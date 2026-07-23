@@ -1,0 +1,61 @@
+#!/bin/sh
+# ws-done — tear down a workspace: kill its tmux session (if running), remove
+# each member repo's worktree, drop the workspace dir once it's empty, and
+# regenerate the tmuxinator pool so the stale config disappears with it.
+#
+# usage: ws-done [--force] <feature>
+#   --force   also discard worktrees with uncommitted changes
+#             (git worktree remove --force). Default: git's own dirty-check
+#             refuses those and leaves them in place, reported — same
+#             "clean gets removed, dirty stays" policy as the archive
+#             runbook's own worktree cleanup, not something reinvented here.
+#
+# Only removes worktrees; each repo's main checkout under WORKBENCH_CODE_ROOT
+# is never touched. If a dirty repo is left behind, the workspace dir itself
+# is left in place too (rerun ws-done later once it's clean, or with --force).
+
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
+WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
+WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+force=0
+if [ "${1:-}" = "--force" ]; then force=1; shift; fi
+[ $# -eq 1 ] || { echo "usage: ws-done [--force] <feature>" >&2; exit 2; }
+feature=$1
+wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
+
+if tmux has-session -t "=$feature" 2>/dev/null; then
+  tmux kill-session -t "=$feature"
+  echo "ws-done: killed tmux session $feature"
+fi
+
+if [ ! -d "$wsdir" ]; then
+  echo "ws-done: no such workspace dir: $wsdir"
+else
+  kept=0
+  for d in "$wsdir"/*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ "$top" = "$d" ] || continue
+    main=$(git -C "$d" worktree list --porcelain | sed -n '1{s/^worktree //p;q}')
+    if [ "$force" = 1 ]; then
+      git -C "$main" worktree remove --force "$d"
+      echo "ws-done: removed $d"
+    elif err=$(git -C "$main" worktree remove "$d" 2>&1); then
+      echo "ws-done: removed $d"
+    else
+      echo "ws-done: KEPT (rerun with --force to discard): $d" >&2
+      printf '%s\n' "$err" >&2
+      kept=$((kept + 1))
+    fi
+  done
+  if rmdir "$wsdir" 2>/dev/null; then
+    echo "ws-done: removed empty workspace dir $wsdir"
+  elif [ "$kept" -gt 0 ]; then
+    echo "ws-done: $wsdir left in place ($kept dirty repo(s) remain)"
+  fi
+fi
+
+"$dir/gen-tmuxinator-configs" "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"

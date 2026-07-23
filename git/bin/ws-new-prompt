@@ -1,0 +1,14 @@
+#!/bin/sh
+# ws-new-prompt — tmux prefix+N entry point: prompt for the whole `ws-new`
+# argument line in one go, then hand off. Kept out of tmux.conf entirely (same
+# rationale as sesh-connect) so the %1-in-quotes substitution never has to
+# fight tmux.conf's own quoting layer.
+#
+# usage: type "feature" alone, or "feature repo[:branch] repo[:branch] ..."
+#        at the prompt — repos are optional, fold more in later with ws-add.
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
+[ -n "${TMUX:-}" ] || { echo "ws-new-prompt: not inside a tmux session" >&2; exit 1; }
+
+tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
+  "run-shell -b \"$dir/ws-new %1\""
