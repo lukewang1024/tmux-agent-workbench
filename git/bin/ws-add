@@ -1,0 +1,72 @@
+#!/bin/sh
+# ws-add — fold a repo into a workspace that's already running: create its
+# worktree under WORKBENCH_WORKSPACE_ROOT/<feature>/<repo> if it doesn't exist yet, then
+# add it as an inspection window via mux-inspect. This is the git-worktree-
+# aware counterpart to mux-inspect for workspace sessions — call it (instead
+# of bare `mux-inspect`) the moment a task discovers it needs a repo that
+# wasn't known about at `ws-new` time. No upfront knowledge of every repo a
+# task will touch is required: start with `ws-new <feature>` alone and call
+# this as many times as needed as new repos actually enter scope.
+#
+# usage: ws-add <repo>[:<branch>]
+#   Run from inside the workspace's own tmux session — the feature name is
+#   the session name. Set WORKBENCH_FEATURE explicitly to target a session you're
+#   not currently attached to (used by ws-new to seed repos given up front,
+#   before the new session has any client attached).
+#
+# Idempotent: a repo that already has a worktree in this workspace is just
+# focused, not recreated. Branch selection when it doesn't exist yet: from
+# the repo's origin/HEAD if resolvable, else the main checkout's current HEAD
+# (same convention as ws-new / git-new-branch). No auto-fetch.
+
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
+
+WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
+WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P) || { echo "ws-add: WORKBENCH_CODE_ROOT not found: $WORKBENCH_CODE_ROOT" >&2; exit 1; }
+WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+[ $# -eq 1 ] || { echo "usage: ws-add <repo>[:<branch>]" >&2; exit 2; }
+
+feature=${WORKBENCH_FEATURE:-}
+if [ -z "$feature" ]; then
+  [ -n "${TMUX:-}" ] || { echo "ws-add: not inside a tmux session (or set WORKBENCH_FEATURE)" >&2; exit 1; }
+  feature=$(tmux display-message -p '#S')
+fi
+
+case $1 in
+  *:*) rname=${1%%:*}; rbranch=${1#*:} ;;
+  *)   rname=$1;       rbranch=$feature ;;
+esac
+
+# Same exact-basename resolution ws-new uses: never matches a numbered pool
+# slot like web-app-3, since those are never named exactly `web-app`.
+main=
+for c in "$WORKBENCH_CODE_ROOT/$rname" "$WORKBENCH_CODE_ROOT"/*/"$rname" "$WORKBENCH_CODE_ROOT"/*/*/"$rname"; do
+  [ -d "$c" ] || continue
+  top=$(git -C "$c" rev-parse --show-toplevel 2>/dev/null) || continue
+  [ "$top" = "$c" ] || continue
+  main=$top; break
+done
+[ -n "$main" ] || { echo "ws-add: no repo named '$rname' found under $WORKBENCH_CODE_ROOT" >&2; exit 1; }
+
+wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
+mkdir -p "$wsdir"
+dest="$wsdir/$(basename "$main")"
+
+if [ ! -e "$dest" ]; then
+  if git -C "$main" show-ref --verify --quiet "refs/heads/$rbranch"; then
+    git -C "$main" worktree add "$dest" "$rbranch"
+  else
+    base=$(git -C "$main" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || base=""
+    if [ -n "$base" ]; then
+      git -C "$main" worktree add -b "$rbranch" "$dest" "$base"
+    else
+      git -C "$main" worktree add -b "$rbranch" "$dest"
+    fi
+  fi
+  echo "ws-add: $rname -> $dest (branch $rbranch)"
+fi
+
+"$dir/gen-tmuxinator-configs" "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"
+WORKBENCH_SESSION="$feature" "$dir/../../bin/mux-inspect" "$dest" --focus --force

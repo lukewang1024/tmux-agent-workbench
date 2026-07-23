@@ -1,0 +1,81 @@
+#!/bin/sh
+# install — symlink this plugin's commands into a bin dir on your PATH.
+#
+# Self-contained on purpose: this is the plugin's own install story so it
+# travels with the plugin when it splits out to its own repo. It knows which
+# commands it ships (everything executable under bin/ and git/bin/) so callers
+# never have to enumerate them — a dotfiles bootstrap, a fresh clone, or a
+# manual run all get the same set, and a command added here needs no edit
+# anywhere else.
+#
+# This covers only the COLD-START case the README describes: invoking these by
+# bare name from a shell tmux never touched (or outside tmux entirely, e.g. for
+# shell completion / `command -v ws-new`). Anything tmux itself spawns already
+# has bin/ and git/bin/ on PATH via workbench.tmux — it does not need this.
+#
+# Usage:
+#   ./install [BIN_DIR] [--no-git]
+#
+#   BIN_DIR    where to place the symlinks (default: ~/.local/bin)
+#   --no-git   skip layer 2 (git/bin/*), matching @workbench-disable-git
+#
+# Existing regular files/dirs at a target are backed up to `<name>~` (never
+# clobbered); an existing symlink already pointing at the right command is left
+# alone (idempotent); any other symlink is repointed.
+set -eu
+
+PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+BIN_DIR=""
+INCLUDE_GIT=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-git) INCLUDE_GIT=0 ;;
+    -h|--help)
+      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    -*)
+      echo "install: unknown option: $arg" >&2
+      exit 1 ;;
+    *)
+      if [ -n "$BIN_DIR" ]; then
+        echo "install: unexpected extra argument: $arg" >&2
+        exit 1
+      fi
+      BIN_DIR="$arg" ;;
+  esac
+done
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+
+mkdir -p "$BIN_DIR"
+
+# Back up a pre-existing non-symlink target to <name>~, then symlink. Skip if
+# the correct symlink is already in place so re-runs don't churn backups.
+link_one() {
+  src="$1"
+  dst="$BIN_DIR/$(basename "$src")"
+
+  if [ -h "$dst" ]; then
+    if [ "$(readlink "$dst")" = "$src" ]; then
+      return 0                       # already correct — idempotent no-op
+    fi
+    rm "$dst"                        # stale symlink — repoint
+  elif [ -e "$dst" ]; then
+    mv "$dst" "$dst~"                # real file/dir — preserve as <name>~
+  fi
+
+  ln -s "$src" "$dst"
+  echo "linked $dst -> $src"
+}
+
+# Layer 1 (agent/window model) — always.
+for f in "$PLUGIN_DIR"/bin/*; do
+  [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
+done
+
+# Layer 2 (git-worktree workspaces) — unless --no-git.
+if [ "$INCLUDE_GIT" -eq 1 ]; then
+  for f in "$PLUGIN_DIR"/git/bin/*; do
+    [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
+  done
+fi

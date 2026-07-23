@@ -1,0 +1,50 @@
+#!/bin/sh
+# ws-new — start a new initiative: create the workspace + its tmux task
+# session. Repos are OPTIONAL — a workspace can start as pure exploration
+# ("what does this task even touch?") with no repo attached yet. Any repos
+# you already know about are folded in immediately; whatever comes up later
+# gets added the same way `mux-inspect` already grows a task at the
+# tmux-window level — by calling `ws-add <repo>` (human or agent) the moment
+# it actually enters scope. This is the "instead of a bare new session" entry
+# point: a workspace needs at least its own dir before anything can be rooted
+# there, so a plain new tmux session on its own isn't quite enough.
+#
+# usage: ws-new <feature> [repo[:branch] ...]
+#   feature  workspace name — the dir under WORKBENCH_WORKSPACE_ROOT
+#            (~/Workspace), and the tmux session name.
+#   repo     short name of a repo's main checkout under WORKBENCH_CODE_ROOT
+#            (~/Code), e.g. `web-app` for ~/Code/myorg/web-app. `:branch`
+#            overrides the per-repo branch (default: same name as the
+#            feature). Handed off to `ws-add` one at a time — see that
+#            script for the worktree/branch-selection details.
+#
+# Idempotent: re-run against an existing workspace to fold in more repos (or
+# just to re-attach) — the session and each repo's worktree are left alone if
+# they already exist.
+
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
+
+WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+[ $# -ge 1 ] || { echo "usage: ws-new <feature> [repo[:branch] ...]" >&2; exit 2; }
+feature=$1; shift
+
+wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
+mkdir -p "$wsdir"
+
+if ! tmux has-session -t "=$feature" 2>/dev/null; then
+  tmux new-session -d -s "$feature" -c "$wsdir" -n agent
+  tmux set-option -t "$feature" @workbench_task 1
+  tmux send-keys -t "$feature:agent" mux-agent Enter
+fi
+
+for arg in "$@"; do
+  WORKBENCH_FEATURE="$feature" "$dir/ws-add" "$arg"
+done
+
+if [ -n "${TMUX:-}" ]; then
+  exec tmux switch-client -t "$feature"
+else
+  exec tmux attach -t "$feature"
+fi
