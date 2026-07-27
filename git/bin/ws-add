@@ -68,5 +68,11 @@ if [ ! -e "$dest" ]; then
   echo "ws-add: $rname -> $dest (branch $rbranch)"
 fi
 
+# Register the worktree with zoxide so this repo surfaces in the directory
+# pickers (sesh / prefix+T, mux-inspect-pick / prefix+G), which both list zoxide
+# entries. It's a real git repo, so it's a first-class inspection target. No-op
+# if zoxide isn't installed.
+if command -v zoxide > /dev/null 2>&1; then zoxide add "$dest" || true; fi
+
 "$dir/gen-tmuxinator-configs" "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"
 WORKBENCH_SESSION="$feature" "$dir/../../bin/mux-inspect" "$dest" --focus --force
