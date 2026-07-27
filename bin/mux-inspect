@@ -88,6 +88,11 @@ editor=$(resolve_editor)
 # pane here too, same as any other window — that's fine: its full-height
 # split narrows this stack uniformly rather than disturbing it.)
 tmux new-window -d -t "$sess:" -n "$name" -c "$path"
+# Pin the window name to the repo. Without this, automatic-rename (on by default)
+# retitles the window after the focused pane's command, so it flips between the
+# git tool / shell / editor as you move between panes — the window's identity is
+# the repo, not whatever happens to be focused, so lock it.
+tmux set-window-option -t "$sess:$name" automatic-rename off
 tmux split-window -v -t "$sess:$name" -c "$path"
 tmux split-window -v -t "$sess:$name" -c "$path"
 tmux select-layout -t "$sess:$name" even-vertical
