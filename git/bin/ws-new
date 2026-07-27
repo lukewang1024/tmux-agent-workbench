@@ -33,6 +33,12 @@ feature=$1; shift
 wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
 mkdir -p "$wsdir"
 
+# Register the workspace dir with zoxide so it's discoverable in the directory
+# pickers even with no live session for it — both sesh (prefix+T) and
+# mux-inspect-pick (prefix+G) list zoxide entries, so this one add surfaces the
+# workspace in both. No-op if zoxide isn't installed.
+if command -v zoxide > /dev/null 2>&1; then zoxide add "$wsdir" || true; fi
+
 if ! tmux has-session -t "=$feature" 2>/dev/null; then
   tmux new-session -d -s "$feature" -c "$wsdir" -n agent
   tmux set-option -t "$feature" @workbench_task 1
