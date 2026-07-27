@@ -20,7 +20,17 @@
 # (same convention as ws-new / git-new-branch). No auto-fetch.
 
 set -eu
-dir=$(cd "$(dirname "$0")" && pwd)
+# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
+# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+dir=$(cd "$(dirname "$self")" && pwd -P)
 
 WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P) || { echo "ws-add: WORKBENCH_CODE_ROOT not found: $WORKBENCH_CODE_ROOT" >&2; exit 1; }
