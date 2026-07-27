@@ -36,12 +36,35 @@ mkdir -p "$wsdir"
 if ! tmux has-session -t "=$feature" 2>/dev/null; then
   tmux new-session -d -s "$feature" -c "$wsdir" -n agent
   tmux set-option -t "$feature" @workbench_task 1
+  # Pin the window name to "agent" — same reason as the inspection windows in
+  # mux-inspect: automatic-rename (on by default) would otherwise retitle it
+  # after the running command (claude/node/…) once mux-agent starts.
+  tmux set-window-option -t "$feature:agent" automatic-rename off
   tmux send-keys -t "$feature:agent" mux-agent Enter
 fi
 
 for arg in "$@"; do
   WORKBENCH_FEATURE="$feature" "$dir/ws-add" "$arg"
 done
+
+# tmux-agent-sidebar (if installed) auto-creates its sidebar on after-new-window,
+# but that hook never fires for a session's FIRST window — which is exactly this
+# agent window (born from `new-session` above). So it alone is skipped while the
+# inspection windows that ws-add/mux-inspect add via `new-window` each get one.
+# The session is also detached until the switch/attach below, so its width is
+# unknown and the sidebar's width gate couldn't evaluate yet either. Bridge both:
+# once a client has attached, invoke the sidebar's own create-only for the agent
+# window, deferred so the window width is real. It self-gates on
+# @sidebar_auto_create_min_width and no-ops if a sidebar already exists, so this
+# is safe on idempotent re-runs. Soft dependency — skipped when the sidebar isn't
+# installed, matching how mux-inspect already treats it.
+sb=$(tmux show-option -gv @agent_sidebar_bin 2>/dev/null || true)
+if [ -n "$sb" ] && [ -x "$sb" ]; then
+  delay=$(tmux show-option -gv @sidebar_auto_create_delay 2>/dev/null || true)
+  case "$delay" in '' | 0 | 0.0) delay=0.5 ;; esac
+  agent_win=$(tmux display-message -p -t "$feature:agent" '#{window_id}')
+  tmux run-shell -b "sleep $delay; '$sb' toggle --create-only '$agent_win' '$wsdir'"
+fi
 
 if [ -n "${TMUX:-}" ]; then
   exec tmux switch-client -t "$feature"
