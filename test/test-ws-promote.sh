@@ -68,6 +68,7 @@ TMUX_PANE="$panid" TMUX="dummy,0,0" \
 
 newsess=$repo
 newdest="$WORKBENCH_WORKSPACE_ROOT/$repo/$repo"
+newdest_physical=$(cd "$newdest" && pwd -P)
 
 wb_assert "new session '$newsess' now exists" tmux has-session -t "=$newsess"
 wb_assert "new session has an agent window" window_named "$newsess" agent
@@ -78,7 +79,7 @@ wb_assert "agent window carries the original pane's content (moved, not fresh)" 
 wb_assert "fresh worktree created under WORKBENCH_WORKSPACE_ROOT" test -d "$newdest"
 wb_assert "new worktree is a distinct dir from the original checkout" test "$newdest" != "$maindir"
 wb_assert "original main checkout still registers the new worktree" \
-  sh -c "git -C '$maindir' worktree list | grep -qF '$newdest'"
+  sh -c "git -C '$maindir' worktree list | grep -qF '$newdest_physical'"
 
 # The pane's own checkout must not itself have been repointed/rewritten —
 # still on its original branch (i.e. it's still `main`'s checkout, not

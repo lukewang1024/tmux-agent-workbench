@@ -29,9 +29,32 @@ dir=$(cd "$(dirname "$self")" && pwd -P)
 WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
 WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
 
+usage() {
+  cat <<'EOF'
+usage: ws-done [--force] <feature>
+
+Remove a workspace's tmux session and member worktrees. Dirty worktrees are
+kept unless --force is supplied.
+
+options:
+  --force     discard worktrees with uncommitted changes
+  -h, --help  show this help and exit
+EOF
+}
+
 force=0
-if [ "${1:-}" = "--force" ]; then force=1; shift; fi
-[ $# -eq 1 ] || { echo "usage: ws-done [--force] <feature>" >&2; exit 2; }
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --force) force=1; shift ;;
+  --) shift ;;
+  -*) echo "ws-done: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "ws-done: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -eq 1 ] || { usage >&2; exit 2; }
 feature=$1
 wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
 
@@ -47,9 +70,14 @@ else
   for d in "$wsdir"/*/; do
     [ -d "$d" ] || continue
     d=${d%/}
+    # macOS may expose the same directory through /var and /private/var.
+    # Compare physical paths so Git's canonical path is not mistaken for a
+    # different worktree; this is a no-op on ordinary Linux paths.
+    d=$(cd "$d" && pwd -P)
     top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    top=$(cd "$top" && pwd -P)
     [ "$top" = "$d" ] || continue
-    main=$(git -C "$d" worktree list --porcelain | sed -n '1{s/^worktree //p;q}')
+    main=$(git -C "$d" worktree list --porcelain | sed -n '1s/^worktree //p')
     if [ "$force" = 1 ]; then
       git -C "$main" worktree remove --force "$d"
       echo "ws-done: removed $d"
