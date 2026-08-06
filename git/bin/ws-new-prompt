@@ -18,6 +18,24 @@ while [ -h "$self" ]; do
   esac
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
+
+usage() {
+  cat <<'EOF'
+usage: ws-new-prompt
+
+Open the tmux prompt used to enter a ws-new feature and optional repositories.
+
+options:
+  -h, --help  show this help and exit
+EOF
+}
+
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "ws-new-prompt: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -eq 0 ] || { usage >&2; exit 2; }
 [ -n "${TMUX:-}" ] || { echo "ws-new-prompt: not inside a tmux session" >&2; exit 1; }
 
 tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \

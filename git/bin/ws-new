@@ -37,7 +37,24 @@ dir=$(cd "$(dirname "$self")" && pwd -P)
 
 WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
 
-[ $# -ge 1 ] || { echo "usage: ws-new <feature> [repo[:branch] ...]" >&2; exit 2; }
+usage() {
+  cat <<'EOF'
+usage: ws-new <feature> [repo[:branch] ...]
+
+Create or reopen a workspace task. Repositories are optional and may specify
+an explicit branch with repo:branch.
+
+options:
+  -h, --help  show this help and exit
+EOF
+}
+
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "ws-new: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -ge 1 ] || { usage >&2; exit 2; }
 feature=$1; shift
 
 wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"

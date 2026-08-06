@@ -32,11 +32,29 @@ while [ -h "$self" ]; do
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
 
+usage() {
+  cat <<'EOF'
+usage: ws-add <repo>[:<branch>]
+
+Add a repository worktree to the current workspace. Set WORKBENCH_FEATURE to
+target a workspace session other than the current one.
+
+options:
+  -h, --help  show this help and exit
+EOF
+}
+
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "ws-add: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+
 WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P) || { echo "ws-add: WORKBENCH_CODE_ROOT not found: $WORKBENCH_CODE_ROOT" >&2; exit 1; }
 WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
 
-[ $# -eq 1 ] || { echo "usage: ws-add <repo>[:<branch>]" >&2; exit 2; }
+[ $# -eq 1 ] || { usage >&2; exit 2; }
 
 feature=${WORKBENCH_FEATURE:-}
 if [ -z "$feature" ]; then
