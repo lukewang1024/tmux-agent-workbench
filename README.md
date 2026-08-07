@@ -153,7 +153,10 @@ set -g @workbench-workspace-root '~/Workspace'
   `claude` / `codex` / `opencode`) in the current directory, and stamps the
   session with `@workbench_task 1`. That marker is the single flag that
   opts a session into the window-per-role model — a bare `claude` started
-  in some other session stays unmarked and `mux-inspect` no-ops there.
+  in some other session stays unmarked and `mux-inspect` no-ops there. Codex
+  task workbenches always launch in YOLO mode so routine approvals do not
+  interrupt the task driver; an explicitly supplied equivalent flag is kept
+  without adding a duplicate.
 - **`mux-inspect <repo-path> [--focus] [--force]`** — adds (or focuses) a
   repo as an inspection window in the current (or `$WORKBENCH_SESSION`)
   task session: three panes, even-vertical, cwd = the repo in all of them —
