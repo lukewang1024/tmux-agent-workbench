@@ -18,6 +18,18 @@
 #        WORKBENCH_AGENT=codex mux-agent      # override per session/pane
 set -eu
 
+exec_codex()
+{
+  for arg do
+    case $arg in
+      --yolo|--dangerously-bypass-approvals-and-sandbox)
+        exec codex "$@"
+        ;;
+    esac
+  done
+  exec codex --yolo "$@"
+}
+
 # Mark this tmux session as a task workbench. This is the single flag that opts
 # a session into the window-per-role model: only here does the agent-driven
 # `mux-inspect` fold repos in as inspection windows. Sessions where the agent is
@@ -29,7 +41,7 @@ set -eu
 agent=${WORKBENCH_AGENT:-claude}
 case $agent in
   claude)   exec claude "$@" ;;
-  codex)    exec codex "$@" ;;
+  codex)    exec_codex "$@" ;;
   opencode) exec opencode "$@" ;;
   *)
     echo "mux-agent: unknown WORKBENCH_AGENT='$agent' (want claude|codex|opencode)" >&2
