@@ -37,10 +37,10 @@
 #   - <repo> window: that repo's inspection surface, three panes stacked
 #     even-vertical — a git TUI on top (tig, or $WORKBENCH_GIT_TOOL e.g.
 #     lazygit), an empty scratchpad shell in the middle, an editor on the
-#     bottom ($VISUAL/$EDITOR else nvim falling back to vim), plus the optional
-#     dev-server pane declared in the project's generated metadata. Full-screen,
-#     small-screen safe. Matches what `mux-inspect` builds at runtime, so a
-#     pre-seeded window and a later accreted one look the same.
+#     bottom ($VISUAL/$EDITOR else nvim falling back to vim) (+ a dev-server
+#     pane for frontends). Full-screen, small-screen safe. Matches what
+#     `mux-inspect` builds at runtime, so a pre-seeded window and a later
+#     accreted one look the same.
 # The task grows by accretion: fold more repos in as inspection windows with
 # prefix+G (manual) or `mux-inspect <path>` (the agent, per the AGENTS.md
 # convention). The seed repo above is just window count 1 of that same model.
@@ -71,7 +71,6 @@ while [ -h "$self" ]; do
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
 . "$dir/../../lib/resolve-tools.sh"
-. "$dir/../../lib/project-config.sh"
 
 WORKBENCH_CODE_ROOT="${1:-${WORKBENCH_CODE_ROOT:-$HOME/Code}}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P || echo "$WORKBENCH_CODE_ROOT")  # canonical
@@ -155,8 +154,11 @@ for r in $roots; do
   if [ -f "$IGNORE" ] && grep -qxF "$name" "$IGNORE" 2>/dev/null; then
     skipped=$((skipped + 1)); continue
   fi
-  "$dir/gen-project-configs" "$r" >/dev/null
-  project_config_load "$r"
+  if [ -f "$r/package.json" ] || [ -f "$r/pnpm-workspace.yaml" ] || [ -f "$r/frontend/package.json" ]; then
+    fe=1
+  else
+    fe=0
+  fi
   {
     printf '%s (%s)\n' "$MARKER" "$r"
     printf 'name: %s\n' "$name"
@@ -165,15 +167,12 @@ for r in $roots; do
     printf 'windows:\n'
     printf '  - agent:\n            - mux-agent\n'
     printf '  - %s:\n' "$name"
-    printf '      layout: %s\n' "$PROJECT_LAYOUT"
+    printf '      layout: even-vertical\n'
     printf '      panes:\n'
     printf '        - git:\n            - %s\n' "$GIT_TOOL"
     printf '        - shell:\n'
     printf '        - editor:\n            - %s\n' "$EDITOR_CMD"
-    if [ -n "$PROJECT_DEV_COMMAND" ]; then
-      dev_yaml=$(printf '%s' "$PROJECT_DEV_COMMAND" | sed "s/'/''/g")
-      printf "        - dev:\n            - '%s'\n" "$dev_yaml"
-    fi
+    [ "$fe" = 1 ] && printf '        - dev:\n            -\n'
   } > "$DEST/$name.yml"
   written=$((written + 1))
 done
@@ -220,19 +219,19 @@ if [ -n "$WS_ROOT" ]; then
       printf '  - agent:\n            - mux-agent\n'
       for m in $members; do
         mname=$(basename "$m" | tr ' .:/' '____')
-        "$dir/gen-project-configs" "$m" >/dev/null
-        project_config_load "$m"
+        if [ -f "$m/package.json" ] || [ -f "$m/pnpm-workspace.yaml" ] || [ -f "$m/frontend/package.json" ]; then
+          mfe=1
+        else
+          mfe=0
+        fi
         printf '  - %s:\n' "$mname"
         printf '      root: %s\n' "$m"
-        printf '      layout: %s\n' "$PROJECT_LAYOUT"
+        printf '      layout: even-vertical\n'
         printf '      panes:\n'
         printf '        - git:\n            - %s\n' "$GIT_TOOL"
         printf '        - shell:\n'
         printf '        - editor:\n            - %s\n' "$EDITOR_CMD"
-        if [ -n "$PROJECT_DEV_COMMAND" ]; then
-          dev_yaml=$(printf '%s' "$PROJECT_DEV_COMMAND" | sed "s/'/''/g")
-          printf "        - dev:\n            - '%s'\n" "$dev_yaml"
-        fi
+        [ "$mfe" = 1 ] && printf '        - dev:\n            -\n'
       done
     } > "$DEST/$wsname.yml"
     ws_written=$((ws_written + 1))
