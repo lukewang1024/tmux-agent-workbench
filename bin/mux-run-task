@@ -1,0 +1,98 @@
+#!/bin/sh
+# mux-run-task — append a pane to a repo's inspection window and run a
+# long-lived command there without moving the current tmux client.
+#
+# usage: mux-run-task [--name <label>] <repo-path> <command>
+set -eu
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+dir=$(cd "$(dirname "$self")" && pwd -P)
+
+task_name=task
+if [ "${1:-}" = --name ]; then
+  [ $# -ge 3 ] || { echo "usage: mux-run-task [--name <label>] <repo-path> <command>" >&2; exit 2; }
+  task_name=$2
+  shift 2
+fi
+[ $# -ge 2 ] || { echo "usage: mux-run-task [--name <label>] <repo-path> <command>" >&2; exit 2; }
+path=$1
+shift
+task_command=$*
+
+path=$(cd "$path" 2>/dev/null && pwd -P) || {
+  echo "mux-run-task: no such dir: $path" >&2
+  exit 1
+}
+
+sess=${WORKBENCH_SESSION:-}
+if [ -z "$sess" ]; then
+  [ -n "${TMUX:-}" ] || {
+    echo "mux-run-task: not inside tmux (or set WORKBENCH_SESSION)" >&2
+    exit 1
+  }
+  sess=$(tmux display-message -p '#S')
+fi
+
+find_project_window() {
+  for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
+    task_root=$(tmux show-options -wqv -t "$task_window" @workbench_project_root)
+    if [ "$task_root" = "$path" ]; then
+      printf '%s\n' "$task_window"
+      return 0
+    fi
+  done
+
+  # Generated tmuxinator windows predate the project-root marker. Resolve
+  # those by the canonical cwd shared by their inspection panes.
+  for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
+    if tmux list-panes -t "$task_window" -F '#{pane_current_path}' |
+      grep -qxF "$path"; then
+      printf '%s\n' "$task_window"
+      return 0
+    fi
+  done
+  return 1
+}
+
+window_id=$(find_project_window || true)
+if [ -z "$window_id" ]; then
+  WORKBENCH_SESSION=$sess "$dir/mux-inspect" "$path"
+  window_id=$(find_project_window || true)
+fi
+[ -n "$window_id" ] || {
+  echo "mux-run-task: no inspection window for $path" >&2
+  exit 1
+}
+
+anchor=$(tmux list-panes -t "$window_id" \
+  -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | tail -1)
+[ -n "$anchor" ] || {
+  echo "mux-run-task: inspection window has no workspace pane" >&2
+  exit 1
+}
+
+task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" -P -F '#{pane_id}')
+tmux set-option -p -t "$task_pane" @pane_role task
+tmux set-option -p -t "$task_pane" @workbench_task_name "$task_name"
+tmux set-option -p -t "$task_pane" @workbench_task_command "$task_command"
+tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
+tmux select-pane -t "$task_pane" -T "$task_name"
+
+# Keep the sidebar as a full-height side column when that integration is
+# installed; otherwise apply the native layout directly.
+if command -v tmux-layout-keep-sidebar >/dev/null 2>&1; then
+  tmux-layout-keep-sidebar even-vertical "$task_pane"
+else
+  tmux select-layout -t "$window_id" even-vertical >/dev/null
+fi
+
+tmux send-keys -t "$task_pane" -l "$task_command"
+tmux send-keys -t "$task_pane" Enter
+printf '%s\n' "$task_pane"

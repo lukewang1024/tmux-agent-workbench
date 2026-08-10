@@ -175,6 +175,16 @@ set -g @workbench-workspace-root '~/Workspace'
   search), then opens the pick as a focused inspection window via
   `mux-inspect --focus --force`. The manual counterpart to the agent-driven
   `mux-inspect` call.
+- **`mux-run-task [--name <label>] <repo-path> '<command>'`** — appends a
+  detached pane to that repo's inspection window for a dev server or another
+  long-running task. It creates the inspection window first when necessary,
+  tags the new pane with `@pane_role=task`, `@workbench_task_name`,
+  `@workbench_task_command`, and `@workbench_project_root`, starts the command,
+  then reapplies `even-vertical`. When `tmux-layout-keep-sidebar` is available,
+  the sidebar remains a full-height side column and only workspace panes are
+  re-laid out. The pane id is printed so callers can capture logs or remove it
+  later. Long tasks are added on demand; the default inspection layout remains
+  git/shell/editor only.
 
 ### Layer 2 — opinionated git-worktree workspaces (`git/bin/`)
 

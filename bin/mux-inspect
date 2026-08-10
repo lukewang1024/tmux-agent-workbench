@@ -103,6 +103,7 @@ tmux new-window -d -t "$sess:" -n "$name" -c "$path"
 # git tool / shell / editor as you move between panes — the window's identity is
 # the repo, not whatever happens to be focused, so lock it.
 tmux set-window-option -t "$sess:$name" automatic-rename off
+tmux set-window-option -t "$sess:$name" @workbench_project_root "$path"
 tmux split-window -v -t "$sess:$name" -c "$path"
 tmux split-window -v -t "$sess:$name" -c "$path"
 tmux select-layout -t "$sess:$name" even-vertical
