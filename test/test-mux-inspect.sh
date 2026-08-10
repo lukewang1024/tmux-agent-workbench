@@ -17,8 +17,6 @@ mux_inspect="$bin_dir/mux-inspect"
 
 wb_test_setup "wb-test-mux-inspect-$$"
 trap wb_test_teardown EXIT
-XDG_CONFIG_HOME="$WB_TEST_TMPDIR/config"
-export XDG_CONFIG_HOME
 
 # 1) fake git repo dir
 repo="$WB_TEST_TMPDIR/code/somerepo"
@@ -77,30 +75,5 @@ wb_assert "still exactly 2 windows total (original + inspection, no dup)" \
 
 matching_count=$(tmux list-windows -t target -F '#W' | grep -xc "$name" || true)
 wb_assert "exactly one window named $name (no duplicate)" test "$matching_count" -eq 1
-
-# 6) A manually edited project config adds a fourth dev-server pane and
-# mux-inspect consumes its command/layout directly.
-dev_repo="$WB_TEST_TMPDIR/code/devrepo"
-mkdir -p "$dev_repo"
-(cd "$dev_repo" && git init -q)
-project_dir="$XDG_CONFIG_HOME/tmux-agent-workbench/projects"
-mkdir -p "$project_dir"
-{
-  printf 'layout=even-vertical\n'
-  printf 'dev_command=sleep 30\n'
-} > "$project_dir/devrepo.conf"
-
-env -u TMUX WORKBENCH_SESSION=target "$mux_inspect" "$dev_repo" --force >/dev/null
-dev_count=$(tmux list-panes -t target:devrepo | wc -l | tr -d ' ')
-wb_assert "project config adds a fourth dev pane" test "$dev_count" -eq 4
-dev_command=
-attempt=0
-while [ "$attempt" -lt 3 ]; do
-  dev_command=$(tmux display-message -p -t target:devrepo.4 '#{pane_current_command}')
-  [ "$dev_command" = sleep ] && break
-  sleep 1
-  attempt=$((attempt + 1))
-done
-wb_assert "dev pane runs the configured command" test "$dev_command" = sleep
 
 wb_test_report

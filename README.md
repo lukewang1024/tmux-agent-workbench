@@ -236,27 +236,6 @@ set -g @workbench-workspace-root '~/Workspace'
   binding all call it so the pool stays in sync with reality; manual
   exclusions persist across re-runs via
   `~/.config/tmuxinator/.genignore`.
-- **`gen-project-configs [--force] [project-path ...]`** — creates editable
-  project layout metadata under
-  `~/.config/tmux-agent-workbench/projects/<project>.conf`. With no explicit
-  paths it scans the configured Code and Workspace roots. Generation is
-  best-effort: package-manager files and `package.json` scripts are used to
-  guess a dev-server command. Existing files are never overwritten unless
-  `--force` is passed, so manual edits are stable across pool regeneration.
-  `gen-tmuxinator-configs` creates any missing metadata and consumes it when
-  writing YAML; `mux-inspect` does the same when adding a window at runtime.
-
-  The data-only format currently supports:
-
-  ```ini
-  layout=even-vertical
-  dev_command=pnpm run dev
-  ```
-
-  An empty `dev_command` keeps the default git/shell/editor three-pane window;
-  a non-empty value appends a fourth dev pane. Configs are keyed by the Git
-  repository's primary worktree name, so its main checkout, numbered pool
-  slots, and workspace worktrees share the same project metadata.
 
 ## Cold-start PATH caveat
 
