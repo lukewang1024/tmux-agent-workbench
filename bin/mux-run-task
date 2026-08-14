@@ -78,8 +78,13 @@ anchor=$(tmux list-panes -t "$window_id" \
   exit 1
 }
 
-task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" -P -F '#{pane_id}')
+# Start through a non-interactive POSIX shell. Sending keys to a freshly split
+# login shell races its startup files and can silently lose the task command.
+task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" \
+  -e "WORKBENCH_TASK_COMMAND=$task_command" -P -F '#{pane_id}' \
+  'exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"')
 tmux set-option -p -t "$task_pane" @pane_role task
+tmux set-option -p -t "$task_pane" remain-on-exit on
 tmux set-option -p -t "$task_pane" @workbench_task_name "$task_name"
 tmux set-option -p -t "$task_pane" @workbench_task_command "$task_command"
 tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
@@ -93,6 +98,4 @@ else
   tmux select-layout -t "$window_id" even-vertical >/dev/null
 fi
 
-tmux send-keys -t "$task_pane" -l "$task_command"
-tmux send-keys -t "$task_pane" Enter
 printf '%s\n' "$task_pane"

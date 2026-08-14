@@ -73,6 +73,11 @@ for f in "$PLUGIN_DIR"/bin/*; do
   [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
 done
 
+# Distributed Fabric integration remains a provider, not part of the Core.
+for f in "$PLUGIN_DIR"/providers/*; do
+  [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
+done
+
 # Layer 2 (git-worktree workspaces) — unless --no-git.
 if [ "$INCLUDE_GIT" -eq 1 ]; then
   for f in "$PLUGIN_DIR"/git/bin/*; do
