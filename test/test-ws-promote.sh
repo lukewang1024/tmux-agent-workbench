@@ -34,6 +34,22 @@ window_named() {
   tmux list-windows -t "$1" -F '#{window_name}' 2>/dev/null | grep -qxF "$2"
 }
 
+wait_for_pane_path() {
+  pane=$1
+  expected=$2
+  attempts=0
+  while [ "$attempts" -lt 50 ]; do
+    current=$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || true)
+    if [ -n "$current" ] && [ "$(cd "$current" 2>/dev/null && pwd -P)" = "$(cd "$expected" && pwd -P)" ]; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  echo "pane $pane did not settle at $expected" >&2
+  return 1
+}
+
 # -----------------------------------------------------------------------
 # 1. Fake repo under CODE_ROOT, an ordinary (non-workspace) session with a
 #    pane cd'd into its main checkout, and a MARKER command run in that pane
@@ -53,8 +69,8 @@ git -C "$maindir" commit -q -m init
 origsess="wb-test-orig-$$"
 tmux new-session -d -s "$origsess" -c "$maindir"
 tmux send-keys -t "$origsess" 'echo PROMOTE_MARKER_REPO' Enter
-sleep 0.3
 panid=$(tmux list-panes -t "$origsess" -F '#{pane_id}')
+wait_for_pane_path "$panid" "$maindir"
 
 # -----------------------------------------------------------------------
 # 2. Run ws-promote as if from that pane, with no feature-name arg.
@@ -107,8 +123,8 @@ mkdir -p "$scratchdir"
 scratchsess="wb-test-scratch-$$"
 tmux new-session -d -s "$scratchsess" -c "$scratchdir"
 tmux send-keys -t "$scratchsess" 'echo PROMOTE_MARKER_SCRATCH' Enter
-sleep 0.3
 scratchpane=$(tmux list-panes -t "$scratchsess" -F '#{pane_id}')
+wait_for_pane_path "$scratchpane" "$scratchdir"
 
 TMUX_PANE="$scratchpane" TMUX="dummy,0,0" \
   timeout 10 "$bindir/ws-promote" brainstorm >"$WB_TEST_TMPDIR/ws-promote-2.out" 2>&1
