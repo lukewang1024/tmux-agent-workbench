@@ -7,17 +7,16 @@
 #                              `<repo>-<number>` (e.g. axon-web-7). One config
 #                              per root, seeded with that single repo — a
 #                              single-repo task.
-#   WORKBENCH_WORKSPACE_ROOT (~/Workspace) — each workspace dir is one
-#                              feature; its immediate children are per-repo
-#                              worktrees for that feature. One config per
-#                              workspace, seeded from its first member repo,
-#                              with every member repo pre-built as its own
-#                              inspection window (a workspace's repos are all
-#                              known up front, so there's no need to wait on
-#                              lazy `mux-inspect` accretion for the ones you
-#                              already know about — though it still works for
-#                              a repo the task touches later that wasn't part
-#                              of the set).
+#   WORKBENCH_WORKSPACE_ROOT (~/Workspace) — every level-1 directory is one
+#                              feature/task. Its immediate children are
+#                              normally per-repo worktrees; a standalone git
+#                              checkout is also valid, and an empty directory
+#                              gets an agent-only config. One config per
+#                              directory, with every known repo pre-built as
+#                              its own inspection window (there's no need to
+#                              wait on lazy `mux-inspect` accretion for repos
+#                              already present — though it still works for a
+#                              repo the task touches later).
 #
 # Skipped everywhere: anything under a `z-archive/` dir (parked repos — pull
 # one out manually when you need it), use-and-throw worktrees under any
@@ -178,9 +177,10 @@ for r in $roots; do
 done
 
 # ---------------------------------------------------------------------------
-# Part B — WORKBENCH_WORKSPACE_ROOT: one config per workspace dir, seeded from
-# its first member repo, with every member repo pre-built as its own
-# inspection window.
+# Part B — WORKBENCH_WORKSPACE_ROOT: one config per level-1 workspace dir,
+# seeded from its first member repo (or the workspace dir itself for a
+# standalone checkout / empty task), with every member repo pre-built as its
+# own inspection window.
 # ---------------------------------------------------------------------------
 WS_ROOT=$(cd "$WORKBENCH_WORKSPACE_ROOT" 2>/dev/null && pwd -P || echo "")
 ws_written=0
@@ -191,25 +191,29 @@ if [ -n "$WS_ROOT" ]; then
     w=${w%/}
     wsname=$(basename "$w" | tr ' .:/' '____')
 
-    # Member repos = immediate subdirs that are themselves a worktree root
-    # (not some deeper path inside one — a workspace's repos are direct
-    # children by convention).
+    # A Workspace level-1 directory can either be a standalone checkout or a
+    # task directory containing immediate child worktrees. Do not descend
+    # further: a workspace's repos are direct children by convention.
     members=
-    for d in "$w"/*/; do
-      [ -d "$d" ] || continue
-      d=${d%/}
-      top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
-      [ "$top" = "$d" ] || continue
-      members="$members$d
-"
-    done
-    [ -n "$members" ] || continue   # not populated yet — nothing to seed with
+    primary=$w
+    top=$(git -C "$w" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ "$top" = "$w" ]; then
+      members="$w "
+    else
+      for d in "$w"/*/; do
+        [ -d "$d" ] || continue
+        d=${d%/}
+        top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+        [ "$top" = "$d" ] || continue
+        [ -n "$members" ] || primary=$d
+        members="$members$d "
+      done
+    fi
 
     if [ -f "$IGNORE" ] && grep -qxF "$wsname" "$IGNORE" 2>/dev/null; then
       skipped=$((skipped + 1)); continue
     fi
 
-    primary=$(printf '%s' "$members" | head -1)
     {
       printf '%s (workspace: %s)\n' "$MARKER" "$w"
       printf 'name: %s\n' "$wsname"
