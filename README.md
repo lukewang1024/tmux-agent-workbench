@@ -135,7 +135,7 @@ don't, the underlying scripts fall back to their own built-in default, so
 | `@workbench-agent` | `WORKBENCH_AGENT` | `claude` | Which CLI `mux-agent` execs: `claude`, `codex`, or `opencode`. |
 | `@workbench-git-tool` | `WORKBENCH_GIT_TOOL` | `tig` | Git TUI launched in the top pane of every inspection window (e.g. `lazygit`). |
 | `@workbench-code-root` | `WORKBENCH_CODE_ROOT` | `~/Code` | Root of your persistent repo checkouts. Layer 2 looks here to resolve a short repo name (`ws-add web-app`) to its main checkout. |
-| `@workbench-workspace-root` | `WORKBENCH_WORKSPACE_ROOT` | `~/Workspace` | Root under which `ws-new` creates one directory per multi-repo workspace, each member a git worktree. |
+| `@workbench-workspace-root` | `WORKBENCH_WORKSPACE_ROOT` | `~/Workspace` | Root under which `ws-new` creates one directory per workspace; each level-1 directory is pickable, with immediate child git worktrees as inspection windows (or the directory itself for a standalone checkout). |
 | `@workbench-disable-git` | — (checked directly, not bridged) | unset | Set to `1` to skip loading layer 2 (`git/workbench-git.tmux`) entirely. |
 
 ```tmux
@@ -236,9 +236,11 @@ set -g @workbench-workspace-root '~/Workspace'
 - **`gen-tmuxinator-configs [code_root] [workspace_root]`** (prefix+M-g) —
   regenerates the persistent tmuxinator pool under
   `~/.config/tmuxinator/` from actual git-worktree state: one config per
-  `$WORKBENCH_CODE_ROOT` repo/pool-slot, one config per
-  `$WORKBENCH_WORKSPACE_ROOT` workspace (pre-seeded with every member repo
-  as its own inspection window). Positional args win over
+  `$WORKBENCH_CODE_ROOT` repo/pool-slot, and one config for every level-1
+  `$WORKBENCH_WORKSPACE_ROOT` directory. Workspace configs are pre-seeded
+  with an inspection window for each immediate child git worktree, or for the
+  directory itself when it is a standalone checkout; empty task directories
+  get an agent-only config. Positional args win over
   `$WORKBENCH_CODE_ROOT`/`$WORKBENCH_WORKSPACE_ROOT`, which win over the
   `~/Code` / `~/Workspace` hardcoded defaults. This script only ever writes
   YAML — it never invokes the `tmuxinator` binary itself (see
