@@ -8,6 +8,7 @@ dir=$(cd "$(dirname "$0")" && pwd)
 generator="$dir/../git/bin/gen-tmuxinator-configs"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/wb-test-gen-XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
+tmp=$(cd "$tmp" && pwd -P)
 
 code="$tmp/code"
 workspace="$tmp/workspace"
