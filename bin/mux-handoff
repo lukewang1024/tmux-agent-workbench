@@ -1,0 +1,461 @@
+#!/bin/sh
+# mux-handoff — transfer an in-progress task from this tmux pane to a freshly
+# launched coding-agent profile in a right-hand pane.
+set -eu
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+bin_dir=$(cd "$(dirname "$self")" && pwd -P)
+plugin_dir=$(cd "$bin_dir/.." && pwd -P)
+self=$bin_dir/mux-handoff
+
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+user_profiles=$config_home/tmux-agent-workbench/profiles
+builtin_profiles=$plugin_dir/profiles
+
+usage()
+{
+  cat <<'EOF'
+usage: mux-handoff --target <profile> [--timeout <seconds>] [--startup-timeout <seconds>]
+                   [--keep-failed-pane] [--no-close] < summary
+       mux-handoff profiles [--json]
+       mux-handoff cancel [--pane <pane-id>]
+
+The main command must run inside tmux and reads the agent-authored handoff
+summary from stdin. On success it starts the target profile to the right, then
+closes the source pane after a cancellable grace period (15 seconds by default).
+EOF
+}
+
+die()
+{
+  echo "mux-handoff: $*" >&2
+  exit 1
+}
+
+valid_name()
+{
+  case $1 in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+profile_file()
+{
+  name=$1
+  if [ -f "$user_profiles/$name.conf" ]; then
+    printf '%s\n' "$user_profiles/$name.conf"
+  elif [ -f "$builtin_profiles/$name.conf" ]; then
+    printf '%s\n' "$builtin_profiles/$name.conf"
+  else
+    return 1
+  fi
+}
+
+profile_value()
+{
+  file=$1
+  wanted=$2
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      ''|'#'*) continue ;;
+      *=*)
+        key=${line%%=*}
+        value=${line#*=}
+        [ "$key" = "$wanted" ] && { printf '%s\n' "$value"; return 0; }
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+json_string()
+{
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g'
+}
+
+list_profiles()
+{
+  json=${1:-0}
+  names=
+  for file in "$builtin_profiles"/*.conf "$user_profiles"/*.conf; do
+    [ -f "$file" ] || continue
+    name=$(basename "$file" .conf)
+    valid_name "$name" || continue
+    case " $names " in *" $name "*) continue ;; esac
+    names="$names $name"
+  done
+
+  if [ "$json" = 1 ]; then
+    printf '['
+    sep=
+  fi
+  for name in $names; do
+    file=$(profile_file "$name") || continue
+    adapter=$(profile_value "$file" adapter 2>/dev/null || true)
+    description=$(profile_value "$file" description 2>/dev/null || true)
+    model=$(profile_value "$file" model 2>/dev/null || true)
+    effort=$(profile_value "$file" effort 2>/dev/null || true)
+    if [ "$json" = 1 ]; then
+      printf '%s{"name":"%s","adapter":"%s","description":"%s","model":"%s","effort":"%s"}' \
+        "$sep" "$(json_string "$name")" "$(json_string "$adapter")" \
+        "$(json_string "$description")" "$(json_string "$model")" \
+        "$(json_string "$effort")"
+      sep=,
+    else
+      printf '%-22s %-10s %s' "$name" "$adapter" "$description"
+      [ -n "$model" ] && printf ' [model=%s]' "$model"
+      [ -n "$effort" ] && printf ' [effort=%s]' "$effort"
+      printf '\n'
+    fi
+  done
+  [ "$json" = 1 ] && printf ']\n'
+}
+
+shell_quote()
+{
+  escaped=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$escaped"
+}
+
+pane_exists()
+{
+  actual=$(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null) || return 1
+  [ "$actual" = "$1" ]
+}
+
+clear_pair()
+{
+  source=$1
+  target=${2:-}
+  if pane_exists "$source"; then
+    tmux set-option -pu -t "$source" @handoff_in_progress 2>/dev/null || true
+    tmux set-option -pu -t "$source" @handoff_target_pane 2>/dev/null || true
+    tmux set-option -pu -t "$source" @handoff_state 2>/dev/null || true
+  fi
+  if [ -n "$target" ] && pane_exists "$target"; then
+    tmux set-option -pu -t "$target" @handoff_id 2>/dev/null || true
+    tmux set-option -pu -t "$target" @handoff_source_pane 2>/dev/null || true
+  fi
+}
+
+cancel_handoff()
+{
+  pane=${TMUX_PANE:-}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --pane) [ $# -ge 2 ] || die "--pane needs a value"; pane=$2; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "mux-handoff: cancel: unknown option: $1" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$pane" ] || die "cancel needs --pane when called outside tmux"
+  pane_exists "$pane" || die "pane does not exist: $pane"
+
+  id=$(tmux show-option -pqv -t "$pane" @handoff_in_progress 2>/dev/null || true)
+  if [ -n "$id" ]; then
+    source=$pane
+    target=$(tmux show-option -pqv -t "$source" @handoff_target_pane 2>/dev/null || true)
+  else
+    id=$(tmux show-option -pqv -t "$pane" @handoff_id 2>/dev/null || true)
+    source=$(tmux show-option -pqv -t "$pane" @handoff_source_pane 2>/dev/null || true)
+    target=$pane
+  fi
+  [ -n "$id" ] && [ -n "$source" ] || die "pane is not part of an active handoff"
+  current=$(tmux show-option -pqv -t "$source" @handoff_in_progress 2>/dev/null || true)
+  [ "$current" = "$id" ] || die "handoff is no longer active"
+  clear_pair "$source" "$target"
+  echo "mux-handoff: cancelled automatic close of source pane $source; target pane $target remains"
+}
+
+launch_target()
+{
+  [ $# -eq 3 ] || exit 2
+  id=$1
+  profile=$2
+  prompt_file=$3
+  pane=${TMUX_PANE:-}
+  [ -n "$pane" ] || { echo "mux-handoff: launcher is not inside tmux" >&2; exit 1; }
+  tmux set-option -pt "$pane" remain-on-exit on
+
+  file=$(profile_file "$profile") || { echo "mux-handoff: unknown profile: $profile" >&2; exit 1; }
+  adapter=$(profile_value "$file" adapter 2>/dev/null || true)
+  model=$(profile_value "$file" model 2>/dev/null || true)
+  effort=$(profile_value "$file" effort 2>/dev/null || true)
+  permissions=$(profile_value "$file" permissions 2>/dev/null || true)
+  command=$(profile_value "$file" command 2>/dev/null || true)
+  [ -r "$prompt_file" ] || { echo "mux-handoff: prompt file disappeared" >&2; exit 1; }
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      env.*=*)
+        key=${line%%=*}
+        env_name=${key#env.}
+        value=${line#*=}
+        case $env_name in
+          ''|[0-9]*|*[!A-Za-z0-9_]*) echo "mux-handoff: invalid environment name: $env_name" >&2; exit 1 ;;
+        esac
+        export "$env_name=$value"
+        ;;
+    esac
+  done < "$file"
+
+  export WORKBENCH_PROFILE="$profile"
+  WORKBENCH_AGENT=$adapter
+  export WORKBENCH_AGENT
+
+  if [ "$adapter" = command ]; then
+    [ -n "$command" ] || { echo "mux-handoff: command adapter needs command=<launcher>" >&2; exit 1; }
+    command -v "$command" >/dev/null 2>&1 || { echo "mux-handoff: launcher not found: $command" >&2; exit 127; }
+    tmux set-option -pt "$pane" @handoff_launching "$id"
+    exec "$command" "$prompt_file"
+  fi
+
+  prompt=$(cat "$prompt_file")
+  case $adapter in
+    codex)
+      command -v codex >/dev/null 2>&1 || { echo "mux-handoff: codex not found" >&2; exit 127; }
+      set -- codex
+      [ "$permissions" = bypass ] && set -- "$@" --yolo
+      [ -n "$model" ] && set -- "$@" --model "$model"
+      [ -n "$effort" ] && set -- "$@" -c "model_reasoning_effort=\"$effort\""
+      set -- "$@" "$prompt"
+      ;;
+    claude)
+      command -v claude >/dev/null 2>&1 || { echo "mux-handoff: claude not found" >&2; exit 127; }
+      set -- claude
+      [ "$permissions" = bypass ] && set -- "$@" --dangerously-skip-permissions
+      [ -n "$model" ] && set -- "$@" --model "$model"
+      [ -n "$effort" ] && set -- "$@" --effort "$effort"
+      set -- "$@" "$prompt"
+      ;;
+    trae)
+      if command -v traex >/dev/null 2>&1; then trae_command=traex
+      elif command -v trae-agent >/dev/null 2>&1; then trae_command=trae-agent
+      elif command -v traecli >/dev/null 2>&1; then trae_command=traecli
+      else echo "mux-handoff: TraeCode CLI not found (tried traex, trae-agent, traecli)" >&2; exit 127
+      fi
+      set -- "$trae_command"
+      [ "$permissions" = bypass ] && set -- "$@" --dangerously-bypass-approvals-and-sandbox
+      [ -n "$model" ] && set -- "$@" --model "$model"
+      set -- "$@" "$prompt"
+      ;;
+    opencode)
+      command -v opencode >/dev/null 2>&1 || { echo "mux-handoff: opencode not found" >&2; exit 127; }
+      set -- opencode
+      [ "$permissions" = bypass ] && set -- "$@" --auto
+      [ -n "$model" ] && set -- "$@" --model "$model"
+      set -- "$@" --prompt "$prompt"
+      ;;
+    *) echo "mux-handoff: unsupported adapter '$adapter' in $file" >&2; exit 1 ;;
+  esac
+
+  tmux set-option -pt "$pane" @handoff_launching "$id"
+  exec "$@"
+}
+
+watchdog()
+{
+  [ $# -eq 4 ] || exit 2
+  source=$1
+  target=$2
+  id=$3
+  timeout=$4
+  sleep "$timeout"
+  current=$(tmux show-option -pqv -t "$source" @handoff_in_progress 2>/dev/null || true)
+  if [ "$current" != "$id" ]; then
+    exit 0
+  fi
+
+  if pane_exists "$source"; then
+    pid=$(tmux display-message -p -t "$source" '#{pane_pid}' 2>/dev/null || true)
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    attempts=0
+    while pane_exists "$source" && [ "$attempts" -lt 20 ]; do
+      sleep 0.1
+      attempts=$((attempts + 1))
+    done
+    pane_exists "$source" && tmux kill-pane -t "$source" 2>/dev/null || true
+  fi
+  clear_pair "$source" "$target"
+}
+
+case ${1:-} in
+  _launch) shift; launch_target "$@"; exit ;;
+  _watchdog) shift; watchdog "$@"; exit ;;
+  profiles)
+    shift
+    case ${1:-} in
+      '') list_profiles 0 ;;
+      --json) [ $# -eq 1 ] || { usage >&2; exit 2; }; list_profiles 1 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    exit ;;
+  cancel) shift; cancel_handoff "$@"; exit ;;
+  -h|--help) usage; exit 0 ;;
+esac
+
+profile=
+close_timeout=15
+startup_timeout=5
+keep_failed=0
+no_close=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --target) [ $# -ge 2 ] || { usage >&2; exit 2; }; profile=$2; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; close_timeout=$2; shift 2 ;;
+    --startup-timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; startup_timeout=$2; shift 2 ;;
+    --keep-failed-pane) keep_failed=1; shift ;;
+    --no-close) no_close=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "mux-handoff: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die "not inside a tmux pane"
+[ -n "$profile" ] || { usage >&2; exit 2; }
+valid_name "$profile" || die "invalid profile name: $profile"
+profile_file "$profile" >/dev/null || die "unknown profile '$profile' (run: mux-handoff profiles)"
+case $close_timeout in ''|*[!0-9]*) die "--timeout must be a non-negative integer" ;; esac
+case $startup_timeout in ''|*[!0-9]*|0) die "--startup-timeout must be a positive integer" ;; esac
+[ ! -t 0 ] || die "handoff summary is required on stdin"
+
+source=$TMUX_PANE
+pane_exists "$source" || die "source pane no longer exists: $source"
+id="$(date +%s)-$$"
+if ! tmux set-option -po -t "$source" @handoff_in_progress "$id" 2>/dev/null; then
+  current=$(tmux show-option -pqv -t "$source" @handoff_in_progress 2>/dev/null || true)
+  die "source pane already has a handoff in progress${current:+ ($current)}"
+fi
+tmux set-option -p -t "$source" @handoff_state preparing
+
+target=
+tmpdir=
+cleanup_on_exit=1
+cleanup()
+{
+  rc=$?
+  [ -n "$tmpdir" ] && [ -d "$tmpdir" ] && rm -rf "$tmpdir"
+  if [ "$cleanup_on_exit" = 1 ]; then
+    clear_pair "$source" "$target"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT HUP INT TERM
+
+runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+[ -d "$runtime_dir" ] || runtime_dir=/tmp
+umask 077
+tmpdir=$(mktemp -d "$runtime_dir/mux-handoff.XXXXXX") || die "could not create temporary directory"
+summary_file=$tmpdir/summary
+prompt_file=$tmpdir/prompt
+cat > "$summary_file"
+[ -s "$summary_file" ] || die "handoff summary is empty"
+
+cwd=$(tmux display-message -p -t "$source" '#{pane_current_path}')
+session=$(tmux display-message -p -t "$source" '#{session_name}')
+window=$(tmux display-message -p -t "$source" '#{window_name}')
+repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
+branch=$(git -C "$cwd" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+head=$(git -C "$cwd" rev-parse --verify HEAD 2>/dev/null || true)
+[ -n "$branch" ] || branch=detached-or-not-a-repository
+source_profile=${WORKBENCH_PROFILE:-${WORKBENCH_AGENT:-unknown}}
+timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+{
+  cat <<EOF
+You are taking over an in-progress coding task from another coding agent.
+Continue the task autonomously from the existing working directory. Inspect the
+current worktree before editing. Use the summary as the current state and consult
+the source agent's transcript only if the summary points to it or more detail is
+needed. Do not merely acknowledge this handoff or wait for confirmation: begin
+working toward the stated objective immediately.
+
+[workbench context]
+source_session: $session
+source_window: $window
+source_pane: $source
+source_profile: $source_profile
+target_profile: $profile
+cwd: $cwd
+repo_root: ${repo_root:-unknown}
+branch: $branch
+HEAD: ${head:-unknown}
+timestamp: $timestamp
+
+[agent handoff]
+EOF
+  cat "$summary_file"
+  printf '\n'
+} > "$prompt_file"
+
+launch_cmd="exec $(shell_quote "$self") _launch $(shell_quote "$id") $(shell_quote "$profile") $(shell_quote "$prompt_file")"
+if ! target=$(tmux split-window -h -p 50 -d -P -F '#{pane_id}' -t "$source" -c "$cwd" "$launch_cmd" 2>&1); then
+  die "could not create target pane: $target"
+fi
+tmux set-option -p -t "$source" @handoff_target_pane "$target"
+tmux set-option -p -t "$target" @handoff_id "$id"
+tmux set-option -p -t "$target" @handoff_source_pane "$source"
+
+max_ticks=$((startup_timeout * 10))
+ticks=0
+launched=0
+while [ "$ticks" -lt "$max_ticks" ]; do
+  pane_exists "$target" || break
+  signal=$(tmux show-option -pqv -t "$target" @handoff_launching 2>/dev/null || true)
+  dead=$(tmux display-message -p -t "$target" '#{pane_dead}' 2>/dev/null || echo 1)
+  [ "$dead" = 1 ] && break
+  if [ "$signal" = "$id" ]; then launched=1; break; fi
+  sleep 0.1
+  ticks=$((ticks + 1))
+done
+
+if [ "$launched" = 1 ]; then
+  ticks=0
+  while [ "$ticks" -lt 10 ]; do
+    sleep 0.1
+    pane_exists "$target" || { launched=0; break; }
+    dead=$(tmux display-message -p -t "$target" '#{pane_dead}' 2>/dev/null || echo 1)
+    [ "$dead" = 1 ] && { launched=0; break; }
+    ticks=$((ticks + 1))
+  done
+fi
+
+if [ "$launched" != 1 ]; then
+  echo "mux-handoff: target profile '$profile' failed to start" >&2
+  if pane_exists "$target"; then
+    tmux capture-pane -p -t "$target" -S -40 2>/dev/null | sed 's/^/target: /' >&2 || true
+    if [ "$keep_failed" = 0 ]; then tmux kill-pane -t "$target" 2>/dev/null || true; target=; fi
+  fi
+  exit 1
+fi
+
+tmux set-option -pt "$target" remain-on-exit off 2>/dev/null || true
+rm -rf "$tmpdir"
+tmpdir=
+tmux set-option -p -t "$source" @handoff_state delivered
+
+if [ "$(tmux display-message -p -t "$source" '#{pane_active}')" = 1 ]; then
+  tmux select-pane -t "$target"
+fi
+
+if [ "$no_close" = 1 ]; then
+  clear_pair "$source" "$target"
+  cleanup_on_exit=0
+  echo "mux-handoff: delivered to $profile in pane $target; source pane $source left open (--no-close)"
+  exit 0
+fi
+
+watch_cmd="$(shell_quote "$self") _watchdog $(shell_quote "$source") $(shell_quote "$target") $(shell_quote "$id") $(shell_quote "$close_timeout")"
+tmux run-shell -b "$watch_cmd"
+cleanup_on_exit=0
+echo "mux-handoff: delivered to $profile in pane $target"
+echo "mux-handoff: source pane $source closes in ${close_timeout}s; cancel with: mux-handoff cancel --pane $source"
+exit 0

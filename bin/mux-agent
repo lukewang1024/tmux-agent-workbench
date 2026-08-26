@@ -3,7 +3,7 @@
 #
 # Under the task/window model a session == one task, and the agent is the
 # session-level driver living in its own full window (not a per-repo sidebar).
-# Which CLI it is comes from $WORKBENCH_AGENT so claude / codex / opencode are
+# Which CLI it is comes from $WORKBENCH_AGENT so claude / codex / trae / opencode are
 # interchangeable without touching the generated tmuxinator configs (they all
 # just run `mux-agent`).
 #
@@ -30,6 +30,19 @@ exec_codex()
   exec codex --yolo "$@"
 }
 
+exec_trae()
+{
+  if command -v traex >/dev/null 2>&1; then
+    exec traex "$@"
+  elif command -v trae-agent >/dev/null 2>&1; then
+    exec trae-agent "$@"
+  elif command -v traecli >/dev/null 2>&1; then
+    exec traecli "$@"
+  fi
+  echo "mux-agent: TraeCode CLI not found (tried traex, trae-agent, traecli)" >&2
+  exit 127
+}
+
 # Mark this tmux session as a task workbench. This is the single flag that opts
 # a session into the window-per-role model: only here does the agent-driven
 # `mux-inspect` fold repos in as inspection windows. Sessions where the agent is
@@ -39,12 +52,16 @@ exec_codex()
 [ -n "${TMUX:-}" ] && tmux set-option @workbench_task 1 2>/dev/null || true
 
 agent=${WORKBENCH_AGENT:-claude}
+WORKBENCH_AGENT=$agent
+WORKBENCH_PROFILE=${WORKBENCH_PROFILE:-$agent-default}
+export WORKBENCH_AGENT WORKBENCH_PROFILE
 case $agent in
   claude)   exec claude "$@" ;;
   codex)    exec_codex "$@" ;;
+  trae)     exec_trae "$@" ;;
   opencode) exec opencode "$@" ;;
   *)
-    echo "mux-agent: unknown WORKBENCH_AGENT='$agent' (want claude|codex|opencode)" >&2
+    echo "mux-agent: unknown WORKBENCH_AGENT='$agent' (want claude|codex|trae|opencode)" >&2
     exit 2
     ;;
 esac

@@ -132,7 +132,7 @@ don't, the underlying scripts fall back to their own built-in default, so
 
 | Option | Bridged env var | Default | Effect |
 |---|---|---|---|
-| `@workbench-agent` | `WORKBENCH_AGENT` | `claude` | Which CLI `mux-agent` execs: `claude`, `codex`, or `opencode`. |
+| `@workbench-agent` | `WORKBENCH_AGENT` | `claude` | Which CLI `mux-agent` execs: `claude`, `codex`, `trae`, or `opencode`. |
 | `@workbench-git-tool` | `WORKBENCH_GIT_TOOL` | `tig` | Git TUI launched in the top pane of every inspection window (e.g. `lazygit`). |
 | `@workbench-code-root` | `WORKBENCH_CODE_ROOT` | `~/Code` | Root of your persistent repo checkouts. Layer 2 looks here to resolve a short repo name (`ws-add web-app`) to its main checkout. |
 | `@workbench-workspace-root` | `WORKBENCH_WORKSPACE_ROOT` | `~/Workspace` | Root under which `ws-new` creates one directory per workspace; each level-1 directory is pickable, with immediate child git worktrees as inspection windows (or the directory itself for a standalone checkout). |
@@ -150,7 +150,7 @@ set -g @workbench-workspace-root '~/Workspace'
 ### Layer 1 — repo-agnostic (`bin/`)
 
 - **`mux-agent`** — launches the task's coding agent (`$WORKBENCH_AGENT`:
-  `claude` / `codex` / `opencode`) in the current directory, and stamps the
+  `claude` / `codex` / `trae` / `opencode`) in the current directory, and stamps the
   session with `@workbench_task 1`. That marker is the single flag that
   opts a session into the window-per-role model — a bare `claude` started
   in some other session stays unmarked and `mux-inspect` no-ops there. Codex
@@ -185,6 +185,43 @@ set -g @workbench-workspace-root '~/Workspace'
   re-laid out. The pane id is printed so callers can capture logs or remove it
   later. Long tasks are added on demand; the default inspection layout remains
   git/shell/editor only.
+- **`mux-handoff --target <profile> < summary`** — hands the current task to a
+  fresh coding-agent profile in a detached right-hand pane, using the target
+  CLI's initial-prompt interface rather than terminal keystroke injection. It
+  adds lightweight tmux/cwd/git context, verifies that the target process
+  starts, focuses it only when the source pane is still active, and closes the
+  source after a cancellable 15-second grace period. A launch failure rolls
+  back and leaves the source untouched. Use `mux-handoff profiles [--json]` to
+  list targets and `mux-handoff cancel` during the grace period. This works in
+  any tmux session, not only sessions marked as task workbenches.
+
+### Handoff profiles
+
+Built-in profiles launch the user's default Codex, Claude Code, TraeCode CLI,
+or opencode setup. Add or override profiles with `.conf` files under
+`$XDG_CONFIG_HOME/tmux-agent-workbench/profiles/`:
+
+```ini
+# ~/.config/tmux-agent-workbench/profiles/codex-deep.conf
+adapter=codex
+description=Codex with high reasoning effort
+model=gpt-5.6
+effort=high
+permissions=bypass
+env.EXAMPLE_FIXED_SETTING=value
+```
+
+Supported adapters are `codex`, `claude`, `trae`, `opencode`, and `command`.
+The first four accept `model`, `effort` where the CLI supports it,
+`permissions=bypass`, and fixed `env.NAME=value` entries. A trusted user-level
+custom launcher can use `adapter=command` plus `command=/absolute/path`; it is
+called with the generated prompt file as its sole argument. Repository-local
+profiles are deliberately not loaded.
+
+The installer also exposes the bundled `handoff` skill through the shared
+`~/.agents/skills` discovery directory. It teaches a source agent to summarize
+the whole active task, select an exact profile when the user did not, and make
+`mux-handoff` its final action.
 
 ### Layer 2 — opinionated git-worktree workspaces (`git/bin/`)
 
