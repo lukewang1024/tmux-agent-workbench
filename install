@@ -46,6 +46,7 @@ for arg in "$@"; do
   esac
 done
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+SKILL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/agent/skills"
 
 mkdir -p "$BIN_DIR"
 
@@ -84,3 +85,23 @@ if [ "$INCLUDE_GIT" -eq 1 ]; then
     [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
   done
 fi
+
+# Shared agent skills. ~/.agents/skills is the cross-tool discovery location;
+# keep the real data under XDG and expose only the compatibility symlink there.
+mkdir -p "$SKILL_DIR" "$HOME/.agents/skills"
+for skill in "$PLUGIN_DIR"/skills/*; do
+  [ -d "$skill" ] || continue
+  name=$(basename "$skill")
+  canonical="$SKILL_DIR/$name"
+  if [ -h "$canonical" ]; then rm "$canonical"
+  elif [ -e "$canonical" ]; then mv "$canonical" "$canonical~"
+  fi
+  ln -s "$skill" "$canonical"
+
+  compat="$HOME/.agents/skills/$name"
+  if [ -h "$compat" ]; then rm "$compat"
+  elif [ -e "$compat" ]; then mv "$compat" "$compat~"
+  fi
+  ln -s "$canonical" "$compat"
+  echo "linked $compat -> $canonical -> $skill"
+done

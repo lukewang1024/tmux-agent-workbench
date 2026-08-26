@@ -1,0 +1,4 @@
+interface:
+  display_name: "Handoff coding task"
+  short_description: "Hand an in-progress coding task to another agent profile"
+  default_prompt: "Hand this task off to another configured coding-agent profile."
