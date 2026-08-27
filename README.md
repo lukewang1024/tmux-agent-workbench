@@ -248,7 +248,19 @@ the whole active task, select an exact profile when the user did not, and make
   primitive — call it the moment a task turns out to need a repo that
   wasn't known about at `ws-new` time. Usable by a human at the prompt or
   by a coding agent's own shell tool. Idempotent: an existing worktree is
-  just focused, not recreated.
+  initialized again and focused, not recreated.
+
+  A repository can opt into local worktree initialization by providing an
+  executable regular file at `<main-checkout>/.workbench/worktree-init`.
+  `ws-add` runs this trusted main-checkout script after the worktree exists and
+  before adding its inspection window, on every invocation. The script runs
+  with the worktree as its current directory and receives
+  `WORKBENCH_INIT_PROTOCOL=1`, `WORKBENCH_MAIN_CHECKOUT`,
+  `WORKBENCH_WORKTREE`, `WORKBENCH_WORKSPACE`, `WORKBENCH_FEATURE`,
+  `WORKBENCH_REPO`, and `WORKBENCH_BRANCH`. It must be non-interactive and
+  idempotent. A non-zero exit stops `ws-add` while preserving the worktree for
+  a later repair; missing initializers are a no-op. Symlink initializers are
+  refused.
 - **`ws-done [--force] <feature>`** — tears a workspace down: kills its
   tmux session if running, then `git worktree remove` per member repo
   (each repo's main checkout under `$WORKBENCH_CODE_ROOT` is never

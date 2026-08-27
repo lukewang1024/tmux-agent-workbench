@@ -14,10 +14,11 @@
 #   not currently attached to (used by ws-new to seed repos given up front,
 #   before the new session has any client attached).
 #
-# Idempotent: a repo that already has a worktree in this workspace is just
-# focused, not recreated. Branch selection when it doesn't exist yet: from
-# the repo's origin/HEAD if resolvable, else the main checkout's current HEAD
-# (same convention as ws-new / git-new-branch). No auto-fetch.
+# Idempotent: a repo that already has a worktree in this workspace is
+# initialized again and then focused, not recreated. Branch selection when it
+# doesn't exist yet: from the repo's origin/HEAD if resolvable, else the main
+# checkout's current HEAD (same convention as ws-new / git-new-branch). No
+# auto-fetch.
 
 set -eu
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
@@ -94,6 +95,38 @@ if [ ! -e "$dest" ]; then
     fi
   fi
   echo "ws-add: $rname -> $dest (branch $rbranch)"
+fi
+
+# Repositories may opt into lightweight, local worktree initialization through
+# a script owned by the trusted main checkout. Run it for both new and existing
+# worktrees so it can be idempotent and repair missing generated state. Refuse
+# symlinks: ws-add must not follow a branch- or filesystem-controlled redirect
+# before executing repository code.
+initializer="$main/.workbench/worktree-init"
+if [ -L "$initializer" ]; then
+  echo "ws-add: refusing symlink initializer: $initializer" >&2
+  exit 1
+fi
+if [ -e "$initializer" ]; then
+  [ -f "$initializer" ] || { echo "ws-add: initializer is not a regular file: $initializer" >&2; exit 1; }
+  [ -x "$initializer" ] || { echo "ws-add: initializer is not executable: $initializer" >&2; exit 1; }
+  actual_branch=$(git -C "$dest" symbolic-ref --short -q HEAD 2>/dev/null) || actual_branch=$rbranch
+  echo "ws-add: running $initializer"
+  (
+    cd "$dest"
+    WORKBENCH_INIT_PROTOCOL=1 \
+    WORKBENCH_MAIN_CHECKOUT="$main" \
+    WORKBENCH_WORKTREE="$dest" \
+    WORKBENCH_WORKSPACE="$wsdir" \
+    WORKBENCH_FEATURE="$feature" \
+    WORKBENCH_REPO="$rname" \
+    WORKBENCH_BRANCH="$actual_branch" \
+      "$initializer"
+  ) || {
+    rc=$?
+    echo "ws-add: repository initializer failed (exit $rc); worktree kept at $dest" >&2
+    exit "$rc"
+  }
 fi
 
 # Register the worktree with zoxide so this repo surfaces in the directory
