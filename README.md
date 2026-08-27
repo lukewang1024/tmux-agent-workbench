@@ -151,7 +151,10 @@ set -g @workbench-workspace-root '~/Workspace'
 
 - **`mux-agent`** — launches the task's coding agent (`$WORKBENCH_AGENT`:
   `claude` / `codex` / `trae` / `opencode`) in the current directory, and stamps the
-  session with `@workbench_task 1`. That marker is the single flag that
+  session with `@workbench_task 1`. It also stamps the agent pane with
+  `@workbench_agent` and `@workbench_profile`, allowing handoffs to recover
+  launch identity even when an agent tool runner sanitizes child-process
+  environment variables. The session marker is the single flag that
   opts a session into the window-per-role model — a bare `claude` started
   in some other session stays unmarked and `mux-inspect` no-ops there. Codex
   task workbenches always launch in YOLO mode so routine approvals do not

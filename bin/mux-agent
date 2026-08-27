@@ -55,6 +55,14 @@ agent=${WORKBENCH_AGENT:-claude}
 WORKBENCH_AGENT=$agent
 WORKBENCH_PROFILE=${WORKBENCH_PROFILE:-$agent-default}
 export WORKBENCH_AGENT WORKBENCH_PROFILE
+
+# Tool runners may sanitize their child environment before invoking commands.
+# Keep the launch identity on the pane as durable tmux metadata so commands
+# such as mux-handoff can recover it after locating the calling pane.
+if [ -n "${TMUX_PANE:-}" ]; then
+  tmux set-option -p -t "$TMUX_PANE" @workbench_agent "$WORKBENCH_AGENT" 2>/dev/null || true
+  tmux set-option -p -t "$TMUX_PANE" @workbench_profile "$WORKBENCH_PROFILE" 2>/dev/null || true
+fi
 case $agent in
   claude)   exec claude "$@" ;;
   codex)    exec_codex "$@" ;;

@@ -66,6 +66,8 @@ pane_is_absent()
 }
 
 source1=$(new_source handoff-success)
+tmux set-option -p -t "$source1" @workbench_agent codex
+tmux set-option -p -t "$source1" @workbench_profile codex-high
 if printf 'Continue frobnicator work.\n' | run_handoff "$source1" \
     --target test-success --startup-timeout 3 --no-close >"$WB_TEST_TMPDIR/success.out" 2>&1; then
   success_rc=0
@@ -81,6 +83,10 @@ wb_assert "free-text summary reached successor" grep -q 'Continue frobnicator wo
 physical_tmp=$(cd "$WB_TEST_TMPDIR" && pwd -P)
 wb_assert "mechanical cwd reached successor" grep -q "cwd: $physical_tmp" "$received"
 wb_assert "target profile reached successor" grep -q 'target_profile: test-success' "$received"
+wb_assert "pane agent identity reached successor" grep -q 'source_agent: codex' "$received"
+wb_assert "pane profile identity reached successor" grep -q 'source_profile: codex-high' "$received"
+wb_assert "target pane records launched adapter" test "$(tmux show-option -pqv -t "$target1" @workbench_agent)" = command
+wb_assert "target pane records launched profile" test "$(tmux show-option -pqv -t "$target1" @workbench_profile)" = test-success
 wb_assert "fixed profile environment reached launcher" test "$(cat "$received.env")" = from-profile
 wb_assert "source lock clears for --no-close" test -z "$(tmux show-option -pqv -t "$source1" @handoff_in_progress 2>/dev/null || true)"
 
