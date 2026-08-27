@@ -193,7 +193,9 @@ set -g @workbench-workspace-root '~/Workspace'
   source after a cancellable 15-second grace period. A launch failure rolls
   back and leaves the source untouched. Use `mux-handoff profiles [--json]` to
   list targets and `mux-handoff cancel` during the grace period. This works in
-  any tmux session, not only sessions marked as task workbenches.
+  any tmux session, not only sessions marked as task workbenches. If an agent's
+  tool runner strips `TMUX`/`TMUX_PANE`, the command safely recovers its source
+  pane from the process ancestry instead of guessing from the active client.
 
 ### Handoff profiles
 

@@ -196,4 +196,25 @@ printf 'Focus case.\n' | run_handoff "$source5" --target test-focus --no-close -
 active_window=$(tmux display-message -p -t handoff-focus '#{window_name}')
 wb_assert "handoff does not pull user from another window" test "$active_window" = elsewhere
 
+# Real coding-agent tool runners can strip TMUX and TMUX_PANE. Invoke the
+# command from a shell that genuinely lives under a pane, explicitly remove
+# both variables, and prove process-ancestry recovery finds that source rather
+# than whichever pane happens to be active.
+tmux new-session -d -s handoff-ancestry -n agent -c "$WB_TEST_TMPDIR"
+tmux set-environment -g XDG_CONFIG_HOME "$XDG_CONFIG_HOME"
+ancestry_source=$(tmux list-panes -t handoff-ancestry:agent -F '#{pane_id}')
+ancestry_result="$WB_TEST_TMPDIR/ancestry-result"
+ancestry_prompt="$WB_TEST_TMPDIR/ancestry-prompt"
+sed "s|^env.HANDOFF_TEST_OUTPUT=.*|env.HANDOFF_TEST_OUTPUT=$ancestry_prompt|" \
+  "$profile_dir/test-success.conf" > "$profile_dir/test-ancestry.conf"
+tmux send-keys -t "$ancestry_source" \
+  "printf '%s\\n' 'Ancestry case.' | env -u TMUX -u TMUX_PANE '$handoff' --target test-ancestry --no-close --startup-timeout 3 >'$ancestry_result' 2>&1" Enter
+attempts=0
+while [ ! -s "$ancestry_result" ] && [ "$attempts" -lt 80 ]; do
+  sleep 0.1
+  attempts=$((attempts + 1))
+done
+wb_assert "handoff recovers pane when tmux variables are stripped" grep -q 'delivered to test-ancestry' "$ancestry_result"
+wb_assert "ancestry-recovered source is reported in prompt" grep -q "source_pane: $ancestry_source" "$ancestry_prompt"
+
 wb_test_report
