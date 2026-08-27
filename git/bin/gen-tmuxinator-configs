@@ -178,9 +178,8 @@ done
 
 # ---------------------------------------------------------------------------
 # Part B — WORKBENCH_WORKSPACE_ROOT: one config per level-1 workspace dir,
-# seeded from its first member repo (or the workspace dir itself for a
-# standalone checkout / empty task), with every member repo pre-built as its
-# own inspection window.
+# rooted at the workspace directory so the session-level agent covers the
+# whole task, with every member repo pre-built as its own inspection window.
 # ---------------------------------------------------------------------------
 WS_ROOT=$(cd "$WORKBENCH_WORKSPACE_ROOT" 2>/dev/null && pwd -P || echo "")
 ws_written=0
@@ -195,7 +194,6 @@ if [ -n "$WS_ROOT" ]; then
     # task directory containing immediate child worktrees. Do not descend
     # further: a workspace's repos are direct children by convention.
     members=
-    primary=$w
     top=$(git -C "$w" rev-parse --show-toplevel 2>/dev/null || true)
     if [ "$top" = "$w" ]; then
       members="$w "
@@ -205,7 +203,6 @@ if [ -n "$WS_ROOT" ]; then
         d=${d%/}
         top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
         [ "$top" = "$d" ] || continue
-        [ -n "$members" ] || primary=$d
         members="$members$d "
       done
     fi
@@ -217,7 +214,7 @@ if [ -n "$WS_ROOT" ]; then
     {
       printf '%s (workspace: %s)\n' "$MARKER" "$w"
       printf 'name: %s\n' "$wsname"
-      printf 'root: %s\n' "$primary"
+      printf 'root: %s\n' "$w"
       printf 'startup_window: agent\n'
       printf 'windows:\n'
       printf '  - agent:\n            - mux-agent\n'
