@@ -131,6 +131,34 @@ pane_exists()
   [ "$actual" = "$1" ]
 }
 
+# Coding-agent tool runners may deliberately sanitize TMUX/TMUX_PANE even
+# though the agent itself still lives under a tmux pane. Recover that pane by
+# walking this process's ancestors and matching one to a pane's root PID. This
+# is stricter than guessing the active pane: it only succeeds on a unique
+# process-tree relationship, so a user viewing some other pane is never
+# mistaken for the caller.
+detect_source_pane()
+{
+  mh_pid=$$
+  mh_ancestors=
+  while [ "$mh_pid" -gt 1 ] 2>/dev/null; do
+    mh_ancestors="$mh_ancestors $mh_pid"
+    mh_pid=$(ps -o ppid= -p "$mh_pid" 2>/dev/null | tr -d ' ') || return 1
+    case $mh_pid in ''|*[!0-9]*) return 1 ;; esac
+  done
+
+  mh_matches=
+  for mh_pid in $mh_ancestors; do
+    mh_match=$(tmux list-panes -a -F '#{pane_id} #{pane_pid}' 2>/dev/null |
+      awk -v pid="$mh_pid" '$2 == pid { print $1 }')
+    [ -n "$mh_match" ] || continue
+    mh_matches="$mh_matches $mh_match"
+  done
+  set -- $mh_matches
+  [ $# -eq 1 ] || return 1
+  printf '%s\n' "$1"
+}
+
 clear_pair()
 {
   source=$1
@@ -156,6 +184,7 @@ cancel_handoff()
       *) echo "mux-handoff: cancel: unknown option: $1" >&2; exit 2 ;;
     esac
   done
+  [ -n "$pane" ] || pane=$(detect_source_pane 2>/dev/null || true)
   [ -n "$pane" ] || die "cancel needs --pane when called outside tmux"
   pane_exists "$pane" || die "pane does not exist: $pane"
 
@@ -319,7 +348,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die "not inside a tmux pane"
 [ -n "$profile" ] || { usage >&2; exit 2; }
 valid_name "$profile" || die "invalid profile name: $profile"
 profile_file "$profile" >/dev/null || die "unknown profile '$profile' (run: mux-handoff profiles)"
@@ -327,7 +355,9 @@ case $close_timeout in ''|*[!0-9]*) die "--timeout must be a non-negative intege
 case $startup_timeout in ''|*[!0-9]*|0) die "--startup-timeout must be a positive integer" ;; esac
 [ ! -t 0 ] || die "handoff summary is required on stdin"
 
-source=$TMUX_PANE
+source=${TMUX_PANE:-}
+[ -n "$source" ] || source=$(detect_source_pane 2>/dev/null || true)
+[ -n "$source" ] || die "not inside a tmux pane and no source pane matched the process ancestry"
 pane_exists "$source" || die "source pane no longer exists: $source"
 id="$(date +%s)-$$"
 if ! tmux set-option -po -t "$source" @handoff_in_progress "$id" 2>/dev/null; then
