@@ -50,6 +50,67 @@ SKILL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/agent/skills"
 
 mkdir -p "$BIN_DIR"
 
+# Attention v2 binary. Release assets use
+# tmux-agent-workbench-<rust-target>.tar.gz; a source checkout falls back to a
+# local Cargo release build when the matching asset is unavailable.
+install_attention_binary() {
+  attention_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$PLUGIN_DIR/Cargo.toml" | head -1)
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) attention_target=aarch64-apple-darwin ;;
+    Darwin-x86_64) attention_target=x86_64-apple-darwin ;;
+    Linux-aarch64|Linux-arm64) attention_target=aarch64-unknown-linux-gnu ;;
+    Linux-x86_64) attention_target=x86_64-unknown-linux-gnu ;;
+    *) attention_target= ;;
+  esac
+  attention_destination="$BIN_DIR/tmux-agent-workbench"
+  attention_stage="$attention_destination.new.$$"
+
+  install_attention_file() {
+    attention_source=$1
+    rm -f "$attention_stage"
+    cp "$attention_source" "$attention_stage"
+    case "$(uname -s 2>/dev/null)" in
+      Darwin)
+        codesign --force --sign - "$attention_stage" >/dev/null
+        ;;
+    esac
+    chmod 755 "$attention_stage"
+    mv -f "$attention_stage" "$attention_destination"
+  }
+  if [ "${TMUX_AGENT_WORKBENCH_INSTALL_SOURCE:-0}" != 1 ] &&
+     [ -x "$attention_destination" ] &&
+     [ "$($attention_destination --version 2>/dev/null | awk '{print $2}')" = "$attention_version" ]; then
+    return 0
+  fi
+
+  attention_installed=0
+  if [ "${TMUX_AGENT_WORKBENCH_INSTALL_SOURCE:-0}" != 1 ] &&
+     [ -n "$attention_target" ] && command -v curl >/dev/null 2>&1; then
+    attention_tmp=$(mktemp -d)
+    attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/download/v$attention_version/tmux-agent-workbench-$attention_target.tar.gz"
+    if curl -fsSL "$attention_url" -o "$attention_tmp/archive.tar.gz" &&
+       tar -xzf "$attention_tmp/archive.tar.gz" -C "$attention_tmp" &&
+       [ -x "$attention_tmp/tmux-agent-workbench" ]; then
+      install_attention_file "$attention_tmp/tmux-agent-workbench"
+      attention_installed=1
+      echo "installed release binary $attention_destination"
+    fi
+    rm -rf "$attention_tmp"
+  fi
+
+  if [ "$attention_installed" -eq 0 ]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "install: no release asset and cargo is unavailable" >&2
+      return 1
+    fi
+    echo "release binary unavailable; building tmux-agent-workbench from source"
+    cargo build --manifest-path "$PLUGIN_DIR/Cargo.toml" --release --bin tmux-agent-workbench
+    install_attention_file "$PLUGIN_DIR/target/release/tmux-agent-workbench"
+  fi
+}
+
+install_attention_binary
+
 # Back up a pre-existing non-symlink target to <name>~, then symlink. Skip if
 # the correct symlink is already in place so re-runs don't churn backups.
 link_one() {

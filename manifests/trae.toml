@@ -1,0 +1,34 @@
+version = 1
+min_engine_version = "2.0.0-alpha.3"
+aliases = ["trae", "trae-cli", "traecode"]
+
+[[rules]]
+id = "trae-approval"
+priority = 300
+state = "blocked"
+reason_category = "approval"
+region = "bottom_non_empty_lines"
+visible = "blocker"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*(allow|approve|confirm).*[?]\\s*$" } },
+  { line_regex = { value = "^\\s*Waiting for approval\\s*$" } }
+] } }
+
+[[rules]]
+id = "trae-working"
+priority = 200
+state = "working"
+region = "bottom_lines"
+visible = "working"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*[•●].*(thinking|working|running)" } },
+  { contains = { value = "esc to interrupt" } }
+] } }
+
+[[rules]]
+id = "trae-idle"
+priority = 100
+state = "idle"
+region = "bottom_non_empty_lines"
+visible = "idle"
+matcher = { line_regex = { value = "^\\s*[›❯>]\\s*$" } }

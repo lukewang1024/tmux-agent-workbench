@@ -34,14 +34,14 @@ case ":$current_path:" in
 esac
 
 # M-g pairs with G (G consumes the pool, M-g regenerates it) — untouched by
-# the T-family below. T/M-t/M-T are a second, session-flavored family: T
-# (elsewhere in tmux.conf) picks an EXISTING session via sesh, M-t starts a
-# NEW workspace/session, M-T derives one from the pane you're already in, no
+# the T-family below. T/M-t/M-T are a second, session-flavored family: T picks
+# a configured tmuxinator project, M-t starts a NEW workspace/session, and M-T
+# derives one from the pane you're already in, no
 # prompt. Capital M-T, not M-t twice — and not M-n/M-N, which would collide
 # with tmux core's next-window -a / nothing-but-still-confusing-with-core-M-n.
-bind_tracked "@workbench-key-regen" "@workbench-_bound-regen" "M-g" \
+bind_tracked "@workbench-key-regen" "@workbench-_bound-regen" "" \
   "regenerate tmuxinator pool configs" run-shell -b "$CURRENT_DIR/bin/gen-tmuxinator-configs"
-bind_tracked "@workbench-key-new" "@workbench-_bound-new" "M-t" \
+bind_tracked "@workbench-key-new" "@workbench-_bound-new" "" \
   "new workspace (feature + repos)" run-shell -b "$CURRENT_DIR/bin/ws-new-prompt"
-bind_tracked "@workbench-key-promote" "@workbench-_bound-promote" "M-T" \
+bind_tracked "@workbench-key-promote" "@workbench-_bound-promote" "" \
   "promote current repo into a new task" run-shell -b "$CURRENT_DIR/bin/ws-promote"

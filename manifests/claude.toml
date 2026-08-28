@@ -1,0 +1,54 @@
+version = 1
+min_engine_version = "2.0.0-alpha.3"
+aliases = ["claude", "claude-code"]
+
+[[rules]]
+id = "claude-btw-overlay-working"
+priority = 975
+state = "working"
+region = "bottom_non_empty_lines"
+visible = "working"
+matcher = { any = { items = [
+  { line_regex = { value = "^\\s*/btw(?:\\s|$)" } },
+  { line_regex = { value = "(?i)esc to close\\s*$" } }
+] } }
+
+[[rules]]
+id = "claude-permission"
+priority = 300
+state = "blocked"
+reason_category = "approval"
+region = "prompt_box"
+visible = "blocker"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*(do you want to proceed|allow|approve).*[?]\\s*$" } },
+  { contains = { value = "Esc to cancel" } }
+] } }
+
+[[rules]]
+id = "claude-question"
+priority = 280
+state = "blocked"
+reason_category = "question"
+region = "bottom_non_empty_lines"
+visible = "blocker"
+matcher = { line_regex = { value = "(?i)^\\s*claude needs your input" } }
+
+[[rules]]
+id = "claude-working"
+priority = 200
+state = "working"
+region = "bottom_lines"
+visible = "working"
+matcher = { any = { items = [
+  { contains = { value = "esc to interrupt" } },
+  { line_regex = { value = "^\\s*[✶✢✳✻✽·].+" } }
+] } }
+
+[[rules]]
+id = "claude-idle-prompt"
+priority = 100
+state = "idle"
+region = "bottom_non_empty_lines"
+visible = "idle"
+matcher = { line_regex = { value = "^\\s*❯\\s*$" } }

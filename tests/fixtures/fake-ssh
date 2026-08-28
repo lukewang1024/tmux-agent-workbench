@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+host=$1
+shift
+[ "$host" = fixture-host ] || exit 2
+[ "$1" = tmux-agent-workbench ] || exit 2
+shift
+XDG_CONFIG_HOME=$WORKBENCH_TEST_REMOTE_CONFIG \
+  "$WORKBENCH_TEST_BINARY" "$@"

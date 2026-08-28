@@ -1,0 +1,22 @@
+pub mod config;
+pub mod daemon;
+pub mod detection;
+pub mod doctor;
+pub mod hooks;
+pub mod ipc;
+pub mod layout;
+pub mod manifest;
+pub mod model;
+pub mod notification;
+pub mod paths;
+pub mod picker;
+pub mod process;
+pub mod relay;
+pub mod server;
+pub mod sidebar;
+pub mod state_machine;
+pub mod tmux;
+
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
