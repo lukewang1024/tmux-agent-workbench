@@ -73,8 +73,18 @@ die() {
 }
 [ -n "${TMUX:-}" ] || die "not inside a tmux session"
 
-cwd=$(tmux display-message -p '#{pane_current_path}')
-srcpane=$(tmux display-message -p '#{pane_id}')
+case ${WORKBENCH_PROMOTE_PANE:-} in
+  %*[!0-9]*|%|'') promote_target= ;;
+  %*) promote_target=$WORKBENCH_PROMOTE_PANE ;;
+  *) promote_target= ;;
+esac
+if [ -n "$promote_target" ]; then
+  cwd=$(tmux display-message -p -t "$promote_target" '#{pane_current_path}')
+  srcpane=$(tmux display-message -p -t "$promote_target" '#{pane_id}')
+else
+  cwd=$(tmux display-message -p '#{pane_current_path}')
+  srcpane=$(tmux display-message -p '#{pane_id}')
+fi
 rname=""
 top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) && rname=$(basename "$top")
 

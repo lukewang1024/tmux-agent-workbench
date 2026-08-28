@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install runtime test dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux fzf
+      - name: Install runtime test dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux fzf
+      - run: cargo test --locked --target "${{ matrix.target }}"
+      - run: tests/integration-tmux.sh
+      - run: tests/relay-pairing.sh
+      - run: tests/install.sh
+      - run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Package
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/tmux-agent-workbench" dist/
+          cp README.md LICENSE dist/
+          tar -C dist -czf "tmux-agent-workbench-${{ matrix.target }}.tar.gz" .
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: tmux-agent-workbench-${{ matrix.target }}.tar.gz

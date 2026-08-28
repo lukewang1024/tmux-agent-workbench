@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "server": "/tmp/tmux-501/default",
+  "generation": 7,
+  "observed_at_unix_ms": 1700000000000,
+  "sessions": [
+    {
+      "session_id": "$1",
+      "session_name": "feature",
+      "rollup_state": "blocked",
+      "agent_count": 1,
+      "attention_count": 1,
+      "last_active_window_id": "@2",
+      "last_active_pane_id": "%3"
+    }
+  ],
+  "agents": [
+    {
+      "instance_id": "%3:4242:123456:codex",
+      "kind": "codex",
+      "label": "Codex build",
+      "target": {
+        "session_id": "$1",
+        "session_name": "feature",
+        "window_id": "@2",
+        "window_index": 1,
+        "window_name": "agent",
+        "pane_id": "%3",
+        "pane_index": 0
+      },
+      "process": {
+        "pid": 4242,
+        "started_at_ticks": 123456,
+        "executable": "codex"
+      },
+      "base_state": "blocked",
+      "display_state": "blocked",
+      "state_source": "screen",
+      "confidence": "low",
+      "hook_health": "missing",
+      "reason_category": "permission",
+      "attention": {
+        "id": "attention-1",
+        "kind": "blocked",
+        "seen": false,
+        "since_unix_ms": 1700000000000
+      },
+      "stale": false,
+      "visible": false,
+      "manifest_version": 1,
+      "rule_id": "codex.permission",
+      "exited": false,
+      "exited_at_unix_ms": null
+    }
+  ]
+}

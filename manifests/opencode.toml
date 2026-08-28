@@ -1,0 +1,43 @@
+version = 1
+min_engine_version = "2.0.0-alpha.3"
+aliases = ["opencode", "opencode-ai"]
+
+[[rules]]
+id = "opencode-permission"
+priority = 300
+state = "blocked"
+reason_category = "approval"
+region = "prompt_box"
+visible = "blocker"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*(permission required|allow|approve).*[?]\\s*$" } },
+  { line_regex = { value = "^\\s*Waiting for permission\\s*$" } }
+] } }
+
+[[rules]]
+id = "opencode-question"
+priority = 280
+state = "blocked"
+reason_category = "question"
+region = "bottom_non_empty_lines"
+visible = "blocker"
+matcher = { line_regex = { value = "(?i)^\\s*(select an option|answer required)" } }
+
+[[rules]]
+id = "opencode-working"
+priority = 200
+state = "working"
+region = "bottom_lines"
+visible = "working"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*[•●].*(thinking|working|running|generating)" } },
+  { contains = { value = "esc interrupt" } }
+] } }
+
+[[rules]]
+id = "opencode-idle"
+priority = 100
+state = "idle"
+region = "bottom_non_empty_lines"
+visible = "idle"
+matcher = { line_regex = { value = "^\\s*[›❯>]\\s*$" } }

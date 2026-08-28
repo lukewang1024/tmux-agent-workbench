@@ -1,0 +1,100 @@
+version = 1
+min_engine_version = "2.0.0-alpha.3"
+aliases = ["codex", "codex-cli"]
+
+[[rules]]
+id = "codex-title-blocked"
+priority = 1100
+state = "blocked"
+reason_category = "input"
+region = "pane_title"
+visible = "blocker"
+matcher = { contains = { value = "Action Required" } }
+
+[[rules]]
+id = "codex-title-working"
+priority = 1050
+state = "working"
+region = "pane_title"
+visible = "working"
+matcher = { regex = { value = "(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)" } }
+
+[[rules]]
+id = "codex-empty-screen-idle"
+priority = 10
+state = "idle"
+region = "whole_recent"
+visible = "idle"
+matcher = { regex = { value = "^\\s*$" } }
+
+[[rules]]
+id = "codex-approval"
+priority = 300
+state = "blocked"
+reason_category = "approval"
+region = "bottom_non_empty_lines"
+visible = "blocker"
+matcher = { any = { items = [
+  { line_regex = { value = "(?i)^\\s*(would you like|do you want) .*[?]\\s*$" } },
+  { line_regex = { value = "(?i)^\\s*(allow|approve) .*[?]\\s*$" } },
+  { contains = { value = "Press enter to confirm" } }
+] } }
+
+[[rules]]
+id = "codex-resource-limit"
+priority = 290
+state = "blocked"
+reason_category = "resource_limit"
+region = "bottom_non_empty_lines"
+visible = "blocker"
+matcher = { line_regex = { value = "(?i)^\\s*(usage limit|rate limit|you have .* weighted tokens left)" } }
+
+[[rules]]
+id = "codex-idle-with-background-terminal"
+priority = 260
+state = "idle"
+region = "bottom_lines"
+visible = "idle"
+matcher = { all = { items = [
+  { contains = { value = "background terminal running" } },
+  { line_regex = { value = "^\\s*[›❯](\\s+.*)?\\s*$" } }
+] } }
+
+[[rules]]
+id = "codex-working-interruptible"
+priority = 280
+state = "working"
+region = "bottom_lines"
+visible = "working"
+matcher = { contains = { value = "esc to interrupt" } }
+
+[[rules]]
+id = "codex-title-idle"
+priority = 100
+state = "idle"
+region = "pane_title"
+# A missing spinner is only negative evidence: Codex briefly clears/reorders its
+# title during a live turn. Keep this weak so working -> idle still goes through
+# the directed three-sample stabilization instead of emitting a false done.
+visible = "always"
+matcher = { all = { items = [
+  { regex = { value = "\\S" } },
+  { not = { item = { regex = { value = "(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)" } } } },
+  { not = { item = { contains = { value = "Action Required" } } } }
+] } }
+
+[[rules]]
+id = "codex-working"
+priority = 200
+state = "working"
+region = "bottom_lines"
+visible = "working"
+matcher = { line_regex = { value = "(?i)^\\s*[•●◐◓◑◒].*(working|thinking|running|searching|analyzing)" } }
+
+[[rules]]
+id = "codex-idle-prompt"
+priority = 220
+state = "idle"
+region = "bottom_non_empty_lines"
+visible = "idle"
+matcher = { line_regex = { value = "^\\s*[›❯](\\s+.*)?\\s*$" } }

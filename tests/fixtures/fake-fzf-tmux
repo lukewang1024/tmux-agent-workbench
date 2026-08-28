@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+match=${WORKBENCH_PICK_MATCH:-}
+while IFS= read -r line; do
+  case $line in
+    *"$match"*)
+      printf '%s\n' "$line"
+      exit 0
+      ;;
+  esac
+done
+exit 1
