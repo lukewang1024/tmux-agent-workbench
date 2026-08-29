@@ -16,6 +16,24 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+wait_sidebar_state()
+{
+  sidebar_target=$1
+  sidebar_expected=$2
+  sidebar_tries=0
+  while :; do
+    if tmux -S "$socket" list-panes -t "$sidebar_target" -F '#{@pane_role}' | \
+      grep '^sidebar$' >/dev/null; then
+      [ "$sidebar_expected" = present ] && return 0
+    else
+      [ "$sidebar_expected" = absent ] && return 0
+    fi
+    sidebar_tries=$((sidebar_tries + 1))
+    [ "$sidebar_tries" -lt 40 ] || return 1
+    sleep 0.1
+  done
+}
+
 export XDG_CONFIG_HOME=$test_root/config
 export XDG_STATE_HOME=$test_root/state
 export XDG_CACHE_HOME=$test_root/cache
@@ -82,10 +100,10 @@ if tmux -S "$socket" list-keys -T prefix -N | \
   grep -E 'pick tmuxinator workbench project|new workspace \(feature \+ repos\)|pick agent$' >/dev/null; then
   exit 1
 fi
-tmux -S "$socket" list-keys -T prefix -N | grep '^C-b a.*user broadcast$' >/dev/null
+tmux -S "$socket" list-keys -T prefix | \
+  grep -E 'bind-key.*-T prefix[[:space:]]+a[[:space:]]+display-message broadcast$' >/dev/null
 initial_window=$(tmux -S "$socket" display-message -p -t workbench-test:1 '#{window_id}')
-tmux -S "$socket" list-panes -t workbench-test:1 -F '#{@pane_role}' | \
-  grep '^sidebar$' >/dev/null
+wait_sidebar_state workbench-test:1 present
 
 # An explicit toggle-off survives maintenance; toggling again opts back in.
 "$binary" sidebar-control toggle "$initial_window"
@@ -104,17 +122,13 @@ tmux -S "$socket" list-panes -t workbench-test:1 -F '#{@pane_role}' | \
   grep '^sidebar$' >/dev/null
 
 tmux -S "$socket" new-window -d -n sidebar-check
-sleep 1
+wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
 tmux -S "$socket" resize-window -t sidebar-check -x 100
-sleep 1
-if tmux -S "$socket" list-panes -t sidebar-check -F '#{@pane_role}' | grep '^sidebar$' >/dev/null; then
-  exit 1
-fi
+wait_sidebar_state sidebar-check absent
 tmux -S "$socket" resize-window -t sidebar-check -x 140
-sleep 1
-tmux -S "$socket" list-panes -t sidebar-check -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
+wait_sidebar_state sidebar-check present
 
 # Repeated sidebar open/close must not distort the main pane proportions.
 tmux -S "$socket" new-window -d -n layout-preserve
