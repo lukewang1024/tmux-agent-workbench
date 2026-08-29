@@ -59,7 +59,7 @@ install_attention_binary() {
     Darwin-arm64) attention_target=aarch64-apple-darwin ;;
     Darwin-x86_64) attention_target=x86_64-apple-darwin ;;
     Linux-aarch64|Linux-arm64) attention_target=aarch64-unknown-linux-gnu ;;
-    Linux-x86_64) attention_target=x86_64-unknown-linux-gnu ;;
+    Linux-x86_64) attention_target=x86_64-unknown-linux-musl ;;
     *) attention_target= ;;
   esac
   attention_destination="$BIN_DIR/tmux-agent-workbench"
