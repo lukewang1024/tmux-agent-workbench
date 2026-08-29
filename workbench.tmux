@@ -65,6 +65,12 @@ fi
 
 if [ -n "$ATTENTION_BIN" ]; then
   tmux set-option -g @workbench_attention_bin "$ATTENTION_BIN"
+  # Sidebars are derived UI, not user panes. Resurrect would otherwise restore
+  # each one as an empty shell and then our auto-create hook would add another
+  # sidebar beside it. Filter sidebar records and substitute the main-only
+  # layout captured by the layout controller.
+  tmux set-option -g @resurrect-hook-post-save-layout \
+    "'$CURRENT_DIR/bin/workbench-resurrect-save-hook'"
   expected_version="$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$CURRENT_DIR/Cargo.toml" | head -1)"
   installed_version="$($ATTENTION_BIN --version 2>/dev/null | awk '{print $2}')"
   if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then

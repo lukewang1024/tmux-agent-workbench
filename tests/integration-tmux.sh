@@ -135,6 +135,23 @@ sidebar_width=$(tmux -S "$socket" list-panes -t layout-preserve \
   -f '#{==:#{@pane_role},sidebar}' -F '#{pane_width}')
 [ "$sidebar_width" = 26 ]
 
+# Resurrect snapshots must contain only user panes and the main-only layout.
+resurrect_file=$test_root/resurrect.txt
+tab=$(printf '\t')
+tmux -S "$socket" list-panes -t layout-preserve \
+  -F "pane${tab}#{session_name}${tab}#{window_index}${tab}0${tab}:-${tab}#{pane_index}${tab}title${tab}:/tmp${tab}#{pane_active}${tab}#{pane_current_command}${tab}:" \
+  > "$resurrect_file"
+tmux -S "$socket" display-message -p -t layout-preserve \
+  -F "window${tab}#{session_name}${tab}#{window_index}${tab}:name${tab}0${tab}:-${tab}#{window_layout}${tab}off" \
+  >> "$resurrect_file"
+TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$socket \
+  "$repo/bin/workbench-resurrect-save-hook" "$resurrect_file"
+[ "$(grep '^pane' "$resurrect_file" | wc -l | tr -d ' ')" = 2 ]
+saved_layout=$(grep '^window' "$resurrect_file" | cut -f7)
+main_layout=$(tmux -S "$socket" show-window-options -v \
+  -t layout-preserve @workbench_main_layout)
+[ "$saved_layout" = "$main_layout" ]
+
 # Adding a workspace pane while the sidebar is open invalidates the saved main
 # layout's pane count. Closing remains successful and preserves the new pane.
 tmux -S "$socket" split-window -v -t layout-preserve

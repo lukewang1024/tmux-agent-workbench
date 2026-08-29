@@ -1,0 +1,38 @@
+#!/bin/sh
+# Remove ephemeral Workbench sidebars from a tmux-resurrect layout snapshot.
+set -eu
+
+save_file=${1:?tmux-resurrect save file is required}
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/workbench-resurrect.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+panes_file=$tmp_dir/panes
+layouts_file=$tmp_dir/layouts
+output_file=$tmp_dir/output
+tab=$(printf '\t')
+
+if [ -n "${TMUX_AGENT_WORKBENCH_TMUX_SOCKET:-}" ]; then
+  t() { command tmux -S "$TMUX_AGENT_WORKBENCH_TMUX_SOCKET" "$@"; }
+else
+  t() { command tmux "$@"; }
+fi
+
+t list-panes -a -f '#{==:#{@pane_role},sidebar}' \
+  -F "#{session_name}${tab}#{window_index}${tab}#{pane_index}" > "$panes_file"
+t list-windows -a \
+  -F "#{session_name}${tab}#{window_index}${tab}#{@workbench_main_layout}" > "$layouts_file"
+
+awk -F '\t' -v OFS='\t' '
+  FILENAME == ARGV[1] { sidebar[$1 SUBSEP $2 SUBSEP $3] = 1; next }
+  FILENAME == ARGV[2] {
+    if ($3 != "") main_layout[$1 SUBSEP $2] = $3
+    next
+  }
+  $1 == "pane" && sidebar[$2 SUBSEP $3 SUBSEP $6] { next }
+  $1 == "window" && (($2 SUBSEP $3) in main_layout) {
+    $7 = main_layout[$2 SUBSEP $3]
+  }
+  { print }
+' "$panes_file" "$layouts_file" "$save_file" > "$output_file"
+
+mv "$output_file" "$save_file"
