@@ -100,8 +100,7 @@ if tmux -S "$socket" list-keys -T prefix -N | \
   grep -E 'pick tmuxinator workbench project|new workspace \(feature \+ repos\)|pick agent$' >/dev/null; then
   exit 1
 fi
-tmux -S "$socket" list-keys -T prefix | \
-  grep -E 'bind-key.*-T prefix[[:space:]]+a[[:space:]]+display-message broadcast$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'user broadcast$' >/dev/null
 initial_window=$(tmux -S "$socket" display-message -p -t workbench-test:1 '#{window_id}')
 wait_sidebar_state workbench-test:1 present
 
