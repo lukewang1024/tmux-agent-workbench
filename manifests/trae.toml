@@ -1,6 +1,14 @@
 version = 1
 min_engine_version = "2.0.0-alpha.3"
-aliases = ["trae", "trae-cli", "traecode"]
+aliases = ["trae", "traex", "trae-cli", "traecode"]
+
+[[rules]]
+id = "trae-empty-screen-idle"
+priority = 10
+state = "idle"
+region = "whole_recent"
+visible = "idle"
+matcher = { regex = { value = "^\\s*$" } }
 
 [[rules]]
 id = "trae-approval"
@@ -31,4 +39,4 @@ priority = 100
 state = "idle"
 region = "bottom_non_empty_lines"
 visible = "idle"
-matcher = { line_regex = { value = "^\\s*[›❯>]\\s*$" } }
+matcher = { line_regex = { value = "^\\s*[›❯>](\\s+.*)?\\s*$" } }

@@ -502,6 +502,21 @@ matcher = { contains = { value = "approval ready" } }"#;
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         assert_eq!(set.get(AgentKind::Codex).version, 1);
         assert_eq!(set.aliases().get("codex-cli"), Some(&AgentKind::Codex));
+        assert_eq!(set.aliases().get("traex"), Some(&AgentKind::Trae));
+    }
+
+    #[test]
+    fn traex_prompt_with_placeholder_is_idle() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let content =
+            "Worked for 10m 34s\n❯ Summarize recent commits\nGPT-5.6-Sol medium · Context 83% left";
+        let result = set.get(AgentKind::Trae).classify(content, "wangyuanlv");
+        assert_eq!(result.state, BaseState::Idle);
+        assert_eq!(result.rule_id.as_deref(), Some("trae-idle"));
+
+        let empty = set.get(AgentKind::Trae).classify("\n\n", "wangyuanlv");
+        assert_eq!(empty.state, BaseState::Idle);
+        assert_eq!(empty.rule_id.as_deref(), Some("trae-empty-screen-idle"));
     }
 
     #[test]
