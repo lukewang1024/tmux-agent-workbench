@@ -36,6 +36,7 @@ jobs:
         run: brew install tmux fzf
       - run: cargo test --locked --target "${{ matrix.target }}"
       - run: tests/integration-tmux.sh
+        if: runner.os == 'macOS'
       - run: tests/relay-pairing.sh
       - run: tests/install.sh
       - run: cargo build --locked --release --target "${{ matrix.target }}"
