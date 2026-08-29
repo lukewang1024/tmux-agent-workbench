@@ -17,7 +17,16 @@
 # usage: mux-agent [extra args passed through to the agent]
 #        WORKBENCH_AGENT=codex mux-agent      # override per session/pane
 set -eu
-. "$(dirname "$0")/../lib/deprecation.sh"
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+bin_dir=$(CDPATH= cd -- "$(dirname "$self")" && pwd -P)
+. "$bin_dir/../lib/deprecation.sh"
 
 exec_codex()
 {

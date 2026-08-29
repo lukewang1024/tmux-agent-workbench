@@ -14,7 +14,6 @@
 # /add-dir the picked repo. codex/opencode can't add mid-session (codex reads it
 # anyway; opencode will prompt on first touch), so we skip the nudge for them.
 set -eu
-. "$(dirname "$0")/../lib/deprecation.sh"
 
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
@@ -27,6 +26,7 @@ while [ -h "$self" ]; do
   esac
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
+. "$dir/../lib/deprecation.sh"
 
 if ! command -v fzf-tmux >/dev/null 2>&1; then
   echo "mux-inspect-pick: fzf-tmux not found on PATH (required)" >&2

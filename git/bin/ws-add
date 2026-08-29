@@ -21,7 +21,6 @@
 # auto-fetch.
 
 set -eu
-. "$(dirname "$0")/../../lib/deprecation.sh"
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0
@@ -33,6 +32,7 @@ while [ -h "$self" ]; do
   esac
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
+. "$dir/../../lib/deprecation.sh"
 
 usage() {
   cat <<'EOF'

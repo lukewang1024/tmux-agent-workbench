@@ -1,7 +1,15 @@
 #!/bin/sh
 set -eu
 
-plugin_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+plugin_dir=$(CDPATH= cd -- "$(dirname "$self")/.." && pwd -P)
 core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
 [ -x "$core" ] || core=$(command -v tmux-agent-workbench 2>/dev/null || true)
 [ -n "$core" ] || { tmux display-message "Workbench binary unavailable"; exit 1; }

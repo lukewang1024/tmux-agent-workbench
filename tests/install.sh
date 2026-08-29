@@ -23,6 +23,7 @@ mkdir -p "$HOME" "$test_root/bin"
 test -x "$test_root/bin/tmux-agent-workbench"
 "$test_root/bin/tmux-agent-workbench" --version | grep 'tmux-agent-workbench' >/dev/null
 test -L "$test_root/bin/mux-agent"
+"$test_root/bin/wb" config check >/dev/null
 
 # A second run must be idempotent and must not create backup files.
 "$repo/install" "$test_root/bin" --no-git >/dev/null

@@ -2,7 +2,6 @@
 # mux-handoff — transfer an in-progress task from this tmux pane to a freshly
 # launched coding-agent profile in a right-hand pane.
 set -eu
-. "$(dirname "$0")/../lib/deprecation.sh"
 
 self=$0
 while [ -h "$self" ]; do
@@ -14,6 +13,7 @@ while [ -h "$self" ]; do
 done
 bin_dir=$(cd "$(dirname "$self")" && pwd -P)
 plugin_dir=$(cd "$bin_dir/.." && pwd -P)
+. "$bin_dir/../lib/deprecation.sh"
 self=$bin_dir/mux-handoff
 
 config_home=${XDG_CONFIG_HOME:-$HOME/.config}
