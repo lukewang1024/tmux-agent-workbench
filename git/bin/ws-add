@@ -21,6 +21,7 @@
 # auto-fetch.
 
 set -eu
+. "$(dirname "$0")/../../lib/deprecation.sh"
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0
@@ -121,6 +122,7 @@ if [ -e "$initializer" ]; then
     WORKBENCH_FEATURE="$feature" \
     WORKBENCH_REPO="$rname" \
     WORKBENCH_BRANCH="$actual_branch" \
+    PWD="$dest" \
       "$initializer"
   ) || {
     rc=$?

@@ -55,9 +55,9 @@ printf '%s\n' '[detection]' 'process_interval_ms = 750' > \
 "$binary" reload >/dev/null
 printf '%s\n' 'unknown_key = true' > \
   "$XDG_CONFIG_HOME/tmux-agent-workbench/config.toml"
-if "$binary" reload >/dev/null 2>&1; then
-  exit 1
-fi
+# Beta configuration is additive: preserve/ignore forward-compatible unknown
+# keys instead of preventing the daemon from reloading known settings.
+"$binary" reload >/dev/null
 "$binary" daemon status >/dev/null
 rm "$XDG_CONFIG_HOME/tmux-agent-workbench/config.toml"
 
@@ -105,7 +105,7 @@ tmux -S "$socket" list-panes -t workbench-test:1 -F '#{@pane_role}' | \
 
 tmux -S "$socket" new-window -d -n sidebar-check
 sleep 1
-tmux -S "$socket" list-keys -T prefix | grep 'tmux-agent-workbench sidebar' >/dev/null
+tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
 tmux -S "$socket" resize-window -t sidebar-check -x 100
 sleep 1

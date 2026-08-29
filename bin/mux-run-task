@@ -4,6 +4,7 @@
 #
 # usage: mux-run-task [--name <label>] <repo-path> <command>
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 self=$0
 while [ -h "$self" ]; do

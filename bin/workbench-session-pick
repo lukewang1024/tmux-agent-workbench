@@ -2,6 +2,7 @@
 # Pick any configured tmuxinator project, then start it or switch to its
 # existing tmux session. This is the canonical Workbench "new" entrypoint.
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 if ! command -v tmuxinator >/dev/null 2>&1; then
   printf '%s\n' 'workbench-session-pick: tmuxinator not found' >&2

@@ -1,3 +1,6 @@
+pub mod checkpoint;
+pub mod client;
+pub mod client_protocol;
 pub mod config;
 pub mod daemon;
 pub mod detection;
@@ -12,11 +15,14 @@ pub mod paths;
 pub mod picker;
 pub mod process;
 pub mod relay;
+pub mod semantic;
 pub mod server;
 pub mod sidebar;
 pub mod state_machine;
 pub mod tmux;
+pub mod workspace;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const CLIENT_PROTOCOL_VERSION: u32 = 1;

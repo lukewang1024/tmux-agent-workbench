@@ -84,7 +84,14 @@ install_attention_binary() {
   fi
 
   attention_installed=0
-  if [ "${TMUX_AGENT_WORKBENCH_INSTALL_SOURCE:-0}" != 1 ] &&
+  if [ -x "$PLUGIN_DIR/target/release/tmux-agent-workbench" ] &&
+     [ "$($PLUGIN_DIR/target/release/tmux-agent-workbench --version 2>/dev/null | awk '{print $2}')" = "$attention_version" ]; then
+    install_attention_file "$PLUGIN_DIR/target/release/tmux-agent-workbench"
+    attention_installed=1
+    echo "installed local release binary $attention_destination"
+  fi
+  if [ "$attention_installed" -eq 0 ] &&
+     [ "${TMUX_AGENT_WORKBENCH_INSTALL_SOURCE:-0}" != 1 ] &&
      [ -n "$attention_target" ] && command -v curl >/dev/null 2>&1; then
     attention_tmp=$(mktemp -d)
     attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/download/v$attention_version/tmux-agent-workbench-$attention_target.tar.gz"
@@ -105,11 +112,18 @@ install_attention_binary() {
     fi
     echo "release binary unavailable; building tmux-agent-workbench from source"
     cargo build --manifest-path "$PLUGIN_DIR/Cargo.toml" --release --bin tmux-agent-workbench
-    install_attention_file "$PLUGIN_DIR/target/release/tmux-agent-workbench"
+  install_attention_file "$PLUGIN_DIR/target/release/tmux-agent-workbench"
   fi
 }
 
 install_attention_binary
+
+# Public v2 name. Keep the historical binary for protocol and release
+# compatibility while exposing one stable CLI entrypoint.
+if [ -h "$BIN_DIR/wb" ]; then rm "$BIN_DIR/wb"
+elif [ -e "$BIN_DIR/wb" ]; then mv "$BIN_DIR/wb" "$BIN_DIR/wb~"
+fi
+ln -s "$PLUGIN_DIR/bin/wb" "$BIN_DIR/wb"
 
 # Back up a pre-existing non-symlink target to <name>~, then symlink. Skip if
 # the correct symlink is already in place so re-runs don't churn backups.

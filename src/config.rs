@@ -17,26 +17,29 @@ pub enum ConfigError {
     Validation(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Config {
     pub detection: DetectionConfig,
     pub sidebar: SidebarConfig,
     pub notifications: NotificationConfig,
     pub relay: RelayConfig,
     pub openpeon: OpenPeonConfig,
+    pub clients: ClientsConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            detection: DetectionConfig::default(),
-            sidebar: SidebarConfig::default(),
-            notifications: NotificationConfig::default(),
-            relay: RelayConfig::default(),
-            openpeon: OpenPeonConfig::default(),
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ClientsConfig {
+    /// Compatibility escape hatch. Unknown focus remains unseen by default.
+    pub selected_implies_focused: bool,
+    pub devices: std::collections::HashMap<String, DeviceClientConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DeviceClientConfig {
+    pub selected_implies_focused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,20 +146,11 @@ impl Default for RelayConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenPeonConfig {
     pub packs_dir: Option<String>,
     pub active_pack: Option<String>,
-}
-
-impl Default for OpenPeonConfig {
-    fn default() -> Self {
-        Self {
-            packs_dir: None,
-            active_pack: None,
-        }
-    }
 }
 
 impl Config {
@@ -239,9 +233,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_keys() {
-        let error = toml::from_str::<Config>("mystery = true").unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
+    fn preserves_forward_compatibility_for_unknown_keys() {
+        let config = toml::from_str::<Config>("mystery = true").unwrap();
+        assert!(!config.clients.selected_implies_focused);
     }
 
     #[test]

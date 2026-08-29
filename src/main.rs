@@ -22,6 +22,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Status {
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    Client {
+        #[command(subcommand)]
+        command: ClientCommand,
+    },
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -53,6 +61,10 @@ enum Command {
     },
     Reload,
     Doctor,
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
@@ -82,6 +94,37 @@ enum Command {
         target: Option<String>,
         #[arg(long)]
         create_only: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClientCommand {
+    Serve,
+    Status,
+    Setup {
+        platform: Option<String>,
+    },
+    Attach {
+        ssh_host: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+    },
+    #[command(hide = true)]
+    AttachPty {
+        #[arg(long)]
+        bind: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspaceCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -236,9 +279,634 @@ fn main() -> ExitCode {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
+    use tmux_agent_workbench::client_protocol::{ClientMessage, read_frame, write_frame};
+    let hello = read_frame(std::io::stdin().lock())?;
+    let ClientMessage::Hello {
+        device_id,
+        device_label,
+        kind,
+        capabilities,
+        ..
+    } = hello
+    else {
+        return Err("client channel must begin with hello".into());
+    };
+    uuid::Uuid::parse_str(&device_id).map_err(|_| "invalid device id")?;
+    ensure_daemon(paths)?;
+    let registration = ipc_call(
+        paths,
+        "client.register",
+        serde_json::json!({"device_id": device_id, "device_label": device_label, "kind": kind, "capabilities": capabilities}),
+    )?;
+    let endpoint_id = registration
+        .get("endpoint_id")
+        .and_then(|value| value.as_str())
+        .ok_or("daemon returned no endpoint id")?
+        .to_owned();
+    let token = registration
+        .get("attachment_token")
+        .and_then(|value| value.as_str())
+        .ok_or("daemon returned no attachment token")?
+        .to_owned();
+    write_frame(
+        std::io::stdout().lock(),
+        &ClientMessage::Welcome {
+            version: 1,
+            endpoint_id: endpoint_id.clone(),
+            heartbeat_seconds: 15,
+            attachment_token: token.clone(),
+        },
+    )?;
+    loop {
+        match read_frame(std::io::stdin().lock()) {
+            Ok(ClientMessage::Goodbye { .. }) => {
+                let _ = ipc_call(
+                    paths,
+                    "client.detach",
+                    serde_json::json!({"endpoint_id": endpoint_id}),
+                );
+                break;
+            }
+            Ok(ClientMessage::Heartbeat {
+                activity_unix_ms, ..
+            }) => {
+                let result = ipc_call(
+                    paths,
+                    "client.heartbeat",
+                    serde_json::json!({"endpoint_id": endpoint_id, "activity_unix_ms": activity_unix_ms}),
+                )?;
+                let events: Vec<tmux_agent_workbench::semantic::SemanticEvent> =
+                    serde_json::from_value(
+                        result
+                            .get("events")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([])),
+                    )?;
+                for event in &events {
+                    write_frame(
+                        std::io::stdout().lock(),
+                        &ClientMessage::EventDelivery {
+                            version: 1,
+                            event_id: event.id.clone(),
+                            category: event.category.name().into(),
+                            title: event.title.clone(),
+                            body: event.body.clone(),
+                        },
+                    )?;
+                }
+                write_frame(
+                    std::io::stdout().lock(),
+                    &ClientMessage::HeartbeatAck {
+                        version: 1,
+                        events: events.len() as u32,
+                    },
+                )?;
+            }
+            Ok(ClientMessage::FocusResult {
+                focused,
+                active_pane,
+                ..
+            }) => {
+                let target = active_pane.and_then(|pane_id| current_target_for_pane(&pane_id).ok());
+                ipc_call(
+                    paths,
+                    "client.focus",
+                    serde_json::json!({"endpoint_id": endpoint_id, "focused": focused, "overlay_visible": false, "target": target}),
+                )?;
+            }
+            Ok(ClientMessage::EventAccepted { event_id, .. }) => {
+                ipc_call(
+                    paths,
+                    "client.accepted",
+                    serde_json::json!({"endpoint_id": endpoint_id, "event_id": event_id}),
+                )?;
+            }
+            Ok(ClientMessage::ClipboardWrite {
+                request_id, text, ..
+            }) => {
+                let result = platform_clipboard_write(&text).err();
+                write_frame(
+                    std::io::stdout().lock(),
+                    &ClientMessage::ClipboardResult {
+                        version: 1,
+                        request_id,
+                        text: None,
+                        error: result,
+                    },
+                )?;
+            }
+            Ok(ClientMessage::ClipboardRead { request_id, .. }) => {
+                let (text, error) = match platform_clipboard_read() {
+                    Ok(text) => (Some(text), None),
+                    Err(error) => (None, Some(error)),
+                };
+                write_frame(
+                    std::io::stdout().lock(),
+                    &ClientMessage::ClipboardResult {
+                        version: 1,
+                        request_id,
+                        text,
+                        error,
+                    },
+                )?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn client_status(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
+    println!("client-protocol-v1\ndevice-id: {}", device_id(paths)?);
+    println!(
+        "notification: {}",
+        if cfg!(target_os = "macos") || cfg!(target_os = "linux") || cfg!(target_os = "windows") {
+            "available"
+        } else {
+            "unknown"
+        }
+    );
+    println!(
+        "clipboard: {}",
+        if platform_clipboard_read().is_ok() {
+            "available"
+        } else {
+            "unavailable"
+        }
+    );
+    Ok(())
+}
+
+fn client_setup(paths: &Paths, platform: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let platform = platform.unwrap_or(std::env::consts::OS);
+    match platform {
+        "windows" => {
+            if std::env::var_os("WSL_DISTRO_NAME").is_none() && !cfg!(target_os = "windows") {
+                return Err("Windows setup must run from WSL or Windows".into());
+            }
+            fs::create_dir_all(&paths.cache_dir)?;
+            let script = paths.cache_dir.join("setup-windows.ps1");
+            fs::write(&script, include_str!("../assets/setup-windows.ps1"))?;
+            let windows_path = if cfg!(target_os = "windows") {
+                script.display().to_string()
+            } else {
+                let output = ProcessCommand::new("wslpath")
+                    .args(["-w", script.to_str().ok_or("setup path is not UTF-8")?])
+                    .output()?;
+                if !output.status.success() {
+                    return Err("could not convert setup path for Windows".into());
+                }
+                String::from_utf8(output.stdout)?.trim().into()
+            };
+            let status = ProcessCommand::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    &windows_path,
+                    tmux_agent_workbench::ENGINE_VERSION,
+                ])
+                .status()?;
+            if status.success() {
+                println!("Windows companion installed under %LOCALAPPDATA%\\tmux-agent-workbench");
+                Ok(())
+            } else {
+                Err("Windows companion setup failed".into())
+            }
+        }
+        "termux" | "android" => {
+            if ProcessCommand::new("termux-notification")
+                .arg("--help")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                println!("Termux:API capabilities available");
+            } else {
+                println!("Termux:API not found; SSH, popup, and navigation remain available");
+            }
+            Ok(())
+        }
+        "macos" | "linux" => {
+            println!("No privileged setup required for {platform}");
+            Ok(())
+        }
+        _ => Err(format!("unsupported client setup platform: {platform}").into()),
+    }
+}
+
+fn client_attach(
+    paths: &Paths,
+    ssh_host: Option<&str>,
+    session: Option<&str>,
+    target: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(value) = session {
+        validate_safe_name(value, "session")?;
+    }
+    if let Some(value) = target {
+        validate_safe_name(value, "event target")?;
+    }
+    let Some(host) = ssh_host else {
+        let mut command = ProcessCommand::new("tmux");
+        command.arg("attach-session");
+        if let Some(session) = session {
+            command.args(["-t", session]);
+        }
+        return command
+            .status()
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("tmux attach failed"))
+                }
+            })
+            .map_err(Into::into);
+    };
+    validate_ssh_host(host)?;
+    let mut control = ProcessCommand::new("ssh")
+        .arg(host)
+        .args(["tmux-agent-workbench", "client", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    use tmux_agent_workbench::client_protocol::{ClientMessage, read_frame, write_frame};
+    let id = device_id(paths)?;
+    let kind = if cfg!(target_os = "macos") {
+        "macos"
+    } else if std::env::var_os("TERMUX_VERSION").is_some() {
+        "termux"
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        "wsl"
+    } else {
+        std::env::consts::OS
+    };
+    let label = std::env::var("HOSTNAME").unwrap_or_else(|_| kind.into());
+    write_frame(
+        control.stdin.as_mut().ok_or("control stdin unavailable")?,
+        &ClientMessage::Hello {
+            version: 1,
+            device_id: id,
+            device_label: label,
+            kind: kind.into(),
+            capabilities: vec![
+                "notification".into(),
+                "sound".into(),
+                "clipboard".into(),
+                "focus".into(),
+            ],
+        },
+    )?;
+    let welcome = read_frame(
+        control
+            .stdout
+            .as_mut()
+            .ok_or("control stdout unavailable")?,
+    )?;
+    let ClientMessage::Welcome {
+        attachment_token, ..
+    } = welcome
+    else {
+        return Err("remote rejected client hello".into());
+    };
+    validate_safe_name(&attachment_token, "attachment token")?;
+    let mut remote = format!("tmux-agent-workbench client attach-pty --bind {attachment_token}");
+    if let Some(session) = session {
+        remote.push_str(" --session ");
+        remote.push_str(session);
+    }
+    let mut pty = ProcessCommand::new("ssh")
+        .args(["-t", host, &remote])
+        .spawn()?;
+    let status = loop {
+        if let Some(status) = pty.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_secs(15));
+        if let Some(stdin) = control.stdin.as_mut() {
+            if write_frame(
+                &mut *stdin,
+                &ClientMessage::Heartbeat {
+                    version: 1,
+                    activity_unix_ms: now_ms(),
+                },
+            )
+            .is_err()
+            {
+                break pty.wait()?;
+            }
+            loop {
+                match read_frame(
+                    control
+                        .stdout
+                        .as_mut()
+                        .ok_or("control stdout unavailable")?,
+                )? {
+                    ClientMessage::EventDelivery {
+                        event_id,
+                        category,
+                        title,
+                        body,
+                        ..
+                    } => {
+                        platform_notify(&event_id, &category, &title, &body)?;
+                        let _ = write_frame(
+                            &mut *stdin,
+                            &ClientMessage::EventAccepted {
+                                version: 1,
+                                event_id,
+                            },
+                        );
+                    }
+                    ClientMessage::HeartbeatAck { .. } => break,
+                    _ => {}
+                }
+            }
+        }
+    };
+    if let Some(stdin) = control.stdin.as_mut() {
+        let _ = write_frame(stdin, &ClientMessage::Goodbye { version: 1 });
+    }
+    let _ = control.wait();
+    if status.success() {
+        Ok(())
+    } else {
+        Err("remote tmux attach failed".into())
+    }
+}
+
+fn client_attach_pty(
+    paths: &Paths,
+    token: &str,
+    session: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    uuid::Uuid::parse_str(token).map_err(|_| "invalid attachment token")?;
+    if let Some(value) = session {
+        validate_safe_name(value, "session")?;
+    }
+    ensure_daemon(paths)?;
+    let tty = std::env::var("SSH_TTY")
+        .or_else(|_| std::env::var("TTY"))
+        .unwrap_or_else(|_| "unknown".into());
+    ipc_call(
+        paths,
+        "client.bind",
+        serde_json::json!({"token": token, "attachment": tty}),
+    )?;
+    let mut command = ProcessCommand::new("tmux");
+    command.arg("attach-session");
+    if let Some(session) = session {
+        command.args(["-t", session]);
+    }
+    let status = command.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("tmux attach failed".into())
+    }
+}
+
+fn current_target_for_pane(
+    pane_id: &str,
+) -> Result<tmux_agent_workbench::model::TmuxTarget, Box<dyn std::error::Error>> {
+    validate_target(pane_id, '%')?;
+    let server = ServerIdentity::discover()?;
+    let format = "#{session_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_index}";
+    let output = ProcessCommand::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args(["display-message", "-p", "-t", pane_id, format])
+        .output()?;
+    if !output.status.success() {
+        return Err("pane is not live".into());
+    }
+    let value = String::from_utf8(output.stdout)?;
+    let fields: Vec<_> = value.trim().split('\u{1f}').collect();
+    if fields.len() != 7 {
+        return Err("invalid tmux target response".into());
+    }
+    Ok(tmux_agent_workbench::model::TmuxTarget {
+        session_id: fields[0].into(),
+        session_name: fields[1].into(),
+        window_id: fields[2].into(),
+        window_index: fields[3].parse()?,
+        window_name: fields[4].into(),
+        pane_id: fields[5].into(),
+        pane_index: fields[6].parse()?,
+    })
+}
+
+fn device_id(paths: &Paths) -> Result<String, Box<dyn std::error::Error>> {
+    let data_root = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))
+        .ok_or("home directory unavailable")?;
+    let directory = data_root.join("tmux-agent-workbench/client");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("device-id");
+    if let Ok(value) = fs::read_to_string(&path) {
+        uuid::Uuid::parse_str(value.trim()).map_err(|_| "invalid stored device id")?;
+        return Ok(value.trim().into());
+    }
+    let value = uuid::Uuid::new_v4().to_string();
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    use std::io::Write;
+    writeln!(file, "{value}")?;
+    let _ = paths;
+    Ok(value)
+}
+
+fn validate_safe_name(value: &str, label: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@' | b'%')
+        })
+    {
+        return Err(format!("invalid {label}").into());
+    }
+    Ok(())
+}
+
+fn validate_ssh_host(host: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if host.starts_with('-') {
+        return Err("SSH host must not begin with '-'".into());
+    }
+    validate_safe_name(host, "SSH host")
+}
+
+fn platform_clipboard_write(text: &str) -> Result<(), String> {
+    tmux_agent_workbench::client_protocol::validate_clipboard(text)?;
+    let (program, args): (&str, &[&str]) = if std::env::var_os("TERMUX_VERSION").is_some() {
+        ("termux-clipboard-set", &[])
+    } else if cfg!(target_os = "macos") {
+        ("pbcopy", &[])
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        ("clip.exe", &[])
+    } else {
+        ("xclip", &["-selection", "clipboard"])
+    };
+    let mut child = ProcessCommand::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("clipboard stdin unavailable")?
+        .write_all(text.as_bytes())
+        .map_err(|error| error.to_string())?;
+    if child.wait().map_err(|error| error.to_string())?.success() {
+        Ok(())
+    } else {
+        Err("clipboard helper failed".into())
+    }
+}
+
+fn platform_clipboard_read() -> Result<String, String> {
+    let (program, args): (&str, &[&str]) = if std::env::var_os("TERMUX_VERSION").is_some() {
+        ("termux-clipboard-get", &[])
+    } else if cfg!(target_os = "macos") {
+        ("pbpaste", &[])
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        (
+            "powershell.exe",
+            &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        )
+    } else {
+        ("xclip", &["-selection", "clipboard", "-o"])
+    };
+    let output = ProcessCommand::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("clipboard helper failed".into());
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| "clipboard is not UTF-8")?;
+    tmux_agent_workbench::client_protocol::validate_clipboard(&text)?;
+    Ok(text)
+}
+
+fn platform_notify(
+    event_id: &str,
+    category: &str,
+    title: &str,
+    body: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_safe_name(event_id, "event id")?;
+    let status = if std::env::var_os("TERMUX_VERSION").is_some() {
+        ProcessCommand::new("termux-notification")
+            .args([
+                "--id",
+                event_id,
+                "--title",
+                title,
+                "--content",
+                body,
+                "--action",
+                &format!("wb attach --target {event_id}"),
+            ])
+            .status()?
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        ProcessCommand::new("wb-client.exe")
+            .args(["notify", event_id, title, body])
+            .status()?
+    } else if cfg!(target_os = "macos") {
+        let script = "on run argv\n display notification (item 3 of argv) with title (item 2 of argv)\nend run";
+        ProcessCommand::new("osascript")
+            .args(["-e", script, event_id, title, body])
+            .status()?
+    } else {
+        ProcessCommand::new("notify-send")
+            .args(["--app-name", "Workbench", title, body])
+            .status()?
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("notification delivery failed for {category}").into())
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
+        Command::Client { command } => match command {
+            ClientCommand::Serve => client_serve(&paths)?,
+            ClientCommand::Status => client_status(&paths)?,
+            ClientCommand::Setup { platform } => client_setup(&paths, platform.as_deref())?,
+            ClientCommand::Attach {
+                ssh_host,
+                session,
+                target,
+            } => client_attach(
+                &paths,
+                ssh_host.as_deref(),
+                session.as_deref(),
+                target.as_deref(),
+            )?,
+            ClientCommand::AttachPty { bind, session } => {
+                client_attach_pty(&paths, &bind, session.as_deref())?
+            }
+        },
+        Command::Status { format } => {
+            let home = dirs::home_dir().ok_or("home directory unavailable")?;
+            let registry = tmux_agent_workbench::workspace::Registry::new(paths.workspaces_dir());
+            let workspaces = registry.lazy_migrate(&home.join("Workspace"), now_ms())?;
+            let capabilities = [
+                "client-protocol-v1",
+                "status-fragments-v1",
+                "responsive-popup-v1",
+                "workspace-registry-v1",
+            ];
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "version": tmux_agent_workbench::ENGINE_VERSION,
+                        "snapshot_schema": 1,
+                        "client_protocol": 1,
+                        "capabilities": capabilities,
+                        "workspaces": workspaces,
+                    }))?
+                );
+            } else if format == "text" {
+                println!(
+                    "Workbench {} · {} workspaces",
+                    tmux_agent_workbench::ENGINE_VERSION,
+                    workspaces.len()
+                );
+                for workspace in workspaces {
+                    println!(
+                        "{}\t{}\t{}",
+                        workspace.id,
+                        workspace.name,
+                        workspace.root.display()
+                    );
+                }
+            } else {
+                return Err("--format must be text or json".into());
+            }
+        }
         Command::Hooks { command } => {
             let (action, target) = match command {
                 HooksCommand::Install { target } => ("install", target),
@@ -337,6 +1005,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string(&value)?);
         }
         Command::Doctor => tmux_agent_workbench::doctor::run(&paths)?,
+        Command::Workspace {
+            command: WorkspaceCommand::Status { json },
+        } => {
+            let home = dirs::home_dir().ok_or("home directory unavailable")?;
+            let registry = tmux_agent_workbench::workspace::Registry::new(paths.workspaces_dir());
+            let workspaces = registry.lazy_migrate(&home.join("Workspace"), now_ms())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&workspaces)?);
+            } else {
+                for workspace in workspaces {
+                    println!(
+                        "{}\t{}\t{}",
+                        workspace.id,
+                        workspace.name,
+                        workspace.root.display()
+                    );
+                }
+            }
+        }
         Command::Relay { command } => match command {
             RelayCommand::Serve => {
                 let config = Config::load(&paths.config_file())?;

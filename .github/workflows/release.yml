@@ -49,3 +49,30 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: tmux-agent-workbench-${{ matrix.target }}.tar.gz
+  windows-companion:
+    strategy:
+      matrix:
+        include:
+          - runtime: win-x64
+            runner: windows-2025
+          - runtime: win-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet publish windows-companion/wb-client.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true
+      - shell: pwsh
+        run: |
+          $archive = "wb-client-${{ matrix.runtime }}.zip"
+          Compress-Archive -Path "windows-companion/bin/Release/net9.0-windows10.0.19041.0/${{ matrix.runtime }}/publish/*" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            wb-client-${{ matrix.runtime }}.zip
+            wb-client-${{ matrix.runtime }}.zip.sha256

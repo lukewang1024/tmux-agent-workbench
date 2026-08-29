@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+plugin_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
+[ -x "$core" ] || core=$(command -v tmux-agent-workbench 2>/dev/null || true)
+[ -n "$core" ] || { tmux display-message "Workbench binary unavailable"; exit 1; }
+
+window=${1:-$(tmux display-message -p '#{window_id}')}
+client_width=$(tmux display-message -p '#{client_width}')
+sidebar_width=$(tmux show-option -gqv @sidebar_width)
+main_width=$(tmux show-option -gqv @sidebar_main_min_width)
+sidebar_width=${sidebar_width:-26}
+main_width=${main_width:-80}
+
+if [ "$client_width" -ge $((sidebar_width + main_width)) ]; then
+  exec "$core" sidebar-control toggle "$window"
+fi
+
+"$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true
+tmux set-option -q @workbench_overlay_visible 1
+trap 'tmux set-option -qu @workbench_overlay_visible; "$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true' EXIT HUP INT TERM
+tmux display-popup -E -w 100% -h 100% "WORKBENCH_POPUP=1 '$core' sidebar"

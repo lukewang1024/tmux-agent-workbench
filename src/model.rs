@@ -113,6 +113,10 @@ pub struct AttentionEvent {
     pub kind: AttentionKind,
     pub seen: bool,
     pub since_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +199,22 @@ pub struct Snapshot {
     pub observed_at_unix_ms: u64,
     pub sessions: Vec<SessionSnapshot>,
     pub agents: Vec<AgentSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clients: Vec<ClientSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientSnapshot {
+    pub device_label: String,
+    pub kind: String,
+    pub capabilities: Vec<String>,
+    pub presence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
+    pub focus: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_target: Option<TmuxTarget>,
+    pub activity_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +243,7 @@ impl Snapshot {
             observed_at_unix_ms,
             sessions: Vec::new(),
             agents: Vec::new(),
+            clients: Vec::new(),
         }
     }
 }

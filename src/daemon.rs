@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::client::{ClientRegistry, FocusState};
 use crate::config::{Config, ConfigError};
 use crate::detection::{Detector, MetadataReport};
 use crate::ipc::{Request, Response, read_request, write_response};
@@ -53,6 +54,10 @@ struct State {
     notifier: NotificationScheduler,
     notification_backend: SystemBackend,
     relay_sender: RelaySender,
+    clients: ClientRegistry,
+    server_incarnation: String,
+    semantic_router: crate::semantic::SemanticRouter,
+    recovered_pending: Vec<crate::semantic::SemanticEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +74,51 @@ struct AckParams {
     event_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientRegisterParams {
+    device_id: String,
+    device_label: String,
+    kind: String,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientBindParams {
+    token: String,
+    attachment: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientHeartbeatParams {
+    endpoint_id: String,
+    activity_unix_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientFocusParams {
+    endpoint_id: String,
+    focused: Option<bool>,
+    overlay_visible: bool,
+    target: Option<crate::model::TmuxTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientAcceptedParams {
+    endpoint_id: String,
+    event_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientDetachParams {
+    endpoint_id: String,
+}
+
 pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> {
     let lock_path = paths.lock_for_server(&server.key);
     let lock = open_lock(&lock_path)?;
@@ -83,6 +133,35 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
 
     let config = Config::load(&paths.config_file())?;
     let manifests = ManifestSet::load(&paths.manifests_dir())?;
+    let server_incarnation = server_incarnation(server);
+    let checkpoint_path = paths.checkpoint_for_server(&server.key);
+    let recovered_checkpoint = match crate::checkpoint::load_server(&checkpoint_path) {
+        Ok(Some(checkpoint)) if checkpoint.server_incarnation == server_incarnation => {
+            Some(checkpoint)
+        }
+        Ok(Some(_)) => {
+            let _ = fs::remove_file(&checkpoint_path);
+            None
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("tmux-agent-workbench: ignoring corrupt checkpoint: {error}");
+            None
+        }
+    };
+    let mut semantic_router = crate::semantic::SemanticRouter::default();
+    let mut recovered_pending = Vec::new();
+    if let Some(checkpoint) = recovered_checkpoint {
+        let mut seen = std::collections::HashSet::new();
+        let mut delivered = Vec::new();
+        for runtime in checkpoint.runtimes {
+            delivered.extend(runtime.delivered_event_ids);
+            recovered_pending.extend(runtime.pending.into_iter().filter(|event| {
+                now_unix_ms() <= event.deadline_unix_ms && seen.insert(event.id.clone())
+            }));
+        }
+        semantic_router.restore_accepted(delivered);
+    }
     let state = Arc::new(RwLock::new(State {
         config,
         manifests,
@@ -91,7 +170,29 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         notifier: NotificationScheduler::default(),
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
+        clients: ClientRegistry::default(),
+        server_incarnation,
+        semantic_router,
+        recovered_pending,
     }));
+    if state
+        .read()
+        .expect("state poisoned")
+        .config
+        .clients
+        .selected_implies_focused
+    {
+        let _ = std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(&server.socket_path)
+            .args([
+                "set-option",
+                "-gq",
+                "@workbench_selected_implies_focused",
+                "1",
+            ])
+            .status();
+    }
     let snapshot = Arc::new(RwLock::new(
         state.read().expect("state poisoned").snapshot.clone(),
     ));
@@ -190,6 +291,7 @@ fn update_snapshot(
                         &report.event_id,
                         &agent,
                     );
+                    route_instant_event(&mut state, &report, &agent, now);
                 }
             }
         }
@@ -202,20 +304,275 @@ fn update_snapshot(
         if sessions != state.snapshot.sessions {
             state.snapshot.sessions = sessions;
         }
+        state.clients.prune(now);
+        sync_attached_client_focus(&mut state, now);
+        let clients = state.clients.snapshots(now);
+        if clients != state.snapshot.clients {
+            state.snapshot.clients = clients;
+            state.snapshot.generation = state.snapshot.generation.saturating_add(1);
+        }
         if changed {
             state.snapshot.generation = state.snapshot.generation.saturating_add(1);
+            publish_status_fragments(&state.snapshot);
+            persist_checkpoint(paths, server_key, &state);
         }
         state.snapshot.observed_at_unix_ms = now;
         let agents = state.snapshot.agents.clone();
+        route_new_attention(&mut state, now);
+        route_recovered_events(&mut state, now);
         state.notifier.observe(now, &agents);
         let mut notifier = std::mem::take(&mut state.notifier);
-        let delivered =
-            notifier.deliver_due(now, &agents, &config, &mut state.notification_backend);
+        let delivered = if state.clients.ranked("notification", now).is_empty() {
+            notifier.deliver_due(now, &agents, &config, &mut state.notification_backend)
+        } else {
+            Vec::new()
+        };
         state.notifier = notifier;
         state.relay_sender.enqueue(&delivered, now);
         *published.write().expect("snapshot poisoned") = state.snapshot.clone();
     }
     state.relay_sender.tick(now);
+}
+
+fn route_recovered_events(state: &mut State, now_ms: u64) {
+    let events = std::mem::take(&mut state.recovered_pending);
+    for event in events {
+        if now_ms > event.deadline_unix_ms {
+            continue;
+        }
+        match state.semantic_router.route(&event, &state.clients, now_ms) {
+            crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
+                if let Some(endpoint) = endpoints.first() {
+                    let _ = state.clients.queue(endpoint, event.clone());
+                }
+                state.recovered_pending.push(event);
+            }
+            crate::semantic::RouteDecision::Watched { .. }
+            | crate::semantic::RouteDecision::Silent => {}
+            crate::semantic::RouteDecision::Expired => {}
+        }
+    }
+}
+
+fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
+    let server = match ServerIdentity::discover() {
+        Ok(server) => server,
+        Err(_) => return,
+    };
+    let output = match std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args([
+            "list-clients",
+            "-F",
+            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{pane_id}\u{1f}#{@workbench_overlay_visible}",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields: Vec<_> = line.split('\u{1f}').collect();
+        if fields.len() != 4 {
+            continue;
+        }
+        let focus = if fields[1].split(',').any(|flag| flag == "focused") {
+            FocusState::Focused
+        } else {
+            FocusState::Unknown
+        };
+        let target = state
+            .snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.target.pane_id == fields[2])
+            .map(|agent| agent.target.clone());
+        state
+            .clients
+            .update_attachment_focus(fields[0], focus, fields[3] == "1", target, now_ms);
+    }
+}
+
+fn route_new_attention(state: &mut State, now_ms: u64) {
+    let new_events: Vec<_> = state
+        .snapshot
+        .agents
+        .iter()
+        .filter_map(|agent| {
+            let attention = agent.attention.as_ref()?;
+            if attention.seen {
+                return None;
+            }
+            let category = match attention.kind {
+                crate::model::AttentionKind::Done => {
+                    crate::semantic::SemanticCategory::TaskComplete
+                }
+                crate::model::AttentionKind::Blocked => {
+                    crate::semantic::SemanticCategory::InputRequired
+                }
+            };
+            Some(crate::semantic::SemanticEvent {
+                id: attention.id.clone(),
+                category,
+                target: agent.target.clone(),
+                created_unix_ms: attention.since_unix_ms,
+                deadline_unix_ms: attention
+                    .since_unix_ms
+                    .saturating_add(category.horizon_ms()),
+                title: format!("Workbench · {}", agent.label),
+                body: format!("{} · {}", category.name(), agent.target.session_name),
+            })
+        })
+        .collect();
+    for event in new_events {
+        match state.semantic_router.route(&event, &state.clients, now_ms) {
+            crate::semantic::RouteDecision::Watched {
+                mark_seen: true, ..
+            } => {
+                let _ = state.detector.acknowledge(&event.id);
+            }
+            crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
+                if let Some(endpoint) = endpoints.first() {
+                    let _ = state.clients.queue(endpoint, event);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn server_incarnation(server: &ServerIdentity) -> String {
+    let output = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args(["display-message", "-p", "#{pid}"])
+        .output();
+    let pid = output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default();
+    format!("{}:{pid}", server.key)
+}
+
+fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
+    let pending = state.clients.pending_events();
+    let delivered_event_ids = state.semantic_router.accepted_event_ids();
+    let recent_endpoint = state
+        .clients
+        .ranked("notification", now_unix_ms())
+        .first()
+        .map(|endpoint| endpoint.id.clone());
+    let runtimes = state
+        .snapshot
+        .agents
+        .iter()
+        .filter_map(|agent| {
+            let process = agent.process.as_ref()?;
+            let attention_seq = agent
+                .attention
+                .as_ref()
+                .and_then(|event| event.attention_seq)
+                .unwrap_or(0);
+            let seen_seq = agent
+                .attention
+                .as_ref()
+                .and_then(|event| event.seen_seq)
+                .unwrap_or(0);
+            Some(crate::checkpoint::RuntimeCheckpoint {
+                version: 1,
+                server_incarnation: state.server_incarnation.clone(),
+                runtime_id: agent
+                    .attention
+                    .as_ref()
+                    .and_then(|event| {
+                        event
+                            .id
+                            .rsplit_once('.')
+                            .map(|(runtime, _)| runtime.to_owned())
+                    })
+                    .unwrap_or_else(|| agent.instance_id.clone()),
+                process_fingerprint: format!(
+                    "{}:{}:{}",
+                    process.pid, process.started_at_ticks, process.executable
+                ),
+                previous_state: format!("{:?}", agent.base_state).to_lowercase(),
+                attention_seq,
+                seen_seq,
+                delivered_event_ids: delivered_event_ids.clone(),
+                pending: pending.clone(),
+                recent_endpoint: recent_endpoint.clone(),
+            })
+        })
+        .collect();
+    let checkpoint = crate::checkpoint::ServerCheckpoint {
+        version: 1,
+        server_incarnation: state.server_incarnation.clone(),
+        updated_unix_ms: now_unix_ms(),
+        runtimes,
+    };
+    if let Err(error) =
+        crate::checkpoint::store_server(&paths.checkpoint_for_server(server_key), &checkpoint)
+    {
+        eprintln!("tmux-agent-workbench: checkpoint write failed: {error}");
+    }
+}
+
+fn publish_status_fragments(snapshot: &Snapshot) {
+    let blocked = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Blocked)
+        .count();
+    let done = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Done)
+        .count();
+    let working = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Working)
+        .count();
+    let unseen = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.attention.as_ref().is_some_and(|event| !event.seen))
+        .count();
+    let fragments = [
+        (
+            "@workbench_status_tiny",
+            if unseen > 0 {
+                format!("A:{unseen}")
+            } else {
+                String::new()
+            },
+        ),
+        ("@workbench_status_compact", format!("A {working}/{unseen}")),
+        (
+            "@workbench_status_normal",
+            format!("Agents {working} work · {blocked} block · {done} done"),
+        ),
+        (
+            "@workbench_status_wide",
+            format!(
+                "Agents {} · {working} working · {blocked} blocked · {done} done · {unseen} unseen",
+                snapshot.agents.len()
+            ),
+        ),
+    ];
+    let server = match ServerIdentity::discover() {
+        Ok(server) => server,
+        Err(_) => return,
+    };
+    for (name, value) in fragments {
+        let _ = std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(&server.socket_path)
+            .args(["set-option", "-gq", name, &value])
+            .status();
+    }
 }
 
 fn handle(
@@ -251,6 +608,36 @@ fn handle(
         }
         "snapshot.get" => serde_json::to_value(&*snapshot.read().expect("snapshot poisoned"))
             .map_err(|error| error.to_string()),
+        "client.register" => parse_params::<ClientRegisterParams>(request.params).and_then(|params| {
+            uuid::Uuid::parse_str(&params.device_id).map_err(|_| "invalid device id")?;
+            let mut state = state.write().expect("state poisoned");
+            let (endpoint_id, attachment_token) = state.clients.register(params.device_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+            Ok(json!({"endpoint_id": endpoint_id, "attachment_token": attachment_token, "heartbeat_seconds": 15}))
+        }),
+        "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            let endpoint_id = state.clients.bind(&params.token, params.attachment, now_unix_ms())?;
+            Ok(json!({"endpoint_id": endpoint_id, "bound": true}))
+        }),
+        "client.heartbeat" => parse_params::<ClientHeartbeatParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            state.clients.heartbeat(&params.endpoint_id, params.activity_unix_ms)?;
+            let events = state.clients.take_pending(&params.endpoint_id, now_unix_ms())?;
+            Ok(json!({"accepted": true, "events": events}))
+        }),
+        "client.focus" => parse_params::<ClientFocusParams>(request.params).and_then(|params| {
+            let focus = match params.focused { Some(true) => FocusState::Focused, Some(false) => FocusState::Unfocused, None => FocusState::Unknown };
+            state.write().expect("state poisoned").clients.update_focus(&params.endpoint_id, focus, params.overlay_visible, params.target, now_unix_ms())?;
+            Ok(json!({"accepted": true}))
+        }),
+        "client.accepted" => parse_params::<ClientAcceptedParams>(request.params).map(|params| {
+            state.write().expect("state poisoned").semantic_router.accepted(&params.event_id, &params.endpoint_id);
+            json!({"accepted": true})
+        }),
+        "client.detach" => parse_params::<ClientDetachParams>(request.params).and_then(|params| {
+            state.write().expect("state poisoned").clients.detach(&params.endpoint_id, now_unix_ms())?;
+            Ok(json!({"detached": true}))
+        }),
         "config.reload" => Config::load(&paths.config_file())
             .and_then(|config| {
                 ManifestSet::load(&paths.manifests_dir())
@@ -259,8 +646,14 @@ fn handle(
             })
             .map(|(config, manifests)| {
                 let mut state = state.write().expect("state poisoned");
+                let compat_focus = config.clients.selected_implies_focused;
                 state.config = config;
                 state.manifests = manifests;
+                let mut command = std::process::Command::new("tmux");
+                command.arg("-S").arg(&server.socket_path);
+                if compat_focus { command.args(["set-option", "-gq", "@workbench_selected_implies_focused", "1"]); }
+                else { command.args(["set-option", "-gu", "@workbench_selected_implies_focused"]); }
+                let _ = command.status();
                 json!({"reloaded": true})
             })
             .map_err(|error| error.to_string()),
@@ -332,6 +725,7 @@ fn handle(
                         &report.event_id,
                         &agent,
                     );
+                    route_instant_event(&mut state, &report, &agent, now);
                 }
                 state.snapshot.agents = state.detector.machine_snapshots();
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);
@@ -344,6 +738,46 @@ fn handle(
     match result {
         Ok(result) => Response::success(request.id, result),
         Err(error) => Response::error(request.id, "request_failed", error),
+    }
+}
+
+fn route_instant_event(
+    state: &mut State,
+    report: &AgentEventReport,
+    agent: &crate::model::AgentSnapshot,
+    now_ms: u64,
+) {
+    let category = match report.event {
+        crate::model::AgentEventType::Error => crate::semantic::SemanticCategory::TaskError,
+        crate::model::AgentEventType::SessionStart => {
+            crate::semantic::SemanticCategory::SessionStart
+        }
+        _ => return,
+    };
+    let event = crate::semantic::SemanticEvent {
+        id: report.event_id.clone(),
+        category,
+        target: agent.target.clone(),
+        created_unix_ms: report.occurred_at_unix_ms,
+        deadline_unix_ms: report
+            .occurred_at_unix_ms
+            .saturating_add(category.horizon_ms()),
+        title: format!("Workbench · {}", agent.label),
+        body: format!("{} · {}", category.name(), agent.target.session_name),
+    };
+    match state.semantic_router.route(&event, &state.clients, now_ms) {
+        crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
+            if let Some(endpoint) = endpoints.first() {
+                let _ = state.clients.queue(endpoint, event);
+            }
+        }
+        crate::semantic::RouteDecision::Watched {
+            sound_endpoint: Some(endpoint),
+            ..
+        } => {
+            let _ = state.clients.queue(&endpoint, event);
+        }
+        _ => {}
     }
 }
 

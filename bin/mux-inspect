@@ -37,6 +37,7 @@
 #          too, since the caller doesn't need to be attached to what it's
 #          naming explicitly.
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).

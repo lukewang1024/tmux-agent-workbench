@@ -237,6 +237,7 @@ mod tests {
                 last_active_pane_id: Some("%1".into()),
             }],
             agents: vec![],
+            clients: vec![],
         };
         assert_eq!(session_lines(&snapshot).len(), 1);
     }

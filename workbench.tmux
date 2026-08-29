@@ -93,7 +93,7 @@ if [ -n "$ATTENTION_BIN" ]; then
   if [ -z "$legacy_sidebar" ]; then
     bind_tracked "@workbench-key-sidebar" "@workbench-_bound-sidebar" "Tab" \
       "toggle Workbench agent sidebar" run-shell -b \
-      "$ATTENTION_BIN sidebar-control toggle '#{window_id}'"
+      "$CURRENT_DIR/bin/wb-responsive '#{window_id}'"
     bind_tracked "@workbench-key-sidebar-all" "@workbench-_bound-sidebar-all" "" \
       "toggle Workbench agent sidebars in all windows" run-shell -b \
       "$ATTENTION_BIN sidebar-control toggle-all"

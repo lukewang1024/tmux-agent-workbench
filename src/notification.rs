@@ -153,10 +153,9 @@ impl NotificationScheduler {
                     NotificationCategory::SessionStart => false,
                 };
                 let should_sound = match pending.category {
-                    NotificationCategory::TaskComplete => !agent.visible && !seen,
-                    NotificationCategory::InputRequired
-                    | NotificationCategory::SessionStart
-                    | NotificationCategory::TaskError => true,
+                    NotificationCategory::TaskComplete => true,
+                    NotificationCategory::InputRequired | NotificationCategory::TaskError => true,
+                    NotificationCategory::SessionStart => false,
                 };
                 if !muted && should_sound {
                     if let Err(error) = backend.sound(pending.category, config) {
@@ -408,6 +407,37 @@ fn command_exists(name: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn spawn_linux_notification(title: &str, body: &str, agent: &AgentSnapshot) -> Result<(), String> {
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        let local = Command::new("cmd.exe")
+            .args(["/d", "/c", "echo", "%LOCALAPPDATA%"])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if local.status.success() {
+            let windows = String::from_utf8_lossy(&local.stdout).trim().to_owned();
+            let converted = Command::new("wslpath")
+                .args(["-u", &windows])
+                .output()
+                .map_err(|error| error.to_string())?;
+            let helper =
+                std::path::PathBuf::from(String::from_utf8_lossy(&converted.stdout).trim())
+                    .join("tmux-agent-workbench/wb-client.exe");
+            if helper.is_file() {
+                let event_id = agent
+                    .attention
+                    .as_ref()
+                    .map(|event| event.id.as_str())
+                    .unwrap_or(&agent.instance_id);
+                return Command::new(helper)
+                    .args(["notify", event_id, title, body])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+            }
+        }
+    }
     let supports_action = Command::new("notify-send")
         .arg("--help")
         .output()
@@ -591,6 +621,8 @@ mod tests {
                 kind,
                 seen,
                 since_unix_ms: 0,
+                attention_seq: None,
+                seen_seq: None,
             }),
             stale: false,
             visible,
@@ -605,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn rechecks_for_one_second_and_suppresses_visible_done() {
+    fn rechecks_for_one_second_sounds_visible_done_and_suppresses_desktop() {
         let mut scheduler = NotificationScheduler::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
@@ -615,7 +647,7 @@ mod tests {
         assert!(backend.sounds.is_empty());
         let visible = vec![agent(AttentionKind::Done, true, true)];
         scheduler.deliver_due(1_000, &visible, &config, &mut backend);
-        assert!(backend.sounds.is_empty());
+        assert_eq!(backend.sounds, vec![NotificationCategory::TaskComplete]);
         assert_eq!(backend.desktops, 0);
     }
 
@@ -700,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn session_start_plays_once_without_desktop_or_attention() {
+    fn session_start_is_fully_silent_without_attention() {
         let mut scheduler = NotificationScheduler::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
@@ -708,11 +740,11 @@ mod tests {
         started.attention = None;
         scheduler.observe_session_start(10, "start-1", &started);
         scheduler.deliver_due(10, &[], &config, &mut backend);
-        assert_eq!(backend.sounds, vec![NotificationCategory::SessionStart]);
+        assert!(backend.sounds.is_empty());
         assert_eq!(backend.desktops, 0);
         scheduler.observe_session_start(20, "start-1", &started);
         scheduler.deliver_due(20, &[], &config, &mut backend);
-        assert_eq!(backend.sounds.len(), 1);
+        assert!(backend.sounds.is_empty());
     }
 
     #[test]

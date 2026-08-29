@@ -378,6 +378,8 @@ fn deliver_event<B: NotificationBackend>(
             kind,
             seen: false,
             since_unix_ms: now_ms(),
+            attention_seq: None,
+            seen_seq: None,
         }),
         stale: false,
         visible: false,

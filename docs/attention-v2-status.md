@@ -1,6 +1,37 @@
 # Attention v2 implementation status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-29
+
+## 2.0.0-beta client-aware extension (2026-08-29)
+
+The superseding decisions are recorded in
+[`v2-beta-client-attention.md`](v2-beta-client-attention.md). Implemented in
+the Beta tree:
+
+- additive snapshot client metadata plus attention/seen sequence fields;
+- strict length-prefixed `client-protocol-v1`, SSH control/PTTY attach binding,
+  stable device ids, heartbeat/offline/detach grace, clipboard bounds, and
+  daemon-owned client registry;
+- exact tmux tty/client binding and conservative focus/overlay-aware seen;
+- canonical semantic categories, endpoint activity ranking, transport
+  acceptance dedupe, retry/failover queue, five-minute/one-minute expiry, and
+  legacy local/relay fallback;
+- mode-0600 atomic server-incarnation checkpoints with pending delivery
+  recovery and no prompt, screen, clipboard, or credential persistence;
+- `wb` workflow dispatcher, argv-safe `wb run`, managed opt-in for
+  `wb agent start`, one-time legacy shim warnings, and an atomic TOML workspace
+  registry with lazy non-destructive migration;
+- narrow-client fullscreen popup, popup-first attention ordering, shared
+  sidebar suppression/restoration, and four unstyled responsive status
+  fragments selected and colored by `tmux-adaptive-theme`;
+- explicit Termux controls and optional API detection, WSL interop paths, and
+  an unpackaged Windows App SDK companion with x64/arm64 release jobs.
+
+Automated macOS verification covers Rust unit/golden tests, isolated tmux,
+relay, installer, legacy workflow suites, POSIX syntax, and a release build.
+Real Termux notification activation/clipboard and real Windows/WSL toast and
+Windows Terminal activation remain the explicit pre-release device checklist;
+they are not represented as locally verified.
 
 The accepted specification is [attention-v2.md](attention-v2.md). This file is
 an implementation checkpoint so work can resume safely after context compaction.

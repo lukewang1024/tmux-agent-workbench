@@ -46,6 +46,9 @@ struct Tracked {
     active_hook_session_id: Option<String>,
     conflict_since_ms: Option<u64>,
     seen_event_ids: Vec<String>,
+    runtime_id: String,
+    attention_seq: u64,
+    seen_seq: u64,
 }
 
 #[derive(Debug, Default)]
@@ -63,8 +66,12 @@ impl StateMachine {
         );
 
         let tracked = self.agents.entry(instance_id.clone()).or_insert_with(|| {
+            let runtime_id = Uuid::new_v4().to_string();
+            let attention_seq = u64::from(observation.state == BaseState::Blocked);
             let attention = (observation.state == BaseState::Blocked).then(|| {
                 attention(
+                    &runtime_id,
+                    attention_seq,
                     AttentionKind::Blocked,
                     observation.visible,
                     observation.observed_at_ms,
@@ -106,6 +113,9 @@ impl StateMachine {
                 active_hook_session_id: None,
                 conflict_since_ms: None,
                 seen_event_ids: Vec::new(),
+                runtime_id,
+                attention_seq,
+                seen_seq: u64::from(observation.state == BaseState::Blocked && observation.visible),
             }
         });
 
@@ -190,7 +200,10 @@ impl StateMachine {
                 tracked.snapshot.attention = None;
             } else {
                 tracked.snapshot.display_state = DisplayState::Done;
+                tracked.attention_seq = tracked.attention_seq.saturating_add(1);
                 tracked.snapshot.attention = Some(attention(
+                    &tracked.runtime_id,
+                    tracked.attention_seq,
                     AttentionKind::Done,
                     false,
                     observation.observed_at_ms,
@@ -199,7 +212,10 @@ impl StateMachine {
             tracked.idle_candidate_since = None;
             tracked.idle_confirmations = 0;
         } else if new_blocked {
+            tracked.attention_seq = tracked.attention_seq.saturating_add(1);
             tracked.snapshot.attention = Some(attention(
+                &tracked.runtime_id,
+                tracked.attention_seq,
                 AttentionKind::Blocked,
                 observation.visible,
                 observation.observed_at_ms,
@@ -207,6 +223,8 @@ impl StateMachine {
         } else if observation.visible {
             if let Some(event) = &mut tracked.snapshot.attention {
                 event.seen = true;
+                tracked.seen_seq = event.attention_seq.unwrap_or(tracked.attention_seq);
+                event.seen_seq = Some(tracked.seen_seq);
             }
         }
 
@@ -335,7 +353,10 @@ impl StateMachine {
         }
         match report.event {
             AgentEventType::Permission => {
+                tracked.attention_seq = tracked.attention_seq.saturating_add(1);
                 tracked.snapshot.attention = Some(attention(
+                    &tracked.runtime_id,
+                    tracked.attention_seq,
                     AttentionKind::Blocked,
                     visible,
                     report.occurred_at_unix_ms,
@@ -346,7 +367,10 @@ impl StateMachine {
                     tracked.snapshot.attention = None;
                 } else {
                     tracked.snapshot.display_state = DisplayState::Done;
+                    tracked.attention_seq = tracked.attention_seq.saturating_add(1);
                     tracked.snapshot.attention = Some(attention(
+                        &tracked.runtime_id,
+                        tracked.attention_seq,
                         AttentionKind::Done,
                         false,
                         report.occurred_at_unix_ms,
@@ -403,7 +427,10 @@ impl StateMachine {
         tracked.snapshot.display_state = DisplayState::Done;
         tracked.snapshot.state_source = StateSource::Process;
         tracked.snapshot.confidence = StateConfidence::High;
+        tracked.attention_seq = tracked.attention_seq.saturating_add(1);
         tracked.snapshot.attention = Some(attention(
+            &tracked.runtime_id,
+            tracked.attention_seq,
             AttentionKind::Done,
             tracked.snapshot.visible,
             now_ms,
@@ -416,6 +443,8 @@ impl StateMachine {
             if let Some(event) = &mut tracked.snapshot.attention {
                 if event.id == event_id {
                     event.seen = true;
+                    tracked.seen_seq = event.attention_seq.unwrap_or(tracked.attention_seq);
+                    event.seen_seq = Some(tracked.seen_seq);
                     refresh_attention_display(&mut tracked.snapshot);
                     return true;
                 }
@@ -500,12 +529,20 @@ impl StateMachine {
     }
 }
 
-fn attention(kind: AttentionKind, seen: bool, since_unix_ms: u64) -> AttentionEvent {
+fn attention(
+    runtime_id: &str,
+    sequence: u64,
+    kind: AttentionKind,
+    seen: bool,
+    since_unix_ms: u64,
+) -> AttentionEvent {
     AttentionEvent {
-        id: Uuid::new_v4().to_string(),
+        id: format!("{runtime_id}.{sequence}"),
         kind,
         seen,
         since_unix_ms,
+        attention_seq: Some(sequence),
+        seen_seq: seen.then_some(sequence),
     }
 }
 

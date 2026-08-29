@@ -17,6 +17,7 @@
 # usage: mux-agent [extra args passed through to the agent]
 #        WORKBENCH_AGENT=codex mux-agent      # override per session/pane
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 exec_codex()
 {
@@ -49,7 +50,9 @@ exec_trae()
 # launched some other way (a bare `claude` in an ad-hoc session) stay unmarked,
 # so that automatic behaviour never leaks into them. Session-scoped, so it lives
 # for the session and is queryable from any pane via `tmux show-option -qv`.
-[ -n "${TMUX:-}" ] && tmux set-option @workbench_task 1 2>/dev/null || true
+if [ "${WORKBENCH_MANAGED:-1}" = 1 ] && [ -n "${TMUX:-}" ]; then
+  tmux set-option @workbench_task 1 2>/dev/null || true
+fi
 
 agent=${WORKBENCH_AGENT:-claude}
 WORKBENCH_AGENT=$agent

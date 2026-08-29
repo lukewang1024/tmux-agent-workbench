@@ -2,6 +2,7 @@
 # mux-handoff — transfer an in-progress task from this tmux pane to a freshly
 # launched coding-agent profile in a right-hand pane.
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 self=$0
 while [ -h "$self" ]; do

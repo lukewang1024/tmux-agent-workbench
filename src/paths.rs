@@ -78,6 +78,20 @@ impl Paths {
         self.runtime_dir.join(format!("spool-{server_key}"))
     }
 
+    pub fn checkpoint_for_server(&self, server_key: &str) -> PathBuf {
+        self.state_dir
+            .join("servers")
+            .join(format!("{server_key}.json"))
+    }
+
+    pub fn workspaces_dir(&self) -> PathBuf {
+        let data_root = env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))
+            .expect("home was validated while discovering paths");
+        data_root.join("tmux-agent-workbench/workspaces")
+    }
+
     fn ensure_private_runtime(&self) -> io::Result<()> {
         if let Ok(metadata) = fs::symlink_metadata(&self.runtime_dir) {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {

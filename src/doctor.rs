@@ -126,6 +126,33 @@ fn check_command(name: &str, hard: bool, hint: &str) -> usize {
 }
 
 fn check_platform_delivery() {
+    if std::env::var_os("TERMUX_VERSION").is_some() {
+        let available = [
+            "termux-notification",
+            "termux-clipboard-get",
+            "termux-clipboard-set",
+        ]
+        .iter()
+        .all(|name| command_exists(name));
+        if available {
+            println!("ok: Termux:API notification and clipboard capabilities");
+        } else {
+            println!(
+                "warning: Termux:API helpers missing; notification, sound, and clipboard are reduced, while SSH, popup, and navigation remain available"
+            );
+        }
+        return;
+    }
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        if command_exists("wb-client.exe") {
+            println!("ok: Windows companion available through WSL interop");
+        } else {
+            println!(
+                "warning: Windows companion missing; run `wb client setup windows` explicitly"
+            );
+        }
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         check_command("osascript", false, "macOS overlays unavailable");

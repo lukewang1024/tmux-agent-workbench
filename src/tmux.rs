@@ -102,12 +102,20 @@ impl Tmux {
     }
 
     fn visible_panes(&self) -> Result<HashSet<String>, TmuxError> {
-        let output = self.output(&["list-clients", "-F", "#{pane_id}"])?;
+        let output = self.output(&["list-clients", "-F", "#{pane_id}\u{1f}#{client_flags}\u{1f}#{@workbench_overlay_visible}\u{1f}#{@workbench_selected_implies_focused}"])?;
         Ok(output
             .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with('%'))
-            .map(str::to_owned)
+            .filter_map(|line| {
+                let mut fields = line.split('\u{1f}');
+                let pane = fields.next()?;
+                let flags = fields.next().unwrap_or_default();
+                let overlay = fields.next().unwrap_or_default();
+                let selected_compat = fields.next().unwrap_or_default();
+                (pane.starts_with('%')
+                    && (flags.split(',').any(|flag| flag == "focused") || selected_compat == "1")
+                    && overlay != "1")
+                    .then(|| pane.to_owned())
+            })
             .collect())
     }
 }

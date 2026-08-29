@@ -14,6 +14,7 @@
 # /add-dir the picked repo. codex/opencode can't add mid-session (codex reads it
 # anyway; opencode will prompt on first touch), so we skip the nudge for them.
 set -eu
+. "$(dirname "$0")/../lib/deprecation.sh"
 
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).

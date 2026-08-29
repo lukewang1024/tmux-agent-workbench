@@ -23,6 +23,7 @@
 # they already exist.
 
 set -eu
+. "$(dirname "$0")/../../lib/deprecation.sh"
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0

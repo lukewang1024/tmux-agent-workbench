@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+usage()
+{
+  echo "usage: wb run [--name <label>] <repo> -- <argv...>" >&2
+  echo "       wb run [--name <label>] <repo> --shell '<command>'" >&2
+  exit 2
+}
+
+label=task
+if [ "${1:-}" = "--name" ]; then
+  [ $# -ge 3 ] || usage
+  label=$2
+  shift 2
+fi
+[ $# -ge 2 ] || usage
+repo=$1
+shift
+
+quote_arg()
+{
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+case ${1:-} in
+  --shell)
+    [ $# -eq 2 ] || usage
+    command_string=$2
+    ;;
+  --)
+    shift
+    [ $# -gt 0 ] || usage
+    command_string=
+    for arg do
+      quoted=$(quote_arg "$arg")
+      if [ -n "$command_string" ]; then command_string="$command_string $quoted"
+      else command_string=$quoted
+      fi
+    done
+    ;;
+  *) usage ;;
+esac
+
+exec mux-run-task --name "$label" "$repo" "$command_string"

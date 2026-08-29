@@ -312,6 +312,9 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
+    if std::env::var_os("WORKBENCH_POPUP").is_some() {
+        return build_popup_rows(snapshot, detailed);
+    }
     let mut rows = vec![Row::Section("sessions")];
     let mut sessions = snapshot.sessions.clone();
     sessions.sort_by_key(|session| session.attention_count == 0);
@@ -359,6 +362,52 @@ fn build_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
                 .map(|conversation| Row::Conversation(agent.clone(), conversation)),
         );
     }
+    rows
+}
+
+fn build_popup_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
+    let mut rows = vec![Row::Section("attention")];
+    let mut agents = snapshot.agents.clone();
+    agents.sort_by_key(|agent| {
+        (
+            agent.attention.as_ref().is_none_or(|event| event.seen),
+            agent
+                .attention
+                .as_ref()
+                .map(|event| event.since_unix_ms)
+                .unwrap_or(u64::MAX),
+            agent.target.session_name.clone(),
+            agent.target.window_index,
+            agent.target.pane_index,
+        )
+    });
+    for agent in agents
+        .iter()
+        .filter(|agent| agent.attention.as_ref().is_some_and(|event| !event.seen))
+    {
+        rows.push(Row::Agent(agent.clone()));
+    }
+    rows.push(Row::Spacer);
+    rows.push(Row::Section("agents"));
+    for agent in agents {
+        rows.push(Row::Agent(agent.clone()));
+        if detailed {
+            rows.push(Row::Detail(
+                format!(
+                    "   {} · {}:{}",
+                    agent_kind_name(agent.kind),
+                    agent.target.window_index,
+                    agent.target.pane_index
+                ),
+                source_health(&agent),
+            ));
+        }
+    }
+    rows.push(Row::Spacer);
+    rows.push(Row::Section("sessions"));
+    let mut sessions = snapshot.sessions.clone();
+    sessions.sort_by_key(|session| (session.attention_count == 0, session.session_name.clone()));
+    rows.extend(sessions.into_iter().map(Row::Session));
     rows
 }
 
@@ -1070,6 +1119,7 @@ mod tests {
                 last_active_pane_id: None,
             }],
             agents: vec![],
+            clients: vec![],
         };
         assert!(
             build_rows(&snapshot, false)
@@ -1102,6 +1152,7 @@ mod tests {
                 session("$11", 2),
             ],
             agents: vec![],
+            clients: vec![],
         };
         let sessions: Vec<_> = build_rows(&snapshot, false)
             .into_iter()
