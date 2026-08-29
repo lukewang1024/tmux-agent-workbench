@@ -4,6 +4,7 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/workbench-install-test.XXXXXX")
 installer_cargo_home=${CARGO_HOME:-$HOME/.cargo}
+installer_rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
 
 cleanup()
 {
@@ -13,6 +14,7 @@ trap cleanup EXIT HUP INT TERM
 
 export HOME=$test_root/home
 export CARGO_HOME=$installer_cargo_home
+export RUSTUP_HOME=$installer_rustup_home
 export XDG_DATA_HOME=$test_root/data
 export TMUX_AGENT_WORKBENCH_INSTALL_SOURCE=1
 mkdir -p "$HOME" "$test_root/bin"
