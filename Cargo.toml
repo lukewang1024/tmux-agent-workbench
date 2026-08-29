@@ -1,6 +1,6 @@
 [package]
 name = "tmux-agent-workbench"
-version = "2.0.0-beta"
+version = "2.0.0-beta.4"
 edition = "2024"
 license = "MIT"
 description = "Local tmux agent discovery and attention system"
