@@ -1,9 +1,15 @@
 param([Parameter(Mandatory=$true)][string]$Version)
 $ErrorActionPreference = 'Stop'
 $runtime = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'win-arm64' } else { 'win-x64' }
+$appRuntimeArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $destination = Join-Path $env:LOCALAPPDATA 'tmux-agent-workbench'
 $stage = Join-Path $env:TEMP ("tmux-agent-workbench-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $destination, $stage | Out-Null
+$appRuntimeInstaller = Join-Path $stage 'WindowsAppRuntimeInstall.exe'
+$appRuntimeUrl = "https://aka.ms/windowsappsdk/1.7/1.7.260224002/windowsappruntimeinstall-$appRuntimeArch.exe"
+Invoke-WebRequest -UseBasicParsing -Uri $appRuntimeUrl -OutFile $appRuntimeInstaller
+& $appRuntimeInstaller --quiet
+if ($LASTEXITCODE -ne 0) { throw "Windows App Runtime installer failed with exit code $LASTEXITCODE" }
 $archive = Join-Path $stage 'wb-client.zip'
 $url = "https://github.com/lukewang1024/tmux-agent-workbench/releases/download/v$Version/wb-client-$runtime.zip"
 Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
