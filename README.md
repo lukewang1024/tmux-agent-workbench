@@ -232,7 +232,11 @@ server in separate sections. Press `d` to toggle a more detailed view with
 Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
 opens session/agent actions. The footer opens the tmuxinator-project picker and
-the global action menu.
+the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
+`Ctrl-D` close the popup; the footer and global menu also expose a mouse-driven
+close action. Those exit keys are popup-only and do not terminate a persistent
+sidebar pane. Activating a session or Agent with Enter or a left click also
+closes the popup after the navigation succeeds.
 
 With focus in the sidebar, press `?` for the complete centered shortcut card.
 The everyday keys are plain letters: `i` inspects a repo, `d` toggles details,
@@ -241,6 +245,13 @@ uppercase: `N` picks/starts a tmuxinator project, `W` creates a workspace, `P`
 promotes the selected repo, and `R` rebuilds generated projects. `m` opens the
 row menu. The global menu exposes the
 same management actions for mouse use.
+
+The daemon publishes `@workbench_window_state` and
+`@workbench_window_label` as window-scoped tmux options for status themes.
+They aggregate Agents in that window using `blocked > working > unseen done >
+idle`; both options are unset when the window has no Agent. This keeps process
+detection in Workbench while allowing a theme to render a lightweight current-
+window badge without polling or screen scraping.
 
 Per-Agent manifest overrides live at
 `$XDG_CONFIG_HOME/tmux-agent-workbench/manifests/{codex,claude,trae,opencode}.toml`.

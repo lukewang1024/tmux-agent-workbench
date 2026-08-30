@@ -40,6 +40,7 @@ enum FooterButton {
     New,
     Help,
     Menu,
+    Close,
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
@@ -157,7 +158,7 @@ fn event_loop(
                 while lines.len() < content_height {
                     lines.push(Line::default());
                 }
-                lines.push(render_footer(area.width, footer_hover));
+                lines.push(render_footer(area.width, footer_hover, popup_mode()));
                 frame.render_widget(Paragraph::new(lines), area);
                 if help_visible {
                     render_help(frame, area);
@@ -172,53 +173,68 @@ fn event_loop(
         let input = event::read()?;
         dirty = true;
         match input {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('?') => help_visible = !help_visible,
-                KeyCode::Esc if help_visible => help_visible = false,
-                _ if help_visible => {}
-                KeyCode::Char('j') | KeyCode::Down => {
-                    selection_visible = true;
-                    move_selection(&rows, &mut selected, 1);
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    selection_visible = true;
-                    move_selection(&rows, &mut selected, -1);
-                }
-                KeyCode::Enter => activate(&rows, selected)?,
-                KeyCode::Char('m') => show_row_menu(
-                    &rows,
-                    selected,
-                    Some((0, selected.saturating_sub(scroll) as u16)),
-                )?,
-                KeyCode::Char('d') => {
-                    let selected_key = rows.get(selected).and_then(selection_key);
-                    detailed = !detailed;
-                    if let Some(snapshot) = &snapshot {
-                        rows = build_rows(snapshot, detailed);
-                        selected = selected_key
-                            .as_deref()
-                            .and_then(|key| {
-                                rows.iter()
-                                    .position(|row| selection_key(row).as_deref() == Some(key))
-                            })
-                            .or_else(|| nearest_selectable(&rows, selected))
-                            .unwrap_or(0);
-                    }
-                }
-                KeyCode::Char('N') => run_session_picker()?,
-                KeyCode::Char('i') => run_command("mux-inspect-pick")?,
-                KeyCode::Char('W') => run_command("ws-new-prompt")?,
-                KeyCode::Char('P') if selection_visible => promote_selected(&rows, selected)?,
-                KeyCode::Char('R') => run_command("gen-tmuxinator-configs")?,
-                KeyCode::Char('n') => run_workbench(&["attention", "next"])?,
-                KeyCode::Char('s') => run_workbench(&["pick", "session"])?,
-                KeyCode::Char('a') => run_workbench(&["pick", "agent"])?,
-                KeyCode::Char('r') => run_workbench(&["reload"])?,
-                KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if popup_mode()
+                    && !help_visible
+                    && (key.code == KeyCode::Esc
+                        || (key.modifiers.contains(event::KeyModifiers::CONTROL)
+                            && matches!(key.code, KeyCode::Char('c' | 'd'))))
+                {
                     return Ok(());
                 }
-                _ => {}
-            },
+                match key.code {
+                    KeyCode::Char('?') => help_visible = !help_visible,
+                    KeyCode::Esc if help_visible => help_visible = false,
+                    _ if help_visible => {}
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selection_visible = true;
+                        move_selection(&rows, &mut selected, 1);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        selection_visible = true;
+                        move_selection(&rows, &mut selected, -1);
+                    }
+                    KeyCode::Enter => {
+                        activate(&rows, selected)?;
+                        if popup_mode() {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('m') => show_row_menu(
+                        &rows,
+                        selected,
+                        Some((0, selected.saturating_sub(scroll) as u16)),
+                    )?,
+                    KeyCode::Char('d') => {
+                        let selected_key = rows.get(selected).and_then(selection_key);
+                        detailed = !detailed;
+                        if let Some(snapshot) = &snapshot {
+                            rows = build_rows(snapshot, detailed);
+                            selected = selected_key
+                                .as_deref()
+                                .and_then(|key| {
+                                    rows.iter()
+                                        .position(|row| selection_key(row).as_deref() == Some(key))
+                                })
+                                .or_else(|| nearest_selectable(&rows, selected))
+                                .unwrap_or(0);
+                        }
+                    }
+                    KeyCode::Char('N') => run_session_picker()?,
+                    KeyCode::Char('i') => run_command("mux-inspect-pick")?,
+                    KeyCode::Char('W') => run_command("ws-new-prompt")?,
+                    KeyCode::Char('P') if selection_visible => promote_selected(&rows, selected)?,
+                    KeyCode::Char('R') => run_command("gen-tmuxinator-configs")?,
+                    KeyCode::Char('n') => run_workbench(&["attention", "next"])?,
+                    KeyCode::Char('s') => run_workbench(&["pick", "session"])?,
+                    KeyCode::Char('a') => run_workbench(&["pick", "agent"])?,
+                    KeyCode::Char('r') => run_workbench(&["reload"])?,
+                    KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             Event::Mouse(mouse) => {
                 if help_visible {
                     if matches!(mouse.kind, MouseEventKind::Down(_))
@@ -266,6 +282,7 @@ fn event_loop(
                                 Some(FooterButton::Menu) => {
                                     show_global_menu(false, Some((mouse.column, mouse.row)))?
                                 }
+                                Some(FooterButton::Close) => return Ok(()),
                                 None => {}
                             }
                             continue;
@@ -277,6 +294,9 @@ fn event_loop(
                         ) {
                             selected = clicked;
                             activate(&rows, selected)?;
+                            if popup_mode() {
+                                return Ok(());
+                            }
                         }
                     }
                     MouseEventKind::Down(MouseButton::Right) => {
@@ -526,7 +546,11 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
     }
 }
 
-fn render_footer(width: u16, hovered: Option<FooterButton>) -> Line<'static> {
+fn popup_mode() -> bool {
+    std::env::var_os("WORKBENCH_POPUP").is_some()
+}
+
+fn render_footer(width: u16, hovered: Option<FooterButton>, popup: bool) -> Line<'static> {
     let button_style = |button| {
         let style = Style::default().fg(Color::Cyan);
         if hovered == Some(button) {
@@ -535,22 +559,34 @@ fn render_footer(width: u16, hovered: Option<FooterButton>) -> Line<'static> {
             style
         }
     };
-    let gap = usize::from(width).saturating_sub(18);
-    Line::from(vec![
+    let fixed_width = if popup { 26 } else { 18 };
+    let gap = usize::from(width).saturating_sub(fixed_width);
+    let mut spans = vec![
         Span::styled("+ new", button_style(FooterButton::New)),
         Span::raw(" ".repeat(gap)),
         Span::styled("? help", button_style(FooterButton::Help)),
         Span::raw(" "),
         Span::styled("⋯ menu", button_style(FooterButton::Menu)),
-    ])
+    ];
+    if popup {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("× close", button_style(FooterButton::Close)));
+    }
+    Line::from(spans)
 }
 
 fn footer_button(width: u16, column: u16) -> Option<FooterButton> {
     if column < 5 {
         return Some(FooterButton::New);
     }
-    let help_start = width.saturating_sub(13);
-    let menu_start = width.saturating_sub(6);
+    let popup = popup_mode();
+    let close_start = width.saturating_sub(7);
+    if popup && column >= close_start {
+        return Some(FooterButton::Close);
+    }
+    let right_offset = if popup { 8 } else { 0 };
+    let help_start = width.saturating_sub(13 + right_offset);
+    let menu_start = width.saturating_sub(6 + right_offset);
     if column >= menu_start {
         Some(FooterButton::Menu)
     } else if column >= help_start && column < help_start.saturating_add(6) {
@@ -577,6 +613,7 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         Line::from("r        reload"),
         Line::from(""),
         Line::from("? / esc  close help"),
+        Line::from("esc ^C ^D close popup"),
     ];
     frame.render_widget(Clear, popup);
     frame.render_widget(
@@ -925,47 +962,50 @@ fn show_global_menu(
     if !safe_target(&sidebar_pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
-    show_menu(
-        "workbench",
-        anchor,
-        anchor.is_some(),
-        &[
-            ("New", "N", "run-shell -b workbench-session-pick".into()),
-            ("Inspect repo", "i", "run-shell -b mux-inspect-pick".into()),
-            ("New workspace", "W", "run-shell -b ws-new-prompt".into()),
-            (
-                "Promote selected",
-                "P",
-                format!("send-keys -t {sidebar_pane} P"),
-            ),
-            (
-                "Rebuild projects",
-                "R",
-                "run-shell -b gen-tmuxinator-configs".into(),
-            ),
-            ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
-            (
-                "Sessions",
-                "s",
-                format!("run-shell \"{} pick session\"", executable),
-            ),
-            (
-                "Agents",
-                "a",
-                format!("run-shell \"{} pick agent\"", executable),
-            ),
-            (
-                "Next",
-                "n",
-                format!("run-shell \"{} attention next\"", executable),
-            ),
-            (
-                "Reload",
-                "r",
-                format!("run-shell \"{} reload\"", executable),
-            ),
-        ],
-    )
+    let mut items = vec![
+        ("New", "N", "run-shell -b workbench-session-pick".into()),
+        ("Inspect repo", "i", "run-shell -b mux-inspect-pick".into()),
+        ("New workspace", "W", "run-shell -b ws-new-prompt".into()),
+        (
+            "Promote selected",
+            "P",
+            format!("send-keys -t {sidebar_pane} P"),
+        ),
+        (
+            "Rebuild projects",
+            "R",
+            "run-shell -b gen-tmuxinator-configs".into(),
+        ),
+        ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
+        (
+            "Sessions",
+            "s",
+            format!("run-shell \"{} pick session\"", executable),
+        ),
+        (
+            "Agents",
+            "a",
+            format!("run-shell \"{} pick agent\"", executable),
+        ),
+        (
+            "Next",
+            "n",
+            format!("run-shell \"{} attention next\"", executable),
+        ),
+        (
+            "Reload",
+            "r",
+            format!("run-shell \"{} reload\"", executable),
+        ),
+    ];
+    if popup_mode() {
+        items.push((
+            "Close popup",
+            "q",
+            format!("send-keys -t {sidebar_pane} Escape"),
+        ));
+    }
+    show_menu("workbench", anchor, anchor.is_some(), &items)
 }
 
 fn run_workbench(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {

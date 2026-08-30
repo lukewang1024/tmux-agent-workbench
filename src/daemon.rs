@@ -573,6 +573,99 @@ fn publish_status_fragments(snapshot: &Snapshot) {
             .args(["set-option", "-gq", name, &value])
             .status();
     }
+    publish_window_statuses(snapshot, &server);
+}
+
+fn publish_window_statuses(snapshot: &Snapshot, server: &ServerIdentity) {
+    use std::collections::HashMap;
+
+    let mut by_window: HashMap<&str, Vec<&crate::model::AgentSnapshot>> = HashMap::new();
+    for agent in &snapshot.agents {
+        by_window
+            .entry(agent.target.window_id.as_str())
+            .or_default()
+            .push(agent);
+    }
+
+    let output = match std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args(["list-windows", "-a", "-F", "#{window_id}"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+    let windows = String::from_utf8_lossy(&output.stdout);
+    let mut command = std::process::Command::new("tmux");
+    command.arg("-S").arg(&server.socket_path);
+    let mut first = true;
+    for window in windows.lines().filter(|window| window.starts_with('@')) {
+        if !first {
+            command.arg(";");
+        }
+        first = false;
+        command.args(["set-option", "-wu", "-t", window, "@workbench_window_state"]);
+        command.arg(";");
+        command.args(["set-option", "-wu", "-t", window, "@workbench_window_label"]);
+        if let Some(agents) = by_window.get(window) {
+            let (state, count) = window_rollup(agents);
+            let label = if count > 1 {
+                format!("{} {count}", state.to_uppercase())
+            } else {
+                state.to_uppercase()
+            };
+            command.arg(";");
+            command.args([
+                "set-option",
+                "-wq",
+                "-t",
+                window,
+                "@workbench_window_state",
+                state,
+            ]);
+            command.arg(";");
+            command.args([
+                "set-option",
+                "-wq",
+                "-t",
+                window,
+                "@workbench_window_label",
+                &label,
+            ]);
+        }
+    }
+    if !first {
+        let _ = command.status();
+    }
+}
+
+fn window_rollup(agents: &[&crate::model::AgentSnapshot]) -> (&'static str, usize) {
+    let blocked = agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Blocked)
+        .count();
+    if blocked > 0 {
+        return ("blocked", blocked);
+    }
+    let working = agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Working)
+        .count();
+    if working > 0 {
+        return ("working", working);
+    }
+    let done = agents
+        .iter()
+        .filter(|agent| {
+            agent.display_state == crate::model::DisplayState::Done
+                && agent.attention.as_ref().is_some_and(|event| !event.seen)
+        })
+        .count();
+    if done > 0 {
+        return ("done", done);
+    }
+    ("idle", agents.len())
 }
 
 fn handle(
