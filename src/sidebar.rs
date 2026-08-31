@@ -866,7 +866,9 @@ fn session_context(session: &SessionSnapshot) -> String {
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .unwrap_or(path);
-        parts.push(display.to_owned());
+        if !display.eq_ignore_ascii_case(&session.session_name) {
+            parts.push(display.to_owned());
+        }
         if let Ok(output) = Command::new("git")
             .args(["-C", path, "branch", "--show-current"])
             .stderr(Stdio::null())
@@ -874,12 +876,19 @@ fn session_context(session: &SessionSnapshot) -> String {
             && output.status.success()
         {
             let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !branch.is_empty() {
+            if !branch.is_empty()
+                && !branch.eq_ignore_ascii_case(&session.session_name)
+                && !parts.iter().any(|part| part.eq_ignore_ascii_case(&branch))
+            {
                 parts.push(branch);
             }
         }
     }
-    parts.push(format!("{} agents", session.agent_count));
+    parts.push(format!(
+        "{} agent{}",
+        session.agent_count,
+        if session.agent_count == 1 { "" } else { "s" }
+    ));
     parts.join(" · ")
 }
 
@@ -1587,6 +1596,20 @@ mod tests {
             pair,
             [Row::Agent(first), Row::AgentSub(second)] if first.instance_id == second.instance_id
         )));
+    }
+
+    #[test]
+    fn session_context_omits_repeated_cwd_name() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let mut session = snapshot.sessions[0].clone();
+        session.session_name = "word-formula".into();
+        session.current_path = Some("/tmp/word-formula".into());
+        session.agent_count = 1;
+        assert_eq!(session_context(&session), "1 agent");
+
+        session.current_path = Some("/tmp/dotfiles".into());
+        assert_eq!(session_context(&session), "dotfiles · 1 agent");
     }
 
     #[test]

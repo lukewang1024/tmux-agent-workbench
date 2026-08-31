@@ -181,6 +181,12 @@ impl Detector {
                             .copied()
                             .find(|pane| pane.window_active && pane.pane_last)
                     });
+                let agent_pane = session_agents.iter().find_map(|agent| {
+                    panes
+                        .iter()
+                        .copied()
+                        .find(|pane| pane.target.pane_id == agent.target.pane_id)
+                });
                 SessionSnapshot {
                     session_id,
                     session_name: panes[0].target.session_name.clone(),
@@ -192,7 +198,8 @@ impl Detector {
                         .iter()
                         .filter(|agent| agent.attention.as_ref().is_some_and(|event| !event.seen))
                         .count(),
-                    current_path: active
+                    current_path: agent_pane
+                        .or(active)
                         .map(|pane| pane.current_path.clone())
                         .or_else(|| panes.first().map(|pane| pane.current_path.clone())),
                     active: panes.iter().any(|pane| pane.session_visible),
