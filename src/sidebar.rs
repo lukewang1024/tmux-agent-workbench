@@ -195,8 +195,8 @@ fn event_loop(
                         move_selection(&rows, &mut selected, -1);
                     }
                     KeyCode::Enter => {
-                        activate(&rows, selected)?;
-                        if popup_mode() {
+                        let navigated = activate(&rows, selected)?;
+                        if popup_mode() && navigated {
                             return Ok(());
                         }
                     }
@@ -293,8 +293,8 @@ fn event_loop(
                             Some(Row::Session(_) | Row::Agent(_) | Row::Conversation(_, _))
                         ) {
                             selected = clicked;
-                            activate(&rows, selected)?;
-                            if popup_mode() {
+                            let navigated = activate(&rows, selected)?;
+                            if popup_mode() && navigated {
                                 return Ok(());
                             }
                         }
@@ -782,7 +782,7 @@ fn keep_visible(selected: usize, height: usize, total: usize, scroll: &mut usize
     *scroll = (*scroll).min(total.saturating_sub(height));
 }
 
-fn activate(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session)) => {
             let mut command = Command::new(std::env::current_exe()?);
@@ -796,11 +796,15 @@ fn activate(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Err
             if let Some(pane) = &session.last_active_pane_id {
                 command.args(["--pane", pane]);
             }
-            command
+            let status = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()?;
+                .status()?;
+            if !status.success() {
+                return Err("could not focus selected session".into());
+            }
+            return Ok(true);
         }
         Some(Row::Agent(agent)) if agent.exited => {
             if let Some(event) = &agent.attention {
@@ -827,11 +831,15 @@ fn activate(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Err
             if let Ok(source) = std::env::var("TMUX_PANE") {
                 command.args(["--source-pane", &source]);
             }
-            command
+            let status = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()?;
+                .status()?;
+            if !status.success() {
+                return Err("could not focus selected Agent".into());
+            }
+            return Ok(true);
         }
         Some(Row::Conversation(agent, _)) => {
             let mut command = Command::new(std::env::current_exe()?);
@@ -847,15 +855,19 @@ fn activate(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Err
             if let Ok(source) = std::env::var("TMUX_PANE") {
                 command.args(["--source-pane", &source]);
             }
-            command
+            let status = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()?;
+                .status()?;
+            if !status.success() {
+                return Err("could not focus selected conversation".into());
+            }
+            return Ok(true);
         }
         _ => {}
     }
-    Ok(())
+    Ok(false)
 }
 
 fn show_row_menu(
