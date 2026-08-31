@@ -90,12 +90,8 @@ fn event_loop(
     let mut agent_sort = Config::load(&paths.config_file())
         .map(|config| config.sidebar.agent_sort)
         .unwrap_or_default();
-    if let Ok(saved) = std::fs::read_to_string(paths.state_dir.join("sidebar-agent-sort")) {
-        agent_sort = match saved.trim() {
-            "prioritized" => AgentSort::Prioritized,
-            "grouped" => AgentSort::Grouped,
-            _ => agent_sort,
-        };
+    if let Some(saved) = persisted_agent_sort(paths) {
+        agent_sort = saved;
     }
     let mut help_visible = false;
     let mut footer_hover = None;
@@ -105,6 +101,7 @@ fn event_loop(
     let mut disconnected = true;
     let mut last_success = None;
     let mut next_refresh = Instant::now();
+    let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
     let mut dirty = true;
     let mut initial_selection = true;
     let mut last_content_height = usize::MAX;
@@ -147,6 +144,27 @@ fn event_loop(
         if Instant::now() >= next_refresh {
             let _ = refresh_tx.try_send(());
             next_refresh = Instant::now() + Duration::from_secs(1);
+        }
+        if Instant::now() >= next_sort_sync {
+            next_sort_sync = Instant::now() + Duration::from_millis(200);
+            if let Some(saved) = persisted_agent_sort(paths)
+                && saved != agent_sort
+            {
+                let selected_key = rows.get(selected).and_then(selection_key);
+                agent_sort = saved;
+                if let Some(snapshot) = &snapshot {
+                    rows = balance_sections(
+                        build_rows(snapshot, detailed, agent_sort),
+                        last_content_height,
+                    );
+                    selected = selected_key
+                        .as_deref()
+                        .and_then(|key| nearest_matching_key(&rows, key, selected))
+                        .or_else(|| nearest_selectable(&rows, selected))
+                        .unwrap_or(0);
+                }
+                dirty = true;
+            }
         }
 
         let size = terminal.size()?;
@@ -532,6 +550,15 @@ fn persist_agent_sort(paths: &Paths, sort: AgentSort) -> io::Result<()> {
             AgentSort::Prioritized => "prioritized\n",
         },
     )
+}
+
+fn persisted_agent_sort(paths: &Paths) -> Option<AgentSort> {
+    let saved = std::fs::read_to_string(paths.state_dir.join("sidebar-agent-sort")).ok()?;
+    match saved.trim() {
+        "grouped" => Some(AgentSort::Grouped),
+        "prioritized" => Some(AgentSort::Prioritized),
+        _ => None,
+    }
 }
 
 fn stable_agent_key(agent: &AgentSnapshot) -> (String, u32, u32, String) {
@@ -1419,6 +1446,28 @@ mod tests {
     use crate::ipc::{Response, read_request, write_response};
     use crate::model::SessionSnapshot;
     use std::os::unix::net::UnixListener;
+
+    fn test_paths(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+            cache_dir: root.join("cache"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    #[test]
+    fn agent_sort_state_is_shared_between_sidebar_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = test_paths(temp.path());
+        let second = test_paths(temp.path());
+
+        persist_agent_sort(&first, AgentSort::Prioritized).unwrap();
+        assert_eq!(persisted_agent_sort(&second), Some(AgentSort::Prioritized));
+
+        persist_agent_sort(&second, AgentSort::Grouped).unwrap();
+        assert_eq!(persisted_agent_sort(&first), Some(AgentSort::Grouped));
+    }
 
     #[test]
     fn sessions_without_agents_remain_navigable() {

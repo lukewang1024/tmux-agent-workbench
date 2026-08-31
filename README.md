@@ -236,7 +236,8 @@ sections. Help remains available from `?` without taking space in the mouse acti
 row. Session and Agent targets use two-line cards so the full card is easier to
 click. The label at the right of the Agents header toggles between `grouped`
 (stable session/window/pane order) and `prioritized` (blocked, unseen done,
-working, seen idle, unknown); the choice is remembered. Press `d` to toggle a more detailed view with
+working, seen idle, unknown); the choice is remembered and synchronized across
+all running sidebar instances. Press `d` to toggle a more detailed view with
 Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
 opens session/agent actions. The footer opens the tmuxinator-project picker and
