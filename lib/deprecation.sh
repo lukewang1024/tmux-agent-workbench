@@ -1,13 +1,21 @@
-# POSIX sh. Emit a compatibility warning once per command through 2.1.
+# shellcheck shell=sh
+# POSIX sh. Emit a compatibility warning on every direct legacy invocation.
 [ "${WB_SHIM_CALL:-0}" = 1 ] || {
-  wb_deprecation_dir=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench/deprecations
   wb_deprecation_name=$(basename "$0")
-  wb_deprecation_file=$wb_deprecation_dir/$wb_deprecation_name
-  if [ ! -f "$wb_deprecation_file" ]; then
-    mkdir -p "$wb_deprecation_dir"
-    chmod 700 "$wb_deprecation_dir" 2>/dev/null || true
-    printf '%s is deprecated; use wb (compatibility retained through 2.1)\n' "$wb_deprecation_name" >&2
-    (umask 077 && : >"$wb_deprecation_file")
-  fi
-  unset wb_deprecation_dir wb_deprecation_name wb_deprecation_file
+  case $wb_deprecation_name in
+    mux-agent) wb_deprecation_replacement='tmux-agent-workbench agent start' ;;
+    mux-handoff) wb_deprecation_replacement='tmux-agent-workbench agent handoff' ;;
+    mux-inspect) wb_deprecation_replacement='tmux-agent-workbench inspect' ;;
+    mux-run-task) wb_deprecation_replacement='tmux-agent-workbench run' ;;
+    workbench-session-pick) wb_deprecation_replacement='tmux-agent-workbench pick session' ;;
+    ws-add) wb_deprecation_replacement='tmux-agent-workbench add' ;;
+    ws-done) wb_deprecation_replacement='tmux-agent-workbench done' ;;
+    ws-new) wb_deprecation_replacement='tmux-agent-workbench new' ;;
+    ws-promote) wb_deprecation_replacement='tmux-agent-workbench promote' ;;
+    *) wb_deprecation_replacement='tmux-agent-workbench' ;;
+  esac
+  # shellcheck disable=SC2016 # backticks are literal user-facing punctuation
+  printf '%s is deprecated; use `%s` (compatibility retained through 2.1)\n' \
+    "$wb_deprecation_name" "$wb_deprecation_replacement" >&2
+  unset wb_deprecation_name wb_deprecation_replacement
 }

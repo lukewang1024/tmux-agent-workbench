@@ -47,8 +47,9 @@ for arg in "$@"; do
 done
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 SKILL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/agent/skills"
+CORE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin"
 
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR" "$CORE_DIR"
 
 # Attention v2 binary. Release assets use
 # tmux-agent-workbench-<rust-target>.tar.gz; a source checkout falls back to a
@@ -62,7 +63,7 @@ install_attention_binary() {
     Linux-x86_64) attention_target=x86_64-unknown-linux-musl ;;
     *) attention_target= ;;
   esac
-  attention_destination="$BIN_DIR/tmux-agent-workbench"
+  attention_destination="$CORE_DIR/tmux-agent-workbench-core"
   attention_stage="$attention_destination.new.$$"
 
   install_attention_file() {
@@ -85,7 +86,7 @@ install_attention_binary() {
 
   attention_installed=0
   if [ -x "$PLUGIN_DIR/target/release/tmux-agent-workbench" ] &&
-     [ "$($PLUGIN_DIR/target/release/tmux-agent-workbench --version 2>/dev/null | awk '{print $2}')" = "$attention_version" ]; then
+     [ "$("$PLUGIN_DIR/target/release/tmux-agent-workbench" --version 2>/dev/null | awk '{print $2}')" = "$attention_version" ]; then
     install_attention_file "$PLUGIN_DIR/target/release/tmux-agent-workbench"
     attention_installed=1
     echo "installed local release binary $attention_destination"
@@ -118,8 +119,21 @@ install_attention_binary() {
 
 install_attention_binary
 
-# Public v2 name. Keep the historical binary for protocol and release
-# compatibility while exposing one stable CLI entrypoint.
+# Replace the historical public Rust binary with the unified dispatcher. The
+# binary now lives under XDG data as an internal implementation detail.
+public_command="$BIN_DIR/tmux-agent-workbench"
+if [ -h "$public_command" ]; then
+  rm "$public_command"
+elif [ -e "$public_command" ]; then
+  if "$public_command" --version 2>/dev/null | grep -q '^tmux-agent-workbench '; then
+    rm "$public_command"
+  else
+    mv "$public_command" "$public_command~"
+  fi
+fi
+ln -s "$PLUGIN_DIR/bin/tmux-agent-workbench-cli" "$public_command"
+
+# The former short name remains a warning wrapper through 2.1.
 if [ -h "$BIN_DIR/wb" ]; then rm "$BIN_DIR/wb"
 elif [ -e "$BIN_DIR/wb" ]; then mv "$BIN_DIR/wb" "$BIN_DIR/wb~"
 fi
@@ -146,6 +160,7 @@ link_one() {
 
 # Layer 1 (agent/window model) — always.
 for f in "$PLUGIN_DIR"/bin/*; do
+  [ "$(basename "$f")" = tmux-agent-workbench-cli ] && continue
   [ -f "$f" ] && [ -x "$f" ] && link_one "$f"
 done
 

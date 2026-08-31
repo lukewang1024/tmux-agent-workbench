@@ -148,7 +148,7 @@ fn check_platform_delivery() {
             println!("ok: Windows companion available through WSL interop");
         } else {
             println!(
-                "warning: Windows companion missing; run `wb client setup windows` explicitly"
+                "warning: Windows companion missing; run `tmux-agent-workbench client setup windows` explicitly"
             );
         }
         return;

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+repo=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 binary=$repo/target/debug/tmux-agent-workbench
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/workbench-v2-test.XXXXXX")
 socket=$test_root/tmux.sock
@@ -34,12 +34,12 @@ wait_sidebar_state()
   done
 }
 
-export XDG_CONFIG_HOME=$test_root/config
-export XDG_STATE_HOME=$test_root/state
-export XDG_CACHE_HOME=$test_root/cache
-export XDG_RUNTIME_DIR=$test_root/runtime
-export TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$socket
-export TMUX_AGENT_WORKBENCH_BIN=$binary
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/runtime"
+export TMUX_AGENT_WORKBENCH_TMUX_SOCKET="$socket"
+export TMUX_AGENT_WORKBENCH_BIN="$binary"
 
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
@@ -126,8 +126,30 @@ tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
 tmux -S "$socket" resize-window -t sidebar-check -x 100
 wait_sidebar_state sidebar-check absent
+
+# An unobserved background window intentionally stays hidden after growing:
+# aggressive-resize may otherwise recreate it at the server's fallback size
+# only to destroy it again when a narrow client returns. Attach a real control
+# client and make sidebar-check visible before asserting responsive restore.
+responsive_fifo=$test_root/responsive-client.in
+mkfifo "$responsive_fifo"
+exec 7<>"$responsive_fifo"
+tmux -S "$socket" -C attach-session -t workbench-test \
+  <"$responsive_fifo" >"$test_root/responsive-client.out" 2>&1 &
+responsive_client_pid=$!
+tries=0
+while [ "$(tmux -S "$socket" list-clients -F '#{client_name}' | wc -l | tr -d ' ')" -lt 1 ]; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 60 ] || exit 1
+  sleep 0.05
+done
+responsive_client=$(tmux -S "$socket" list-clients -F '#{client_name}' | sed -n '1p')
+tmux -S "$socket" switch-client -c "$responsive_client" -t workbench-test:sidebar-check
+tmux -S "$socket" refresh-client -t "$responsive_client" -C 140x40
 tmux -S "$socket" resize-window -t sidebar-check -x 140
 wait_sidebar_state sidebar-check present
+kill "$responsive_client_pid" 2>/dev/null || true
+exec 7>&-
 
 # Repeated sidebar open/close must not distort the main pane proportions.
 tmux -S "$socket" new-window -d -n layout-preserve
@@ -159,7 +181,7 @@ tmux -S "$socket" display-message -p -t layout-preserve \
   >> "$resurrect_file"
 TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$socket \
   "$repo/bin/workbench-resurrect-save-hook" "$resurrect_file"
-[ "$(grep '^pane' "$resurrect_file" | wc -l | tr -d ' ')" = 2 ]
+[ "$(grep -c '^pane' "$resurrect_file")" = 2 ]
 saved_layout=$(grep '^window' "$resurrect_file" | cut -f7)
 main_layout=$(tmux -S "$socket" show-window-options -v \
   -t layout-preserve @workbench_main_layout)

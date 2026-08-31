@@ -232,6 +232,7 @@ mod tests {
                 rollup_state: DisplayState::Unknown,
                 agent_count: 0,
                 attention_count: 0,
+                current_path: None,
                 active: false,
                 last_active_window_id: Some("@1".into()),
                 last_active_pane_id: Some("%1".into()),

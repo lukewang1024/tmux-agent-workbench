@@ -14,6 +14,7 @@ while [ -h "$self" ]; do
   esac
 done
 dir=$(cd "$(dirname "$self")" && pwd -P)
+# shellcheck disable=SC1091 # path is resolved from this script at runtime
 . "$dir/../lib/deprecation.sh"
 
 task_name=task
@@ -72,6 +73,12 @@ fi
   exit 1
 }
 
+# Preserve the pane that was active before adding the detached task. Passing
+# the new task pane to tmux-layout-keep-sidebar would make its final
+# select-pane activate that pane and interrupt an attached client.
+active_pane=$(tmux list-panes -t "$window_id" -f '#{pane_active}' \
+  -F '#{pane_id}' | sed -n 1p)
+
 anchor=$(tmux list-panes -t "$window_id" \
   -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | tail -1)
 [ -n "$anchor" ] || {
@@ -81,6 +88,7 @@ anchor=$(tmux list-panes -t "$window_id" \
 
 # Start through a non-interactive POSIX shell. Sending keys to a freshly split
 # login shell races its startup files and can silently lose the task command.
+# shellcheck disable=SC2016 # expansion belongs to the task pane's /bin/sh
 task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" \
   -e "WORKBENCH_TASK_COMMAND=$task_command" -P -F '#{pane_id}' \
   'exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"')
@@ -94,9 +102,11 @@ tmux select-pane -t "$task_pane" -T "$task_name"
 # Keep the sidebar as a full-height side column when that integration is
 # installed; otherwise apply the native layout directly.
 if command -v tmux-layout-keep-sidebar >/dev/null 2>&1; then
-  tmux-layout-keep-sidebar even-vertical "$task_pane"
+  tmux-layout-keep-sidebar even-vertical "${active_pane:-$anchor}"
 else
   tmux select-layout -t "$window_id" even-vertical >/dev/null
 fi
+
+[ -z "$active_pane" ] || tmux select-pane -t "$active_pane"
 
 printf '%s\n' "$task_pane"

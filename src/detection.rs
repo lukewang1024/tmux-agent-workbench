@@ -192,6 +192,9 @@ impl Detector {
                         .iter()
                         .filter(|agent| agent.attention.as_ref().is_some_and(|event| !event.seen))
                         .count(),
+                    current_path: active
+                        .map(|pane| pane.current_path.clone())
+                        .or_else(|| panes.first().map(|pane| pane.current_path.clone())),
                     active: panes.iter().any(|pane| pane.session_visible),
                     last_active_window_id: active.map(|pane| pane.target.window_id.clone()),
                     last_active_pane_id: active.map(|pane| pane.target.pane_id.clone()),

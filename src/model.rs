@@ -224,6 +224,8 @@ pub struct SessionSnapshot {
     pub rollup_state: DisplayState,
     pub agent_count: usize,
     pub attention_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub active: bool,
     pub last_active_window_id: Option<String>,

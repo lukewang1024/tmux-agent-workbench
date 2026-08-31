@@ -37,12 +37,14 @@ and baseline for hook-first lifecycle detection. The target release is
 - Wide clients use the shared pane sidebar. Narrow clients use a per-client
   fullscreen popup and temporarily suppress the shared sidebar only for the
   window they view.
-- `wb` is the public CLI. Legacy `mux-*`, `ws-*`, and relay surfaces remain as
-  one-time-warning shims through 2.1 and may be removed in 2.2.
+- `tmux-agent-workbench` is the public CLI, explicitly distinct from Distributed
+  Workbench's `workbench` CLI. The former short name `wb`, legacy `mux-*`,
+  `ws-*`, and relay surfaces remain as every-invocation-warning shims through
+  2.1 and may be removed in 2.2.
 - Durable workspace TOML records live below
   `$XDG_DATA_HOME/tmux-agent-workbench/workspaces`. UUID is identity and
   canonical root is the dedupe key; names are ambiguous display aliases.
-  Migration never moves or recreates worktrees. `wb done` updates a record only
+  Migration never moves or recreates worktrees. `tmux-agent-workbench done` updates a record only
   after the corresponding resource is actually removed.
 - Windows uses the Rust core and a minimal C# companion only where native app
   notification activation requires it. Setup is always explicit.
@@ -63,7 +65,7 @@ finally to a metadata-only summary.
 
 ## Compatibility
 
-Configuration precedence is environment, new `wb` keys, legacy keys, then
+Configuration precedence is environment, new `tmux-agent-workbench` keys, legacy keys, then
 defaults. User configuration is not rewritten implicitly. Unknown fields are
 preserved by explicit migration tooling and reported diagnostically.
 

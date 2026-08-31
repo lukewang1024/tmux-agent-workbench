@@ -3,8 +3,8 @@ set -eu
 
 usage()
 {
-  echo "usage: wb run [--name <label>] <repo> -- <argv...>" >&2
-  echo "       wb run [--name <label>] <repo> --shell '<command>'" >&2
+  echo "usage: tmux-agent-workbench run [--name <label>] <repo> -- <argv...>" >&2
+  echo "       tmux-agent-workbench run [--name <label>] <repo> --shell '<command>'" >&2
   exit 2
 }
 

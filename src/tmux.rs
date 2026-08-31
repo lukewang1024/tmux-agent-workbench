@@ -29,6 +29,7 @@ pub struct Pane {
     pub root_pid: u32,
     pub title: String,
     pub current_command: String,
+    pub current_path: String,
     pub role: Option<String>,
     pub visible: bool,
     pub window_active: bool,
@@ -141,6 +142,7 @@ impl TmuxSource for Tmux {
             "#{cursor_y}",
             "#{history_size}",
             "#{pane_last}",
+            "#{pane_current_path}",
         ]
         .join(&FIELD_SEPARATOR.to_string());
         let output = self.output(&["list-panes", "-a", "-F", &format])?;
@@ -211,7 +213,7 @@ impl TmuxSource for Tmux {
 
 fn parse_pane(line: &str, visible: &HashSet<String>) -> Result<Pane, TmuxError> {
     let fields: Vec<_> = line.split(FIELD_SEPARATOR).collect();
-    if fields.len() != 17 {
+    if fields.len() != 18 {
         return Err(TmuxError::InvalidRow(line.to_owned()));
     }
     let pane_id = fields[5].to_owned();
@@ -237,6 +239,7 @@ fn parse_pane(line: &str, visible: &HashSet<String>) -> Result<Pane, TmuxError> 
             .map_err(|_| TmuxError::InvalidRow(line.to_owned()))?,
         title: sanitize_text(fields[8], 256),
         current_command: sanitize_text(fields[9], 256),
+        current_path: sanitize_text(fields[17], 1024),
         role: (!fields[10].is_empty()).then(|| fields[10].to_owned()),
         visible: visible.contains(&pane_id),
         window_active: fields[11] == "1",
@@ -297,12 +300,13 @@ mod tests {
 
     #[test]
     fn parses_inventory_and_visibility() {
-        let row = "$1\u{1f}task\u{1f}@2\u{1f}3\u{1f}agent\u{1f}%4\u{1f}0\u{1f}123\u{1f}title\u{1f}codex\u{1f}\u{1f}1\u{1f}1\u{1f}8\u{1f}9\u{1f}10\u{1f}0";
+        let row = "$1\u{1f}task\u{1f}@2\u{1f}3\u{1f}agent\u{1f}%4\u{1f}0\u{1f}123\u{1f}title\u{1f}codex\u{1f}\u{1f}1\u{1f}1\u{1f}8\u{1f}9\u{1f}10\u{1f}0\u{1f}/tmp/task";
         let pane = parse_pane(row, &HashSet::from(["%4".into()])).unwrap();
         assert_eq!(pane.target.session_name, "task");
         assert_eq!(pane.root_pid, 123);
         assert!(pane.visible);
         assert_eq!(pane.content_revision, "title:8:9:10");
+        assert_eq!(pane.current_path, "/tmp/task");
     }
 
     #[test]

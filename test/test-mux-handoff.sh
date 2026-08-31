@@ -211,15 +211,17 @@ tmux set-environment -g XDG_CONFIG_HOME "$XDG_CONFIG_HOME"
 ancestry_source=$(tmux list-panes -t handoff-ancestry:agent -F '#{pane_id}')
 ancestry_result="$WB_TEST_TMPDIR/ancestry-result"
 ancestry_prompt="$WB_TEST_TMPDIR/ancestry-prompt"
+ancestry_done="$WB_TEST_TMPDIR/ancestry-done"
 sed "s|^env.HANDOFF_TEST_OUTPUT=.*|env.HANDOFF_TEST_OUTPUT=$ancestry_prompt|" \
   "$profile_dir/test-success.conf" > "$profile_dir/test-ancestry.conf"
 tmux send-keys -t "$ancestry_source" \
-  "printf '%s\\n' 'Ancestry case.' | env -u TMUX -u TMUX_PANE '$handoff' --target test-ancestry --no-close --startup-timeout 3 >'$ancestry_result' 2>&1" Enter
+  "printf '%s\\n' 'Ancestry case.' | env -u TMUX -u TMUX_PANE '$handoff' --target test-ancestry --no-close --startup-timeout 3 >'$ancestry_result' 2>&1; printf '%s\\n' \$? >'$ancestry_done'" Enter
 attempts=0
-while [ ! -s "$ancestry_result" ] && [ "$attempts" -lt 80 ]; do
+while [ ! -s "$ancestry_done" ] && [ "$attempts" -lt 80 ]; do
   sleep 0.1
   attempts=$((attempts + 1))
 done
+wb_assert "ancestry recovery command completes successfully" test "$(cat "$ancestry_done" 2>/dev/null || true)" -eq 0
 wb_assert "handoff recovers pane when tmux variables are stripped" grep -q 'delivered to test-ancestry' "$ancestry_result"
 wb_assert "ancestry-recovered source is reported in prompt" grep -q "source_pane: $ancestry_source" "$ancestry_prompt"
 

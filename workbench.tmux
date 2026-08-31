@@ -49,18 +49,16 @@ bind_tracked "@workbench-key-project" "@workbench-_bound-project" "" \
   "pick tmuxinator workbench project" run-shell -b "$CURRENT_DIR/bin/workbench-session-pick"
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
-# above remain independent. Prefer a release binary installed in the plugin,
-# then a local source build, then PATH.
+# above remain independent. The public tmux-agent-workbench command is a shell
+# dispatcher, so the plugin must resolve the internal Rust core explicitly.
 ATTENTION_BIN="${TMUX_AGENT_WORKBENCH_BIN:-}"
 if [ -n "$ATTENTION_BIN" ] && [ ! -x "$ATTENTION_BIN" ]; then
   ATTENTION_BIN=""
 fi
-if [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/bin/tmux-agent-workbench" ]; then
-  ATTENTION_BIN="$CURRENT_DIR/bin/tmux-agent-workbench"
-elif [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/target/release/tmux-agent-workbench" ]; then
+if [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/target/release/tmux-agent-workbench" ]; then
   ATTENTION_BIN="$CURRENT_DIR/target/release/tmux-agent-workbench"
-elif [ -z "$ATTENTION_BIN" ] && command -v tmux-agent-workbench >/dev/null 2>&1; then
-  ATTENTION_BIN="$(command -v tmux-agent-workbench)"
+elif [ -z "$ATTENTION_BIN" ] && [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core" ]; then
+  ATTENTION_BIN="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core"
 fi
 
 if [ -n "$ATTENTION_BIN" ]; then
@@ -113,7 +111,7 @@ if [ -n "$ATTENTION_BIN" ]; then
     tmux set-hook -g 'session-window-changed[920]' \
       "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'window-resized[920]' \
-      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{hook_window}\"'"
     tmux set-hook -g 'after-kill-pane[920]' \
       "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
     tmux set-hook -g 'pane-exited[920]' \

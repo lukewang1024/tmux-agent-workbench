@@ -75,6 +75,7 @@ pub struct SidebarConfig {
     pub main_min_width: u16,
     pub position: SidebarPosition,
     pub auto_create: bool,
+    pub agent_sort: AgentSort,
 }
 
 impl Default for SidebarConfig {
@@ -86,8 +87,17 @@ impl Default for SidebarConfig {
             main_min_width: 80,
             position: SidebarPosition::Left,
             auto_create: true,
+            agent_sort: AgentSort::Grouped,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSort {
+    #[default]
+    Grouped,
+    Prioritized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

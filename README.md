@@ -200,6 +200,7 @@ max_width = 36
 main_min_width = 80
 position = "left"
 auto_create = true
+agent_sort = "grouped" # grouped or prioritized
 
 [notifications]
 enabled = true
@@ -228,7 +229,14 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 `@workbench-key-agent`, and `@workbench-key-attention` before the plugin loads.
 
 The sidebar shows all sessions and all detected agents from the current tmux
-server in separate sections. Press `d` to toggle a more detailed view with
+server in separate sections. Sessions occupy the upper half by default. A
+midpoint action row keeps `new` on the left and `menu` on the right, with Agents
+below it in the lower half. One blank row separates the action row from both
+sections. Help remains available from `?` without taking space in the mouse action
+row. Session and Agent targets use two-line cards so the full card is easier to
+click. The label at the right of the Agents header toggles between `grouped`
+(stable session/window/pane order) and `prioritized` (blocked, unseen done,
+working, seen idle, unknown); the choice is remembered. Press `d` to toggle a more detailed view with
 Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
 opens session/agent actions. The footer opens the tmuxinator-project picker and
@@ -372,7 +380,7 @@ reported through the TTL-bound command above.
   search), then opens the pick as a focused inspection window via
   `mux-inspect --focus --force`. The manual counterpart to the agent-driven
   `mux-inspect` call.
-- **`mux-run-task [--name <label>] <repo-path> '<command>'`** — appends a
+- **`tmux-agent-workbench run [--name <label>] <repo-path> -- <argv...>`** — appends a
   detached pane to that repo's inspection window for a dev server or another
   long-running task. It creates the inspection window first when necessary,
   tags the new pane with `@pane_role=task`, `@workbench_task_name`,
@@ -382,6 +390,8 @@ reported through the TTL-bound command above.
   re-laid out. The pane id is printed so callers can capture logs or remove it
   later. Long tasks are added on demand; the default inspection layout remains
   git/shell/editor only.
+  The legacy `mux-run-task` form remains as an every-invocation-warning shim
+  through 2.1. Use `--shell '<command>'` only when shell syntax is required.
 - **`mux-handoff --target <profile> < summary`** — hands the current task to a
   fresh coding-agent profile in a detached right-hand pane, using the target
   CLI's initial-prompt interface rather than terminal keystroke injection. It

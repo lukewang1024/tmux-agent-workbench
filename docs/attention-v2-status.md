@@ -18,8 +18,9 @@ the Beta tree:
   legacy local/relay fallback;
 - mode-0600 atomic server-incarnation checkpoints with pending delivery
   recovery and no prompt, screen, clipboard, or credential persistence;
-- `wb` workflow dispatcher, argv-safe `wb run`, managed opt-in for
-  `wb agent start`, one-time legacy shim warnings, and an atomic TOML workspace
+- `tmux-agent-workbench` workflow dispatcher, argv-safe
+  `tmux-agent-workbench run`, managed opt-in for
+  `tmux-agent-workbench agent start`, every-invocation legacy shim warnings, and an atomic TOML workspace
   registry with lazy non-destructive migration;
 - narrow-client fullscreen popup, popup-first attention ordering, shared
   sidebar suppression/restoration, and four unstyled responsive status
