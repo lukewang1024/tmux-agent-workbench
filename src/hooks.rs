@@ -408,8 +408,8 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
     }
     if target == HookTarget::Codex {
         let doc = content.parse::<DocumentMut>()?;
-        if !codex_hooks_trusted(&doc, &path) {
-            return Ok("installed but not trusted".into());
+        if let Some(issue) = codex_hooks_issue(&doc, &path) {
+            return Ok(issue.into());
         }
     }
     let count = content.matches(&needle).count();
@@ -519,19 +519,19 @@ fn merge_codex(path: &Path, remove: bool) -> Result<(), Box<dyn std::error::Erro
     atomic_write(path, doc.to_string().as_bytes())
 }
 
-fn codex_hooks_trusted(doc: &DocumentMut, path: &Path) -> bool {
+fn codex_hooks_issue(doc: &DocumentMut, path: &Path) -> Option<&'static str> {
     let Some(hooks) = doc.get("hooks").and_then(Item::as_table) else {
-        return false;
+        return Some("installed but not trusted");
     };
     let Some(state) = hooks.get("state").and_then(Item::as_table) else {
-        return false;
+        return Some("installed but not trusted");
     };
-    EVENTS.iter().all(|(event, _)| {
+    for (event, _) in EVENTS {
         let Some(entries) = hooks.get(event).and_then(Item::as_array_of_tables) else {
-            return false;
+            return Some("installed but not trusted");
         };
         let Some(index) = entries.iter().position(codex_entry_is_workbench) else {
-            return false;
+            return Some("installed but not trusted");
         };
         let snake = event
             .chars()
@@ -544,14 +544,17 @@ fn codex_hooks_trusted(doc: &DocumentMut, path: &Path) -> bool {
                 output
             });
         let key = format!("{}:{snake}:{index}:0", path.display());
-        state
-            .get(&key)
-            .and_then(Item::as_table)
-            .is_some_and(|entry| {
-                entry.get("trusted_hash").and_then(Item::as_str).is_some()
-                    && entry.get("enabled").and_then(Item::as_bool) != Some(false)
-            })
-    })
+        let Some(entry) = state.get(&key).and_then(Item::as_table) else {
+            return Some("installed but not trusted");
+        };
+        if entry.get("trusted_hash").and_then(Item::as_str).is_none() {
+            return Some("installed but not trusted");
+        }
+        if entry.get("enabled").and_then(Item::as_bool) == Some(false) {
+            return Some("installed but disabled");
+        }
+    }
+    None
 }
 
 fn codex_entry_is_workbench(entry: &Table) -> bool {
@@ -676,6 +679,53 @@ mod tests {
         let removed = fs::read_to_string(&path).unwrap();
         assert!(!removed.contains(HOOK_ID));
         assert!(removed.contains("model = \"gpt-test\""));
+    }
+
+    #[test]
+    fn codex_checker_distinguishes_disabled_from_untrusted_hooks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        merge_codex(&path, false).unwrap();
+        let mut doc = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let hooks = doc["hooks"].as_table_mut().unwrap();
+        let mut state = Table::new();
+        for (event, _) in EVENTS {
+            let snake = event
+                .chars()
+                .enumerate()
+                .fold(String::new(), |mut output, (index, ch)| {
+                    if ch.is_ascii_uppercase() && index > 0 {
+                        output.push('_');
+                    }
+                    output.push(ch.to_ascii_lowercase());
+                    output
+                });
+            let key = format!("{}:{snake}:0:0", path.display());
+            let mut entry = Table::new();
+            entry["trusted_hash"] = Item::Value(TomlValue::from("sha256:test"));
+            state[&key] = Item::Table(entry);
+        }
+        hooks["state"] = Item::Table(state);
+        assert_eq!(codex_hooks_issue(&doc, &path), None);
+
+        let key = format!("{}:post_tool_use:0:0", path.display());
+        doc["hooks"]["state"][&key]["enabled"] = Item::Value(TomlValue::from(false));
+        assert_eq!(
+            codex_hooks_issue(&doc, &path),
+            Some("installed but disabled")
+        );
+
+        doc["hooks"]["state"][&key]
+            .as_table_mut()
+            .unwrap()
+            .remove("trusted_hash");
+        assert_eq!(
+            codex_hooks_issue(&doc, &path),
+            Some("installed but not trusted")
+        );
     }
 
     #[test]
