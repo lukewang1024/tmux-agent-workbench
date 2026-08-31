@@ -92,15 +92,28 @@ fn event_loop(
     let mut last_success = None;
     let mut next_refresh = Instant::now();
     let mut dirty = true;
+    let mut initial_selection = true;
     loop {
         if let Ok(result) = snapshot_rx.try_recv() {
             match result {
                 Ok(fetched) => {
+                    let selected_key = rows.get(selected).and_then(selection_key);
                     rows = build_rows(&fetched, detailed);
-                    snapshot = Some(fetched);
                     disconnected = false;
                     last_success = Some(Instant::now());
-                    selected = nearest_selectable(&rows, selected).unwrap_or(0);
+                    selected = if initial_selection {
+                        initial_selection = false;
+                        current_agent_selection(&rows, &fetched, server)
+                            .or_else(|| nearest_selectable(&rows, 0))
+                            .unwrap_or(0)
+                    } else {
+                        selected_key
+                            .as_deref()
+                            .and_then(|key| nearest_matching_key(&rows, key, selected))
+                            .or_else(|| nearest_selectable(&rows, selected))
+                            .unwrap_or(0)
+                    };
+                    snapshot = Some(fetched);
                 }
                 Err(_) => {
                     // Keep the last good snapshot through a short scan/IPC
@@ -173,6 +186,14 @@ fn event_loop(
         let input = event::read()?;
         dirty = true;
         match input {
+            Event::FocusGained => {
+                selection_visible = true;
+                if let Some(snapshot) = &snapshot
+                    && let Some(current) = current_agent_selection(&rows, snapshot, server)
+                {
+                    selected = current;
+                }
+            }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 if popup_mode()
                     && !help_visible
@@ -212,10 +233,7 @@ fn event_loop(
                             rows = build_rows(snapshot, detailed);
                             selected = selected_key
                                 .as_deref()
-                                .and_then(|key| {
-                                    rows.iter()
-                                        .position(|row| selection_key(row).as_deref() == Some(key))
-                                })
+                                .and_then(|key| nearest_matching_key(&rows, key, selected))
                                 .or_else(|| nearest_selectable(&rows, selected))
                                 .unwrap_or(0);
                         }
@@ -312,7 +330,6 @@ fn event_loop(
                     _ => {}
                 }
             }
-            Event::FocusGained => selection_visible = true,
             Event::FocusLost => {
                 selection_visible = false;
                 footer_hover = None;
@@ -335,23 +352,9 @@ fn build_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
     if std::env::var_os("WORKBENCH_POPUP").is_some() {
         return build_popup_rows(snapshot, detailed);
     }
-    let mut rows = vec![Row::Section("sessions")];
-    let mut sessions = snapshot.sessions.clone();
-    sessions.sort_by_key(|session| session.attention_count == 0);
-    for session in sessions {
-        rows.push(Row::Session(session));
-    }
-    rows.push(Row::Spacer);
-    rows.push(Row::Section("agents"));
+    let mut rows = vec![Row::Section("agents")];
     let mut agents = snapshot.agents.clone();
-    agents.sort_by_key(|agent| {
-        (
-            agent.attention.as_ref().is_none_or(|event| event.seen),
-            agent.target.session_name.clone(),
-            agent.target.window_index,
-            agent.target.pane_index,
-        )
-    });
+    agents.sort_by_key(stable_agent_key);
     for agent in agents {
         rows.push(Row::Agent(agent.clone()));
         if detailed {
@@ -382,25 +385,18 @@ fn build_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
                 .map(|conversation| Row::Conversation(agent.clone(), conversation)),
         );
     }
+    rows.push(Row::Spacer);
+    rows.push(Row::Section("sessions"));
+    let mut sessions = snapshot.sessions.clone();
+    sessions.sort_by_key(stable_session_key);
+    rows.extend(sessions.into_iter().map(Row::Session));
     rows
 }
 
 fn build_popup_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
     let mut rows = vec![Row::Section("attention")];
     let mut agents = snapshot.agents.clone();
-    agents.sort_by_key(|agent| {
-        (
-            agent.attention.as_ref().is_none_or(|event| event.seen),
-            agent
-                .attention
-                .as_ref()
-                .map(|event| event.since_unix_ms)
-                .unwrap_or(u64::MAX),
-            agent.target.session_name.clone(),
-            agent.target.window_index,
-            agent.target.pane_index,
-        )
-    });
+    agents.sort_by_key(stable_agent_key);
     for agent in agents
         .iter()
         .filter(|agent| agent.attention.as_ref().is_some_and(|event| !event.seen))
@@ -426,9 +422,76 @@ fn build_popup_rows(snapshot: &Snapshot, detailed: bool) -> Vec<Row> {
     rows.push(Row::Spacer);
     rows.push(Row::Section("sessions"));
     let mut sessions = snapshot.sessions.clone();
-    sessions.sort_by_key(|session| (session.attention_count == 0, session.session_name.clone()));
+    sessions.sort_by_key(stable_session_key);
     rows.extend(sessions.into_iter().map(Row::Session));
     rows
+}
+
+fn stable_agent_key(agent: &AgentSnapshot) -> (String, u32, u32, String) {
+    (
+        agent.target.session_name.clone(),
+        agent.target.window_index,
+        agent.target.pane_index,
+        agent.instance_id.clone(),
+    )
+}
+
+fn stable_session_key(session: &SessionSnapshot) -> (String, String) {
+    (session.session_name.clone(), session.session_id.clone())
+}
+
+fn current_agent_selection(
+    rows: &[Row],
+    snapshot: &Snapshot,
+    server: &ServerIdentity,
+) -> Option<usize> {
+    let instance = current_agent_instance(snapshot, server)?;
+    // Popup mode may also show the Agent in the attention section. Prefer the
+    // canonical Agents section so Down continues through Agents to Sessions.
+    rows.iter()
+        .rposition(|row| matches!(row, Row::Agent(agent) if agent.instance_id == instance))
+}
+
+fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Option<String> {
+    let source = std::env::var("TMUX_PANE").ok()?;
+    if let Some(agent) = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.target.pane_id == source)
+    {
+        return Some(agent.instance_id.clone());
+    }
+
+    let output = Command::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args([
+            "list-panes",
+            "-t",
+            &source,
+            "-F",
+            "#{pane_id}\u{1f}#{pane_last}\u{1f}#{@pane_role}",
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let previous = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            let pane = fields.next()?;
+            let was_last = fields.next()? == "1";
+            let role = fields.next().unwrap_or_default();
+            (was_last && role != "sidebar").then(|| pane.to_owned())
+        })?;
+    snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.target.pane_id == previous)
+        .map(|agent| agent.instance_id.clone())
 }
 
 fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
@@ -756,6 +819,14 @@ fn selection_key(row: &Row) -> Option<String> {
         )),
         Row::Section(_) | Row::Detail(_, _) | Row::Spacer => None,
     }
+}
+
+fn nearest_matching_key(rows: &[Row], key: &str, previous: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| selection_key(row).as_deref() == Some(key))
+        .min_by_key(|(index, _)| index.abs_diff(previous))
+        .map(|(index, _)| index)
 }
 
 fn move_selection(rows: &[Row], selected: &mut usize, direction: i32) {
@@ -1181,10 +1252,10 @@ mod tests {
     }
 
     #[test]
-    fn attention_partition_preserves_tmux_session_order() {
-        let session = |id: &str, attention_count| SessionSnapshot {
+    fn sessions_match_tmux_name_order() {
+        let session = |id: &str, name: &str, attention_count| SessionSnapshot {
             session_id: id.into(),
-            session_name: id.into(),
+            session_name: name.into(),
             rollup_state: DisplayState::Unknown,
             agent_count: 1,
             attention_count,
@@ -1198,10 +1269,10 @@ mod tests {
             generation: 1,
             observed_at_unix_ms: 1,
             sessions: vec![
-                session("$2", 0),
-                session("$3", 1),
-                session("$10", 0),
-                session("$11", 2),
+                session("$2", "zeta", 0),
+                session("$3", "alpha", 1),
+                session("$10", "gamma", 0),
+                session("$11", "beta", 2),
             ],
             agents: vec![],
             clients: vec![],
@@ -1217,7 +1288,53 @@ mod tests {
                 | Row::Spacer => None,
             })
             .collect();
-        assert_eq!(sessions, ["$3", "$11", "$2", "$10"]);
+        assert_eq!(sessions, ["$3", "$11", "$10", "$2"]);
+    }
+
+    #[test]
+    fn agents_use_stable_tmux_location_order() {
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let template = snapshot.agents[0].clone();
+        let agent = |instance: &str, session: &str, window, pane| {
+            let mut agent = template.clone();
+            agent.instance_id = instance.into();
+            agent.target.session_id = session.into();
+            agent.target.window_index = window;
+            agent.target.pane_index = pane;
+            agent
+        };
+        snapshot.agents = vec![
+            agent("late", "$11", 1, 0),
+            agent("pane", "$2", 1, 3),
+            agent("first", "$2", 1, 1),
+        ];
+        snapshot.agents[0].target.session_name = "zeta".into();
+        snapshot.agents[1].target.session_name = "alpha".into();
+        snapshot.agents[2].target.session_name = "alpha".into();
+
+        let agents: Vec<_> = build_rows(&snapshot, false)
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Agent(agent) => Some(agent.instance_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(agents, ["first", "pane", "late"]);
+    }
+
+    #[test]
+    fn duplicate_agent_key_stays_in_its_nearest_section() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let agent = snapshot.agents[0].clone();
+        let rows = vec![
+            Row::Agent(agent.clone()),
+            Row::Spacer,
+            Row::Agent(agent.clone()),
+        ];
+        let key = selection_key(&Row::Agent(agent)).unwrap();
+        assert_eq!(nearest_matching_key(&rows, &key, 2), Some(2));
     }
 
     #[test]

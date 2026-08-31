@@ -1228,9 +1228,7 @@ fn focus_target(
         validate_target(source_pane, '%')?;
     }
     let server = ServerIdentity::discover()?;
-    let source_client = source_pane
-        .and_then(|pane| tmux_format(&server, pane, "#{client_name}").ok())
-        .filter(|client| !client.is_empty());
+    let source_client = source_pane.and_then(|pane| client_for_pane(&server, pane));
     if let (Some(source_pane), Some(target_pane)) = (source_pane, pane) {
         restore_source_pane_before_jump(&server, source_pane, target_pane)?;
     }
@@ -1277,6 +1275,33 @@ fn focus_target(
         }
     }
     Ok(())
+}
+
+fn client_for_pane(server: &ServerIdentity, pane: &str) -> Option<String> {
+    let output = ProcessCommand::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args([
+            "list-clients",
+            "-F",
+            "#{client_name}\u{1f}#{pane_id}\u{1f}#{client_activity}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            let client = fields.next()?;
+            let active_pane = fields.next()?;
+            let activity = fields.next()?.parse::<u64>().ok()?;
+            (active_pane == pane).then(|| (activity, client.to_owned()))
+        })
+        .max_by_key(|(activity, _)| *activity)
+        .map(|(_, client)| client)
 }
 
 fn restore_source_pane_before_jump(

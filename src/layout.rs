@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 
@@ -37,9 +36,6 @@ pub fn control(
         .mode(0o600)
         .open(lock_path)?;
     lock.lock_exclusive()?;
-    if !matches!(&action, Action::Remember) {
-        suppress_programmatic_resize(&server)?;
-    }
     let result = match action {
         Action::Configure => Ok(()),
         Action::Toggle => toggle(
@@ -209,7 +205,7 @@ fn create(
     debug(&format!(
         "create window={window} window_width={window_width} width={width} main_min={main_min} auto={auto}"
     ));
-    if window_width < width.saturating_add(main_min) {
+    if window_width < width.saturating_add(main_min).saturating_add(1) {
         debug("responsive gate skipped sidebar");
         if auto {
             tmux(
@@ -396,7 +392,7 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
         .trim()
         .parse::<u16>()
         .unwrap_or(0);
-    if window_width < width.saturating_add(main_min) {
+    if window_width < width.saturating_add(main_min).saturating_add(1) {
         if let Some(pane) = panes.first() {
             tmux(
                 server,
@@ -412,6 +408,13 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
             close_sidebar(server, window, pane)?;
         }
     } else if panes.is_empty() {
+        // aggressive-resize lets an unobserved window grow back to the large
+        // server size. Do not recreate its sidebar in the background only to
+        // destroy it when a narrow client returns. The client/session-change
+        // hooks call maintain synchronously when the window is actually shown.
+        if !window_has_client(server, window)? {
+            return Ok(());
+        }
         let auto_hidden =
             display(server, window, "#{@workbench_sidebar_auto_hidden}")?.trim() == "1";
         let disabled = display(server, window, "#{@workbench_sidebar_disabled}")?.trim() == "1";
@@ -426,6 +429,14 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
         )?;
     }
     Ok(())
+}
+
+fn window_has_client(
+    server: &ServerIdentity,
+    window: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let output = tmux(server, &["list-clients", "-F", "#{window_id}"])?;
+    Ok(output.lines().any(|visible| visible == window))
 }
 
 fn freeze_window_name(
@@ -505,49 +516,73 @@ fn close_sidebar(
 
 fn remember(server: &ServerIdentity, pane: &str) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(pane, '%')?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let busy_until = option(server, "@workbench_layout_busy_until")?
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0);
-    if now < busy_until {
-        return Ok(());
-    }
-    if display(server, pane, "#{@pane_role}")?.trim() != "sidebar" {
-        return Ok(());
-    }
-    let width = display(server, pane, "#{pane_width}")?
+    let pane = if display(server, pane, "#{@pane_role}")?.trim() == "sidebar" {
+        pane.to_owned()
+    } else {
+        let window = display(server, pane, "#{window_id}")?;
+        let Some(sidebar) = sidebar_panes(server, window.trim())?.into_iter().next() else {
+            return Ok(());
+        };
+        sidebar
+    };
+    let requested = display(server, &pane, "#{pane_width}")?
         .trim()
         .parse::<u16>()
         .unwrap_or(26);
     let min = option_u16(server, "@sidebar_min_width", 18);
     let max = option_u16(server, "@sidebar_max_width", 36).min(64);
-    tmux(
+    let main_min = option_u16(server, "@sidebar_main_min_width", 80);
+    let saved = option_u16(server, "@sidebar_width", 26);
+    let mut effective_max = max;
+    let mut all_at_saved = true;
+    let output = tmux(
         server,
         &[
-            "set-option",
-            "-g",
-            "@sidebar_width",
-            &width.clamp(min, max).to_string(),
+            "list-panes",
+            "-a",
+            "-f",
+            "#{==:#{@pane_role},sidebar}",
+            "-F",
+            "#{pane_id}\u{1f}#{pane_width}\u{1f}#{window_width}",
         ],
     )?;
-    Ok(())
-}
-
-fn suppress_programmatic_resize(server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
-    let until = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis()
-        .saturating_add(5_000);
+    let mut sidebars = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split('\u{1f}');
+        let Some(sidebar) = fields.next() else {
+            continue;
+        };
+        let Some(pane_width) = fields.next().and_then(|value| value.parse::<u16>().ok()) else {
+            continue;
+        };
+        let Some(window_width) = fields.next().and_then(|value| value.parse::<u16>().ok()) else {
+            continue;
+        };
+        if !valid_target(sidebar, '%') {
+            continue;
+        }
+        all_at_saved &= pane_width == saved;
+        // One column belongs to tmux's separator between the sidebar and the
+        // main area. Existing sidebars should converge on the widest value
+        // that still leaves every main area at its configured minimum.
+        effective_max = effective_max.min(window_width.saturating_sub(main_min.saturating_add(1)));
+        sidebars.push(sidebar.to_owned());
+    }
+    effective_max = effective_max.max(min);
+    let width = requested.clamp(min, effective_max);
+    if width == saved && requested == saved && all_at_saved {
+        return Ok(());
+    }
     tmux(
         server,
-        &[
-            "set-option",
-            "-g",
-            "@workbench_layout_busy_until",
-            &until.to_string(),
-        ],
+        &["set-option", "-g", "@sidebar_width", &width.to_string()],
     )?;
+    for sidebar in sidebars {
+        tmux(
+            server,
+            &["resize-pane", "-t", &sidebar, "-x", &width.to_string()],
+        )?;
+    }
     Ok(())
 }
 

@@ -169,7 +169,18 @@ impl Detector {
                 let active = panes
                     .iter()
                     .copied()
-                    .find(|pane| pane.window_active && pane.pane_active);
+                    .find(|pane| pane.window_active && pane.pane_active)
+                    // When the Workbench sidebar owns focus it has already
+                    // been filtered from this inventory. tmux marks the main
+                    // pane that preceded it as pane_last; retain that target
+                    // so the first Session click cannot land on the sidebar or
+                    // on a stale window.
+                    .or_else(|| {
+                        panes
+                            .iter()
+                            .copied()
+                            .find(|pane| pane.window_active && pane.pane_last)
+                    });
                 SessionSnapshot {
                     session_id,
                     session_name: panes[0].target.session_name.clone(),

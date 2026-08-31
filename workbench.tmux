@@ -108,14 +108,19 @@ if [ -n "$ATTENTION_BIN" ]; then
       "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'client-resized[920]' \
       "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    tmux set-hook -g 'client-session-changed[920]' \
+      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    tmux set-hook -g 'session-window-changed[920]' \
+      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'window-resized[920]' \
       "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'after-kill-pane[920]' \
       "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
     tmux set-hook -g 'pane-exited[920]' \
       "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
-    tmux set-hook -g 'after-resize-pane[920]' \
-      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control remember \"#{pane_id}\"'"
+    tmux set-hook -gu 'after-resize-pane[920]' 2>/dev/null || true
+    tmux bind-key -T root MouseDragEnd1Border run-shell -b \
+      "\"$ATTENTION_BIN\" sidebar-control remember \"#{mouse_pane}\""
   else
     tmux display-message "tmux-agent-workbench: legacy tmux-agent-sidebar is loaded; v2 sidebar disabled (run doctor)"
   fi
