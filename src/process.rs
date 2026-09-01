@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 
-use sysinfo::{Pid, Process, ProcessesToUpdate, System, ThreadKind};
+use sysinfo::{Pid, Process, ProcessesToUpdate, System};
 
 use crate::model::{AgentKind, ProcessFingerprint};
 
@@ -54,7 +54,7 @@ fn find_agent(
     let root = Pid::from_u32(root);
     let mut best: Option<(usize, &Process, AgentKind)> = None;
     for process in system.processes().values() {
-        if !is_agent_process_candidate(process.thread_kind()) {
+        if !is_process_group_leader(process.pid().as_u32()) {
             continue;
         }
         let Some(kind) = identify(process, aliases) else {
@@ -90,8 +90,25 @@ fn find_agent(
     })
 }
 
-fn is_agent_process_candidate(thread_kind: Option<ThreadKind>) -> bool {
-    thread_kind.is_none()
+#[cfg(target_os = "linux")]
+fn is_process_group_leader(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|status| linux_tgid_from_status(&status))
+        .is_none_or(|tgid| tgid == pid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_process_group_leader(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tgid_from_status(status: &str) -> Option<u32> {
+    status.lines().find_map(|line| {
+        line.strip_prefix("Tgid:")
+            .and_then(|value| value.trim().parse().ok())
+    })
 }
 
 fn process_candidate_precedes(candidate: (usize, u64, u32), current: (usize, u64, u32)) -> bool {
@@ -165,9 +182,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn worker_threads_are_not_agent_process_candidates() {
-        assert!(is_agent_process_candidate(None));
-        assert!(!is_agent_process_candidate(Some(ThreadKind::Userland)));
-        assert!(!is_agent_process_candidate(Some(ThreadKind::Kernel)));
+        assert_eq!(
+            linux_tgid_from_status("Name:\tcodex\nTgid:\t42\nPid:\t42\n"),
+            Some(42)
+        );
+        assert!(is_process_group_leader(std::process::id()));
     }
 }
