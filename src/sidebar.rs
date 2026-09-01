@@ -509,7 +509,7 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![Row::Section("sessions")];
+    let mut rows = vec![Row::Section("sessions"), Row::Spacer];
     let mut sessions = snapshot.sessions.clone();
     sessions.sort_by_key(stable_session_key);
     for session in sessions {
@@ -520,6 +520,7 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
     rows.push(Row::Actions);
     rows.push(Row::Spacer);
     rows.push(Row::AgentSection(agent_sort));
+    rows.push(Row::Spacer);
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
     if agent_sort == AgentSort::Prioritized {
@@ -684,9 +685,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
     match row {
         Row::Section(label) => Line::from(Span::styled(
             *label,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::DIM),
+            muted_style().add_modifier(Modifier::BOLD),
         )),
         Row::AgentSection(sort) => aligned_line(
             "agents".into(),
@@ -696,24 +695,22 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             }
             .into(),
             width,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::DIM),
-            Style::default().fg(Color::Cyan),
+            muted_style().add_modifier(Modifier::BOLD),
+            muted_style(),
             false,
         ),
-        Row::Session(session) => aligned_line(
-            format!(" {} {}", glyph(session.rollup_state), session.session_name),
-            String::new(),
+        Row::Session(session) => icon_title_line(
+            glyph(session.rollup_state),
+            &session.session_name,
             width,
+            Style::default().fg(state_color(session.rollup_state)),
             if session.active {
                 Style::default()
-                    .fg(state_color(session.rollup_state))
+                    .fg(Color::Rgb(235, 235, 245))
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(state_color(session.rollup_state))
+                Style::default().fg(Color::Rgb(235, 235, 245))
             },
-            Style::default().add_modifier(Modifier::DIM),
             selected,
         ),
         Row::SessionSub(session) => aligned_line(
@@ -733,28 +730,19 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             selected,
         ),
         Row::Agent(agent) => {
-            let estimated = agent.state_source == StateSource::Screen;
-            let primary = if agent.visible && !estimated {
+            let title = if agent.visible && agent.state_source != StateSource::Screen {
                 Style::default()
-                    .fg(state_color(agent.display_state))
+                    .fg(Color::Rgb(235, 235, 245))
                     .add_modifier(Modifier::BOLD)
-            } else if estimated {
-                Style::default()
-                    .fg(state_color(agent.display_state))
-                    .add_modifier(Modifier::DIM)
             } else {
-                Style::default().fg(state_color(agent.display_state))
+                Style::default().fg(Color::Rgb(235, 235, 245))
             };
-            aligned_line(
-                format!(
-                    " {} {}",
-                    glyph(agent.display_state),
-                    agent.target.session_name
-                ),
-                String::new(),
+            icon_title_line(
+                glyph(agent.display_state),
+                &agent.target.session_name,
                 width,
-                primary,
-                Style::default(),
+                Style::default().fg(state_color(agent.display_state)),
+                title,
                 selected,
             )
         }
@@ -826,12 +814,19 @@ fn source_pane() -> Option<String> {
 }
 
 fn button_style(button: FooterButton, hovered: Option<FooterButton>) -> Style {
-    let style = Style::default().fg(Color::Cyan);
+    let style = muted_style();
     if hovered == Some(button) {
         style.add_modifier(Modifier::REVERSED)
     } else {
         style
     }
+}
+
+fn muted_style() -> Style {
+    // ANSI bright-black is the theme-pack `term-muted` semantic color. Keep it
+    // undimmed: DIM makes muted text illegible, while an accent such as Cyan
+    // gives structural labels and secondary actions too much visual weight.
+    Style::default().fg(Color::DarkGray)
 }
 
 fn render_actions(width: u16, hovered: Option<FooterButton>) -> Line<'static> {
@@ -1033,6 +1028,40 @@ fn aligned_line(
         Span::styled(left, left_style),
         Span::styled(" ".repeat(gap), left_style),
         Span::styled(right, right_style),
+    ])
+}
+
+fn icon_title_line(
+    icon: &str,
+    title: &str,
+    width: u16,
+    mut icon_style: Style,
+    mut title_style: Style,
+    selected: bool,
+) -> Line<'static> {
+    let width = usize::from(width);
+    let prefix = format!(" {icon} ");
+    let title_limit = width.saturating_sub(prefix.chars().count());
+    let truncated = title.chars().count() > title_limit;
+    let mut title = title.chars().take(title_limit).collect::<String>();
+    if truncated && !title.is_empty() {
+        title.pop();
+        title.push('…');
+    }
+    let gap = width.saturating_sub(prefix.chars().count() + title.chars().count());
+    if selected {
+        icon_style = icon_style
+            .remove_modifier(Modifier::DIM)
+            .bg(Color::DarkGray);
+        title_style = title_style
+            .remove_modifier(Modifier::DIM)
+            .add_modifier(Modifier::BOLD)
+            .bg(Color::DarkGray);
+    }
+    Line::from(vec![
+        Span::styled(prefix, icon_style),
+        Span::styled(title, title_style),
+        Span::styled(" ".repeat(gap), title_style),
     ])
 }
 
@@ -1642,6 +1671,8 @@ mod tests {
         assert_eq!(sessions, 0);
         assert_eq!(actions, 10);
         assert_eq!(agents, 12);
+        assert!(matches!(rows.get(sessions + 1), Some(Row::Spacer)));
+        assert!(matches!(rows.get(agents + 1), Some(Row::Spacer)));
     }
 
     #[test]
@@ -1826,6 +1857,72 @@ mod tests {
         assert!(!first.contains(agent_kind_name(agent.kind)));
         assert!(second.contains(agent_kind_name(agent.kind)));
         assert!(second.contains(&agent_status(&agent)));
+    }
+
+    #[test]
+    fn card_titles_are_white_while_status_stays_on_icons_and_agent_subtitles() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let title_color = Color::Rgb(235, 235, 245);
+
+        let mut session = snapshot.sessions[0].clone();
+        for agent_count in [0, 2] {
+            session.agent_count = agent_count;
+            let line = render_row(&Row::Session(session.clone()), false, 40);
+            assert_eq!(
+                line.spans[0].style.fg,
+                Some(state_color(session.rollup_state))
+            );
+            assert_eq!(line.spans[1].style.fg, Some(title_color));
+        }
+
+        let agent = snapshot.agents[0].clone();
+        let title = render_row(&Row::Agent(agent.clone()), false, 40);
+        assert_eq!(
+            title.spans[0].style.fg,
+            Some(state_color(agent.display_state))
+        );
+        assert_eq!(title.spans[1].style.fg, Some(title_color));
+
+        let subtitle = render_row(&Row::AgentSub(agent.clone()), false, 40);
+        assert_eq!(
+            subtitle.spans[0].style.fg,
+            Some(state_color(agent.display_state))
+        );
+
+        for row in [Row::Session(session), Row::Agent(agent)] {
+            let selected = render_row(&row, true, 40);
+            assert!(
+                !selected.spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            assert!(
+                selected.spans[1]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+        }
+    }
+
+    #[test]
+    fn structural_labels_and_secondary_actions_use_theme_muted_without_dim() {
+        let section = render_row(&Row::Section("sessions"), false, 40);
+        let agent_section = render_row(&Row::AgentSection(AgentSort::Prioritized), false, 40);
+        let actions = render_actions(40, None);
+
+        for line in [section, agent_section, actions] {
+            for span in line
+                .spans
+                .iter()
+                .filter(|span| !span.content.trim().is_empty())
+            {
+                assert_eq!(span.style.fg, Some(Color::DarkGray));
+                assert!(!span.style.add_modifier.contains(Modifier::DIM));
+            }
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 
-use sysinfo::{Pid, Process, ProcessesToUpdate, System};
+use sysinfo::{Pid, Process, ProcessesToUpdate, System, ThreadKind};
 
 use crate::model::{AgentKind, ProcessFingerprint};
 
@@ -54,13 +54,25 @@ fn find_agent(
     let root = Pid::from_u32(root);
     let mut best: Option<(usize, &Process, AgentKind)> = None;
     for process in system.processes().values() {
+        if !is_agent_process_candidate(process.thread_kind()) {
+            continue;
+        }
         let Some(kind) = identify(process, aliases) else {
             continue;
         };
         let Some(depth) = descendant_depth(system, process.pid(), root) else {
             continue;
         };
-        if best.is_none_or(|(best_depth, _, _)| depth >= best_depth) {
+        if best.is_none_or(|(best_depth, best_process, _)| {
+            process_candidate_precedes(
+                (depth, process.start_time(), process.pid().as_u32()),
+                (
+                    best_depth,
+                    best_process.start_time(),
+                    best_process.pid().as_u32(),
+                ),
+            )
+        }) {
             best = Some((depth, process, kind));
         }
     }
@@ -76,6 +88,14 @@ fn find_agent(
                 .to_string(),
         },
     })
+}
+
+fn is_agent_process_candidate(thread_kind: Option<ThreadKind>) -> bool {
+    thread_kind.is_none()
+}
+
+fn process_candidate_precedes(candidate: (usize, u64, u32), current: (usize, u64, u32)) -> bool {
+    candidate < current
 }
 
 fn descendant_depth(system: &System, mut pid: Pid, root: Pid) -> Option<usize> {
@@ -135,5 +155,19 @@ mod tests {
         );
         assert_eq!(identify_token(OsStr::new("my-codex-notes"), &aliases), None);
         assert_eq!(identify_token(OsStr::new("zsh"), &aliases), None);
+    }
+
+    #[test]
+    fn closest_stable_agent_process_wins_over_transient_descendants() {
+        assert!(process_candidate_precedes((1, 100, 10), (2, 101, 11)));
+        assert!(process_candidate_precedes((1, 100, 10), (1, 101, 11)));
+        assert!(!process_candidate_precedes((2, 99, 9), (1, 100, 10)));
+    }
+
+    #[test]
+    fn worker_threads_are_not_agent_process_candidates() {
+        assert!(is_agent_process_candidate(None));
+        assert!(!is_agent_process_candidate(Some(ThreadKind::Userland)));
+        assert!(!is_agent_process_candidate(Some(ThreadKind::Kernel)));
     }
 }

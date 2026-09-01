@@ -151,10 +151,14 @@ impl Detector {
         &mut self,
         checkpoints: &[crate::checkpoint::RuntimeCheckpoint],
         restored_at_ms: u64,
-    ) {
+    ) -> Vec<crate::checkpoint::RuntimeCheckpoint> {
+        let mut unmatched = Vec::new();
         for checkpoint in checkpoints {
-            self.machine.restore_checkpoint(checkpoint, restored_at_ms);
+            if !self.machine.restore_checkpoint(checkpoint, restored_at_ms) {
+                unmatched.push(checkpoint.clone());
+            }
         }
+        unmatched
     }
 
     pub fn checkpoint_metadata(
@@ -725,6 +729,30 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmatched_checkpoint_remains_pending_until_process_discovery() {
+        let server = ServerIdentity::from_socket("/tmp/workbench-checkpoint-test".into()).unwrap();
+        let mut detector = Detector::new(server);
+        let checkpoint = crate::checkpoint::RuntimeCheckpoint {
+            version: 1,
+            server_incarnation: "server:1".into(),
+            runtime_id: "runtime".into(),
+            process_fingerprint: "42:100:/bin/codex".into(),
+            previous_state: "working".into(),
+            attention_seq: 0,
+            seen_seq: 0,
+            hook_session_id: Some("thread".into()),
+            delivered_event_ids: Vec::new(),
+            pending: Vec::new(),
+            recent_endpoint: None,
+        };
+
+        assert_eq!(
+            detector.restore_checkpoints(std::slice::from_ref(&checkpoint), 500),
+            vec![checkpoint]
+        );
+    }
 
     #[test]
     fn metadata_requires_bounded_ttl_and_safe_fields() {

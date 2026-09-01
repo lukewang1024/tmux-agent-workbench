@@ -280,7 +280,7 @@ fn update_snapshot(
     if state.detector.tick(&config, &manifests, now).is_ok() {
         if !state.recovered_runtimes.is_empty() {
             let checkpoints = std::mem::take(&mut state.recovered_runtimes);
-            state.detector.restore_checkpoints(&checkpoints, now);
+            state.recovered_runtimes = state.detector.restore_checkpoints(&checkpoints, now);
         }
         for report in crate::hooks::drain_spool(paths, server_key, now) {
             if let Ok(agent) = state.detector.report_agent_event(&report) {
@@ -838,7 +838,24 @@ fn handle(
                     return Err("agent event timestamp is in the future".into());
                 }
                 let mut state = state.write().expect("state poisoned");
-                let (report, agent) = state.detector.resolve_agent_event(&detached)?;
+                let resolved = state.detector.resolve_agent_event(&detached);
+                let (report, agent) = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(_) => {
+                        // SessionStart can beat the daemon's periodic process scan
+                        // during a fresh or resumed TUI startup. Treat a detached
+                        // hook as a discovery signal and retry after one immediate
+                        // scan instead of surfacing a spurious hook failure.
+                        let config = state.config.clone();
+                        let manifests = state.manifests.clone();
+                        state.detector.wake();
+                        state
+                            .detector
+                            .tick(&config, &manifests, now)
+                            .map_err(|error| error.to_string())?;
+                        state.detector.resolve_agent_event(&detached)?
+                    }
+                };
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
                 {
