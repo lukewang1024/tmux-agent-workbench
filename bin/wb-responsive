@@ -14,8 +14,30 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 [ -x "$core" ] || core=$(command -v tmux-agent-workbench 2>/dev/null || true)
 [ -n "$core" ] || { tmux display-message "Workbench binary unavailable"; exit 1; }
 
-window=${1:-$(tmux display-message -p '#{window_id}')}
-client_width=$(tmux display-message -p '#{client_width}')
+# tmux run-shell does not guarantee that TMUX is present in the child
+# environment. The core accepts an explicit socket and should use the same
+# server this launcher is already controlling through the tmux CLI.
+TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$(tmux display-message -p '#{socket_path}')
+export TMUX_AGENT_WORKBENCH_TMUX_SOCKET
+
+client=${2:-$(tmux display-message -p '#{client_name}')}
+case $client in
+  ''|*[!A-Za-z0-9_./-]*) tmux display-message 'Workbench client unavailable'; exit 1 ;;
+esac
+# run-shell format expansion may supply a stale window from another session.
+# Resolve the client-owned session first; ordinary window_id/session_id formats
+# still use tmux's default target pane even when display-message has -c.
+client_session=$(tmux display-message -p -c "$client" '#{client_session}') || {
+  tmux display-message 'Workbench client unavailable'
+  exit 1
+}
+window=$(tmux display-message -p -t "$client_session:" '#{window_id}') || exit 1
+source_pane=$(tmux display-message -p -t "$window" '#{pane_id}') || exit 1
+client_width=$(tmux list-clients -F '#{client_name} #{client_width}' | \
+  awk -v target="$client" '$1 == target { print $2; found = 1; exit } END { if (!found) exit 1 }') || {
+  tmux display-message -c "$client" 'Workbench client disappeared'
+  exit 1
+}
 sidebar_width=$(tmux show-option -gqv @sidebar_width)
 main_width=$(tmux show-option -gqv @sidebar_main_min_width)
 sidebar_width=${sidebar_width:-26}
@@ -28,4 +50,5 @@ fi
 "$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true
 tmux set-option -q @workbench_overlay_visible 1
 trap 'tmux set-option -qu @workbench_overlay_visible; "$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true' EXIT HUP INT TERM
-tmux display-popup -E -w 100% -h 100% "WORKBENCH_POPUP=1 '$core' sidebar"
+tmux display-popup -c "$client" -E -w 100% -h 100% \
+  "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' WORKBENCH_SOURCE_PANE='$source_pane' '$core' sidebar"

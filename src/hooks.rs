@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
 
 use crate::ipc::{Request, call};
-use crate::model::{AgentEventReport, AgentEventType, AgentKind};
+use crate::model::{AgentEventReport, AgentEventType, AgentKind, DetachedAgentEventReport};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
 
@@ -82,6 +82,60 @@ pub fn ingest(
         spool(paths, server, &report)?;
     }
     Ok(())
+}
+
+pub fn ingest_detached(
+    paths: &Paths,
+    agent: AgentKind,
+    event_name: &str,
+    input: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload: Value = if input.iter().all(u8::is_ascii_whitespace) {
+        Value::Null
+    } else {
+        serde_json::from_slice(input)?
+    };
+    let report = detached_report_from_payload(agent, event_name, &payload)?;
+    let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
+    let mut accepted = 0_u32;
+    if let Ok(entries) = fs::read_dir(&paths.runtime_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if !name.starts_with("daemon-") || !name.ends_with(".sock") {
+                continue;
+            }
+            if call(&path, &request, Duration::from_millis(150)).is_ok() {
+                accepted = accepted.saturating_add(1);
+            }
+        }
+    }
+    if accepted == 0 {
+        return Err("no Workbench daemon could associate the Codex hook with a live pane".into());
+    }
+    Ok(())
+}
+
+fn detached_report_from_payload(
+    agent: AgentKind,
+    event_name: &str,
+    payload: &Value,
+) -> Result<DetachedAgentEventReport, String> {
+    let full = report_from_payload(agent, event_name, String::new(), String::new(), 0, payload)?;
+    Ok(DetachedAgentEventReport {
+        version: full.version,
+        event_id: full.event_id,
+        agent: full.agent,
+        session_id: full.session_id,
+        session_label: full.session_label,
+        event: full.event,
+        occurred_at_unix_ms: full.occurred_at_unix_ms,
+        reason_category: full.reason_category,
+        cwd: string_field(payload, &["cwd", "working_directory", "workingDirectory"]),
+    })
 }
 
 fn report_from_payload(

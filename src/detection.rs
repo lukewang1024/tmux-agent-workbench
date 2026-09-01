@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::manifest::ManifestSet;
 use crate::model::{
-    AgentEventReport, AgentKind, AgentSnapshot, BaseState, ConversationRole, DisplayState,
-    SessionSnapshot, session_rollup,
+    AgentEventReport, AgentKind, AgentSnapshot, BaseState, ConversationRole,
+    DetachedAgentEventReport, DisplayState, SessionSnapshot, session_rollup,
 };
 use crate::process::{AgentProcess, ProcessSource, ProcessTree};
 use crate::server::ServerIdentity;
@@ -145,6 +145,23 @@ impl Detector {
 
     pub fn machine_snapshots(&self) -> Vec<AgentSnapshot> {
         self.decorated_snapshots()
+    }
+
+    pub fn restore_checkpoints(
+        &mut self,
+        checkpoints: &[crate::checkpoint::RuntimeCheckpoint],
+        restored_at_ms: u64,
+    ) {
+        for checkpoint in checkpoints {
+            self.machine.restore_checkpoint(checkpoint, restored_at_ms);
+        }
+    }
+
+    pub fn checkpoint_metadata(
+        &self,
+        instance_id: &str,
+    ) -> Option<(String, u64, u64, Option<String>)> {
+        self.machine.checkpoint_metadata(instance_id)
     }
 
     pub fn sessions(&self) -> Vec<SessionSnapshot> {
@@ -297,6 +314,70 @@ impl Detector {
             .ok_or("event pane has no tracked instance")?
             .clone();
         self.machine.report_event(&instance, report, pane.visible)
+    }
+
+    pub fn resolve_agent_event(
+        &mut self,
+        detached: &DetachedAgentEventReport,
+    ) -> Result<(AgentEventReport, AgentSnapshot), String> {
+        let snapshots = self.machine.snapshots();
+        let bound: Vec<_> = snapshots
+            .iter()
+            .filter(|agent| {
+                !agent.exited
+                    && agent.kind == detached.agent
+                    && agent.hook_session_id.as_deref() == Some(&detached.session_id)
+            })
+            .collect();
+        let chosen = if bound.len() == 1 {
+            bound[0]
+        } else if bound.is_empty() {
+            let mut candidates: Vec<_> = snapshots
+                .iter()
+                .filter(|agent| {
+                    !agent.exited
+                        && agent.kind == detached.agent
+                        && agent.hook_session_id.is_none()
+                        && detached.cwd.as_deref().is_none_or(|cwd| {
+                            self.panes
+                                .get(&agent.target.pane_id)
+                                .is_some_and(|pane| pane.current_path == cwd)
+                        })
+                })
+                .collect();
+            candidates.sort_by_key(|agent| {
+                agent
+                    .process
+                    .as_ref()
+                    .map(|process| process.started_at_ticks)
+                    .unwrap_or_default()
+            });
+            candidates
+                .last()
+                .copied()
+                .ok_or("no matching live agent pane")?
+        } else {
+            return Err("agent thread is associated with multiple panes".into());
+        };
+        let pane = self
+            .panes
+            .get(&chosen.target.pane_id)
+            .ok_or("event pane is not live")?;
+        let report = AgentEventReport {
+            version: detached.version,
+            event_id: detached.event_id.clone(),
+            agent: detached.agent,
+            pane_id: chosen.target.pane_id.clone(),
+            tmux_session_id: pane.target.session_id.clone(),
+            session_id: detached.session_id.clone(),
+            session_label: detached.session_label.clone(),
+            agent_pid: 0,
+            event: detached.event,
+            occurred_at_unix_ms: detached.occurred_at_unix_ms,
+            reason_category: detached.reason_category.clone(),
+        };
+        let snapshot = self.report_agent_event(&report)?;
+        Ok((report, snapshot))
     }
 
     fn decorated_snapshots(&self) -> Vec<AgentSnapshot> {

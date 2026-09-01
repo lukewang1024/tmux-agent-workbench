@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+parent=${1:?missing popup process id}
+shift
+[ "$#" -gt 0 ] || exit 2
+
+while kill -0 "$parent" 2>/dev/null; do
+  sleep 0.05
+done
+sleep 0.05
+
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench
+mkdir -p "$state_dir"
+log=$state_dir/popup-actions.log
+output=$(mktemp "$state_dir/.popup-action.XXXXXX")
+trap 'rm -f "$output"' 0 1 2 3 15
+
+set +e
+"$@" >"$output" 2>&1
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  {
+    printf 'failed client=%s exit=%s argv=' "${WORKBENCH_TARGET_CLIENT:-unknown}" "$status"
+    printf ' <%s>' "$@"
+    printf '\n'
+    cat "$output"
+  } >>"$log"
+
+  # Keep diagnostics useful without allowing an unattended popup failure loop
+  # to grow state indefinitely.
+  if [ "$(wc -c <"$log")" -gt 131072 ]; then
+    tail -c 65536 "$log" >"$log.tmp"
+    mv "$log.tmp" "$log"
+  fi
+fi
+exit "$status"

@@ -17,6 +17,8 @@ pub struct RuntimeCheckpoint {
     pub previous_state: String,
     pub attention_seq: u64,
     pub seen_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_session_id: Option<String>,
     #[serde(default)]
     pub delivered_event_ids: Vec<String>,
     #[serde(default)]
@@ -117,6 +119,7 @@ mod tests {
             previous_state: "working".into(),
             attention_seq: 3,
             seen_seq: 2,
+            hook_session_id: Some("thread-1".into()),
             delivered_event_ids: vec![],
             pending: vec![],
             recent_endpoint: None,

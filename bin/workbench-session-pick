@@ -32,12 +32,12 @@ fi
   printf '%s\n' 'workbench-session-pick: not inside tmux' >&2
   exit 1
 }
-if ! command -v fzf-tmux >/dev/null 2>&1; then
-  printf '%s\n' 'workbench-session-pick: fzf-tmux not found' >&2
+if ! command -v workbench-fzf-tmux >/dev/null 2>&1; then
+  printf '%s\n' 'workbench-session-pick: workbench-fzf-tmux not found' >&2
   exit 1
 fi
 
-project=$(projects | fzf-tmux -p 60%,70% \
+project=$(projects | workbench-fzf-tmux -p 60%,70% \
   --no-sort --border-label ' workbench projects ' --prompt 'New › ' \
   --bind 'tab:down,btab:up') || exit 0
 [ -n "$project" ] || exit 0

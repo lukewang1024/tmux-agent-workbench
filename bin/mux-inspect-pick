@@ -28,8 +28,8 @@ done
 dir=$(cd "$(dirname "$self")" && pwd -P)
 . "$dir/../lib/deprecation.sh"
 
-if ! command -v fzf-tmux >/dev/null 2>&1; then
-  echo "mux-inspect-pick: fzf-tmux not found on PATH (required)" >&2
+if ! command -v workbench-fzf-tmux >/dev/null 2>&1; then
+  echo "mux-inspect-pick: workbench-fzf-tmux not found on PATH (required)" >&2
   exit 1
 fi
 
@@ -51,7 +51,7 @@ fi
 [ -n "${TMUX:-}" ] || { echo "mux-inspect-pick: not inside tmux" >&2; exit 1; }
 
 sel=$(
-  all | fzf-tmux -p 80%,70% --no-sort --ansi \
+  all | workbench-fzf-tmux -p 80%,70% --no-sort --ansi \
     --border-label ' inspect dir ' --prompt '🔍  ' \
     --header '^a all ^x zoxide ^g pool ^f find' \
     --bind 'tab:down,btab:up' \

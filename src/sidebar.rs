@@ -1,4 +1,5 @@
-use std::io::{self, stdout};
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Write, stdout};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -67,6 +68,18 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
         DisableFocusChange
     )?;
     terminal.show_cursor()?;
+    if let Err(error) = &result {
+        let log = paths.state_dir.join("popup-actions.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
+            let client =
+                std::env::var("WORKBENCH_TARGET_CLIENT").unwrap_or_else(|_| "unknown".into());
+            let _ = writeln!(file, "sidebar-error client={client} error={error}");
+        }
+    }
     result
 }
 
@@ -282,11 +295,15 @@ fn event_loop(
                             return Ok(());
                         }
                     }
-                    KeyCode::Char('m') => show_row_menu(
-                        &rows,
-                        selected,
-                        Some((0, selected.saturating_sub(scroll) as u16)),
-                    )?,
+                    KeyCode::Char('m') => {
+                        if show_row_menu(
+                            &rows,
+                            selected,
+                            Some((0, selected.saturating_sub(scroll) as u16)),
+                        )? {
+                            return Ok(());
+                        }
+                    }
                     KeyCode::Char('d') => {
                         let selected_key = rows.get(selected).and_then(selection_key);
                         detailed = !detailed;
@@ -302,15 +319,43 @@ fn event_loop(
                                 .unwrap_or(0);
                         }
                     }
-                    KeyCode::Char('N') => run_session_picker()?,
-                    KeyCode::Char('i') => run_command("mux-inspect-pick")?,
-                    KeyCode::Char('W') => run_command("ws-new-prompt")?,
+                    KeyCode::Char('N') => {
+                        if run_session_picker()? {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('i') => {
+                        if run_command("mux-inspect-pick", true)? {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('W') => {
+                        if run_command("ws-new-prompt", true)? {
+                            return Ok(());
+                        }
+                    }
                     KeyCode::Char('P') if selection_visible => promote_selected(&rows, selected)?,
-                    KeyCode::Char('R') => run_command("gen-tmuxinator-configs")?,
-                    KeyCode::Char('n') => run_workbench(&["attention", "next"])?,
-                    KeyCode::Char('s') => run_workbench(&["pick", "session"])?,
-                    KeyCode::Char('a') => run_workbench(&["pick", "agent"])?,
-                    KeyCode::Char('r') => run_workbench(&["reload"])?,
+                    KeyCode::Char('R') => {
+                        run_command("gen-tmuxinator-configs", false)?;
+                    }
+                    KeyCode::Char('n') => {
+                        if run_workbench(&["attention", "next"], true)? {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if run_workbench(&["pick", "session"], true)? {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if run_workbench(&["pick", "agent"], true)? {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        run_workbench(&["reload"], false)?;
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                         return Ok(());
                     }
@@ -393,9 +438,15 @@ fn event_loop(
                         }
                         if matches!(rows.get(clicked), Some(Row::Actions)) {
                             match action_button(size.width, mouse.column) {
-                                Some(FooterButton::New) => run_session_picker()?,
+                                Some(FooterButton::New) => {
+                                    if run_session_picker()? {
+                                        return Ok(());
+                                    }
+                                }
                                 Some(FooterButton::Menu) => {
-                                    show_global_menu(false, Some((mouse.column, mouse.row)))?
+                                    if show_global_menu(false, Some((mouse.column, mouse.row)))? {
+                                        return Ok(());
+                                    }
                                 }
                                 _ => {}
                             }
@@ -431,7 +482,9 @@ fn event_loop(
                             )
                         ) {
                             selected = clicked;
-                            show_row_menu(&rows, selected, Some((mouse.column, mouse.row)))?;
+                            if show_row_menu(&rows, selected, Some((mouse.column, mouse.row)))? {
+                                return Ok(());
+                            }
                         }
                     }
                     _ => {}
@@ -586,7 +639,7 @@ fn current_agent_selection(
 }
 
 fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Option<String> {
-    let source = std::env::var("TMUX_PANE").ok()?;
+    let source = source_pane()?;
     if let Some(agent) = snapshot
         .agents
         .iter()
@@ -765,6 +818,13 @@ fn popup_mode() -> bool {
     std::env::var_os("WORKBENCH_POPUP").is_some()
 }
 
+fn source_pane() -> Option<String> {
+    std::env::var("WORKBENCH_SOURCE_PANE")
+        .or_else(|_| std::env::var("TMUX_PANE"))
+        .ok()
+        .filter(|pane| safe_target(pane, '%'))
+}
+
 fn button_style(button: FooterButton, hovered: Option<FooterButton>) -> Style {
     let style = Style::default().fg(Color::Cyan);
     if hovered == Some(button) {
@@ -875,8 +935,12 @@ fn agent_status(agent: &AgentSnapshot) -> String {
         state_name(agent.display_state)
     }
     .to_owned();
-    if agent.hook_health == crate::model::HookHealth::Conflict {
-        status.push_str(" !");
+    match agent.hook_health {
+        crate::model::HookHealth::Missing => status.push_str(" ~"),
+        crate::model::HookHealth::Stale | crate::model::HookHealth::Conflict => {
+            status.push_str(" !")
+        }
+        crate::model::HookHealth::Healthy => {}
     }
     status
 }
@@ -1073,7 +1137,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
         Some(Row::Session(session) | Row::SessionSub(session)) => {
             let mut command = Command::new(std::env::current_exe()?);
             command.args(["focus", "--session", &session.session_id]);
-            if let Ok(source) = std::env::var("TMUX_PANE") {
+            if let Some(source) = source_pane() {
                 command.args(["--source-pane", &source]);
             }
             if let Some(window) = &session.last_active_window_id {
@@ -1114,7 +1178,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
                 "--pane",
                 &agent.target.pane_id,
             ]);
-            if let Ok(source) = std::env::var("TMUX_PANE") {
+            if let Some(source) = source_pane() {
                 command.args(["--source-pane", &source]);
             }
             let status = command
@@ -1138,7 +1202,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
                 "--pane",
                 &agent.target.pane_id,
             ]);
-            if let Ok(source) = std::env::var("TMUX_PANE") {
+            if let Some(source) = source_pane() {
                 command.args(["--source-pane", &source]);
             }
             let status = command
@@ -1160,7 +1224,7 @@ fn show_row_menu(
     rows: &[Row],
     selected: usize,
     anchor: Option<(u16, u16)>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session))
             if safe_target(&session.session_id, '$') =>
@@ -1249,20 +1313,20 @@ fn show_row_menu(
                 ],
             )
         }
-        _ => Ok(()),
+        _ => Ok(false),
     }
 }
 
 fn show_global_menu(
     new_only: bool,
     anchor: Option<(u16, u16)>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     if new_only {
         return run_session_picker();
     }
     let executable = std::env::current_exe()?.display().to_string();
     let executable = shell_quote(&executable);
-    let sidebar_pane = std::env::var("TMUX_PANE")?;
+    let sidebar_pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&sidebar_pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
@@ -1303,41 +1367,89 @@ fn show_global_menu(
         ),
     ];
     if popup_mode() {
-        items.push((
-            "Close popup",
-            "q",
-            format!("send-keys -t {sidebar_pane} Escape"),
-        ));
+        // Once this popup closes there is no sidebar pane to receive these
+        // synthetic keys. The direct keyboard shortcuts remain available in
+        // the TUI; omit only the menu entries whose target would be stale.
+        items.retain(|(label, _, _)| !matches!(*label, "Promote selected" | "Details"));
     }
     show_menu("workbench", anchor, anchor.is_some(), &items)
 }
 
-fn run_workbench(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    Command::new(std::env::current_exe()?)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+fn run_workbench(args: &[&str], clear_popup: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    dispatch_command(&executable, args.iter().map(OsStr::new), clear_popup)
 }
 
-fn run_session_picker() -> Result<(), Box<dyn std::error::Error>> {
-    Command::new("workbench-session-pick")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+fn run_session_picker() -> Result<bool, Box<dyn std::error::Error>> {
+    dispatch_command("workbench-session-pick", std::iter::empty::<&OsStr>(), true)
 }
 
-fn run_command(program: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Command::new(program)
+fn run_command(program: &str, clear_popup: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    dispatch_command(program, std::iter::empty::<&OsStr>(), clear_popup)
+}
+
+fn dispatch_command<I, S>(
+    program: impl AsRef<OsStr>,
+    args: I,
+    clear_popup: bool,
+) -> Result<bool, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args: Vec<OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect();
+    if popup_mode() && clear_popup {
+        // tmux permits only one popup/menu per client. Let this process exit so
+        // the responsive sidebar popup is gone, then launch the requested UI
+        // in the same inherited tmux client context. Positional shell arguments
+        // avoid quoting command paths or user-controlled values.
+        let client = current_client()?;
+        let mut deferred = format!(
+            "WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            shell_quote(&client),
+            std::process::id(),
+            shell_quote(&program.as_ref().to_string_lossy()),
+        );
+        for arg in &args {
+            deferred.push(' ');
+            deferred.push_str(&shell_quote(&arg.to_string_lossy()));
+        }
+        // tmux owns this background job, so closing the current popup cannot
+        // kill the deferred action with the popup's process group.
+        Command::new("tmux")
+            .args(["run-shell", "-b", &deferred])
+            .status()?
+            .success()
+            .then_some(())
+            .ok_or("could not queue popup action")?;
+        return Ok(true);
+    }
+    Command::new(program.as_ref())
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(())
+    Ok(false)
+}
+
+fn current_client() -> Result<String, Box<dyn std::error::Error>> {
+    if let Ok(client) = std::env::var("WORKBENCH_TARGET_CLIENT")
+        && !client.is_empty()
+    {
+        return Ok(client);
+    }
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{client_name}"])
+        .output()?;
+    let client = String::from_utf8(output.stdout)?.trim().to_owned();
+    if !output.status.success() || client.is_empty() {
+        return Err("could not resolve popup client".into());
+    }
+    Ok(client)
 }
 
 fn promote_selected(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Error>> {
@@ -1367,9 +1479,9 @@ fn show_menu(
     anchor: Option<(u16, u16)>,
     pointer_bottom_right: bool,
     items: &[(&'static str, &'static str, String)],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let server = ServerIdentity::discover()?;
-    let pane = std::env::var("TMUX_PANE")?;
+    let pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
@@ -1381,6 +1493,8 @@ fn show_menu(
         // button's release so the menu remains available for a normal click.
         "-M".to_owned(),
         "-O".to_owned(),
+        "-c".to_owned(),
+        current_client()?,
         "-T".to_owned(),
         title.to_owned(),
         "-t".to_owned(),
@@ -1393,8 +1507,19 @@ fn show_menu(
     for (label, key, command) in items {
         args.extend([(*label).to_owned(), (*key).to_owned(), command.clone()]);
     }
-    let refs: Vec<_> = args.iter().map(String::as_str).collect();
-    tmux_ui(&server, &refs)
+    if popup_mode() {
+        let mut command_args: Vec<OsString> = server
+            .tmux_args()
+            .into_iter()
+            .map(|arg| arg.as_os_str().to_os_string())
+            .collect();
+        command_args.extend(args.into_iter().map(OsString::from));
+        dispatch_command("tmux", &command_args, true)
+    } else {
+        let refs: Vec<_> = args.iter().map(String::as_str).collect();
+        tmux_ui(&server, &refs)?;
+        Ok(false)
+    }
 }
 
 fn menu_position(anchor: Option<(u16, u16)>, pointer_bottom_right: bool) -> (String, String) {

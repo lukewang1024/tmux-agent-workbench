@@ -18,7 +18,7 @@ use crate::config::{Config, ConfigError};
 use crate::detection::{Detector, MetadataReport};
 use crate::ipc::{Request, Response, read_request, write_response};
 use crate::manifest::{ManifestError, ManifestSet};
-use crate::model::{AgentEventReport, Snapshot};
+use crate::model::{AgentEventReport, DetachedAgentEventReport, Snapshot};
 use crate::notification::{NotificationScheduler, SystemBackend};
 use crate::paths::Paths;
 use crate::relay::RelaySender;
@@ -58,6 +58,7 @@ struct State {
     server_incarnation: String,
     semantic_router: crate::semantic::SemanticRouter,
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
+    recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,10 +152,12 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
     };
     let mut semantic_router = crate::semantic::SemanticRouter::default();
     let mut recovered_pending = Vec::new();
+    let mut recovered_runtimes = Vec::new();
     if let Some(checkpoint) = recovered_checkpoint {
         let mut seen = std::collections::HashSet::new();
         let mut delivered = Vec::new();
         for runtime in checkpoint.runtimes {
+            recovered_runtimes.push(runtime.clone());
             delivered.extend(runtime.delivered_event_ids);
             recovered_pending.extend(runtime.pending.into_iter().filter(|event| {
                 now_unix_ms() <= event.deadline_unix_ms && seen.insert(event.id.clone())
@@ -174,6 +177,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         server_incarnation,
         semantic_router,
         recovered_pending,
+        recovered_runtimes,
     }));
     if state
         .read()
@@ -274,6 +278,10 @@ fn update_snapshot(
     let manifests = state.manifests.clone();
     let now = now_unix_ms();
     if state.detector.tick(&config, &manifests, now).is_ok() {
+        if !state.recovered_runtimes.is_empty() {
+            let checkpoints = std::mem::take(&mut state.recovered_runtimes);
+            state.detector.restore_checkpoints(&checkpoints, now);
+        }
         for report in crate::hooks::drain_spool(paths, server_key, now) {
             if let Ok(agent) = state.detector.report_agent_event(&report) {
                 if report.event == crate::model::AgentEventType::SessionStart
@@ -470,29 +478,14 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
         .iter()
         .filter_map(|agent| {
             let process = agent.process.as_ref()?;
-            let attention_seq = agent
-                .attention
-                .as_ref()
-                .and_then(|event| event.attention_seq)
-                .unwrap_or(0);
-            let seen_seq = agent
-                .attention
-                .as_ref()
-                .and_then(|event| event.seen_seq)
-                .unwrap_or(0);
+            let (runtime_id, attention_seq, seen_seq, hook_session_id) = state
+                .detector
+                .checkpoint_metadata(&agent.instance_id)
+                .unwrap_or_else(|| (agent.instance_id.clone(), 0, 0, None));
             Some(crate::checkpoint::RuntimeCheckpoint {
                 version: 1,
                 server_incarnation: state.server_incarnation.clone(),
-                runtime_id: agent
-                    .attention
-                    .as_ref()
-                    .and_then(|event| {
-                        event
-                            .id
-                            .rsplit_once('.')
-                            .map(|(runtime, _)| runtime.to_owned())
-                    })
-                    .unwrap_or_else(|| agent.instance_id.clone()),
+                runtime_id,
                 process_fingerprint: format!(
                     "{}:{}:{}",
                     process.pid, process.started_at_ticks, process.executable
@@ -500,6 +493,7 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
                 previous_state: format!("{:?}", agent.base_state).to_lowercase(),
                 attention_seq,
                 seen_seq,
+                hook_session_id,
                 delivered_event_ids: delivered_event_ids.clone(),
                 pending: pending.clone(),
                 recent_endpoint: recent_endpoint.clone(),
@@ -665,6 +659,13 @@ fn window_rollup(agents: &[&crate::model::AgentSnapshot]) -> (&'static str, usiz
     if done > 0 {
         return ("done", done);
     }
+    let unknown = agents
+        .iter()
+        .filter(|agent| agent.display_state == crate::model::DisplayState::Unknown)
+        .count();
+    if unknown > 0 {
+        return ("unknown", unknown);
+    }
     ("idle", agents.len())
 }
 
@@ -822,8 +823,44 @@ fn handle(
                 }
                 state.snapshot.agents = state.detector.machine_snapshots();
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);
+                persist_checkpoint(paths, &server.key, &state);
                 *snapshot.write().expect("snapshot poisoned") = state.snapshot.clone();
                 Ok(json!({"accepted": true}))
+            })
+        }
+        "agent.event.ingest" => {
+            parse_params::<DetachedAgentEventReport>(request.params).and_then(|detached| {
+                let now = now_unix_ms();
+                if now.saturating_sub(detached.occurred_at_unix_ms) > crate::hooks::SPOOL_TTL_MS {
+                    return Err("agent event expired".into());
+                }
+                if detached.occurred_at_unix_ms > now.saturating_add(5_000) {
+                    return Err("agent event timestamp is in the future".into());
+                }
+                let mut state = state.write().expect("state poisoned");
+                let (report, agent) = state.detector.resolve_agent_event(&detached)?;
+                if report.event == crate::model::AgentEventType::SessionStart
+                    && report.reason_category.as_deref() != Some("compact")
+                {
+                    state.notifier.observe_session_start(
+                        report.occurred_at_unix_ms,
+                        &report.event_id,
+                        &agent,
+                    );
+                }
+                if report.event == crate::model::AgentEventType::Error {
+                    state.notifier.observe_task_error(
+                        report.occurred_at_unix_ms,
+                        &report.event_id,
+                        &agent,
+                    );
+                    route_instant_event(&mut state, &report, &agent, now);
+                }
+                state.snapshot.agents = state.detector.machine_snapshots();
+                state.snapshot.generation = state.snapshot.generation.saturating_add(1);
+                persist_checkpoint(paths, &server.key, &state);
+                *snapshot.write().expect("snapshot poisoned") = state.snapshot.clone();
+                Ok(json!({"accepted": true, "pane_id": report.pane_id}))
             })
         }
         _ => Err(format!("unknown method: {}", request.method)),

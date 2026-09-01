@@ -57,6 +57,76 @@ pub struct StateMachine {
 }
 
 impl StateMachine {
+    pub fn restore_checkpoint(
+        &mut self,
+        checkpoint: &crate::checkpoint::RuntimeCheckpoint,
+        restored_at_ms: u64,
+    ) -> bool {
+        let Some(tracked) = self.agents.values_mut().find(|tracked| {
+            tracked.snapshot.process.as_ref().is_some_and(|process| {
+                let current = format!(
+                    "{}:{}:{}",
+                    process.pid, process.started_at_ticks, process.executable
+                );
+                current == checkpoint.process_fingerprint
+                    || stable_process_fingerprint(&current)
+                        == stable_process_fingerprint(&checkpoint.process_fingerprint)
+            })
+        }) else {
+            return false;
+        };
+        let previous = match checkpoint.previous_state.as_str() {
+            "working" => BaseState::Working,
+            "blocked" => BaseState::Blocked,
+            "idle" => BaseState::Idle,
+            "unknown" => BaseState::Unknown,
+            _ => return false,
+        };
+        tracked.runtime_id = checkpoint.runtime_id.clone();
+        tracked.attention_seq = checkpoint.attention_seq;
+        tracked.seen_seq = checkpoint.seen_seq;
+        tracked.active_hook_session_id = checkpoint.hook_session_id.clone();
+        tracked.snapshot.hook_session_id = checkpoint.hook_session_id.clone();
+        tracked.snapshot.base_state = previous;
+        tracked.snapshot.display_state = display_for(previous);
+        tracked.snapshot.state_source = StateSource::Hook;
+        tracked.snapshot.confidence = StateConfidence::High;
+        tracked.snapshot.hook_health = HookHealth::Stale;
+        tracked.snapshot.attention = if checkpoint.attention_seq > checkpoint.seen_seq {
+            let kind = if previous == BaseState::Blocked {
+                AttentionKind::Blocked
+            } else if previous == BaseState::Idle {
+                AttentionKind::Done
+            } else {
+                return true;
+            };
+            Some(attention(
+                &tracked.runtime_id,
+                checkpoint.attention_seq,
+                kind,
+                false,
+                restored_at_ms,
+            ))
+        } else {
+            None
+        };
+        refresh_attention_display(&mut tracked.snapshot);
+        true
+    }
+
+    pub fn checkpoint_metadata(
+        &self,
+        instance_id: &str,
+    ) -> Option<(String, u64, u64, Option<String>)> {
+        let tracked = self.agents.get(instance_id)?;
+        Some((
+            tracked.runtime_id.clone(),
+            tracked.attention_seq,
+            tracked.seen_seq,
+            tracked.active_hook_session_id.clone(),
+        ))
+    }
+
     pub fn observe(&mut self, observation: Observation) -> AgentSnapshot {
         let instance_id = instance_id(&observation.target.pane_id, &observation.process);
         let new_reason = reason_fingerprint(
@@ -459,6 +529,8 @@ impl StateMachine {
         if visible {
             if let Some(event) = &mut tracked.snapshot.attention {
                 event.seen = true;
+                tracked.seen_seq = event.attention_seq.unwrap_or(tracked.attention_seq);
+                event.seen_seq = Some(tracked.seen_seq);
             }
         }
         refresh_attention_display(&mut tracked.snapshot);
@@ -527,6 +599,12 @@ impl StateMachine {
             })
             .map(|tracked| tracked.snapshot.clone())
     }
+}
+
+fn stable_process_fingerprint(fingerprint: &str) -> &str {
+    fingerprint
+        .split_once(':')
+        .map_or(fingerprint, |(_, stable)| stable)
 }
 
 fn attention(
@@ -740,6 +818,37 @@ mod tests {
         let event_id = still_done.attention.unwrap().id;
         assert!(machine.acknowledge(&event_id));
         assert_eq!(machine.snapshots()[0].display_state, DisplayState::Idle);
+    }
+
+    #[test]
+    fn checkpoint_restores_unseen_done_and_hook_thread() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe(observation(BaseState::Idle, 0));
+        let process = initial.process.as_ref().unwrap();
+        let checkpoint = crate::checkpoint::RuntimeCheckpoint {
+            version: 1,
+            server_incarnation: "server:1".into(),
+            runtime_id: "runtime".into(),
+            process_fingerprint: format!(
+                "{}:{}:{}",
+                process.pid + 4,
+                process.started_at_ticks,
+                process.executable
+            ),
+            previous_state: "idle".into(),
+            attention_seq: 4,
+            seen_seq: 3,
+            hook_session_id: Some("thread".into()),
+            delivered_event_ids: Vec::new(),
+            pending: Vec::new(),
+            recent_endpoint: None,
+        };
+        assert!(machine.restore_checkpoint(&checkpoint, 500));
+        let restored = machine.snapshots().remove(0);
+        assert_eq!(restored.display_state, DisplayState::Done);
+        assert_eq!(restored.hook_health, HookHealth::Stale);
+        assert_eq!(restored.hook_session_id.as_deref(), Some("thread"));
+        assert_eq!(restored.attention.unwrap().id, "runtime.4");
     }
 
     #[test]

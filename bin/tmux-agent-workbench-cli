@@ -88,7 +88,12 @@ case $command_name in
   sidebar) need_core; exec "$core" sidebar "$@" ;;
   popup)
     need_core
-    exec tmux display-popup -E -w 100% -h 100% "WORKBENCH_POPUP=1 '$core' sidebar"
+    client=$(tmux display-message -p '#{client_name}')
+    case $client in
+      ''|*[!A-Za-z0-9_./-]*) die 'Workbench client unavailable' ;;
+    esac
+    exec tmux display-popup -c "$client" -E -w 100% -h 100% \
+      "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' '$core' sidebar"
     ;;
   pick) need_core; exec "$core" pick "$@" ;;
   status) need_core; exec "$core" status "$@" ;;

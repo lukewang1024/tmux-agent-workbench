@@ -90,8 +90,8 @@ if [ -n "$ATTENTION_BIN" ]; then
   legacy_sidebar="$(tmux show-option -gqv @agent_sidebar_bin 2>/dev/null || true)"
   if [ -z "$legacy_sidebar" ]; then
     bind_tracked "@workbench-key-sidebar" "@workbench-_bound-sidebar" "Tab" \
-      "toggle Workbench agent sidebar" run-shell -b \
-      "$CURRENT_DIR/bin/wb-responsive '#{window_id}'"
+      "toggle Workbench agent sidebar" run-shell \
+      "$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'"
     bind_tracked "@workbench-key-sidebar-all" "@workbench-_bound-sidebar-all" "" \
       "toggle Workbench agent sidebars in all windows" run-shell -b \
       "$ATTENTION_BIN sidebar-control toggle-all"

@@ -107,7 +107,7 @@ fn agent_lines(snapshot: &Snapshot) -> Vec<String> {
 }
 
 fn fzf(lines: &[String]) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let mut child = Command::new("fzf-tmux")
+    let mut child = Command::new("workbench-fzf-tmux")
         .args([
             "-p",
             "80%,70%",

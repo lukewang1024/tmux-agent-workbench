@@ -38,5 +38,11 @@ esac
 [ $# -eq 0 ] || { usage >&2; exit 2; }
 [ -n "${TMUX:-}" ] || { echo "ws-new-prompt: not inside a tmux session" >&2; exit 1; }
 
-tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
-  "run-shell -b \"$dir/ws-new %1\""
+if [ -n "${WORKBENCH_TARGET_CLIENT:-}" ]; then
+  tmux command-prompt -t "$WORKBENCH_TARGET_CLIENT" \
+    -p 'New workspace — feature [repo[:branch] ...]:' \
+    "run-shell -b \"$dir/ws-new %1\""
+else
+  tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
+    "run-shell -b \"$dir/ws-new %1\""
+fi

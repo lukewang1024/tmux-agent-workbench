@@ -520,6 +520,21 @@ matcher = { contains = { value = "approval ready" } }"#;
     }
 
     #[test]
+    fn traex_osc_title_tracks_working_spinner() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let trae = set.get(AgentKind::Trae);
+        let working = trae.classify("", "⠴ word-formula");
+        assert_eq!(working.state, BaseState::Working);
+        assert_eq!(working.rule_id.as_deref(), Some("trae-title-working"));
+        assert!(working.strong_visible_signal);
+
+        let idle = trae.classify("shell output", "word-formula");
+        assert_eq!(idle.state, BaseState::Idle);
+        assert_eq!(idle.rule_id.as_deref(), Some("trae-title-idle"));
+        assert!(!idle.strong_visible_signal);
+    }
+
+    #[test]
     fn codex_osc_title_is_a_strong_stable_signal() {
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${WORKBENCH_TARGET_CLIENT:-}" ]; then
+  exec fzf-tmux "$@"
+fi
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+dir=$(CDPATH='' cd "$(dirname "$self")" && pwd -P)
+
+WORKBENCH_REAL_TMUX=$(command -v tmux)
+export WORKBENCH_REAL_TMUX
+PATH="$dir/fzf-target:$PATH"
+export PATH
+exec fzf-tmux "$@"

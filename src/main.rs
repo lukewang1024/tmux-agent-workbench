@@ -918,10 +918,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Hook {
             command: HookCommand::Ingest { agent, event },
         } => {
-            let server = ServerIdentity::discover()?;
             let agent = parse_agent_kind(&agent)?;
             let input = tmux_agent_workbench::hooks::read_stdin()?;
-            tmux_agent_workbench::hooks::ingest(&paths, &server, agent, &event, &input)?;
+            match ServerIdentity::discover() {
+                Ok(server) => {
+                    tmux_agent_workbench::hooks::ingest(&paths, &server, agent, &event, &input)?
+                }
+                Err(tmux_agent_workbench::server::ServerError::NotInTmux)
+                    if agent == tmux_agent_workbench::model::AgentKind::Codex =>
+                {
+                    tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
+                }
+                Err(error) => return Err(error.into()),
+            }
             println!("{{}}");
         }
         Command::Config {

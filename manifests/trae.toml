@@ -3,6 +3,14 @@ min_engine_version = "2.0.0-alpha.3"
 aliases = ["trae", "traex", "trae-cli", "traecode"]
 
 [[rules]]
+id = "trae-title-working"
+priority = 1050
+state = "working"
+region = "pane_title"
+visible = "working"
+matcher = { regex = { value = "(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)" } }
+
+[[rules]]
 id = "trae-empty-screen-idle"
 priority = 10
 state = "idle"
@@ -20,6 +28,17 @@ visible = "blocker"
 matcher = { any = { items = [
   { line_regex = { value = "(?i)^\\s*(allow|approve|confirm).*[?]\\s*$" } },
   { line_regex = { value = "^\\s*Waiting for approval\\s*$" } }
+] } }
+
+[[rules]]
+id = "trae-title-idle"
+priority = 5
+state = "idle"
+region = "pane_title"
+visible = "always"
+matcher = { all = { items = [
+  { regex = { value = "\\S" } },
+  { not = { item = { regex = { value = "(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)" } } } }
 ] } }
 
 [[rules]]

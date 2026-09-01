@@ -83,6 +83,23 @@ pub struct AgentEventReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetachedAgentEventReport {
+    pub version: u32,
+    pub event_id: String,
+    pub agent: AgentKind,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    pub event: AgentEventType,
+    pub occurred_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxTarget {
     pub session_id: String,
     pub session_name: String,
