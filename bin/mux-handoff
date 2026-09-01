@@ -480,7 +480,7 @@ tmpdir=
 tmux set-option -p -t "$source" @handoff_state delivered
 
 if [ "$(tmux display-message -p -t "$source" '#{pane_active}')" = 1 ]; then
-  tmux select-pane -t "$target"
+  tmux select-pane -Z -t "$target"
 fi
 
 if [ "$no_close" = 1 ]; then

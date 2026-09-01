@@ -779,7 +779,11 @@ pub fn focus_target(
             .lines()
             .any(|candidate| candidate == pane_id);
     if pane_exists {
-        if !tmux(&["switch-client", "-c", &client, "-t", pane_id])?.success() {
+        // Target the session first, then select the pane with -Z. A direct
+        // switch-client to a pane expands an already zoomed target window.
+        if !tmux(&["switch-client", "-c", &client, "-t", session_id])?.success()
+            || !tmux(&["select-pane", "-Z", "-t", pane_id])?.success()
+        {
             return Err("remote pane could not be focused".into());
         }
         return Ok(());

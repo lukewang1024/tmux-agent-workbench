@@ -110,7 +110,7 @@ tmux split-window -v -t "$sess:$name" -c "$path"
 tmux select-layout -t "$sess:$name" even-vertical
 tmux send-keys -t "$sess:$name.1" "$git_tool" Enter
 tmux send-keys -t "$sess:$name.3" "$editor" Enter
-tmux select-pane -t "$sess:$name.2"           # land in the scratchpad, not tig
+tmux select-pane -Z -t "$sess:$name.2"        # land in the scratchpad, not tig
 
 [ "$focus" = 1 ] && tmux select-window -t "$sess:$name"
 exit 0

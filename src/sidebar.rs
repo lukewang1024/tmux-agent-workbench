@@ -1275,7 +1275,7 @@ fn show_row_menu(
                         "Focus",
                         "f",
                         format!(
-                            "switch-client -t {}; select-window -t {}; select-pane -t {}",
+                            "switch-client -t {}; select-window -t {}; select-pane -Z -t {}",
                             agent.target.session_id, agent.target.window_id, agent.target.pane_id
                         ),
                     ),
@@ -1283,7 +1283,7 @@ fn show_row_menu(
                         "Rename pane",
                         "r",
                         format!(
-                            "command-prompt -p 'Rename pane:' \"select-pane -t {} -T '%%'\"",
+                            "command-prompt -p 'Rename pane:' \"select-pane -Z -t {} -T '%%'\"",
                             agent.target.pane_id
                         ),
                     ),

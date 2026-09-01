@@ -97,7 +97,7 @@ tmux set-option -p -t "$task_pane" remain-on-exit on
 tmux set-option -p -t "$task_pane" @workbench_task_name "$task_name"
 tmux set-option -p -t "$task_pane" @workbench_task_command "$task_command"
 tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
-tmux select-pane -t "$task_pane" -T "$task_name"
+tmux select-pane -Z -t "$task_pane" -T "$task_name"
 
 # Keep the sidebar as a full-height side column when that integration is
 # installed; otherwise apply the native layout directly.
@@ -107,6 +107,6 @@ else
   tmux select-layout -t "$window_id" even-vertical >/dev/null
 fi
 
-[ -z "$active_pane" ] || tmux select-pane -t "$active_pane"
+[ -z "$active_pane" ] || tmux select-pane -Z -t "$active_pane"
 
 printf '%s\n' "$task_pane"

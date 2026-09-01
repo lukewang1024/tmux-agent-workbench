@@ -1271,7 +1271,7 @@ fn focus_target(
         commands.push(vec!["select-window", "-t", window]);
     }
     if let Some(pane) = pane {
-        commands.push(vec!["select-pane", "-t", pane]);
+        commands.push(select_pane_command(pane));
     }
     for args in commands {
         let status = ProcessCommand::new("tmux")
@@ -1284,6 +1284,12 @@ fn focus_target(
         }
     }
     Ok(())
+}
+
+fn select_pane_command(pane: &str) -> Vec<&str> {
+    // Selecting another pane normally expands a zoomed tmux window. Preserve
+    // responsive single-pane mode while remaining a no-op when unzoomed.
+    vec!["select-pane", "-Z", "-t", pane]
 }
 
 fn client_for_pane(server: &ServerIdentity, pane: &str) -> Option<String> {
@@ -1327,7 +1333,7 @@ fn restore_source_pane_before_jump(
         let _ = ProcessCommand::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
-            .args(["select-pane", "-t", source_pane, "-l"])
+            .args(["select-pane", "-Z", "-t", source_pane, "-l"])
             .status();
     }
     Ok(())
@@ -1520,6 +1526,14 @@ fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_selection_preserves_existing_zoom() {
+        assert_eq!(
+            select_pane_command("%42"),
+            ["select-pane", "-Z", "-t", "%42"]
+        );
+    }
 
     #[test]
     fn sidebar_jump_restores_only_when_leaving_its_window() {

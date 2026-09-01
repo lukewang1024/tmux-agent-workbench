@@ -285,7 +285,7 @@ fn create(
         );
     }
     if valid_target(active.trim(), '%') {
-        tmux(server, &["select-pane", "-t", active.trim()])?;
+        tmux(server, &["select-pane", "-Z", "-t", active.trim()])?;
     }
     Ok(())
 }
