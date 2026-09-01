@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -44,6 +44,18 @@ pub struct Status {
     pub server: String,
     pub pid: u32,
     pub generation: u64,
+    pub ipc_in_flight: u64,
+    pub ipc_peak_in_flight: u64,
+    pub ipc_accepted: u64,
+    pub ipc_slow: u64,
+}
+
+#[derive(Default)]
+struct IpcMetrics {
+    in_flight: AtomicU64,
+    peak_in_flight: AtomicU64,
+    accepted: AtomicU64,
+    slow: AtomicU64,
 }
 
 struct State {
@@ -201,8 +213,17 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         state.read().expect("state poisoned").snapshot.clone(),
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let ipc_metrics = Arc::new(IpcMetrics::default());
 
-    let outcome = serve_loop(listener, state, snapshot, shutdown, paths, server);
+    let outcome = serve_loop(
+        listener,
+        state,
+        snapshot,
+        shutdown,
+        ipc_metrics,
+        paths,
+        server,
+    );
     let _ = fs::remove_file(&socket_path);
     drop(lock);
     outcome
@@ -213,6 +234,7 @@ fn serve_loop(
     state: Arc<RwLock<State>>,
     snapshot: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
+    ipc_metrics: Arc<IpcMetrics>,
     paths: &Paths,
     server: &ServerIdentity,
 ) -> Result<(), DaemonError> {
@@ -244,18 +266,37 @@ fn serve_loop(
         for _ in 0..64 {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    // A malformed, timed-out, or already-disconnected UI client is
-                    // connection-local. It must never tear down the server-wide
-                    // daemon (macOS can surface EINVAL here for a closing socket).
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                    let response = match read_request(&stream) {
-                        Ok(request) => handle(request, &state, &snapshot, &shutdown, paths, server),
-                        Err(error) => {
-                            Response::error(String::new(), "invalid_request", error.to_string())
+                    let state = Arc::clone(&state);
+                    let snapshot = Arc::clone(&snapshot);
+                    let shutdown = Arc::clone(&shutdown);
+                    let metrics = Arc::clone(&ipc_metrics);
+                    let paths = paths.clone();
+                    let server = server.clone();
+                    let in_flight = metrics.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    metrics.accepted.fetch_add(1, Ordering::Relaxed);
+                    metrics
+                        .peak_in_flight
+                        .fetch_max(in_flight, Ordering::Relaxed);
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        // A stalled or malformed client is connection-local and
+                        // must not hold up snapshots for every other sidebar.
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                        let response = match read_request(&stream) {
+                            Ok(request) => handle(
+                                request, &state, &snapshot, &shutdown, &metrics, &paths, &server,
+                            ),
+                            Err(error) => {
+                                Response::error(String::new(), "invalid_request", error.to_string())
+                            }
+                        };
+                        let _ = write_response(&stream, &response);
+                        metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+                        if started.elapsed() >= Duration::from_millis(250) {
+                            metrics.slow.fetch_add(1, Ordering::Relaxed);
                         }
-                    };
-                    let _ = write_response(&stream, &response);
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error.into()),
@@ -674,6 +715,7 @@ fn handle(
     state: &RwLock<State>,
     snapshot: &RwLock<Snapshot>,
     shutdown: &AtomicBool,
+    ipc_metrics: &IpcMetrics,
     paths: &Paths,
     server: &ServerIdentity,
 ) -> Response {
@@ -697,6 +739,10 @@ fn handle(
                 server: server.socket_path.display().to_string(),
                 pid: std::process::id(),
                 generation,
+                ipc_in_flight: ipc_metrics.in_flight.load(Ordering::Relaxed),
+                ipc_peak_in_flight: ipc_metrics.peak_in_flight.load(Ordering::Relaxed),
+                ipc_accepted: ipc_metrics.accepted.load(Ordering::Relaxed),
+                ipc_slow: ipc_metrics.slow.load(Ordering::Relaxed),
             })
             .map_err(|error| error.to_string())
         }

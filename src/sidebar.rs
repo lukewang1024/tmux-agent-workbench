@@ -89,11 +89,12 @@ fn event_loop(
     server: &ServerIdentity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
+    let fetch_socket = socket.clone();
     let (refresh_tx, refresh_rx) = mpsc::sync_channel::<()>(1);
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         while refresh_rx.recv().is_ok() {
-            let result = fetch_snapshot(&socket).map_err(|error| error.to_string());
+            let result = fetch_snapshot(&fetch_socket).map_err(|error| error.to_string());
             let _ = snapshot_tx.try_send(result);
         }
     });
@@ -113,6 +114,7 @@ fn event_loop(
     let mut scroll = 0_usize;
     let mut disconnected = true;
     let mut last_success = None;
+    let mut last_failure_log = Instant::now() - Duration::from_secs(10);
     let mut next_refresh = Instant::now();
     let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
     let mut dirty = true;
@@ -143,13 +145,20 @@ fn event_loop(
                     };
                     snapshot = Some(fetched);
                 }
-                Err(_) => {
+                Err(error) => {
                     // Keep the last good snapshot through a short scan/IPC
                     // hiccup. A genuinely unavailable daemon still becomes
                     // visible after the stale grace instead of flashing on
                     // every isolated timeout.
                     disconnected = last_success
                         .is_none_or(|success| success.elapsed() >= Duration::from_secs(3));
+                    if last_failure_log.elapsed() >= Duration::from_secs(10) {
+                        append_sidebar_log(
+                            paths,
+                            &format!("snapshot-error socket={} error={error}", socket.display()),
+                        );
+                        last_failure_log = Instant::now();
+                    }
                 }
             }
             dirty = true;
@@ -210,7 +219,7 @@ fn event_loop(
             terminal.draw(|frame| {
                 let area = frame.area();
                 let mut lines = Vec::new();
-                if disconnected {
+                if connection_notice(disconnected, snapshot.is_some()) == Some("disconnected") {
                     lines.push(Line::from(Span::styled(
                         "disconnected",
                         Style::default().add_modifier(Modifier::DIM),
@@ -221,7 +230,18 @@ fn event_loop(
                         Style::default().add_modifier(Modifier::DIM),
                     )));
                 } else {
-                    for row in rows.iter().skip(scroll).take(viewport_height) {
+                    let row_height = if connection_notice(disconnected, snapshot.is_some())
+                        == Some("stale · reconnecting")
+                    {
+                        lines.push(Line::from(Span::styled(
+                            "stale · reconnecting",
+                            muted_style(),
+                        )));
+                        viewport_height.saturating_sub(1)
+                    } else {
+                        viewport_height
+                    };
+                    for row in rows.iter().skip(scroll).take(row_height) {
                         lines.push(if matches!(row, Row::Actions) {
                             render_actions(area.width, footer_hover)
                         } else {
@@ -234,7 +254,7 @@ fn event_loop(
                             )
                         });
                     }
-                    let shown = rows.len().saturating_sub(scroll).min(viewport_height);
+                    let shown = rows.len().saturating_sub(scroll).min(row_height);
                     let hidden = rows.len().saturating_sub(shown);
                     if hidden > 0 {
                         lines.push(Line::from(format!("↕ {hidden} hidden")));
@@ -496,6 +516,25 @@ fn event_loop(
             }
             _ => {}
         }
+    }
+}
+
+fn append_sidebar_log(paths: &Paths, message: &str) {
+    let log = paths.state_dir.join("sidebar.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+fn connection_notice(disconnected: bool, has_snapshot: bool) -> Option<&'static str> {
+    match (disconnected, has_snapshot) {
+        (true, false) => Some("disconnected"),
+        (true, true) => Some("stale · reconnecting"),
+        (false, _) => None,
     }
 }
 
@@ -1597,6 +1636,13 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_notice_preserves_a_stale_snapshot() {
+        assert_eq!(connection_notice(true, false), Some("disconnected"));
+        assert_eq!(connection_notice(true, true), Some("stale · reconnecting"));
+        assert_eq!(connection_notice(false, true), None);
+    }
     use crate::ipc::{Response, read_request, write_response};
     use crate::model::SessionSnapshot;
     use std::os::unix::net::UnixListener;

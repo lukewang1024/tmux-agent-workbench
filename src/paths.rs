@@ -24,12 +24,8 @@ impl Paths {
         let cache_root = env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".cache"));
-        let preferred_runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
-            Some(root) => PathBuf::from(root).join("tmux-agent-workbench"),
-            None => env::temp_dir().join(format!("tmux-agent-workbench-{}", unsafe {
-                libc::geteuid()
-            })),
-        };
+        let uid = unsafe { libc::geteuid() };
+        let preferred_runtime_dir = canonical_runtime_dir(uid);
         // macOS permits only 104 bytes for sockaddr_un.sun_path. Keep enough
         // room for `/daemon-<16 hex>.sock`; long per-user TMPDIR values are
         // common under /var/folders.
@@ -113,6 +109,46 @@ impl Paths {
     }
 }
 
+fn canonical_runtime_dir(uid: u32) -> PathBuf {
+    // tmux keeps the environment captured when the server was created while
+    // shells attached later may or may not export XDG_RUNTIME_DIR. Resolve the
+    // standard Linux user runtime directory independently of that inherited
+    // environment so one tmux server cannot acquire two daemon sockets.
+    if let Some(root) = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.exists() || owned_directory(path, uid))
+    {
+        return root.join("tmux-agent-workbench");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let standard = PathBuf::from(format!("/run/user/{uid}"));
+        if owned_directory(&standard, uid) {
+            return standard.join("tmux-agent-workbench");
+        }
+    }
+    env::temp_dir().join(format!("tmux-agent-workbench-{uid}"))
+}
+
+fn owned_directory(path: &Path, uid: u32) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.uid() == uid
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = uid;
+        true
+    }
+}
+
 #[cfg(unix)]
 fn set_mode_0700(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -122,4 +158,23 @@ fn set_mode_0700(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_mode_0700(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_directory_is_private_and_uid_scoped() {
+        let paths = Paths::discover().unwrap();
+        assert!(owned_directory(&paths.runtime_dir, unsafe {
+            libc::geteuid()
+        }));
+        assert!(
+            paths
+                .runtime_dir
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("tmux-agent-workbench"))
+        );
+    }
 }

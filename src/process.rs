@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -39,55 +39,65 @@ impl ProcessSource for ProcessTree {
         aliases: &HashMap<String, AgentKind>,
     ) -> HashMap<u32, AgentProcess> {
         self.system.refresh_processes(ProcessesToUpdate::All, true);
-        roots
-            .iter()
-            .filter_map(|root| find_agent(&self.system, *root, aliases).map(|agent| (*root, agent)))
-            .collect()
+        find_agents(&self.system, roots, aliases)
     }
 }
 
-fn find_agent(
+fn find_agents(
     system: &System,
-    root: u32,
+    roots: &[u32],
     aliases: &HashMap<String, AgentKind>,
-) -> Option<AgentProcess> {
-    let root = Pid::from_u32(root);
-    let mut best: Option<(usize, &Process, AgentKind)> = None;
+) -> HashMap<u32, AgentProcess> {
+    let roots: HashSet<_> = roots.iter().copied().map(Pid::from_u32).collect();
+    let mut best: HashMap<Pid, (usize, &Process, AgentKind)> = HashMap::new();
     for process in system.processes().values() {
-        if !is_process_group_leader(process.pid().as_u32()) {
-            continue;
-        }
         let Some(kind) = identify(process, aliases) else {
             continue;
         };
-        let Some(depth) = descendant_depth(system, process.pid(), root) else {
+        if !is_process_group_leader(process.pid().as_u32()) {
+            continue;
+        }
+        let Some((root, depth)) = nearest_root(system, process.pid(), &roots) else {
             continue;
         };
-        if best.is_none_or(|(best_depth, best_process, _)| {
+        if best.get(&root).is_none_or(|(best_depth, current, _)| {
             process_candidate_precedes(
                 (depth, process.start_time(), process.pid().as_u32()),
-                (
-                    best_depth,
-                    best_process.start_time(),
-                    best_process.pid().as_u32(),
-                ),
+                (*best_depth, current.start_time(), current.pid().as_u32()),
             )
         }) {
-            best = Some((depth, process, kind));
+            best.insert(root, (depth, process, kind));
         }
     }
-    best.map(|(_, process, kind)| AgentProcess {
-        kind,
-        fingerprint: ProcessFingerprint {
-            pid: process.pid().as_u32(),
-            started_at_ticks: process.start_time(),
-            executable: process
-                .exe()
-                .unwrap_or_else(|| Path::new(process.name()))
-                .display()
-                .to_string(),
-        },
-    })
+    best.into_iter()
+        .map(|(root, (_, process, kind))| {
+            (
+                root.as_u32(),
+                AgentProcess {
+                    kind,
+                    fingerprint: ProcessFingerprint {
+                        pid: process.pid().as_u32(),
+                        started_at_ticks: process.start_time(),
+                        executable: process
+                            .exe()
+                            .unwrap_or_else(|| Path::new(process.name()))
+                            .display()
+                            .to_string(),
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+fn nearest_root(system: &System, mut pid: Pid, roots: &HashSet<Pid>) -> Option<(Pid, usize)> {
+    for depth in 0..128 {
+        if roots.contains(&pid) {
+            return Some((pid, depth));
+        }
+        pid = system.process(pid)?.parent()?;
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -113,16 +123,6 @@ fn linux_tgid_from_status(status: &str) -> Option<u32> {
 
 fn process_candidate_precedes(candidate: (usize, u64, u32), current: (usize, u64, u32)) -> bool {
     candidate < current
-}
-
-fn descendant_depth(system: &System, mut pid: Pid, root: Pid) -> Option<usize> {
-    for depth in 0..128 {
-        if pid == root {
-            return Some(depth);
-        }
-        pid = system.process(pid)?.parent()?;
-    }
-    None
 }
 
 fn identify(process: &Process, aliases: &HashMap<String, AgentKind>) -> Option<AgentKind> {
