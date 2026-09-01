@@ -614,6 +614,31 @@ fn balance_sections(mut rows: Vec<Row>, content_height: usize) -> Vec<Row> {
     let Some(actions_index) = rows.iter().position(|row| matches!(row, Row::Actions)) else {
         return rows;
     };
+
+    // Keep the default Sessions-first layout when the sidebar can show every
+    // row. Once content overflows, prioritize Agents instead: they carry the
+    // live working/blocked state that is most important on short terminals
+    // (notably phone clients), while Sessions remain reachable below.
+    if rows.len() > content_height && rows.iter().any(|row| matches!(row, Row::Agent(_))) {
+        let Some(agents_index) = rows
+            .iter()
+            .position(|row| matches!(row, Row::AgentSection(_)))
+        else {
+            return rows;
+        };
+        let mut agents = rows.split_off(agents_index);
+        let mut sessions = rows;
+        sessions.truncate(actions_index);
+        while matches!(sessions.last(), Some(Row::Spacer)) {
+            sessions.pop();
+        }
+        agents.push(Row::Spacer);
+        agents.push(Row::Actions);
+        agents.push(Row::Spacer);
+        agents.extend(sessions);
+        return agents;
+    }
+
     let actions_start = content_height / 2;
     if actions_index < actions_start {
         rows.splice(
@@ -1719,6 +1744,29 @@ mod tests {
         assert_eq!(agents, 12);
         assert!(matches!(rows.get(sessions + 1), Some(Row::Spacer)));
         assert!(matches!(rows.get(agents + 1), Some(Row::Spacer)));
+    }
+
+    #[test]
+    fn overflowing_sidebar_prioritizes_agents_above_sessions() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let rows = balance_sections(build_rows(&snapshot, false, AgentSort::Grouped), 8);
+        let sessions = rows
+            .iter()
+            .position(|row| matches!(row, Row::Section("sessions")))
+            .unwrap();
+        let agents = rows
+            .iter()
+            .position(|row| matches!(row, Row::AgentSection(_)))
+            .unwrap();
+        let actions = rows
+            .iter()
+            .position(|row| matches!(row, Row::Actions))
+            .unwrap();
+
+        assert_eq!(agents, 0);
+        assert!(agents < actions);
+        assert!(actions < sessions);
     }
 
     #[test]

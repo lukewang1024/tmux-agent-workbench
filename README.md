@@ -231,10 +231,13 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 The sidebar shows all sessions and all detected agents from the current tmux
 server in separate sections. Sessions occupy the upper half by default. A
 midpoint action row keeps `new` on the left and `menu` on the right, with Agents
-below it in the lower half. One blank row separates the action row from both
-sections. Help remains available from `?` without taking space in the mouse action
-row. Session and Agent targets use two-line cards so the full card is easier to
-click. The label at the right of the Agents header toggles between `grouped`
+below it in the lower half. When the available terminal height cannot show all
+rows, the order adapts to Agents, the action row, then Sessions so live Agent
+state remains visible on short terminals such as phone clients. One blank row
+separates the action row from both sections. Help remains available from `?`
+without taking space in the mouse action row. Session and Agent targets use
+two-line cards so the full card is easier to click. The label at the right of
+the Agents header toggles between `grouped`
 (stable session/window/pane order) and `prioritized` (blocked, unseen done,
 working, seen idle, unknown); the choice is remembered and synchronized across
 all running sidebar instances. Press `d` to toggle a more detailed view with
