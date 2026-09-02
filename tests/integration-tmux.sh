@@ -105,6 +105,7 @@ initial_window=$(tmux -S "$socket" display-message -p -t workbench-test:1 '#{win
 wait_sidebar_state workbench-test:1 present
 
 # An explicit toggle-off survives maintenance; toggling again opts back in.
+printf '%s\n' 'integration phase: sidebar toggle'
 "$binary" sidebar-control toggle "$initial_window"
 sleep 1
 if tmux -S "$socket" list-panes -t workbench-test:1 -F '#{@pane_role}' | \
@@ -138,6 +139,7 @@ if [ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{window_zoomed_f
 fi
 
 # An unobserved background window intentionally stays hidden after growing:
+printf '%s\n' 'integration phase: responsive restore'
 # aggressive-resize may otherwise recreate it at the server's fallback size
 # only to destroy it again when a narrow client returns. Attach a real control
 # client and make sidebar-check visible before asserting responsive restore.
@@ -162,6 +164,7 @@ kill "$responsive_client_pid" 2>/dev/null || true
 exec 7>&-
 
 # Repeated sidebar open/close must not distort the main pane proportions.
+printf '%s\n' 'integration phase: layout preserve'
 tmux -S "$socket" new-window -d -n layout-preserve
 sleep 1
 layout_window=$(tmux -S "$socket" display-message -p -t layout-preserve '#{window_id}')
@@ -231,6 +234,7 @@ if tmux -S "$socket" list-windows -F '#{window_name}' | grep '^sole-close$' >/de
 fi
 
 # Relay click focus runs from SSH without a current tmux client. Exercise exact
+printf '%s\n' 'integration phase: relay focus'
 # pane targeting and the expired-pane/session fallback against a control client.
 focus_fifo=$test_root/focus-client.in
 mkfifo "$focus_fifo"
@@ -253,6 +257,7 @@ tmux -S "$socket" list-clients -F '#{client_session}' | \
   grep '^relay-target$' >/dev/null
 
 # Picker integration replaces only the human fzf selection. Inventory,
+printf '%s\n' 'integration phase: picker'
 # process discovery, socket snapshot, and exact focus all remain real.
 mkdir -p "$test_root/picker-bin"
 cp "$repo/tests/fixtures/fake-fzf-tmux" "$test_root/picker-bin/fzf-tmux"
@@ -276,6 +281,7 @@ WORKBENCH_PICK_MATCH=agent-pick PATH=$test_root/picker-bin:$PATH \
 tmux -S "$socket" list-clients -F '#{pane_id}' | grep "^$agent_pane$" >/dev/null
 
 # Clicking a sidebar makes it active before the handler runs. A cross-window
+printf '%s\n' 'integration phase: local focus'
 # jump must restore the source window's previous pane, otherwise returning to
 # that window lands in the sidebar itself.
 tmux -S "$socket" new-session -d -s source-restore -x 140 -y 40
@@ -307,6 +313,7 @@ while "$binary" daemon status >/dev/null 2>&1; do
 done
 
 # A fresh server must be able to bootstrap its daemon solely from plugin
+printf '%s\n' 'integration phase: daemon bootstrap'
 # sourcing. In particular, the daemon must outlive tmux's short run-shell job.
 socket_bootstrap=$test_root/bootstrap.sock
 tmux -S "$socket_bootstrap" new-session -d -s bootstrap-test -x 140 -y 40
