@@ -62,12 +62,13 @@ fn run_osascript(script: &str, tty: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn valid_tty(tty: &str) -> bool {
-    tty.strip_prefix("/dev/").is_some_and(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    })
+    std::path::Path::new(tty).exists()
+        && tty.strip_prefix("/dev/").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 #[cfg(target_os = "macos")]
