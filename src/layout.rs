@@ -378,12 +378,33 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
     if old_sidebar_loaded(server) {
         return Ok(());
     }
-    let zoomed_pane = if display(server, window, "#{window_zoomed_flag}")?.trim() == "1" {
+    let mut zoomed_pane = if display(server, window, "#{window_zoomed_flag}")?.trim() == "1" {
         let pane = display(server, window, "#{pane_id}")?;
         valid_target(pane.trim(), '%').then(|| pane.trim().to_owned())
     } else {
         None
     };
+    let width = option_u16(server, "@sidebar_width", 26).min(64);
+    let main_min = option_u16(server, "@sidebar_main_min_width", 80);
+    let window_width = display(server, window, "#{window_width}")?
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(0);
+    let rebuilding_sidebar = sidebar_panes(server, window)?.is_empty()
+        && window_width >= width.saturating_add(main_min).saturating_add(1);
+    if rebuilding_sidebar {
+        if let Some(pane) = zoomed_pane.as_deref() {
+            // list-panes reports the zoomed pane at the full viewport width.
+            // Reveal the underlying layout before create() snapshots column
+            // ratios, otherwise the active pane becomes permanently larger.
+            tmux(server, &["resize-pane", "-Z", "-t", pane])?;
+        }
+        if display(server, window, "#{@responsive_auto_zoom}")?.trim() == "1" {
+            // The following responsive hook owns this zoom and is about to
+            // release it on the wide viewport; do not briefly restore it.
+            zoomed_pane = None;
+        }
+    }
     let result = maintain_layout(server, window);
     let restore_result = restore_zoom(server, window, zoomed_pane.as_deref());
     result.and(restore_result)

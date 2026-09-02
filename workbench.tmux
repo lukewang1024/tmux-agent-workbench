@@ -103,9 +103,9 @@ if [ -n "$ATTENTION_BIN" ]; then
       tmux set-hook -gu 'after-new-window[920]' 2>/dev/null || true
     fi
     tmux set-hook -g 'client-attached[920]' \
-      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'client-resized[920]' \
-      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'client-session-changed[920]' \
       "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
     tmux set-hook -g 'session-window-changed[920]' \
