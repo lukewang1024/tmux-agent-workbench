@@ -260,8 +260,8 @@ tmux -S "$socket" list-clients -F '#{client_session}' | \
 printf '%s\n' 'integration phase: picker'
 # process discovery, socket snapshot, and exact focus all remain real.
 mkdir -p "$test_root/picker-bin"
-cp "$repo/tests/fixtures/fake-fzf-tmux" "$test_root/picker-bin/fzf-tmux"
-chmod 755 "$test_root/picker-bin/fzf-tmux"
+cp "$repo/tests/fixtures/fake-fzf-tmux" "$test_root/picker-bin/workbench-fzf-tmux"
+chmod 755 "$test_root/picker-bin/workbench-fzf-tmux"
 tmux -S "$socket" new-session -d -s agent-pick -x 140 -y 40 \
   "$repo/target/debug/examples/codex"
 tmux -S "$socket" rename-window -t agent-pick:1 agent-pick
