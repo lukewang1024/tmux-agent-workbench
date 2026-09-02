@@ -150,9 +150,9 @@ if [ -n "$ATTENTION_BIN" ]; then
     tmux set-hook -gu 'after-new-window[920]' 2>/dev/null || true
   fi
   tmux set-hook -g 'client-attached[920]' \
-    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
   tmux set-hook -g 'client-resized[920]' \
-    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
   tmux set-hook -g 'client-session-changed[920]' \
     "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
   tmux set-hook -g 'session-window-changed[920]' \
@@ -166,10 +166,8 @@ if [ -n "$ATTENTION_BIN" ]; then
   tmux set-hook -gu 'after-resize-pane[920]' 2>/dev/null || true
   tmux bind-key -T root MouseDragEnd1Border run-shell -b \
     "\"$ATTENTION_BIN\" sidebar-control remember \"#{mouse_pane}\""
-  tmux set-hook -g 'client-attached[930]' \
-    "run-shell '$CURRENT_DIR/bin/workbench-responsive-zoom #{client_width} #{window_id}'"
-  tmux set-hook -g 'client-resized[930]' \
-    "run-shell '$CURRENT_DIR/bin/workbench-responsive-zoom #{client_width} #{window_id}'"
+  tmux set-hook -gu 'client-attached[930]' 2>/dev/null || true
+  tmux set-hook -gu 'client-resized[930]' 2>/dev/null || true
 
   bind_tracked "@workbench-key-session" "@workbench-_bound-session" "" \
     "pick tmux session by agent attention" run-shell -b \

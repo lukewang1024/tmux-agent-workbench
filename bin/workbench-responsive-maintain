@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 2 ] || exit 2
+core=$1
+client=$2
+case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
+[ -x "$core" ] || exit 1
+
+runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+server_pid=$(tmux display-message -p '#{pid}')
+lock=$runtime/workbench-responsive-$server_pid-$(printf '%s' "$client" | tr '/.' '__').lock
+mkdir "$lock" 2>/dev/null || exit 0
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+
+snapshot()
+{
+  session=$(tmux display-message -p -c "$client" '#{client_session}') || return 1
+  window=$(tmux display-message -p -t "$session:" '#{window_id}') || return 1
+  width=$(tmux list-clients -F '#{client_name} #{client_width}' |
+    awk -v target="$client" '$1 == target { print $2; found = 1; exit } END { if (!found) exit 1 }') || return 1
+  case $width:$window in *[!0-9]*:*|*:*[!@0-9]*) return 1 ;; esac
+}
+
+rounds=0
+while [ "$rounds" -lt 8 ]; do
+  rounds=$((rounds + 1))
+  snapshot || exit 0
+  before=$window:$width
+  "$core" sidebar-control maintain "$window"
+  snapshot || exit 0
+  [ "$before" = "$window:$width" ] || continue
+  "$(dirname "$0")/workbench-responsive-zoom" "$width" "$window"
+  stable=$window:$width
+  snapshot || exit 0
+  [ "$stable" != "$window:$width" ] || exit 0
+done
