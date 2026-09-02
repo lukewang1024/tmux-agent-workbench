@@ -130,9 +130,12 @@ tmux -S "$socket" select-pane -t "$responsive_main_pane"
 tmux -S "$socket" resize-pane -Z -t "$responsive_main_pane"
 tmux -S "$socket" resize-window -t sidebar-check -x 100
 wait_sidebar_state sidebar-check absent
-[ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{window_zoomed_flag}')" = 1 ]
 [ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{pane_id}')" = "$responsive_main_pane" ]
-tmux -S "$socket" resize-pane -Z -t "$responsive_main_pane"
+# tmux 3.6 clears manual zoom as part of resize-window before window-resized
+# hooks run, so responsive maintenance cannot restore that pre-hook state.
+if [ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{window_zoomed_flag}')" = 1 ]; then
+  tmux -S "$socket" resize-pane -Z -t "$responsive_main_pane"
+fi
 
 # An unobserved background window intentionally stays hidden after growing:
 # aggressive-resize may otherwise recreate it at the server's fallback size
