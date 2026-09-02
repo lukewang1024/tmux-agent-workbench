@@ -124,8 +124,15 @@ tmux -S "$socket" new-window -d -n sidebar-check
 wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
+responsive_main_pane=$(tmux -S "$socket" list-panes -t sidebar-check \
+  -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | sed -n '1p')
+tmux -S "$socket" select-pane -t "$responsive_main_pane"
+tmux -S "$socket" resize-pane -Z -t "$responsive_main_pane"
 tmux -S "$socket" resize-window -t sidebar-check -x 100
 wait_sidebar_state sidebar-check absent
+[ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{window_zoomed_flag}')" = 1 ]
+[ "$(tmux -S "$socket" display-message -p -t sidebar-check '#{pane_id}')" = "$responsive_main_pane" ]
+tmux -S "$socket" resize-pane -Z -t "$responsive_main_pane"
 
 # An unobserved background window intentionally stays hidden after growing:
 # aggressive-resize may otherwise recreate it at the server's fallback size

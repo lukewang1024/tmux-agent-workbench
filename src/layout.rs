@@ -378,6 +378,21 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
     if old_sidebar_loaded(server) {
         return Ok(());
     }
+    let zoomed_pane = if display(server, window, "#{window_zoomed_flag}")?.trim() == "1" {
+        let pane = display(server, window, "#{pane_id}")?;
+        valid_target(pane.trim(), '%').then(|| pane.trim().to_owned())
+    } else {
+        None
+    };
+    let result = maintain_layout(server, window);
+    let restore_result = restore_zoom(server, window, zoomed_pane.as_deref());
+    result.and(restore_result)
+}
+
+fn maintain_layout(
+    server: &ServerIdentity,
+    window: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let panes = sidebar_panes(server, window)?;
     let pane_count = tmux(server, &["list-panes", "-t", window, "-F", "#{pane_id}"])?
         .lines()
@@ -427,6 +442,39 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
             server,
             &["resize-pane", "-t", pane, "-x", &width.to_string()],
         )?;
+    }
+    Ok(())
+}
+
+fn restore_zoom(
+    server: &ServerIdentity,
+    window: &str,
+    zoomed_pane: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(original_pane) = zoomed_pane else {
+        return Ok(());
+    };
+    if display(server, window, "#{window_zoomed_flag}")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    // Removing or adding the sidebar makes tmux leave zoom. Restore the pane
+    // that was zoomed before maintenance; if that pane was the sidebar and was
+    // removed, zoom the window's new active pane instead.
+    let target = display(server, original_pane, "#{pane_id}")
+        .ok()
+        .filter(|pane| valid_target(pane.trim(), '%'))
+        .map(|pane| pane.trim().to_owned())
+        .or_else(|| {
+            display(server, window, "#{pane_id}")
+                .ok()
+                .filter(|pane| valid_target(pane.trim(), '%'))
+                .map(|pane| pane.trim().to_owned())
+        });
+    if let Some(target) = target {
+        tmux(server, &["resize-pane", "-Z", "-t", &target])?;
     }
     Ok(())
 }
