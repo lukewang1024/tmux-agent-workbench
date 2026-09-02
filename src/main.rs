@@ -1241,35 +1241,32 @@ fn focus_target(
     if let (Some(source_pane), Some(target_pane)) = (source_pane, pane) {
         restore_source_pane_before_jump(&server, source_pane, target_pane)?;
     }
-    activate_terminal();
     let client_output = ProcessCommand::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args([
             "list-clients",
             "-F",
-            "#{client_name}\u{1f}#{client_activity}",
+            "#{client_name}\u{1f}#{client_activity}\u{1f}#{session_id}\u{1f}#{client_tty}",
         ])
         .output()?;
-    let client = source_client.or_else(|| {
-        String::from_utf8_lossy(&client_output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (name, activity) = line.split_once('\u{1f}')?;
-                Some((activity.parse::<u64>().ok()?, name.to_owned()))
-            })
-            .max_by_key(|(activity, _)| *activity)
-            .map(|(_, name)| name)
-    });
+    let clients = parse_focus_clients(&String::from_utf8_lossy(&client_output.stdout));
+    let client = source_client
+        .as_deref()
+        .and_then(|name| clients.iter().find(|client| client.name == name))
+        .or_else(|| {
+            clients
+                .iter()
+                .filter(|client| client.session_id == session)
+                .max_by_key(|client| client.activity)
+        })
+        .or_else(|| clients.iter().max_by_key(|client| client.activity));
     let mut switch = vec!["switch-client"];
-    if let Some(client) = client.as_deref() {
-        switch.extend(["-c", client]);
+    if let Some(client) = client {
+        switch.extend(["-c", &client.name]);
     }
-    switch.extend(["-t", session]);
+    switch.extend(["-t", window.unwrap_or(session)]);
     let mut commands = vec![switch];
-    if let Some(window) = window {
-        commands.push(vec!["select-window", "-t", window]);
-    }
     if let Some(pane) = pane {
         commands.push(select_pane_command(pane));
     }
@@ -1283,7 +1280,33 @@ fn focus_target(
             return Err(format!("tmux focus target expired: {}", pane.unwrap_or(session)).into());
         }
     }
+    if !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty)) {
+        activate_terminal();
+    }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FocusClient {
+    name: String,
+    activity: u64,
+    session_id: String,
+    tty: String,
+}
+
+fn parse_focus_clients(output: &str) -> Vec<FocusClient> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            Some(FocusClient {
+                name: fields.next()?.to_owned(),
+                activity: fields.next()?.parse().ok()?,
+                session_id: fields.next()?.to_owned(),
+                tty: fields.next()?.to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn select_pane_command(pane: &str) -> Vec<&str> {
@@ -1541,5 +1564,18 @@ mod tests {
         assert!(!should_restore_source_window("@1", "@1"));
         assert!(!should_restore_source_window("", "@2"));
         assert!(!should_restore_source_window("@1", ""));
+    }
+
+    #[test]
+    fn parses_tmux_clients_with_session_and_terminal_tty() {
+        assert_eq!(
+            parse_focus_clients("/dev/ttys001\u{1f}42\u{1f}$3\u{1f}/dev/ttys001\n"),
+            [FocusClient {
+                name: "/dev/ttys001".into(),
+                activity: 42,
+                session_id: "$3".into(),
+                tty: "/dev/ttys001".into(),
+            }]
+        );
     }
 }

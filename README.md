@@ -220,6 +220,11 @@ bind = "127.0.0.1"
 port = 19999
 ```
 
+On macOS, clicking an overlay resolves the tmux client attached to the target
+session, focuses its exact iTerm2 or Terminal TTY/tab, and then selects the
+target window and pane. If no matching attached client exists, Workbench falls
+back to the most recently active client and activates the terminal application.
+
 The layout controller also honors the established tmux options
 `@sidebar_width`, `@sidebar_position`, `@sidebar_auto_create`,
 `@sidebar_min_width`, `@sidebar_max_width`, and
@@ -342,7 +347,11 @@ Use `relay rotate devbox` to atomically replace its token and
 The listener accepts only authenticated CESP `task.complete` and
 `input.required` events at `POST /v1/events`, with a 16 KiB limit and rate
 limiting. Notification clicks map the stored remote id back to the SSH alias
-and execute only Workbench's validated fixed focus command.
+and execute only Workbench's validated fixed focus command. On macOS the click
+first focuses the interactive terminal tab running that SSH host, then switches
+the matching remote tmux client to the exact target window and pane. Remote
+arguments are POSIX-shell quoted before OpenSSH transports them, so opaque tmux
+ids such as `$11` are not expanded by the remote login shell.
 
 ### Migration from tmux-agent-sidebar
 

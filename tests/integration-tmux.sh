@@ -236,7 +236,8 @@ tmux -S "$socket" -C attach-session -t workbench-test \
   <"$focus_fifo" >"$test_root/focus-client.out" 2>&1 &
 focus_client_pid=$!
 tmux -S "$socket" new-session -d -s relay-target -x 140 -y 40
-target_pane=$(tmux -S "$socket" split-window -d -t relay-target -P -F '#{pane_id}')
+tmux -S "$socket" new-window -d -t relay-target -n hidden-target
+target_pane=$(tmux -S "$socket" split-window -d -t relay-target:hidden-target -P -F '#{pane_id}')
 target_session=$(tmux -S "$socket" display-message -p -t relay-target '#{session_id}')
 sleep 1
 "$binary" relay focus-target --tmux-socket "$socket" \

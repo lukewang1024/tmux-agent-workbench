@@ -668,27 +668,50 @@ pub fn focus_click(
         .find(|pairing| pairing.remote_id == remote_id)
         .ok_or("relay pairing not found")?;
     validate_ssh_host(&pairing.ssh_host)?;
-    activate_terminal();
-    let status = Command::new("ssh")
+    if !crate::terminal::interactive_ssh_tty(&pairing.ssh_host)
+        .is_some_and(|tty| crate::terminal::focus_tty(&tty))
+    {
+        activate_terminal();
+    }
+    let remote_command = [
+        "tmux-agent-workbench",
+        "relay",
+        "focus-target",
+        "--tmux-socket",
+        tmux_socket,
+        "--session-id",
+        session_id,
+        "--pane-id",
+        pane_id,
+    ]
+    .into_iter()
+    .map(shell_quote)
+    .collect::<Vec<_>>()
+    .join(" ");
+    let output = Command::new("ssh")
         .args([
+            "-o",
+            "ClearAllForwardings=yes",
             &pairing.ssh_host,
-            "tmux-agent-workbench",
-            "relay",
-            "focus-target",
-            "--tmux-socket",
-            tmux_socket,
-            "--session-id",
-            session_id,
-            "--pane-id",
-            pane_id,
+            &remote_command,
         ])
-        .status()?;
-    if status.success() {
+        .output()?;
+    if output.status.success() {
         Ok(())
     } else {
-        show_target_expired();
-        Err("remote target expired".into())
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if detail.is_empty() {
+            format!("SSH exited with {}", output.status)
+        } else {
+            detail
+        };
+        show_focus_failed(&detail);
+        Err(format!("remote focus failed: {detail}").into())
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(target_os = "macos")]
@@ -713,25 +736,23 @@ fn activate_terminal() {
 fn activate_terminal() {}
 
 #[cfg(target_os = "macos")]
-fn show_target_expired() {
+fn show_focus_failed(detail: &str) {
+    let script = "on run argv\n display notification (item 1 of argv) with title \"Workbench · focus failed\"\nend run";
     let _ = Command::new("osascript")
-        .args([
-            "-e",
-            "display notification \"The tmux target no longer exists\" with title \"Workbench · target expired\"",
-        ])
+        .args(["-e", script, detail])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
 }
 
 #[cfg(target_os = "linux")]
-fn show_target_expired() {
+fn show_focus_failed(detail: &str) {
     let _ = Command::new("notify-send")
         .args([
             "--app-name",
             "Workbench",
-            "Workbench · target expired",
-            "The tmux target no longer exists",
+            "Workbench · focus failed",
+            detail,
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -739,7 +760,7 @@ fn show_target_expired() {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn show_target_expired() {}
+fn show_focus_failed(_detail: &str) {}
 
 pub fn focus_target(
     tmux_socket: &str,
@@ -763,25 +784,41 @@ pub fn focus_target(
             tmux_socket,
             "list-clients",
             "-F",
-            "#{client_name}\u{1f}#{client_activity}",
+            "#{client_name}\u{1f}#{client_activity}\u{1f}#{session_id}",
         ])
         .output()?;
     if !clients.status.success() {
         return Err("remote tmux server has no attached client".into());
     }
-    let client = most_recent_client(&String::from_utf8_lossy(&clients.stdout))
+    let client = focus_client(&String::from_utf8_lossy(&clients.stdout), session_id)
         .ok_or("remote tmux server has no attached client")?;
     let panes = Command::new("tmux")
-        .args(["-S", tmux_socket, "list-panes", "-a", "-F", "#{pane_id}"])
+        .args([
+            "-S",
+            tmux_socket,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\u{1f}#{window_id}",
+        ])
         .output()?;
-    let pane_exists = panes.status.success()
-        && String::from_utf8_lossy(&panes.stdout)
-            .lines()
-            .any(|candidate| candidate == pane_id);
-    if pane_exists {
-        // Target the session first, then select the pane with -Z. A direct
-        // switch-client to a pane expands an already zoomed target window.
-        if !tmux(&["switch-client", "-c", &client, "-t", session_id])?.success()
+    let target_window = panes
+        .status
+        .success()
+        .then(|| {
+            String::from_utf8_lossy(&panes.stdout)
+                .lines()
+                .find_map(|line| {
+                    let (candidate, window) = line.split_once('\u{1f}')?;
+                    (candidate == pane_id).then(|| window.to_owned())
+                })
+        })
+        .flatten();
+    if let Some(target_window) = target_window {
+        // Select the exact window before its pane. Selecting only a pane in a
+        // hidden window changes that window's active pane but leaves the client
+        // looking at its previous window.
+        if !tmux(&["switch-client", "-c", &client, "-t", &target_window])?.success()
             || !tmux(&["select-pane", "-Z", "-t", pane_id])?.success()
         {
             return Err("remote pane could not be focused".into());
@@ -796,16 +833,24 @@ pub fn focus_target(
     Err("remote target expired".into())
 }
 
-fn most_recent_client(output: &str) -> Option<String> {
-    output
+fn focus_client(output: &str, target_session: &str) -> Option<String> {
+    let clients: Vec<_> = output
         .lines()
         .filter_map(|line| {
-            let (name, activity) = line.split_once('\u{1f}')?;
+            let mut fields = line.split('\u{1f}');
+            let name = fields.next()?;
+            let activity = fields.next()?;
+            let session = fields.next()?;
             let activity = activity.parse::<u64>().ok()?;
-            (!name.is_empty()).then(|| (activity, name.to_owned()))
+            (!name.is_empty()).then(|| (activity, name.to_owned(), session.to_owned()))
         })
-        .max_by_key(|(activity, _)| *activity)
-        .map(|(_, name)| name)
+        .collect();
+    clients
+        .iter()
+        .filter(|(_, _, session)| session == target_session)
+        .max_by_key(|(activity, _, _)| *activity)
+        .or_else(|| clients.iter().max_by_key(|(activity, _, _)| *activity))
+        .map(|(_, name, _)| name.clone())
 }
 
 pub fn load_store(path: &Path) -> Result<RelayStore, Box<dyn std::error::Error>> {
@@ -1249,10 +1294,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_focus_chooses_most_recent_attached_client() {
-        let clients = "client-old\u{1f}10\nclient-new\u{1f}42\n";
-        assert_eq!(most_recent_client(clients).as_deref(), Some("client-new"));
-        assert_eq!(most_recent_client(""), None);
+    fn remote_focus_prefers_client_already_attached_to_target_session() {
+        let clients = "client-new\u{1f}42\u{1f}$1\nclient-target\u{1f}10\u{1f}$2\n";
+        assert_eq!(
+            focus_client(clients, "$2").as_deref(),
+            Some("client-target")
+        );
+        assert_eq!(focus_client(clients, "$9").as_deref(), Some("client-new"));
+        assert_eq!(focus_client("", "$2"), None);
+    }
+
+    #[test]
+    fn remote_command_quotes_tmux_dollar_targets() {
+        assert_eq!(shell_quote("$11"), "'$11'");
+        assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
     }
 
     #[test]
