@@ -37,3 +37,14 @@ bind_tracked() {
   tmux set-option -g "${state_opt}-description" "$desc"
   tmux bind-key -N "$desc" "$key" "$@"
 }
+
+bind_tracked_repeat() {
+  opt=$1; default=$3; desc=$4
+  bind_tracked "$@"
+  key=$(tmux show-option -gqv "$opt" 2>/dev/null || true)
+  key=${key:-$default}
+  [ -z "$key" ] || {
+    shift 4
+    tmux bind-key -r -N "$desc" "$key" "$@"
+  }
+}

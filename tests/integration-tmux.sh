@@ -95,6 +95,10 @@ tmux -S "$socket" set-option -g @workbench-_bound-agent a
 tmux -S "$socket" bind-key -N 'user broadcast' a display-message broadcast
 tmux -S "$socket" run-shell "bash '$repo/workbench.tmux'"
 sleep 1
+tmux -S "$socket" show-hooks -g client-resized | grep 'client-resized\[930\].*workbench-responsive-zoom' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'next layout without resizing sidebar$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'select pane left with responsive zoom$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'open compact tmux menu$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \
   grep -E 'pick tmuxinator workbench project|new workspace \(feature \+ repos\)|pick agent$' >/dev/null; then

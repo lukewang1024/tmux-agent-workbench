@@ -23,6 +23,9 @@ if [ -z "$(tmux show-option -gqv @workbench-agent 2>/dev/null || true)" ]; then
   tmux set-option -g @workbench-agent codex
   tmux set-environment -g WORKBENCH_AGENT codex
 fi
+if [ -z "$(tmux show-option -gqv @workbench-responsive-zoom 2>/dev/null || true)" ]; then
+  tmux set-option -g @workbench-responsive-zoom on
+fi
 
 . "$CURRENT_DIR/lib/bind-tracked.sh"
 
@@ -47,6 +50,52 @@ bind_tracked "@workbench-key-inspect" "@workbench-_bound-inspect" "" \
   "add repo as inspection window" run-shell -b "$CURRENT_DIR/bin/mux-inspect-pick"
 bind_tracked "@workbench-key-project" "@workbench-_bound-project" "" \
   "pick tmuxinator workbench project" run-shell -b "$CURRENT_DIR/bin/workbench-session-pick"
+
+bind_layout() {
+  bind_tracked "$1" "$2" "$3" "$4" run-shell -b \
+    "$CURRENT_DIR/bin/workbench-layout '$5' '#{pane_id}'"
+}
+bind_layout @workbench-key-layout-spread @workbench-_bound-layout-spread e "spread panes without resizing sidebar" -E
+bind_layout @workbench-key-layout-next @workbench-_bound-layout-next Space "next layout without resizing sidebar" -n
+bind_layout @workbench-key-layout-even-horizontal @workbench-_bound-layout-even-horizontal M-1 "even-horizontal without resizing sidebar" even-horizontal
+bind_layout @workbench-key-layout-even-vertical @workbench-_bound-layout-even-vertical M-2 "even-vertical without resizing sidebar" even-vertical
+bind_layout @workbench-key-layout-main-horizontal @workbench-_bound-layout-main-horizontal M-3 "main-horizontal without resizing sidebar" main-horizontal
+bind_layout @workbench-key-layout-main-vertical @workbench-_bound-layout-main-vertical M-4 "main-vertical without resizing sidebar" main-vertical
+bind_layout @workbench-key-layout-tiled @workbench-_bound-layout-tiled M-5 "tiled without resizing sidebar" tiled
+bind_layout @workbench-key-layout-main-horizontal-mirrored @workbench-_bound-layout-main-horizontal-mirrored M-6 "main-horizontal-mirrored without resizing sidebar" main-horizontal-mirrored
+bind_layout @workbench-key-layout-main-vertical-mirrored @workbench-_bound-layout-main-vertical-mirrored M-7 "main-vertical-mirrored without resizing sidebar" main-vertical-mirrored
+
+bind_pane() {
+  bind_tracked_repeat "$1" "$2" "$3" "$4" run-shell "$CURRENT_DIR/bin/workbench-select-pane '$5'"
+}
+bind_pane @workbench-key-pane-left @workbench-_bound-pane-left h "select pane left with responsive zoom" -L
+bind_pane @workbench-key-pane-down @workbench-_bound-pane-down j "select pane down with responsive zoom" -D
+bind_pane @workbench-key-pane-up @workbench-_bound-pane-up k "select pane up with responsive zoom" -U
+bind_pane @workbench-key-pane-right @workbench-_bound-pane-right l "select pane right with responsive zoom" -R
+bind_pane @workbench-key-pane-last @workbench-_bound-pane-last o "select next pane with responsive zoom" next
+bind_pane @workbench-key-pane-previous @workbench-_bound-pane-previous O "select previous pane with responsive zoom" previous
+bind_pane @workbench-key-pane-left-ctrl @workbench-_bound-pane-left-ctrl C-h "select pane left with responsive zoom" -L
+bind_pane @workbench-key-pane-down-ctrl @workbench-_bound-pane-down-ctrl C-j "select pane down with responsive zoom" -D
+bind_pane @workbench-key-pane-up-ctrl @workbench-_bound-pane-up-ctrl C-k "select pane up with responsive zoom" -U
+bind_pane @workbench-key-pane-right-ctrl @workbench-_bound-pane-right-ctrl C-l "select pane right with responsive zoom" -R
+bind_pane @workbench-key-pane-left-arrow @workbench-_bound-pane-left-arrow Left "select pane left with responsive zoom" -L
+bind_pane @workbench-key-pane-down-arrow @workbench-_bound-pane-down-arrow Down "select pane down with responsive zoom" -D
+bind_pane @workbench-key-pane-up-arrow @workbench-_bound-pane-up-arrow Up "select pane up with responsive zoom" -U
+bind_pane @workbench-key-pane-right-arrow @workbench-_bound-pane-right-arrow Right "select pane right with responsive zoom" -R
+
+bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open agent command menu" \
+  display-menu -T '#[align=centre] 󰚩 Agent ' \
+  '/side' s 'send-keys -l "/side"; send-keys Enter' \
+  '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
+  '/fork' f 'send-keys -l "/fork"; send-keys Enter'
+bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
+  display-menu -T '#[align=centre] tmux ' \
+  'New window' c 'new-window -c "#{pane_current_path}"' \
+  'Split below' - 'split-window -v -c "#{pane_current_path}"' \
+  'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
+  'Choose window' w 'choose-tree -Zw' \
+  'Choose session' s 'choose-tree -Zs' \
+  'Detach' d detach-client
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell
@@ -87,41 +136,40 @@ if [ -n "$ATTENTION_BIN" ]; then
   current_delay="$(tmux show-option -gqv @sidebar_auto_create_delay 2>/dev/null || true)"
   [ -n "$current_delay" ] || tmux set-option -g @sidebar_auto_create_delay 0
 
-  legacy_sidebar="$(tmux show-option -gqv @agent_sidebar_bin 2>/dev/null || true)"
-  if [ -z "$legacy_sidebar" ]; then
-    bind_tracked "@workbench-key-sidebar" "@workbench-_bound-sidebar" "Tab" \
-      "toggle Workbench agent sidebar" run-shell \
-      "$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'"
-    bind_tracked "@workbench-key-sidebar-all" "@workbench-_bound-sidebar-all" "" \
-      "toggle Workbench agent sidebars in all windows" run-shell -b \
-      "$ATTENTION_BIN sidebar-control toggle-all"
+  bind_tracked "@workbench-key-sidebar" "@workbench-_bound-sidebar" "Tab" \
+    "toggle Workbench agent sidebar" run-shell \
+    "$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'"
+  bind_tracked "@workbench-key-sidebar-all" "@workbench-_bound-sidebar-all" "" \
+    "toggle Workbench agent sidebars in all windows" run-shell -b \
+    "$ATTENTION_BIN sidebar-control toggle-all"
 
-    if [ "$(tmux show-option -gqv @sidebar_auto_create 2>/dev/null || true)" != "off" ]; then
-      tmux set-hook -g 'after-new-window[920]' \
-        "run-shell -b 'sleep \"#{@sidebar_auto_create_delay}\"; \"$ATTENTION_BIN\" sidebar-control toggle \"#{window_id}\" --create-only'"
-    else
-      tmux set-hook -gu 'after-new-window[920]' 2>/dev/null || true
-    fi
-    tmux set-hook -g 'client-attached[920]' \
-      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
-    tmux set-hook -g 'client-resized[920]' \
-      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
-    tmux set-hook -g 'client-session-changed[920]' \
-      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
-    tmux set-hook -g 'session-window-changed[920]' \
-      "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
-    tmux set-hook -g 'window-resized[920]' \
-      "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{hook_window}\"'"
-    tmux set-hook -g 'after-kill-pane[920]' \
-      "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
-    tmux set-hook -g 'pane-exited[920]' \
-      "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
-    tmux set-hook -gu 'after-resize-pane[920]' 2>/dev/null || true
-    tmux bind-key -T root MouseDragEnd1Border run-shell -b \
-      "\"$ATTENTION_BIN\" sidebar-control remember \"#{mouse_pane}\""
+  if [ "$(tmux show-option -gqv @sidebar_auto_create 2>/dev/null || true)" != "off" ]; then
+    tmux set-hook -g 'after-new-window[920]' \
+      "run-shell -b 'sleep \"#{@sidebar_auto_create_delay}\"; \"$ATTENTION_BIN\" sidebar-control toggle \"#{window_id}\" --create-only'"
   else
-    tmux display-message "tmux-agent-workbench: legacy tmux-agent-sidebar is loaded; v2 sidebar disabled (run doctor)"
+    tmux set-hook -gu 'after-new-window[920]' 2>/dev/null || true
   fi
+  tmux set-hook -g 'client-attached[920]' \
+    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+  tmux set-hook -g 'client-resized[920]' \
+    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+  tmux set-hook -g 'client-session-changed[920]' \
+    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+  tmux set-hook -g 'session-window-changed[920]' \
+    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+  tmux set-hook -g 'window-resized[920]' \
+    "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{hook_window}\"'"
+  tmux set-hook -g 'after-kill-pane[920]' \
+    "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
+  tmux set-hook -g 'pane-exited[920]' \
+    "run-shell -b 'sleep 0.05; \"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\" >/dev/null 2>&1'"
+  tmux set-hook -gu 'after-resize-pane[920]' 2>/dev/null || true
+  tmux bind-key -T root MouseDragEnd1Border run-shell -b \
+    "\"$ATTENTION_BIN\" sidebar-control remember \"#{mouse_pane}\""
+  tmux set-hook -g 'client-attached[930]' \
+    "run-shell '$CURRENT_DIR/bin/workbench-responsive-zoom #{client_width} #{window_id}'"
+  tmux set-hook -g 'client-resized[930]' \
+    "run-shell '$CURRENT_DIR/bin/workbench-responsive-zoom #{client_width} #{window_id}'"
 
   bind_tracked "@workbench-key-session" "@workbench-_bound-session" "" \
     "pick tmux session by agent attention" run-shell -b \

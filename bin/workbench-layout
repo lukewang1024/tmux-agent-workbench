@@ -1,0 +1,44 @@
+#!/bin/sh
+set -u
+
+PRESETS='even-horizontal even-vertical main-horizontal main-horizontal-mirrored main-vertical main-vertical-mirrored tiled'
+OPT='@workbench_layout_preset'
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || exit 2
+pane=${2:-${TMUX_PANE:-}}
+win=
+[ -z "$pane" ] || win=$(tmux display-message -pt "$pane" '#{window_id}' 2>/dev/null)
+if [ -z "$win" ]; then
+  pane=$(tmux display-message -p '#{pane_id}')
+  win=$(tmux display-message -p '#{window_id}')
+fi
+
+case $1 in
+-n|-p)
+  action=$1
+  cur=$(tmux show-option -wvq -t "$win" "$OPT")
+  set -- $PRESETS
+  total=$#; idx=0; n=0
+  for preset do n=$((n + 1)); [ "$preset" != "$cur" ] || idx=$n; done
+  if [ "$action" = -n ]; then idx=$((idx % total + 1)); else idx=$((idx - 1)); [ "$idx" -ge 1 ] || idx=$total; fi
+  n=0; layout=
+  for preset do n=$((n + 1)); [ "$n" -ne "$idx" ] || { layout=$preset; break; }; done
+  ;;
+-E) layout=-E ;;
+-*) exit 2 ;;
+*) layout=$1 ;;
+esac
+[ "$layout" = -E ] || tmux set-option -wq -t "$win" "$OPT" "$layout"
+
+sidebar=$(tmux list-panes -t "$win" -f '#{==:#{@pane_role},sidebar}' -F '#{pane_id}' | sed -n 1p)
+panes=$(tmux list-panes -t "$win" -F . | wc -l)
+if [ -z "$sidebar" ] || [ "$panes" -lt 2 ]; then exec tmux select-layout -t "$win" "$layout"; fi
+
+width=$(tmux show-option -gqv @sidebar_width); case $width in ''|*[!0-9]*) width=26 ;; esac
+before=-b
+[ "$(tmux show-option -gqv @sidebar_position)" != right ] || before=
+tmux break-pane -d -s "$sidebar" || exit 1
+case $layout in -E) [ "$pane" = "$sidebar" ] || tmux select-layout -E -t "$pane" ;; *) tmux select-layout -t "$win" "$layout" ;; esac
+# shellcheck disable=SC2086
+tmux join-pane -f -h $before -l "$width" -s "$sidebar" -t "$win" 2>/dev/null ||
+  tmux join-pane -f -h $before -s "$sidebar" -t "$win"
+tmux select-pane -t "$pane" 2>/dev/null || true

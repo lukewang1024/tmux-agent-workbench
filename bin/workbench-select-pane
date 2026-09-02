@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 1 ] || exit 2
+case $1 in
+  -L|-R|-U|-D|-l) args=$1 ;;
+  next) args='-t :.+' ;;
+  previous) args='-t :.-' ;;
+  *) exit 2 ;;
+esac
+narrow='#{e|<:#{client_width},#{e|+:#{e|+:#{@sidebar_width},#{@sidebar_main_min_width}},1}}'
+if [ "$(tmux display-message -p "$narrow")" = 1 ] &&
+   [ "$(tmux show-option -gqv @workbench-responsive-zoom)" != off ]; then
+  # shellcheck disable=SC2086
+  exec tmux select-pane -Z $args
+fi
+# shellcheck disable=SC2086
+exec tmux select-pane $args
