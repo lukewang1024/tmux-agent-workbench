@@ -8,17 +8,18 @@
 # task will touch is required: start with `ws-new <feature>` alone and call
 # this as many times as needed as new repos actually enter scope.
 #
-# usage: ws-add <repo>[:<branch>]
+# usage: ws-add [--base <remote-branch>] <repo>[:<branch>]
 #   Run from inside the workspace's own tmux session — the feature name is
 #   the session name. Set WORKBENCH_FEATURE explicitly to target a session you're
 #   not currently attached to (used by ws-new to seed repos given up front,
 #   before the new session has any client attached).
 #
-# Idempotent: a repo that already has a worktree in this workspace is
-# initialized again and then focused, not recreated. Branch selection when it
-# doesn't exist yet: from the repo's origin/HEAD if resolvable, else the main
-# checkout's current HEAD (same convention as ws-new / git-new-branch). No
-# auto-fetch.
+# Idempotent: a repo that already has a worktree in this workspace is verified,
+# initialized again, and then focused, not recreated. Before either path,
+# refresh origin so branch selection uses current remote refs. A missing local
+# requirement branch starts from the explicitly selected remote base branch,
+# or the refreshed origin/HEAD when --base is omitted. Never infer the base
+# from a same-named remote branch or the main checkout's current HEAD.
 
 set -eu
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
@@ -36,27 +37,50 @@ dir=$(cd "$(dirname "$self")" && pwd -P)
 
 usage() {
   cat <<'EOF'
-usage: ws-add <repo>[:<branch>]
+usage: ws-add [--base <remote-branch>] <repo>[:<branch>]
 
 Add a repository worktree to the current workspace. Set WORKBENCH_FEATURE to
-target a workspace session other than the current one.
+target a workspace session other than the current one. The requirement branch
+defaults to the workspace name. A new requirement branch starts from the named
+remote base branch, or origin/HEAD when --base is omitted.
 
 options:
+  --base <branch>  remote branch under origin used to create a new requirement branch
   -h, --help  show this help and exit
 EOF
 }
 
-case ${1-} in
-  -h|--help) usage; exit 0 ;;
-  --) shift ;;
-  -*) echo "ws-add: unknown option: $1" >&2; usage >&2; exit 2 ;;
-esac
+base_branch=
+repo_spec=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --base)
+      [ $# -ge 2 ] || { echo "ws-add: --base requires a branch" >&2; exit 2; }
+      base_branch=$2
+      shift 2
+      ;;
+    --)
+      shift
+      [ $# -eq 1 ] && [ -z "$repo_spec" ] || { echo "ws-add: expected one repository after --" >&2; exit 2; }
+      repo_spec=$1
+      shift
+      break
+      ;;
+    -*) echo "ws-add: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      [ -z "$repo_spec" ] || { echo "ws-add: expected exactly one repository" >&2; usage >&2; exit 2; }
+      repo_spec=$1
+      shift
+      ;;
+  esac
+done
+[ $# -eq 0 ] || { echo "ws-add: unexpected arguments after --" >&2; usage >&2; exit 2; }
+[ -n "$repo_spec" ] || { usage >&2; exit 2; }
 
 WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P) || { echo "ws-add: WORKBENCH_CODE_ROOT not found: $WORKBENCH_CODE_ROOT" >&2; exit 1; }
 WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
-
-[ $# -eq 1 ] || { usage >&2; exit 2; }
 
 feature=${WORKBENCH_FEATURE:-}
 if [ -z "$feature" ]; then
@@ -64,10 +88,16 @@ if [ -z "$feature" ]; then
   feature=$(tmux display-message -p '#S')
 fi
 
-case $1 in
-  *:*) rname=${1%%:*}; rbranch=${1#*:} ;;
-  *)   rname=$1;       rbranch=$feature ;;
+case $repo_spec in
+  *:*) rname=${repo_spec%%:*}; rbranch=${repo_spec#*:} ;;
+  *)   rname=$repo_spec;       rbranch=$feature ;;
 esac
+[ -n "$rname" ] && [ -n "$rbranch" ] || { echo "ws-add: repository and requirement branch must be non-empty" >&2; exit 2; }
+git check-ref-format --branch "$rbranch" >/dev/null 2>&1 || { echo "ws-add: invalid requirement branch: $rbranch" >&2; exit 2; }
+if [ -n "$base_branch" ]; then
+  case $base_branch in origin/*) base_branch=${base_branch#origin/} ;; esac
+  git check-ref-format --branch "$base_branch" >/dev/null 2>&1 || { echo "ws-add: invalid remote base branch: $base_branch" >&2; exit 2; }
+fi
 
 # Same exact-basename resolution ws-new uses: never matches a numbered pool
 # slot like web-app-3, since those are never named exactly `web-app`.
@@ -84,18 +114,58 @@ wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
 mkdir -p "$wsdir"
 dest="$wsdir/$(basename "$main")"
 
+git -C "$main" remote get-url origin >/dev/null 2>&1 || {
+  echo "ws-add: $rname has no origin remote" >&2
+  exit 1
+}
+echo "ws-add: fetching origin for $rname"
+git -C "$main" fetch origin
+
 if [ ! -e "$dest" ]; then
   if git -C "$main" show-ref --verify --quiet "refs/heads/$rbranch"; then
     git -C "$main" worktree add "$dest" "$rbranch"
   else
-    base=$(git -C "$main" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || base=""
-    if [ -n "$base" ]; then
-      git -C "$main" worktree add -b "$rbranch" "$dest" "$base"
+    if [ -n "$base_branch" ]; then
+      base="refs/remotes/origin/$base_branch"
     else
-      git -C "$main" worktree add -b "$rbranch" "$dest"
+      base=$(git -C "$main" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || base=""
     fi
+    [ -n "$base" ] || {
+      echo "ws-add: cannot resolve origin/HEAD for $rname; specify or repair the remote default branch" >&2
+      exit 1
+    }
+    git -C "$main" show-ref --verify --quiet "$base" || {
+      echo "ws-add: remote base branch does not exist after fetch: ${base#refs/remotes/}" >&2
+      exit 1
+    }
+    git -C "$main" worktree add --no-track -b "$rbranch" "$dest" "$base"
   fi
   echo "ws-add: $rname -> $dest (branch $rbranch)"
+else
+  [ ! -L "$dest" ] || { echo "ws-add: refusing symlink worktree: $dest" >&2; exit 1; }
+  actual_top=$(git -C "$dest" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "ws-add: existing path is not a Git worktree: $dest" >&2
+    exit 1
+  }
+  actual_top=$(cd "$actual_top" && pwd -P)
+  [ "$actual_top" = "$(cd "$dest" && pwd -P)" ] || {
+    echo "ws-add: existing path is not the worktree root: $dest" >&2
+    exit 1
+  }
+  main_common=$(git -C "$main" rev-parse --path-format=absolute --git-common-dir)
+  dest_common=$(git -C "$dest" rev-parse --path-format=absolute --git-common-dir)
+  main_common=$(cd "$main_common" && pwd -P)
+  dest_common=$(cd "$dest_common" && pwd -P)
+  [ "$main_common" = "$dest_common" ] || {
+    echo "ws-add: existing worktree belongs to a different repository: $dest" >&2
+    exit 1
+  }
+  actual_branch=$(git -C "$dest" symbolic-ref --short -q HEAD 2>/dev/null) || actual_branch=""
+  [ -n "$actual_branch" ] || { echo "ws-add: existing worktree is detached: $dest" >&2; exit 1; }
+  [ "$actual_branch" = "$rbranch" ] || {
+    echo "ws-add: existing worktree branch is $actual_branch, requested $rbranch: $dest" >&2
+    exit 1
+  }
 fi
 
 # Repositories may opt into lightweight, local worktree initialization through

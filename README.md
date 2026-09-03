@@ -456,12 +456,20 @@ the whole active task, select an exact profile when the user did not, and make
   repos (or re-attaches).
 - **`ws-new-prompt`** (prefix+M-t) — `tmux command-prompt` front end for
   `ws-new`: type `feature` alone, or `feature repo[:branch] ...`, in one go.
-- **`ws-add <repo>[:<branch>]`** — folds a repo into an *already-running*
+- **`ws-add [--base <remote-branch>] <repo>[:<branch>]`** — folds a repo into an *already-running*
   workspace: creates its worktree under
   `$WORKBENCH_WORKSPACE_ROOT/<feature>/<repo>` if it doesn't exist yet
-  (branch defaults to the workspace's own name; base ref is the repo's
-  `origin/HEAD` if resolvable, else current HEAD), then adds it as an
-  inspection window via `mux-inspect`. This is the "discovered mid-task"
+  (branch defaults to the workspace's own name). It fetches `origin` first;
+  a missing local requirement branch is created from `origin/<remote-branch>`
+  when `--base` is given, otherwise from the updated `origin/HEAD`. The target
+  and base branches are independent: `ws-add --base release/word
+  roadster:feature-x` creates local `feature-x` from `origin/release/word`.
+  The new requirement branch starts without an upstream, so its first push
+  cannot accidentally target the remote base branch.
+  It never infers the base from a same-named remote branch or falls back to
+  the main checkout's current HEAD. Existing worktrees must
+  belong to the resolved mother repo and already be on the requested branch.
+  It then adds the repo as an inspection window via `mux-inspect`. This is the "discovered mid-task"
   primitive — call it the moment a task turns out to need a repo that
   wasn't known about at `ws-new` time. Usable by a human at the prompt or
   by a coding agent's own shell tool. Idempotent: an existing worktree is

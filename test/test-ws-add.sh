@@ -35,9 +35,9 @@ feature="in-progress-ws"
 repo="somerepo"
 
 # ---------------------------------------------------------------------------
-# 1. A fake repo under CODE_ROOT, with at least one real commit — ws-add's
-#    no-existing-branch fallback path points the new worktree's branch at
-#    the main checkout's current HEAD, which needs to actually resolve.
+# 1. A fake repo under CODE_ROOT, with a real origin and default branch.
+#    ws-add fetches this remote and creates a missing requirement branch from
+#    origin/HEAD.
 # ---------------------------------------------------------------------------
 repodir="$WORKBENCH_CODE_ROOT/$repo"
 mkdir -p "$repodir"
@@ -60,6 +60,12 @@ chmod +x "$repodir/.workbench/worktree-init"
 git -C "$repodir" add file.txt
 git -C "$repodir" add .workbench/worktree-init
 git -C "$repodir" commit -q -m "initial"
+origin="$WB_TEST_TMPDIR/remotes/$repo.git"
+mkdir -p "$(dirname "$origin")"
+git clone -q --bare "$repodir" "$origin"
+git -C "$repodir" remote add origin "$origin"
+git -C "$repodir" fetch -q origin
+git -C "$repodir" remote set-head origin -a >/dev/null
 
 # ---------------------------------------------------------------------------
 # 2. A bare workspace session — built by hand, NOT via ws-new — representing
@@ -92,6 +98,10 @@ printf '%s\n' "$out1"
 wb_assert "first ws-add call exits 0" [ "$rc1" -eq 0 ]
 wb_assert "worktree created under WORKBENCH_WORKSPACE_ROOT/$feature/$repo" test -d "$dest"
 wb_assert "worktree checked out real repo content" test -f "$dest/file.txt"
+wb_assert "requirement branch starts at the remote default branch" \
+  test "$(git -C "$dest" rev-parse HEAD)" = "$(git -C "$repodir" rev-parse refs/remotes/origin/HEAD)"
+wb_assert "new requirement branch has no upstream" \
+  sh -c "! git -C '$dest' rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1"
 wb_assert "repository initializer ran" test -f "$dest/.initializer-runs"
 wb_assert "repository initializer received workspace context" \
   grep -qxF "$feature|$WORKBENCH_WORKSPACE_ROOT/$feature" "$dest/.initializer-runs"
@@ -136,6 +146,11 @@ EOF
 chmod +x "$failmain/.workbench/worktree-init"
 git -C "$failmain" add file.txt .workbench/worktree-init
 git -C "$failmain" commit -q -m "initial"
+failorigin="$WB_TEST_TMPDIR/remotes/$failrepo.git"
+git clone -q --bare "$failmain" "$failorigin"
+git -C "$failmain" remote add origin "$failorigin"
+git -C "$failmain" fetch -q origin
+git -C "$failmain" remote set-head origin -a >/dev/null
 
 faildest="$WORKBENCH_WORKSPACE_ROOT/$feature/$failrepo"
 failout=$("$WS_ADD" "$failrepo" 2>&1); failrc=$?
@@ -174,6 +189,11 @@ EOF
     git -C "$unsafemain" add file.txt .workbench/worktree-init
   fi
   git -C "$unsafemain" commit -q -m "initial"
+  unsafeorigin="$WB_TEST_TMPDIR/remotes/$unsaferepo.git"
+  git clone -q --bare "$unsafemain" "$unsafeorigin"
+  git -C "$unsafemain" remote add origin "$unsafeorigin"
+  git -C "$unsafemain" fetch -q origin
+  git -C "$unsafemain" remote set-head origin -a >/dev/null
 
   unsafeout=$("$WS_ADD" "$unsaferepo" 2>&1); unsaferc=$?
   printf '%s\n' "$unsafeout"
@@ -183,5 +203,46 @@ EOF
   wb_assert "$kind initializer leaves no inspection window" \
     sh -c "! tmux list-windows -t '$feature' -F '#W' | grep -qxF '$unsaferepo'"
 done
+
+# ---------------------------------------------------------------------------
+# 8. --base selects an independent remote base for a differently named local
+#    requirement branch. The fetch performed by ws-add must see a commit that
+#    was pushed after the main checkout's last fetch.
+# ---------------------------------------------------------------------------
+baserepo="baserepo"
+basemain="$WORKBENCH_CODE_ROOT/$baserepo"
+baseorigin="$WB_TEST_TMPDIR/remotes/$baserepo.git"
+basewriter="$WB_TEST_TMPDIR/basewriter"
+git init -q --bare "$baseorigin"
+git clone -q "$baseorigin" "$basemain"
+git -C "$basemain" config user.email "test@example.com"
+git -C "$basemain" config user.name "Test"
+echo "default" > "$basemain/default.txt"
+git -C "$basemain" add default.txt
+git -C "$basemain" commit -q -m "default"
+git -C "$basemain" push -q -u origin HEAD:main
+git -C "$baseorigin" symbolic-ref HEAD refs/heads/main
+git -C "$basemain" remote set-head origin -a >/dev/null
+
+git clone -q "$baseorigin" "$basewriter"
+git -C "$basewriter" config user.email "test@example.com"
+git -C "$basewriter" config user.name "Test"
+git -C "$basewriter" switch -q -c release/word
+echo "remote base" > "$basewriter/base.txt"
+git -C "$basewriter" add base.txt
+git -C "$basewriter" commit -q -m "remote base"
+git -C "$basewriter" push -q -u origin release/word
+expected_base=$(git -C "$basewriter" rev-parse HEAD)
+
+baseout=$("$WS_ADD" --base origin/release/word "$baserepo:feature-x" 2>&1); baserc=$?
+printf '%s\n' "$baseout"
+basedest="$WORKBENCH_WORKSPACE_ROOT/$feature/$baserepo"
+wb_assert "ws-add --base exits 0" [ "$baserc" -eq 0 ]
+wb_assert "--base creates the independently named requirement branch" \
+  test "$(git -C "$basedest" branch --show-current)" = feature-x
+wb_assert "--base uses the branch fetched from origin" \
+  test "$(git -C "$basedest" rev-parse HEAD)" = "$expected_base"
+wb_assert "--base requirement branch has no upstream" \
+  sh -c "! git -C '$basedest' rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1"
 
 wb_test_report

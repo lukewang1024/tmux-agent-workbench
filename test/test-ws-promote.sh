@@ -65,6 +65,12 @@ git -C "$maindir" config user.name "Test User"
 echo hello > "$maindir/file"
 git -C "$maindir" add file
 git -C "$maindir" commit -q -m init
+remote="$WB_TEST_TMPDIR/remotes/$repo.git"
+mkdir -p "$(dirname "$remote")"
+git clone -q --bare "$maindir" "$remote"
+git -C "$maindir" remote add origin "$remote"
+git -C "$maindir" fetch -q origin
+git -C "$maindir" remote set-head origin -a >/dev/null
 
 origsess="wb-test-orig-$$"
 tmux new-session -d -s "$origsess" -c "$maindir"

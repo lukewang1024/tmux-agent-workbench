@@ -74,6 +74,7 @@ repo_b_branch="beta-custom"
 
 mk_fake_repo() {
   d="$WORKBENCH_CODE_ROOT/$1"
+  remote="$WB_TEST_TMPDIR/remotes/$1.git"
   mkdir -p "$d"
   git -C "$d" init -q -b main
   git -C "$d" config user.email test@example.com
@@ -81,6 +82,11 @@ mk_fake_repo() {
   echo seed > "$d/seed.txt"
   git -C "$d" add seed.txt
   git -C "$d" commit -q -m seed
+  mkdir -p "$(dirname "$remote")"
+  git clone -q --bare "$d" "$remote"
+  git -C "$d" remote add origin "$remote"
+  git -C "$d" fetch -q origin
+  git -C "$d" remote set-head origin -a >/dev/null
 }
 mk_fake_repo "$repo_a"
 mk_fake_repo "$repo_b"
