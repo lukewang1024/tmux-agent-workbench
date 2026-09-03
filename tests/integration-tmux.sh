@@ -298,14 +298,13 @@ tmux -S "$socket" select-pane -t "$source_main"
 tmux -S "$socket" select-pane -t "$source_sidebar"
 "$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
   --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
-  --pane "$agent_pane" --source-pane "$source_sidebar"
+  --pane "$agent_pane" --source-pane "$source_sidebar" --responsive
 tmux -S "$socket" list-panes -t source-restore -f '#{pane_active}' -F '#{pane_id}' | \
   grep "^$source_main$" >/dev/null
 
-# Focus is a viewport transition as well as a target change. A narrow client
-# must enter responsive zoom even when the destination was previously wide and
-# unzoomed; sidebar Enter, clicks, menus, pickers, and attention all share this
-# hidden focus command.
+# Interactive Workbench focus is a viewport transition as well as a target
+# change. A narrow client must enter responsive zoom even when the destination
+# was previously wide and unzoomed.
 focus_client=$(tmux -S "$socket" list-clients -F '#{client_name}' | sed -n '1p')
 # Disable the resize-driven path so this assertion proves focus itself owns the
 # transition instead of racing an asynchronous client-resized hook.
@@ -317,9 +316,18 @@ if [ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag
 fi
 "$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
   --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
-  --pane "$agent_pane" --source-pane "$source_sidebar"
+  --pane "$agent_pane" --source-pane "$source_sidebar" --responsive
 [ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 1 ]
 [ "$(tmux -S "$socket" show-option -wvq -t agent-pick @responsive_auto_zoom)" = 1 ]
+
+# A notification click has no source pane/client and uses plain focus. It must
+# not mutate the window-global zoom state based on some other narrow client.
+tmux -S "$socket" resize-pane -Z -t "$agent_pane"
+tmux -S "$socket" set-option -wqu -t agent-pick @responsive_auto_zoom
+"$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
+  --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
+  --pane "$agent_pane"
+[ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 0 ]
 
 # Session rows remain actionable even when no last-active non-sidebar pane is
 # available: the hidden focus command accepts a session-only target.

@@ -189,6 +189,7 @@ fn spawn_focus(session: &str, window: &str, pane: &str) -> Result<(), Box<dyn st
     let status = Command::new(std::env::current_exe()?)
         .args([
             "focus",
+            "--responsive",
             "--session",
             session,
             "--window",

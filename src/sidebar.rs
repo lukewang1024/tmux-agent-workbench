@@ -1229,7 +1229,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session)) => {
             let mut command = Command::new(std::env::current_exe()?);
-            command.args(["focus", "--session", &session.session_id]);
+            command.args(["focus", "--responsive", "--session", &session.session_id]);
             if let Some(source) = source_pane() {
                 command.args(["--source-pane", &source]);
             }
@@ -1264,6 +1264,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             let mut command = Command::new(std::env::current_exe()?);
             command.args([
                 "focus",
+                "--responsive",
                 "--session",
                 &agent.target.session_id,
                 "--window",
@@ -1288,6 +1289,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             let mut command = Command::new(std::env::current_exe()?);
             command.args([
                 "focus",
+                "--responsive",
                 "--session",
                 &agent.target.session_id,
                 "--window",
@@ -1362,7 +1364,7 @@ fn show_row_menu(
             let executable = std::env::current_exe()?;
             let source = source_pane().ok_or("sidebar source pane unavailable")?;
             let focus = format!(
-                "{} focus --session {} --window {} --pane {} --source-pane {}",
+                "{} focus --responsive --session {} --window {} --pane {} --source-pane {}",
                 shell_quote(&executable.to_string_lossy()),
                 agent.target.session_id,
                 agent.target.window_id,

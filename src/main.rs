@@ -87,6 +87,8 @@ enum Command {
         pane: Option<String>,
         #[arg(long)]
         source_pane: Option<String>,
+        #[arg(long)]
+        responsive: bool,
     },
     #[command(hide = true)]
     SidebarControl {
@@ -1146,11 +1148,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             window,
             pane,
             source_pane,
+            responsive,
         } => focus_target(
             &session,
             window.as_deref(),
             pane.as_deref(),
             source_pane.as_deref(),
+            responsive,
         )?,
         Command::SidebarControl {
             action,
@@ -1217,6 +1221,7 @@ fn focus_agent(agent: &AgentSnapshot) -> Result<(), Box<dyn std::error::Error>> 
         Some(&agent.target.window_id),
         Some(&agent.target.pane_id),
         None,
+        true,
     )
 }
 
@@ -1225,6 +1230,7 @@ fn focus_target(
     window: Option<&str>,
     pane: Option<&str>,
     source_pane: Option<&str>,
+    responsive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(session, '$')?;
     if let Some(window) = window {
@@ -1280,17 +1286,19 @@ fn focus_target(
             return Err(format!("tmux focus target expired: {}", pane.unwrap_or(session)).into());
         }
     }
-    let focused_window = if let Some(client) = client {
-        tmux_format_for_client(&server, &client.name, "#{window_id}")?
-    } else if let Some(pane) = pane {
-        tmux_format(&server, pane, "#{window_id}")?
-    } else {
-        tmux_format(&server, window.unwrap_or(session), "#{window_id}")?
-    };
-    tmux_agent_workbench::layout::maintain_responsive_focus(
-        client.map(|client| client.name.as_str()),
-        &focused_window,
-    )?;
+    if responsive {
+        let focused_window = if let Some(client) = client {
+            tmux_format_for_client(&server, &client.name, "#{window_id}")?
+        } else if let Some(pane) = pane {
+            tmux_format(&server, pane, "#{window_id}")?
+        } else {
+            tmux_format(&server, window.unwrap_or(session), "#{window_id}")?
+        };
+        tmux_agent_workbench::layout::maintain_responsive_focus(
+            client.map(|client| client.name.as_str()),
+            &focused_window,
+        )?;
+    }
     if !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty)) {
         activate_terminal();
     }
