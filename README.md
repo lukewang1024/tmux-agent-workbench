@@ -270,6 +270,18 @@ idle`; both options are unset when the window has no Agent. This keeps process
 detection in Workbench while allowing a theme to render a lightweight current-
 window badge without polling or screen scraping.
 
+When `tmux-adaptive-theme` is present, the plugin registers those values through
+the theme's generic `@adaptive_context_*` interface. Workbench owns the complete
+Agent Status behavior: left-click opens a persistent usage menu, right-click
+focuses the active Agent, and the status suffix shows the selected provider's
+remaining-limit battery plus today's token total. Codex, Claude Code, Trae, and
+OpenCode can be selected in the menu. Token totals come from local `ccusage`
+data and are cached under `$XDG_STATE_HOME/tmux-agent-workbench/usage`.
+
+Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
+(default `codex`). Set `@workbench-usage off` before the plugin loads to omit
+the usage suffix while retaining the Agent Status capsule and focus behavior.
+
 Per-Agent manifest overrides live at
 `$XDG_CONFIG_HOME/tmux-agent-workbench/manifests/{codex,claude,trae,opencode}.toml`.
 One local file replaces that Agent's whole bundled manifest; Workbench does not

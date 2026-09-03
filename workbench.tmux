@@ -40,6 +40,41 @@ case ":$current_path:" in
   *) tmux set-environment -g PATH "$CURRENT_DIR/bin:$current_path" ;;
 esac
 
+# Publish Workbench's status model through the adaptive theme's generic context
+# interface. The theme owns presentation only; all Agent semantics, usage data,
+# commands, and mouse behavior remain here. Recursive formats let either plugin
+# load first and survive every later theme repaint.
+tmux set-option -g @adaptive_context_state '#{@workbench_window_state}'
+tmux set-option -g @adaptive_context_label '#{@workbench_window_label}'
+tmux set-option -g @adaptive_context_range_open '#[range=user|agent_status]'
+tmux set-option -g @adaptive_context_range_close '#[range=]'
+usage_enabled="$(tmux show-option -gqv @workbench-usage 2>/dev/null || true)"
+if [ "$usage_enabled" != off ]; then
+  old_usage_source="$(tmux show-option -gqv @agent_usage_source 2>/dev/null || true)"
+  usage_source="$(tmux show-option -gqv @workbench-usage-source 2>/dev/null || true)"
+  if [ -z "$usage_source" ]; then
+    case "$old_usage_source" in codex|claude|trae|opencode) usage_source=$old_usage_source ;; *) usage_source=codex ;; esac
+    tmux set-option -g @workbench-usage-source "$usage_source"
+  fi
+  tmux set-option -g @adaptive_context_suffix \
+    "#($CURRENT_DIR/bin/workbench-agent-usage badge #{client_width})"
+else
+  tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
+fi
+tmux bind-key -T root MouseDown1Status if-shell -F \
+  '#{==:#{mouse_status_range},agent_status}' \
+  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage menu'" 'select-window -t ='
+tmux bind-key -T root MouseDown3Status if-shell -F \
+  '#{==:#{mouse_status_range},agent_status}' \
+  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'
+
+# If the optional theme loaded first, ask it to consume the newly registered
+# context values once. Future theme repaints read the same retained options.
+adaptive_theme_dir="$(tmux show-option -gqv @adaptive_theme_dir 2>/dev/null || true)"
+if [ -n "$adaptive_theme_dir" ] && [ -x "$adaptive_theme_dir/tmux-adaptive-theme.tmux" ]; then
+  "$adaptive_theme_dir/tmux-adaptive-theme.tmux"
+fi
+
 # Dependency check: mux-inspect-pick hard-requires fzf-tmux. Everything else
 # in this layer (mux-agent, mux-inspect) has no external binary dependency.
 if ! command -v fzf-tmux >/dev/null 2>&1; then
