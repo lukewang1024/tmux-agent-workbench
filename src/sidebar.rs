@@ -1359,19 +1359,22 @@ fn show_row_menu(
         Some(Row::Agent(agent) | Row::AgentSub(agent))
             if !agent.exited && safe_target(&agent.target.pane_id, '%') =>
         {
+            let executable = std::env::current_exe()?;
+            let source = source_pane().ok_or("sidebar source pane unavailable")?;
+            let focus = format!(
+                "{} focus --session {} --window {} --pane {} --source-pane {}",
+                shell_quote(&executable.to_string_lossy()),
+                agent.target.session_id,
+                agent.target.window_id,
+                agent.target.pane_id,
+                source,
+            );
             show_menu(
                 "agent",
                 anchor,
                 false,
                 &[
-                    (
-                        "Focus",
-                        "f",
-                        format!(
-                            "switch-client -t {}; select-window -t {}; select-pane -Z -t {}",
-                            agent.target.session_id, agent.target.window_id, agent.target.pane_id
-                        ),
-                    ),
+                    ("Focus", "f", format!("run-shell {}", shell_quote(&focus))),
                     (
                         "Rename pane",
                         "r",

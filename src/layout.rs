@@ -52,6 +52,62 @@ pub fn control(
     result
 }
 
+pub fn maintain_responsive_focus(
+    client: Option<&str>,
+    window: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_target(window, '@')?;
+    control(Action::Maintain, Some(window), false)?;
+
+    let server = ServerIdentity::discover()?;
+    if option(&server, "@workbench-responsive-zoom")?.trim() == "off" {
+        return Ok(());
+    }
+    let Some(client) = client else {
+        return Ok(());
+    };
+    let client_width = tmux(
+        &server,
+        &["display-message", "-p", "-c", client, "#{client_width}"],
+    )?
+    .trim()
+    .parse::<u16>()?;
+    let sidebar_width = option_u16(&server, "@sidebar_width", 26);
+    let main_min_width = option_u16(&server, "@sidebar_main_min_width", 80);
+    let threshold = sidebar_width
+        .saturating_add(main_min_width)
+        .saturating_add(1);
+    let zoomed = display(&server, window, "#{window_zoomed_flag}")?.trim() == "1";
+    let auto_zoom = display(&server, window, "#{@responsive_auto_zoom}")?.trim() == "1";
+    let pane = display(&server, window, "#{pane_id}")?;
+
+    if client_width < threshold {
+        if !zoomed {
+            tmux(
+                &server,
+                &[
+                    "set-option",
+                    "-w",
+                    "-t",
+                    window,
+                    "@responsive_auto_zoom",
+                    "1",
+                ],
+            )?;
+            tmux(&server, &["resize-pane", "-Z", "-t", pane.trim()])?;
+        }
+    } else if auto_zoom {
+        if zoomed {
+            tmux(&server, &["resize-pane", "-Z", "-t", pane.trim()])?;
+        }
+        tmux(
+            &server,
+            &["set-option", "-wu", "-t", window, "@responsive_auto_zoom"],
+        )?;
+    }
+    Ok(())
+}
+
 fn seed_layout_options(
     server: &ServerIdentity,
     config: &Config,

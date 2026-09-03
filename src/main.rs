@@ -1280,6 +1280,17 @@ fn focus_target(
             return Err(format!("tmux focus target expired: {}", pane.unwrap_or(session)).into());
         }
     }
+    let focused_window = if let Some(client) = client {
+        tmux_format_for_client(&server, &client.name, "#{window_id}")?
+    } else if let Some(pane) = pane {
+        tmux_format(&server, pane, "#{window_id}")?
+    } else {
+        tmux_format(&server, window.unwrap_or(session), "#{window_id}")?
+    };
+    tmux_agent_workbench::layout::maintain_responsive_focus(
+        client.map(|client| client.name.as_str()),
+        &focused_window,
+    )?;
     if !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty)) {
         activate_terminal();
     }
@@ -1374,6 +1385,22 @@ fn tmux_format(
         .output()?;
     if !output.status.success() {
         return Err("tmux target expired".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn tmux_format_for_client(
+    server: &ServerIdentity,
+    client: &str,
+    format: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let output = ProcessCommand::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args(["display-message", "-p", "-c", client, format])
+        .output()?;
+    if !output.status.success() {
+        return Err("tmux client expired".into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
