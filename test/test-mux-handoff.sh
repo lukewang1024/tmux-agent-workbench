@@ -111,7 +111,7 @@ adapter=codex
 description=Codex argv test
 model=codex-test
 effort=high
-permissions=bypass
+permissions=auto
 env.ADAPTER_LOG_DIR=$adapter_log_dir
 EOF
 cat > "$profile_dir/test-claude.conf" <<EOF
@@ -119,21 +119,21 @@ adapter=claude
 description=Claude argv test
 model=opus
 effort=high
-permissions=bypass
+permissions=auto
 env.ADAPTER_LOG_DIR=$adapter_log_dir
 EOF
 cat > "$profile_dir/test-trae.conf" <<EOF
 adapter=trae
 description=Trae argv test
 model=trae-test
-permissions=bypass
+permissions=auto
 env.ADAPTER_LOG_DIR=$adapter_log_dir
 EOF
 cat > "$profile_dir/test-opencode.conf" <<EOF
 adapter=opencode
 description=opencode argv test
 model=provider/test
-permissions=bypass
+permissions=auto
 env.ADAPTER_LOG_DIR=$adapter_log_dir
 EOF
 
@@ -143,13 +143,15 @@ for adapter in codex claude trae opencode; do
     --target "test-$adapter" --startup-timeout 3 --no-close \
     >"$WB_TEST_TMPDIR/adapter-$adapter.out" 2>&1
 done
-wb_assert "codex adapter enables bypass" grep -qxF '<--yolo>' "$adapter_log_dir/codex"
+wb_assert "codex adapter enables automatic approval review" grep -qxF '<--approve-for-me>' "$adapter_log_dir/codex"
 wb_assert "codex adapter passes model" grep -qxF '<codex-test>' "$adapter_log_dir/codex"
 wb_assert "codex adapter passes reasoning effort" grep -qxF '<model_reasoning_effort="high">' "$adapter_log_dir/codex"
-wb_assert "claude adapter enables bypass" grep -qxF '<--dangerously-skip-permissions>' "$adapter_log_dir/claude"
+wb_assert "claude adapter selects automatic permission review" grep -qxF '<--permission-mode>' "$adapter_log_dir/claude"
+wb_assert "claude adapter passes automatic permission mode" grep -qxF '<auto>' "$adapter_log_dir/claude"
 wb_assert "claude adapter passes model" grep -qxF '<opus>' "$adapter_log_dir/claude"
 wb_assert "claude adapter passes effort" grep -qxF '<high>' "$adapter_log_dir/claude"
-wb_assert "trae adapter enables bypass" grep -qxF '<--dangerously-bypass-approvals-and-sandbox>' "$adapter_log_dir/traex"
+wb_assert "trae adapter selects automatic permission review" grep -qxF '<--permission-mode>' "$adapter_log_dir/traex"
+wb_assert "trae adapter passes automatic permission mode" grep -qxF '<auto>' "$adapter_log_dir/traex"
 wb_assert "trae adapter passes model" grep -qxF '<trae-test>' "$adapter_log_dir/traex"
 wb_assert "opencode adapter enables auto approval" grep -qxF '<--auto>' "$adapter_log_dir/opencode"
 wb_assert "opencode adapter uses prompt option" grep -qxF '<--prompt>' "$adapter_log_dir/opencode"

@@ -32,15 +32,40 @@ exec_codex()
 {
   for arg do
     case $arg in
-      --yolo|--dangerously-bypass-approvals-and-sandbox)
+      --approve-for-me|--yolo|--dangerously-bypass-approvals-and-sandbox|-a|--ask-for-approval|--ask-for-approval=*)
         exec codex "$@"
         ;;
     esac
   done
-  exec codex --yolo "$@"
+  exec codex --approve-for-me "$@"
+}
+
+exec_claude()
+{
+  for arg do
+    case $arg in
+      --permission-mode|--permission-mode=*|--dangerously-skip-permissions)
+        exec claude "$@"
+        ;;
+    esac
+  done
+  exec claude --permission-mode auto "$@"
 }
 
 exec_trae()
+{
+  for arg do
+    case $arg in
+      --permission-mode|--permission-mode=*|-y|--yolo|--dangerously-bypass-approvals-and-sandbox)
+        exec_trae_command "$@"
+        ;;
+    esac
+  done
+  set -- --permission-mode auto "$@"
+  exec_trae_command "$@"
+}
+
+exec_trae_command()
 {
   if command -v traex >/dev/null 2>&1; then
     exec traex "$@"
@@ -51,6 +76,18 @@ exec_trae()
   fi
   echo "mux-agent: TraeCode CLI not found (tried traex, trae-agent, traecli)" >&2
   exit 127
+}
+
+exec_opencode()
+{
+  for arg do
+    case $arg in
+      --auto)
+        exec opencode "$@"
+        ;;
+    esac
+  done
+  exec opencode --auto "$@"
 }
 
 # Mark this tmux session as a task workbench. This is the single flag that opts
@@ -76,10 +113,10 @@ if [ -n "${TMUX_PANE:-}" ]; then
   tmux set-option -p -t "$TMUX_PANE" @workbench_profile "$WORKBENCH_PROFILE" 2>/dev/null || true
 fi
 case $agent in
-  claude)   exec claude "$@" ;;
+  claude)   exec_claude "$@" ;;
   codex)    exec_codex "$@" ;;
   trae)     exec_trae "$@" ;;
-  opencode) exec opencode "$@" ;;
+  opencode) exec_opencode "$@" ;;
   *)
     echo "mux-agent: unknown WORKBENCH_AGENT='$agent' (want claude|codex|trae|opencode)" >&2
     exit 2

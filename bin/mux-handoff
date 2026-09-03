@@ -256,6 +256,7 @@ launch_target()
       command -v codex >/dev/null 2>&1 || { echo "mux-handoff: codex not found" >&2; exit 127; }
       set -- codex
       [ "$permissions" = bypass ] && set -- "$@" --yolo
+      [ "$permissions" = auto ] && set -- "$@" --approve-for-me
       [ -n "$model" ] && set -- "$@" --model "$model"
       [ -n "$effort" ] && set -- "$@" -c "model_reasoning_effort=\"$effort\""
       set -- "$@" "$prompt"
@@ -264,6 +265,7 @@ launch_target()
       command -v claude >/dev/null 2>&1 || { echo "mux-handoff: claude not found" >&2; exit 127; }
       set -- claude
       [ "$permissions" = bypass ] && set -- "$@" --dangerously-skip-permissions
+      [ "$permissions" = auto ] && set -- "$@" --permission-mode auto
       [ -n "$model" ] && set -- "$@" --model "$model"
       [ -n "$effort" ] && set -- "$@" --effort "$effort"
       set -- "$@" "$prompt"
@@ -276,13 +278,14 @@ launch_target()
       fi
       set -- "$trae_command"
       [ "$permissions" = bypass ] && set -- "$@" --dangerously-bypass-approvals-and-sandbox
+      [ "$permissions" = auto ] && set -- "$@" --permission-mode auto
       [ -n "$model" ] && set -- "$@" --model "$model"
       set -- "$@" "$prompt"
       ;;
     opencode)
       command -v opencode >/dev/null 2>&1 || { echo "mux-handoff: opencode not found" >&2; exit 127; }
       set -- opencode
-      [ "$permissions" = bypass ] && set -- "$@" --auto
+      case $permissions in auto|bypass) set -- "$@" --auto ;; esac
       [ -n "$model" ] && set -- "$@" --model "$model"
       set -- "$@" --prompt "$prompt"
       ;;

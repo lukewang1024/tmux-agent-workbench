@@ -429,13 +429,15 @@ adapter=codex
 description=Codex with high reasoning effort
 model=gpt-5.6
 effort=high
-permissions=bypass
+permissions=auto
 env.EXAMPLE_FIXED_SETTING=value
 ```
 
 Supported adapters are `codex`, `claude`, `trae`, `opencode`, and `command`.
 The first four accept `model`, `effort` where the CLI supports it,
-`permissions=bypass`, and fixed `env.NAME=value` entries. A trusted user-level
+`permissions=auto` or `permissions=bypass`, and fixed `env.NAME=value` entries.
+Automatic mode uses each CLI's approval reviewer/workspace-safe preset; bypass
+remains available only when explicitly requested. A trusted user-level
 custom launcher can use `adapter=command` plus `command=/absolute/path`; it is
 called with the generated prompt file as its sole argument. Repository-local
 profiles are deliberately not loaded.
