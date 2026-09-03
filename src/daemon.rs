@@ -48,6 +48,7 @@ pub struct Status {
     pub ipc_peak_in_flight: u64,
     pub ipc_accepted: u64,
     pub ipc_slow: u64,
+    pub detector_recoveries: u64,
 }
 
 #[derive(Default)]
@@ -56,6 +57,7 @@ struct IpcMetrics {
     peak_in_flight: AtomicU64,
     accepted: AtomicU64,
     slow: AtomicU64,
+    detector_recoveries: AtomicU64,
 }
 
 struct State {
@@ -743,6 +745,7 @@ fn handle(
                 ipc_peak_in_flight: ipc_metrics.peak_in_flight.load(Ordering::Relaxed),
                 ipc_accepted: ipc_metrics.accepted.load(Ordering::Relaxed),
                 ipc_slow: ipc_metrics.slow.load(Ordering::Relaxed),
+                detector_recoveries: ipc_metrics.detector_recoveries.load(Ordering::Relaxed),
             })
             .map_err(|error| error.to_string())
         }
@@ -887,7 +890,7 @@ fn handle(
                 let resolved = state.detector.resolve_agent_event(&detached);
                 let (report, agent) = match resolved {
                     Ok(resolved) => resolved,
-                    Err(_) => {
+                    Err(first_error) => {
                         // SessionStart can beat the daemon's periodic process scan
                         // during a fresh or resumed TUI startup. Treat a detached
                         // hook as a discovery signal and retry after one immediate
@@ -899,7 +902,40 @@ fn handle(
                             .detector
                             .tick(&config, &manifests, now)
                             .map_err(|error| error.to_string())?;
-                        state.detector.resolve_agent_event(&detached)?
+                        match state.detector.resolve_agent_event(&detached) {
+                            Ok(resolved) => resolved,
+                            Err(scan_error) => {
+                                // A long-lived daemon can retain a stale tmux /
+                                // process inventory after transient system
+                                // failures (notably ENOSPC). Build a clean
+                                // detector off to the side and replace the live
+                                // one only if it can both discover and accept
+                                // this event. Invalid or ambiguous hooks must
+                                // never destroy otherwise healthy state.
+                                let mut recovered = Detector::new(server.clone());
+                                recovered.wake();
+                                recovered
+                                    .tick(&config, &manifests, now)
+                                    .map_err(|error| error.to_string())?;
+                                match recovered.resolve_agent_event(&detached) {
+                                    Ok(resolved) => {
+                                        eprintln!(
+                                            "tmux-agent-workbench: detector self-healed after detached hook association failed: {first_error}; retry: {scan_error}"
+                                        );
+                                        state.detector = recovered;
+                                        ipc_metrics
+                                            .detector_recoveries
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        resolved
+                                    }
+                                    Err(recovery_error) => {
+                                        return Err(format!(
+                                            "detached hook association failed: {first_error}; retry: {scan_error}; recovery: {recovery_error}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 };
                 if report.event == crate::model::AgentEventType::SessionStart

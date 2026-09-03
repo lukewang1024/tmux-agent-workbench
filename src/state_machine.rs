@@ -377,7 +377,12 @@ impl StateMachine {
             report.event,
             AgentEventType::SessionStart | AgentEventType::Working
         );
-        if activates {
+        // Hooks are best-effort. If SessionStart/UserPromptSubmit was missed
+        // (for example while the daemon was recovering from ENOSPC), the next
+        // activity event is still sufficient to establish the initial thread
+        // binding. Once bound, non-activating events remain unable to switch
+        // the foreground thread.
+        if activates || tracked.active_hook_session_id.is_none() {
             tracked.active_hook_session_id = Some(report.session_id.clone());
         } else if tracked.active_hook_session_id.as_deref() != Some(&report.session_id) {
             return Err("event is not for the active foreground session".into());
@@ -1126,6 +1131,32 @@ mod tests {
         assert_eq!(current.base_state, BaseState::Working);
         assert_eq!(current.state_source, StateSource::Hook);
         assert!(current.attention.is_none());
+    }
+
+    #[test]
+    fn first_activity_self_heals_a_missed_session_start_without_weakening_thread_fence() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Idle, 0));
+
+        let active = machine
+            .report_event(
+                &initial.instance_id,
+                &event("activity", "front", AgentEventType::Activity, 10),
+                false,
+            )
+            .unwrap();
+        assert_eq!(active.hook_session_id.as_deref(), Some("front"));
+        assert_eq!(active.base_state, BaseState::Working);
+
+        assert!(
+            machine
+                .report_event(
+                    &initial.instance_id,
+                    &event("stale", "other", AgentEventType::Activity, 20),
+                    false,
+                )
+                .is_err()
+        );
     }
 
     #[test]
