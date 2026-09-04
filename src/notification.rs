@@ -380,6 +380,13 @@ fn spawn_audio(path: &Path, volume: f32) -> Result<(), String> {
         command.arg(path);
         command
     };
+    #[cfg(target_os = "android")]
+    let mut command = {
+        let _ = volume;
+        let mut command = Command::new("termux-media-player");
+        command.arg("play").arg(path);
+        command
+    };
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
