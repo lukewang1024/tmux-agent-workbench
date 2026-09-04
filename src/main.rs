@@ -121,11 +121,6 @@ enum ClientCommand {
         #[arg(long)]
         session: Option<String>,
     },
-    #[command(hide = true)]
-    Click {
-        #[arg(long)]
-        event: String,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -401,7 +396,9 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
             Ok(ClientMessage::FocusTarget {
                 event_id, target, ..
             }) => {
-                let _ = focus_attached_client(paths, &endpoint_id, &event_id, &target);
+                if let Err(error) = focus_attached_client(paths, &endpoint_id, &event_id, &target) {
+                    eprintln!("tmux-agent-workbench: notification focus failed: {error}");
+                }
             }
             Ok(ClientMessage::ClipboardWrite {
                 request_id, text, ..
@@ -485,14 +482,6 @@ fn focus_attached_client(
 
 fn click_path(paths: &Paths, event_id: &str) -> std::path::PathBuf {
     paths.runtime_dir.join("clicks").join(event_id)
-}
-
-fn client_click(paths: &Paths, event_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    validate_safe_name(event_id, "event id")?;
-    let directory = paths.runtime_dir.join("clicks");
-    fs::create_dir_all(&directory)?;
-    fs::write(click_path(paths, event_id), b"focus\n")?;
-    Ok(())
 }
 
 fn client_status(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
@@ -927,10 +916,13 @@ fn platform_notify(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_safe_name(event_id, "event id")?;
     let status = if std::env::var_os("TERMUX_VERSION").is_some() {
-        let executable = std::env::current_exe()?;
+        let click = click_path(paths, event_id);
+        fs::create_dir_all(click.parent().ok_or("click directory is unavailable")?)?;
+        let am = command_path("am").ok_or("Android activity manager is unavailable")?;
         let action = format!(
-            "am start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1; {} client click --event {event_id}",
-            shell_quote(&executable.to_string_lossy())
+            "{} start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1; : > {}",
+            shell_quote(&am.to_string_lossy()),
+            shell_quote(&click.to_string_lossy())
         );
         ProcessCommand::new("termux-notification")
             .args([
@@ -970,6 +962,14 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn command_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(name))
+            .find(|path| path.is_file())
+    })
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
@@ -990,7 +990,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ClientCommand::AttachPty { bind, session } => {
                 client_attach_pty(&paths, &bind, session.as_deref())?
             }
-            ClientCommand::Click { event } => client_click(&paths, &event)?,
         },
         Command::Status { format } => {
             let home = dirs::home_dir().ok_or("home directory unavailable")?;
