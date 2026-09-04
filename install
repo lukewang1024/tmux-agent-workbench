@@ -56,7 +56,11 @@ mkdir -p "$BIN_DIR" "$CORE_DIR"
 # local Cargo release build when the matching asset is unavailable.
 install_attention_binary() {
   attention_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$PLUGIN_DIR/Cargo.toml" | head -1)
-  if [ -n "${TERMUX_VERSION:-}" ]; then
+  attention_termux=0
+  [ -z "${TERMUX_VERSION:-}" ] || attention_termux=1
+  case ${PREFIX:-} in /data/data/com.termux/*) attention_termux=1 ;; esac
+  case $(uname -o 2>/dev/null || true) in Android) attention_termux=1 ;; esac
+  if [ "$attention_termux" -eq 1 ]; then
     # Android uses Bionic rather than glibc/musl. The ordinary Linux release
     # assets cannot execute in Termux, so build for Cargo's native Android
     # target instead of installing an incompatible archive.
