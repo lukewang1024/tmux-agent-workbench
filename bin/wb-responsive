@@ -50,5 +50,14 @@ fi
 "$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true
 tmux set-option -q @workbench_overlay_visible 1
 trap 'tmux set-option -qu @workbench_overlay_visible; "$core" sidebar-control maintain "$window" >/dev/null 2>&1 || true' EXIT HUP INT TERM
+popup_status=0
 tmux display-popup -c "$client" -E -w 100% -h 100% \
-  "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' WORKBENCH_SOURCE_PANE='$source_pane' '$core' sidebar"
+  "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' WORKBENCH_SOURCE_PANE='$source_pane' '$core' sidebar" || popup_status=$?
+
+# tmux reports a popup closed by HUP/INT as 128 + signal. Escape, Ctrl-C,
+# navigation, and a disappearing client can all take this normal close path;
+# do not make the foreground run-shell surface it as a command failure.
+case $popup_status in
+  0|129|130) exit 0 ;;
+  *) exit "$popup_status" ;;
+esac

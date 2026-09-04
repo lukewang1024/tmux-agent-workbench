@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+case ${1:-} in
+  display-message)
+    case "$*" in
+      *'#{socket_path}'*) printf '%s\n' /tmp/mock-tmux.sock ;;
+      *'#{client_session}'*) printf '%s\n' mock-session ;;
+      *'#{window_id}'*) printf '%s\n' @1 ;;
+      *'#{pane_id}'*) printf '%s\n' %1 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list-clients) printf '%s\n' '/dev/pts/8 80' ;;
+  show-option)
+    case "$*" in
+      *'@sidebar_width'*) printf '%s\n' 26 ;;
+      *'@sidebar_main_min_width'*) printf '%s\n' 80 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  set-option) ;;
+  display-popup) exit "${MOCK_POPUP_STATUS:-0}" ;;
+  *) exit 1 ;;
+esac

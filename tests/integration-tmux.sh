@@ -41,6 +41,24 @@ export XDG_RUNTIME_DIR="$test_root/runtime"
 export TMUX_AGENT_WORKBENCH_TMUX_SOCKET="$socket"
 export TMUX_AGENT_WORKBENCH_BIN="$binary"
 
+# Closing a responsive popup by HUP/INT is a successful user action. Preserve
+# other display-popup failures so tmux still reports real launcher errors.
+responsive_mock_bin=$test_root/responsive-mock-bin
+mkdir -p "$responsive_mock_bin"
+ln -s "$repo/tests/fixtures/fake-responsive-tmux" "$responsive_mock_bin/tmux"
+for responsive_status in 129 130; do
+  MOCK_POPUP_STATUS=$responsive_status \
+    PATH="$responsive_mock_bin:$PATH" \
+    TMUX_AGENT_WORKBENCH_BIN="$repo/tests/fixtures/fake-responsive-core" \
+    "$repo/bin/wb-responsive" @1 /dev/pts/8
+done
+if MOCK_POPUP_STATUS=7 \
+  PATH="$responsive_mock_bin:$PATH" \
+  TMUX_AGENT_WORKBENCH_BIN="$repo/tests/fixtures/fake-responsive-core" \
+  "$repo/bin/wb-responsive" @1 /dev/pts/8; then
+  exit 1
+fi
+
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 tmux -f "$repo/tests/fixtures/tmux.conf" -S "$socket" \
