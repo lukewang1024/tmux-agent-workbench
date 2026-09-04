@@ -552,8 +552,9 @@ fn client_attach(
     };
     validate_ssh_host(host)?;
     let mut control = ProcessCommand::new("ssh")
+        .args(["-o", "ClearAllForwardings=yes"])
         .arg(host)
-        .args(["tmux-agent-workbench", "client", "serve"])
+        .arg("tmux_socket=$(tmux display-message -p '#{socket_path}') && export TMUX_AGENT_WORKBENCH_TMUX_SOCKET=\"$tmux_socket\" && exec tmux-agent-workbench client serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -597,13 +598,15 @@ fn client_attach(
         return Err("remote rejected client hello".into());
     };
     validate_safe_name(&attachment_token, "attachment token")?;
-    let mut remote = format!("tmux-agent-workbench client attach-pty --bind {attachment_token}");
+    let mut remote = format!(
+        "tmux_socket=$(tmux display-message -p '#{{socket_path}}') && export TMUX_AGENT_WORKBENCH_TMUX_SOCKET=\"$tmux_socket\" && exec tmux-agent-workbench client attach-pty --bind {attachment_token}"
+    );
     if let Some(session) = session {
         remote.push_str(" --session ");
         remote.push_str(session);
     }
     let mut pty = ProcessCommand::new("ssh")
-        .args(["-t", host, &remote])
+        .args(["-o", "ClearAllForwardings=yes", "-t", host, &remote])
         .spawn()?;
     let status = loop {
         if let Some(status) = pty.try_wait()? {
