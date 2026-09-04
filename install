@@ -56,13 +56,20 @@ mkdir -p "$BIN_DIR" "$CORE_DIR"
 # local Cargo release build when the matching asset is unavailable.
 install_attention_binary() {
   attention_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$PLUGIN_DIR/Cargo.toml" | head -1)
-  case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64) attention_target=aarch64-apple-darwin ;;
-    Darwin-x86_64) attention_target=x86_64-apple-darwin ;;
-    Linux-aarch64|Linux-arm64) attention_target=aarch64-unknown-linux-gnu ;;
-    Linux-x86_64) attention_target=x86_64-unknown-linux-musl ;;
-    *) attention_target= ;;
-  esac
+  if [ -n "${TERMUX_VERSION:-}" ]; then
+    # Android uses Bionic rather than glibc/musl. The ordinary Linux release
+    # assets cannot execute in Termux, so build for Cargo's native Android
+    # target instead of installing an incompatible archive.
+    attention_target=
+  else
+    case "$(uname -s)-$(uname -m)" in
+      Darwin-arm64) attention_target=aarch64-apple-darwin ;;
+      Darwin-x86_64) attention_target=x86_64-apple-darwin ;;
+      Linux-aarch64|Linux-arm64) attention_target=aarch64-unknown-linux-gnu ;;
+      Linux-x86_64) attention_target=x86_64-unknown-linux-musl ;;
+      *) attention_target= ;;
+    esac
+  fi
   attention_destination="$CORE_DIR/tmux-agent-workbench-core"
   attention_stage="$attention_destination.new.$$"
 

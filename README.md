@@ -94,7 +94,8 @@ release and falls back to `cargo build --release` when no release asset is
 available. It installs executables under `~/.local/bin` by default, stages the
 binary before replacing it, and signs the staged Mach-O on macOS. Reload tmux
 after installation. Plugin loading never overwrites Workbench configuration or
-Agent configuration.
+Agent configuration. Termux is detected explicitly and always builds for its
+native Android target; install the Termux `rust` package first.
 
 If you want layer 2 disabled from the start, set this **before** the
 `@tpm_plugins` line so it's in effect the first time the plugin loads:
@@ -340,7 +341,31 @@ payloads are inspected only inside the short-lived reporter and are never sent
 to the daemon or persisted. OpenPeon categories are resolved from the active
 pack, so a separate notification hook such as Peon Ping is not required.
 
-### SSH notification relay
+### Client-aware SSH from Termux
+
+Install the Termux:API Android app from the same signing source as Termux, then
+install its CLI package and allow Android notification permission:
+
+```sh
+pkg install termux-api
+tmux-agent-workbench client setup termux
+termux-notification --title Test --content 'Workbench notification'
+```
+
+Use Workbench as the SSH entrypoint instead of attaching through plain `ssh`:
+
+```sh
+tmux-agent-workbench client attach devbox
+tmux-agent-workbench client attach devbox --session my-task
+```
+
+The command keeps an authenticated control channel beside the interactive PTY.
+Completion, input-required, and task-error events from the devbox are delivered
+through `termux-notification`; tapping one brings the active Termux session to
+the foreground. Closing the SSH attachment removes the endpoint. No listening
+port, reverse tunnel, or third-party push provider is required.
+
+### Legacy SSH notification relay
 
 Run one user-level listener on the laptop (under launchd, systemd --user, or a
 terminal supervisor), then pair each SSH config host alias independently:

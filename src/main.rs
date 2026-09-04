@@ -430,12 +430,24 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
 
 fn client_status(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     println!("client-protocol-v1\ndevice-id: {}", device_id(paths)?);
+    let termux_notification = std::env::var_os("TERMUX_VERSION").is_some()
+        && ProcessCommand::new("termux-notification")
+            .arg("--help")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
     println!(
         "notification: {}",
-        if cfg!(target_os = "macos") || cfg!(target_os = "linux") || cfg!(target_os = "windows") {
+        if termux_notification
+            || (std::env::var_os("TERMUX_VERSION").is_none()
+                && (cfg!(target_os = "macos")
+                    || cfg!(target_os = "linux")
+                    || cfg!(target_os = "windows")))
+        {
             "available"
         } else {
-            "unknown"
+            "unavailable"
         }
     );
     println!(
@@ -825,7 +837,7 @@ fn platform_notify(
                 "--content",
                 body,
                 "--action",
-                &format!("wb attach --target {event_id}"),
+                "am start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1",
             ])
             .status()?
     } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
