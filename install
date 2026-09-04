@@ -62,9 +62,13 @@ install_attention_binary() {
   case $(uname -o 2>/dev/null || true) in Android) attention_termux=1 ;; esac
   if [ "$attention_termux" -eq 1 ]; then
     # Android uses Bionic rather than glibc/musl. The ordinary Linux release
-    # assets cannot execute in Termux, so build for Cargo's native Android
-    # target instead of installing an incompatible archive.
-    attention_target=
+    # assets cannot execute in Termux. Prefer the matching Android release and
+    # retain the native Cargo build below as a fallback for other architectures.
+    case $(uname -m) in
+      aarch64|arm64) attention_target=aarch64-linux-android ;;
+      x86_64|amd64) attention_target=x86_64-linux-android ;;
+      *) attention_target= ;;
+    esac
   else
     case "$(uname -s)-$(uname -m)" in
       Darwin-arm64) attention_target=aarch64-apple-darwin ;;

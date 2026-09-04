@@ -95,7 +95,9 @@ available. It installs executables under `~/.local/bin` by default, stages the
 binary before replacing it, and signs the staged Mach-O on macOS. Reload tmux
 after installation. Plugin loading never overwrites Workbench configuration or
 Agent configuration. Termux is detected explicitly and always builds for its
-native Android target; install the Termux `rust` package first.
+native Android target. Tagged releases provide Android arm64 and x86_64 assets;
+install the Termux `rust` package only when using an unreleased revision or an
+architecture without a release asset.
 
 If you want layer 2 disabled from the start, set this **before** the
 `@tpm_plugins` line so it's in effect the first time the plugin loads:
