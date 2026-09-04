@@ -589,6 +589,15 @@ fn client_setup(paths: &Paths, platform: Option<&str>) -> Result<(), Box<dyn std
             } else {
                 println!("Termux:API not found; SSH, popup, and navigation remain available");
             }
+            let properties = dirs::home_dir()
+                .ok_or("home directory unavailable")?
+                .join(".termux/termux.properties");
+            if !termux_external_apps_enabled(&properties) {
+                println!(
+                    "Warning: set allow-external-apps=true in {} and run termux-reload-settings for notification clicks",
+                    properties.display()
+                );
+            }
             Ok(())
         }
         "macos" | "linux" => {
@@ -983,6 +992,18 @@ fn command_path(name: &str) -> Option<std::path::PathBuf> {
         std::env::split_paths(&paths)
             .map(|directory| directory.join(name))
             .find(|path| path.is_file())
+    })
+}
+
+fn termux_external_apps_enabled(path: &std::path::Path) -> bool {
+    fs::read_to_string(path).is_ok_and(|contents| {
+        contents.lines().any(|line| {
+            let line = line.trim();
+            let Some((key, value)) = line.split_once('=') else {
+                return false;
+            };
+            key.trim() == "allow-external-apps" && value.trim() == "true"
+        })
     })
 }
 
@@ -1794,5 +1815,15 @@ mod tests {
         assert!(script.starts_with("#!/system/bin/sh\n"));
         assert!(script.contains("/data/data/com.termux/files/usr/bin/am"));
         assert!(script.contains(&click_path(&paths, "codex.42").display().to_string()));
+    }
+
+    #[test]
+    fn detects_termux_external_app_permission_with_spacing() {
+        let root = tempfile::tempdir().unwrap();
+        let properties = root.path().join("termux.properties");
+        fs::write(&properties, "# disabled\nallow-external-apps = true\n").unwrap();
+        assert!(termux_external_apps_enabled(&properties));
+        fs::write(&properties, "allow-external-apps=false\n").unwrap();
+        assert!(!termux_external_apps_enabled(&properties));
     }
 }
