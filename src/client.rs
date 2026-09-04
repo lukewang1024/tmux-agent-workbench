@@ -204,6 +204,7 @@ impl ClientRegistry {
             .values()
             .filter(|endpoint| {
                 now_ms.saturating_sub(endpoint.last_activity_ms) <= OFFLINE_AFTER_MS
+                    && endpoint.kind != "termux"
                     && endpoint.focus == FocusState::Focused
                     && !endpoint.overlay_visible
                     && endpoint
@@ -298,7 +299,7 @@ mod tests {
         let (id, token) = registry.register(
             "d".into(),
             "phone".into(),
-            "termux".into(),
+            "macos".into(),
             vec!["sound".into()],
             0,
         );
@@ -312,6 +313,23 @@ mod tests {
             .unwrap();
         assert_eq!(registry.focused_viewer("%1", 5).unwrap().id, id);
         assert!(registry.focused_viewer("%2", 5).is_none());
+    }
+
+    #[test]
+    fn termux_is_not_treated_as_visible_when_android_is_backgrounded() {
+        let mut registry = ClientRegistry::default();
+        let (id, token) = registry.register(
+            "d".into(),
+            "phone".into(),
+            "termux".into(),
+            vec!["notification".into()],
+            0,
+        );
+        registry.bind(&token, "/dev/pts/1".into(), 1).unwrap();
+        registry
+            .update_focus(&id, FocusState::Focused, false, Some(target("%1")), 2)
+            .unwrap();
+        assert!(registry.focused_viewer("%1", 3).is_none());
     }
 
     #[test]

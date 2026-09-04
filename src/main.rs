@@ -484,6 +484,28 @@ fn click_path(paths: &Paths, event_id: &str) -> std::path::PathBuf {
     paths.runtime_dir.join("clicks").join(event_id)
 }
 
+fn termux_click_action(
+    paths: &Paths,
+    event_id: &str,
+    am: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    validate_safe_name(event_id, "event id")?;
+    let click = click_path(paths, event_id);
+    fs::create_dir_all(click.parent().ok_or("click directory is unavailable")?)?;
+    let directory = paths.runtime_dir.join("notification-actions");
+    fs::create_dir_all(&directory)?;
+    let action = directory.join(event_id);
+    let script = format!(
+        "#!/system/bin/sh\n{} start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1\n: > {}\n",
+        shell_quote(&am.to_string_lossy()),
+        shell_quote(&click.to_string_lossy())
+    );
+    fs::write(&action, script)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&action, fs::Permissions::from_mode(0o700))?;
+    Ok(action)
+}
+
 fn client_status(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     println!("client-protocol-v2\ndevice-id: {}", device_id(paths)?);
     let termux_notification = std::env::var_os("TERMUX_VERSION").is_some()
@@ -916,14 +938,8 @@ fn platform_notify(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_safe_name(event_id, "event id")?;
     let status = if std::env::var_os("TERMUX_VERSION").is_some() {
-        let click = click_path(paths, event_id);
-        fs::create_dir_all(click.parent().ok_or("click directory is unavailable")?)?;
         let am = command_path("am").ok_or("Android activity manager is unavailable")?;
-        let action = format!(
-            "{} start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1; : > {}",
-            shell_quote(&am.to_string_lossy()),
-            shell_quote(&click.to_string_lossy())
-        );
+        let action = termux_click_action(paths, event_id, &am)?;
         ProcessCommand::new("termux-notification")
             .args([
                 "--id",
@@ -933,7 +949,7 @@ fn platform_notify(
                 "--content",
                 body,
                 "--action",
-                &action,
+                &action.to_string_lossy(),
             ])
             .status()?
     } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
@@ -1756,5 +1772,27 @@ mod tests {
             shell_quote("/tmp/work bench's/core"),
             "'/tmp/work bench'\"'\"'s/core'"
         );
+    }
+
+    #[test]
+    fn termux_notification_action_is_self_contained() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: root.path().join("config"),
+            state_dir: root.path().join("state"),
+            cache_dir: root.path().join("cache"),
+            runtime_dir: root.path().join("runtime"),
+        };
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+        let action = termux_click_action(
+            &paths,
+            "codex.42",
+            std::path::Path::new("/data/data/com.termux/files/usr/bin/am"),
+        )
+        .unwrap();
+        let script = fs::read_to_string(action).unwrap();
+        assert!(script.starts_with("#!/system/bin/sh\n"));
+        assert!(script.contains("/data/data/com.termux/files/usr/bin/am"));
+        assert!(script.contains(&click_path(&paths, "codex.42").display().to_string()));
     }
 }
