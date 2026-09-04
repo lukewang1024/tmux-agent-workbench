@@ -308,7 +308,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         return Err("client channel must begin with hello".into());
     };
     uuid::Uuid::parse_str(&device_id).map_err(|_| "invalid device id")?;
-    ensure_daemon(paths)?;
+    ensure_daemon_quiet(paths)?;
     let registration = ipc_call(
         paths,
         "client.register",
@@ -1615,6 +1615,17 @@ fn ipc_call(
 }
 
 fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_daemon_with_announcement(paths, true)
+}
+
+fn ensure_daemon_quiet(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_daemon_with_announcement(paths, false)
+}
+
+fn ensure_daemon_with_announcement(
+    paths: &Paths,
+    announce: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::process::CommandExt;
 
     let server = ServerIdentity::discover()?;
@@ -1639,7 +1650,9 @@ fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|value| value.get("pid"))
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "unknown".into());
-            println!("daemon already running (pid {pid})");
+            if announce {
+                println!("daemon already running (pid {pid})");
+            }
             return Ok(());
         }
         let _ = exchange(
@@ -1693,7 +1706,9 @@ fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
             &Request::new("daemon.status", serde_json::Value::Null),
             Duration::from_millis(250),
         ) {
-            println!("daemon running (pid {})", value["pid"]);
+            if announce {
+                println!("daemon running (pid {})", value["pid"]);
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {
