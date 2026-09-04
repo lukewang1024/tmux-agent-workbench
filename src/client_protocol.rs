@@ -2,6 +2,8 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::TmuxTarget;
+
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +41,16 @@ pub enum ClientMessage {
         category: String,
         title: String,
         body: String,
+        target: TmuxTarget,
     },
     EventAccepted {
         version: u32,
         event_id: String,
+    },
+    FocusTarget {
+        version: u32,
+        event_id: String,
+        target: TmuxTarget,
     },
     FocusRequest {
         version: u32,
@@ -84,6 +92,7 @@ impl ClientMessage {
             | Self::AttachmentBind { version, .. }
             | Self::EventDelivery { version, .. }
             | Self::EventAccepted { version, .. }
+            | Self::FocusTarget { version, .. }
             | Self::FocusRequest { version, .. }
             | Self::FocusResult { version, .. }
             | Self::ClipboardRead { version, .. }
@@ -154,10 +163,22 @@ pub fn read_frame(mut reader: impl Read) -> io::Result<ClientMessage> {
 mod tests {
     use super::*;
 
+    fn target() -> TmuxTarget {
+        TmuxTarget {
+            session_id: "$1".into(),
+            session_name: "task".into(),
+            window_id: "@2".into(),
+            window_index: 1,
+            window_name: "agent".into(),
+            pane_id: "%3".into(),
+            pane_index: 0,
+        }
+    }
+
     #[test]
     fn framed_json_round_trips() {
         let message = ClientMessage::Heartbeat {
-            version: 1,
+            version: crate::CLIENT_PROTOCOL_VERSION,
             activity_unix_ms: 42,
         };
         let mut bytes = Vec::new();
@@ -174,5 +195,17 @@ mod tests {
         let mut invalid = (2_u32).to_be_bytes().to_vec();
         invalid.extend_from_slice(&[0xff, 0xff]);
         assert!(read_frame(invalid.as_slice()).is_err());
+    }
+
+    #[test]
+    fn focus_target_round_trips_with_exact_pane() {
+        let message = ClientMessage::FocusTarget {
+            version: crate::CLIENT_PROTOCOL_VERSION,
+            event_id: "codex.42".into(),
+            target: target(),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).unwrap();
+        assert_eq!(read_frame(bytes.as_slice()).unwrap(), message);
     }
 }

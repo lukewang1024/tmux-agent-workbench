@@ -127,6 +127,13 @@ impl ClientRegistry {
         Ok(())
     }
 
+    pub fn attachment(&self, endpoint_id: &str) -> Result<Option<&str>, String> {
+        self.endpoints
+            .get(endpoint_id)
+            .map(|endpoint| endpoint.attachment.as_deref())
+            .ok_or_else(|| "unknown endpoint".into())
+    }
+
     pub fn queue(&mut self, endpoint_id: &str, event: SemanticEvent) -> Result<(), String> {
         let endpoint = self
             .endpoints
@@ -319,5 +326,14 @@ mod tests {
                 .bind(&old, "tty".into(), ATTACHMENT_TOKEN_TTL_MS + 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn attachment_is_available_only_after_binding() {
+        let mut registry = ClientRegistry::default();
+        let (id, token) = registry.register("d".into(), "phone".into(), "termux".into(), vec![], 0);
+        assert_eq!(registry.attachment(&id).unwrap(), None);
+        registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
+        assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/7"));
     }
 }

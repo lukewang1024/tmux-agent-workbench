@@ -26,4 +26,4 @@ pub mod workspace;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-pub const CLIENT_PROTOCOL_VERSION: u32 = 1;
+pub const CLIENT_PROTOCOL_VERSION: u32 = 2;

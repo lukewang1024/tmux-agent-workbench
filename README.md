@@ -363,9 +363,11 @@ tmux-agent-workbench client attach devbox --session my-task
 
 The command keeps an authenticated control channel beside the interactive PTY.
 Completion, input-required, and task-error events from the devbox are delivered
-through `termux-notification`; tapping one brings the active Termux session to
-the foreground. Closing the SSH attachment removes the endpoint. No listening
-port, reverse tunnel, or third-party push provider is required.
+through `termux-notification`; tapping one brings Termux to the foreground and
+uses that control channel to switch the attached remote tmux client to the
+event's exact session, window, and pane. Closing the SSH attachment removes the
+endpoint. No listening port, reverse tunnel, or third-party push provider is
+required.
 
 ### Legacy SSH notification relay
 

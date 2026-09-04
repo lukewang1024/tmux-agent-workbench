@@ -134,6 +134,12 @@ struct ClientDetachParams {
     endpoint_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientAttachmentParams {
+    endpoint_id: String,
+}
+
 pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> {
     let lock_path = paths.lock_for_server(&server.key);
     let lock = open_lock(&lock_path)?;
@@ -761,6 +767,11 @@ fn handle(
             let mut state = state.write().expect("state poisoned");
             let endpoint_id = state.clients.bind(&params.token, params.attachment, now_unix_ms())?;
             Ok(json!({"endpoint_id": endpoint_id, "bound": true}))
+        }),
+        "client.attachment" => parse_params::<ClientAttachmentParams>(request.params).and_then(|params| {
+            let state = state.read().expect("state poisoned");
+            let attachment = state.clients.attachment(&params.endpoint_id)?;
+            Ok(json!({"attachment": attachment}))
         }),
         "client.heartbeat" => parse_params::<ClientHeartbeatParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");

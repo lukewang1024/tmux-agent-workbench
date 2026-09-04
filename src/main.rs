@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
@@ -119,6 +120,11 @@ enum ClientCommand {
         bind: String,
         #[arg(long)]
         session: Option<String>,
+    },
+    #[command(hide = true)]
+    Click {
+        #[arg(long)]
+        event: String,
     },
 }
 
@@ -321,7 +327,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     write_frame(
         std::io::stdout().lock(),
         &ClientMessage::Welcome {
-            version: 1,
+            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
             endpoint_id: endpoint_id.clone(),
             heartbeat_seconds: 15,
             attachment_token: token.clone(),
@@ -356,18 +362,19 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     write_frame(
                         std::io::stdout().lock(),
                         &ClientMessage::EventDelivery {
-                            version: 1,
+                            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                             event_id: event.id.clone(),
                             category: event.category.name().into(),
                             title: event.title.clone(),
                             body: event.body.clone(),
+                            target: event.target.clone(),
                         },
                     )?;
                 }
                 write_frame(
                     std::io::stdout().lock(),
                     &ClientMessage::HeartbeatAck {
-                        version: 1,
+                        version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                         events: events.len() as u32,
                     },
                 )?;
@@ -391,6 +398,11 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::json!({"endpoint_id": endpoint_id, "event_id": event_id}),
                 )?;
             }
+            Ok(ClientMessage::FocusTarget {
+                event_id, target, ..
+            }) => {
+                let _ = focus_attached_client(paths, &endpoint_id, &event_id, &target);
+            }
             Ok(ClientMessage::ClipboardWrite {
                 request_id, text, ..
             }) => {
@@ -398,7 +410,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                 write_frame(
                     std::io::stdout().lock(),
                     &ClientMessage::ClipboardResult {
-                        version: 1,
+                        version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                         request_id,
                         text: None,
                         error: result,
@@ -413,7 +425,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                 write_frame(
                     std::io::stdout().lock(),
                     &ClientMessage::ClipboardResult {
-                        version: 1,
+                        version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                         request_id,
                         text,
                         error,
@@ -428,8 +440,63 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn focus_attached_client(
+    paths: &Paths,
+    endpoint_id: &str,
+    event_id: &str,
+    target: &tmux_agent_workbench::model::TmuxTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_safe_name(event_id, "event id")?;
+    validate_target(&target.session_id, '$')?;
+    validate_target(&target.window_id, '@')?;
+    validate_target(&target.pane_id, '%')?;
+    let attachment = ipc_call(
+        paths,
+        "client.attachment",
+        serde_json::json!({"endpoint_id": endpoint_id}),
+    )?
+    .get("attachment")
+    .and_then(|value| value.as_str())
+    .ok_or("client attachment is unavailable")?
+    .to_owned();
+    let server = ServerIdentity::discover()?;
+    for args in [
+        vec![
+            "switch-client",
+            "-c",
+            attachment.as_str(),
+            "-t",
+            target.window_id.as_str(),
+        ],
+        vec!["select-pane", "-Z", "-t", target.pane_id.as_str()],
+    ] {
+        if !ProcessCommand::new("tmux")
+            .arg("-S")
+            .arg(&server.socket_path)
+            .args(args)
+            .status()?
+            .success()
+        {
+            return Err(format!("tmux notification target expired: {event_id}").into());
+        }
+    }
+    Ok(())
+}
+
+fn click_path(paths: &Paths, event_id: &str) -> std::path::PathBuf {
+    paths.runtime_dir.join("clicks").join(event_id)
+}
+
+fn client_click(paths: &Paths, event_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_safe_name(event_id, "event id")?;
+    let directory = paths.runtime_dir.join("clicks");
+    fs::create_dir_all(&directory)?;
+    fs::write(click_path(paths, event_id), b"focus\n")?;
+    Ok(())
+}
+
 fn client_status(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
-    println!("client-protocol-v1\ndevice-id: {}", device_id(paths)?);
+    println!("client-protocol-v2\ndevice-id: {}", device_id(paths)?);
     let termux_notification = std::env::var_os("TERMUX_VERSION").is_some()
         && ProcessCommand::new("termux-notification")
             .arg("--help")
@@ -573,7 +640,7 @@ fn client_attach(
     write_frame(
         control.stdin.as_mut().ok_or("control stdin unavailable")?,
         &ClientMessage::Hello {
-            version: 1,
+            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
             device_id: id,
             device_label: label,
             kind: kind.into(),
@@ -608,16 +675,37 @@ fn client_attach(
     let mut pty = ProcessCommand::new("ssh")
         .args(["-o", "ClearAllForwardings=yes", "-t", host, &remote])
         .spawn()?;
+    let mut event_targets: HashMap<String, tmux_agent_workbench::model::TmuxTarget> =
+        HashMap::new();
+    let mut next_heartbeat = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = pty.try_wait()? {
             break status;
         }
-        thread::sleep(Duration::from_secs(15));
+        if let Some(stdin) = control.stdin.as_mut() {
+            for (event_id, target) in &event_targets {
+                if fs::remove_file(click_path(paths, event_id)).is_ok() {
+                    write_frame(
+                        &mut *stdin,
+                        &ClientMessage::FocusTarget {
+                            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+                            event_id: event_id.clone(),
+                            target: target.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
+        if Instant::now() < next_heartbeat {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        next_heartbeat = Instant::now() + Duration::from_secs(15);
         if let Some(stdin) = control.stdin.as_mut() {
             if write_frame(
                 &mut *stdin,
                 &ClientMessage::Heartbeat {
-                    version: 1,
+                    version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                     activity_unix_ms: now_ms(),
                 },
             )
@@ -637,13 +725,15 @@ fn client_attach(
                         category,
                         title,
                         body,
+                        target,
                         ..
                     } => {
-                        platform_notify(&event_id, &category, &title, &body)?;
+                        event_targets.insert(event_id.clone(), target);
+                        platform_notify(paths, &event_id, &category, &title, &body)?;
                         let _ = write_frame(
                             &mut *stdin,
                             &ClientMessage::EventAccepted {
-                                version: 1,
+                                version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                                 event_id,
                             },
                         );
@@ -655,7 +745,12 @@ fn client_attach(
         }
     };
     if let Some(stdin) = control.stdin.as_mut() {
-        let _ = write_frame(stdin, &ClientMessage::Goodbye { version: 1 });
+        let _ = write_frame(
+            stdin,
+            &ClientMessage::Goodbye {
+                version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+            },
+        );
     }
     let _ = control.wait();
     if status.success() {
@@ -824,6 +919,7 @@ fn platform_clipboard_read() -> Result<String, String> {
 }
 
 fn platform_notify(
+    paths: &Paths,
     event_id: &str,
     category: &str,
     title: &str,
@@ -831,6 +927,11 @@ fn platform_notify(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_safe_name(event_id, "event id")?;
     let status = if std::env::var_os("TERMUX_VERSION").is_some() {
+        let executable = std::env::current_exe()?;
+        let action = format!(
+            "am start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1; {} client click --event {event_id}",
+            shell_quote(&executable.to_string_lossy())
+        );
         ProcessCommand::new("termux-notification")
             .args([
                 "--id",
@@ -840,7 +941,7 @@ fn platform_notify(
                 "--content",
                 body,
                 "--action",
-                "am start --user 0 -n com.termux/.app.TermuxActivity >/dev/null 2>&1",
+                &action,
             ])
             .status()?
     } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
@@ -853,6 +954,7 @@ fn platform_notify(
             .args(["-e", script, event_id, title, body])
             .status()?
     } else {
+        let _ = paths;
         ProcessCommand::new("notify-send")
             .args(["--app-name", "Workbench", title, body])
             .status()?
@@ -862,6 +964,10 @@ fn platform_notify(
     } else {
         Err(format!("notification delivery failed for {category}").into())
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -884,13 +990,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ClientCommand::AttachPty { bind, session } => {
                 client_attach_pty(&paths, &bind, session.as_deref())?
             }
+            ClientCommand::Click { event } => client_click(&paths, &event)?,
         },
         Command::Status { format } => {
             let home = dirs::home_dir().ok_or("home directory unavailable")?;
             let registry = tmux_agent_workbench::workspace::Registry::new(paths.workspaces_dir());
             let workspaces = registry.lazy_migrate(&home.join("Workspace"), now_ms())?;
             let capabilities = [
-                "client-protocol-v1",
+                "client-protocol-v2",
                 "status-fragments-v1",
                 "responsive-popup-v1",
                 "workspace-registry-v1",
@@ -1626,6 +1733,14 @@ mod tests {
                 session_id: "$3".into(),
                 tty: "/dev/ttys001".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn shell_quotes_notification_click_executable() {
+        assert_eq!(
+            shell_quote("/tmp/work bench's/core"),
+            "'/tmp/work bench'\"'\"'s/core'"
         );
     }
 }
