@@ -49,6 +49,10 @@ enum FooterButton {
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve the first frame before switching to the alternate screen. Some
+    // remote clients do not paint an initially empty fullscreen popup until a
+    // later input event; entering with real rows makes the UI visible at once.
+    let initial_snapshot = fetch_snapshot(&paths.socket_for_server(&server.key));
     enable_raw_mode()?;
     let mut output = stdout();
     execute!(
@@ -59,7 +63,7 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     )?;
     let backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(backend)?;
-    let result = event_loop(&mut terminal, paths, server);
+    let result = event_loop(&mut terminal, paths, server, initial_snapshot);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -87,6 +91,7 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     paths: &Paths,
     server: &ServerIdentity,
+    initial_snapshot: Result<Snapshot, Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
     let fetch_socket = socket.clone();
@@ -98,8 +103,6 @@ fn event_loop(
             let _ = snapshot_tx.try_send(result);
         }
     });
-    let mut rows = Vec::new();
-    let mut snapshot = None;
     let mut detailed = false;
     let mut agent_sort = Config::load(&paths.config_file())
         .map(|config| config.sidebar.agent_sort)
@@ -107,13 +110,18 @@ fn event_loop(
     if let Some(saved) = persisted_agent_sort(paths) {
         agent_sort = saved;
     }
+    let mut snapshot = initial_snapshot.ok();
+    let mut rows = snapshot
+        .as_ref()
+        .map(|snapshot| build_rows(snapshot, detailed, agent_sort))
+        .unwrap_or_default();
     let mut help_visible = false;
     let mut footer_hover = None;
     let mut selected = 0_usize;
     let mut selection_visible = true;
     let mut scroll = 0_usize;
-    let mut disconnected = true;
-    let mut last_success = None;
+    let mut disconnected = snapshot.is_none();
+    let mut last_success = snapshot.as_ref().map(|_| Instant::now());
     let mut last_failure_log = Instant::now() - Duration::from_secs(10);
     let mut next_refresh = Instant::now();
     let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
