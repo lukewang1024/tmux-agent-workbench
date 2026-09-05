@@ -207,6 +207,9 @@ menu() {
   case $client in
     ''|*[!A-Za-z0-9_./-]*) return 2 ;;
   esac
+  if ! tmux list-clients -F '#{client_name}' 2>/dev/null | grep -Fx "$client" >/dev/null; then
+    return 0
+  fi
   agent=$(source_name)
   value=$(render "$agent")
   case $agent in
@@ -238,6 +241,7 @@ menu() {
 
   # -M handles subsequent mouse events; -O ignores the opening click's release,
   # so the menu remains visible after the user lets go of the left button.
+  menu_status=0
   tmux display-menu -M -O -C 0 -c "$client" -b rounded -T " Usage · $name " -x C -y C \
     "#{?#{==:1,1},-,}$daily_line" '' '' \
     "#{?#{==:1,1},-,}$weekly_line" '' '' \
@@ -247,7 +251,10 @@ menu() {
     "${codex_mark}Codex" c 'run-shell -b "workbench-agent-usage choose codex"' \
     "${claude_mark}Claude Code" l 'run-shell -b "workbench-agent-usage choose claude"' \
     "${trae_mark}Trae" t 'run-shell -b "workbench-agent-usage choose trae"' \
-    "${opencode_mark}OpenCode" o 'run-shell -b "workbench-agent-usage choose opencode"'
+    "${opencode_mark}OpenCode" o 'run-shell -b "workbench-agent-usage choose opencode"' || menu_status=$?
+  # A duplicate touch can race after the first menu is already visible. tmux
+  # returns 2 for that client-local collision; it is not an action failure.
+  case $menu_status in 0|2) return 0 ;; *) return "$menu_status" ;; esac
 }
 
 select_source() {

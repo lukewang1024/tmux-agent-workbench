@@ -18,9 +18,9 @@ case ${1:-} in
     ;;
   agent)
     exec tmux display-menu -M -O -C 0 -c "$client" -T '#[align=centre] 󰚩 Agent ' \
-      '/side' s 'send-keys -l "/side"; send-keys Enter' \
-      '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
-      '/fork' f 'send-keys -l "/fork"; send-keys Enter'
+      '/side' s 'send-keys -l "/side "' \
+      '/btw' b 'send-keys -l "/btw "' \
+      '/fork' f 'send-keys -l "/fork "'
     ;;
   *) exit 2 ;;
 esac

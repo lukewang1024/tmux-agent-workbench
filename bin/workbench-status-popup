@@ -20,7 +20,7 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 
 case $kind in
   host) height=12; title=SSH ;;
-  tmux) height=9; title=tmux ;;
+  tmux) height=14; title=tmux ;;
   agent) height=6; title=Agent ;;
 esac
 sleep 0.15

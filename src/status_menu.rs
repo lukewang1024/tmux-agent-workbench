@@ -160,6 +160,46 @@ fn actions(
             "tmux",
             vec![
                 tmux_action("New window", 'c', &["new-window"]),
+                tmux_action(
+                    "Codex Auto",
+                    'x',
+                    &["new-window", "-n", "codex", "exec codex --approve-for-me"],
+                ),
+                tmux_action(
+                    "Claude Auto",
+                    'a',
+                    &[
+                        "new-window",
+                        "-n",
+                        "claude",
+                        "exec claude --permission-mode auto",
+                    ],
+                ),
+                tmux_action(
+                    "Trae Auto",
+                    't',
+                    &[
+                        "new-window",
+                        "-n",
+                        "trae",
+                        "exec traex --permission-mode auto",
+                    ],
+                ),
+                tmux_action(
+                    "OpenCode",
+                    'o',
+                    &["new-window", "-n", "opencode", "exec opencode --auto"],
+                ),
+                tmux_action(
+                    "VS Code",
+                    'v',
+                    &[
+                        "new-window",
+                        "-n",
+                        "code",
+                        "code .; exec ${SHELL:-/bin/sh} -l",
+                    ],
+                ),
                 tmux_action("Split below", '-', &["split-window", "-v"]),
                 tmux_action("Split right", '|', &["split-window", "-h"]),
                 tmux_action("Choose window", 'w', &["choose-tree", "-Zw"]),
@@ -222,27 +262,21 @@ fn execute_action(action: &Action, pane: &str) -> Result<(), Box<dyn std::error:
     let status = match &action.command {
         ActionCommand::Tmux(args) => {
             let mut command = Command::new("tmux");
-            command.args(args);
             if matches!(
                 args.first().map(String::as_str),
                 Some("new-window" | "split-window")
             ) {
+                command.arg(&args[0]);
                 command.args(["-c", path.trim()]);
+                command.args(&args[1..]);
+            } else {
+                command.args(args);
             }
             command.status()?
         }
         ActionCommand::Agent(text) => Command::new("tmux")
-            .args(["send-keys", "-t", pane, "-l", text])
-            .status()
-            .and_then(|status| {
-                if status.success() {
-                    Command::new("tmux")
-                        .args(["send-keys", "-t", pane, "Enter"])
-                        .status()
-                } else {
-                    Ok(status)
-                }
-            })?,
+            .args(["send-keys", "-t", pane, "-l", &agent_input(text)])
+            .status()?,
         ActionCommand::Host(host) => Command::new("tmux")
             .args([
                 "new-window",
@@ -259,6 +293,10 @@ fn execute_action(action: &Action, pane: &str) -> Result<(), Box<dyn std::error:
     } else {
         Err(format!("menu action failed: {}", action.label).into())
     }
+}
+
+fn agent_input(command: &str) -> String {
+    format!("{command} ")
 }
 
 fn tmux_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
@@ -297,5 +335,10 @@ mod tests {
     #[test]
     fn shell_quotes_hosts() {
         assert_eq!(shell_quote("dev'box"), "'dev'\\''box'");
+    }
+
+    #[test]
+    fn agent_shortcuts_prefill_without_submitting() {
+        assert_eq!(agent_input("/side"), "/side ");
     }
 }

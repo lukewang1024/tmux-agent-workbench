@@ -164,6 +164,7 @@ wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-host-status' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-usage-status' >/dev/null
+if tmux -S "$socket" show-options -sv command-alias | grep 'wb-usage-status=.*sleep' >/dev/null; then exit 1; fi
 tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*switch-client -T prefix' >/dev/null
 tmux -S "$socket" list-keys -T prefix | grep 'MouseUp1Status.*switch-client -T prefix' >/dev/null
 if tmux -S "$socket" list-keys -T root | grep 'MouseUp1Status' >/dev/null; then exit 1; fi

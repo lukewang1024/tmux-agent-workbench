@@ -95,7 +95,7 @@ tmux bind-key -T prefix MouseUp1Status if-shell -F "$workbench_status_ranges" \
 tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
-  "wb-usage-status=run-shell -b \"sleep 0.15; '$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
+  "wb-usage-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
   'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_host}" wb-host-status "if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status"'
@@ -165,7 +165,7 @@ bind_pane @workbench-key-pane-right-arrow @workbench-_bound-pane-right-arrow Rig
 bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open agent command menu" \
   run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}'"
 bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
-  run-shell "$CURRENT_DIR/bin/workbench-menu tmux '#{client_name}'"
+  run-shell -b "$CURRENT_DIR/bin/workbench-status-popup tmux '#{client_name}' '#{pane_id}'"
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell
