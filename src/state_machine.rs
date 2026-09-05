@@ -35,6 +35,7 @@ pub struct Observation {
 #[derive(Debug, Clone)]
 struct Tracked {
     snapshot: AgentSnapshot,
+    automatic_review_attention: Option<AttentionEvent>,
     idle_candidate_since: Option<u64>,
     idle_confirmations: u8,
     working_candidate_since: Option<u64>,
@@ -148,6 +149,7 @@ impl StateMachine {
                 )
             });
             Tracked {
+                automatic_review_attention: None,
                 snapshot: AgentSnapshot {
                     instance_id: instance_id.clone(),
                     kind: observation.kind,
@@ -331,6 +333,27 @@ impl StateMachine {
         tracked.snapshot.process = Some(observation.process);
         tracked.snapshot.visible = observation.visible;
         tracked.snapshot.estimated_state = Some(observation.state);
+        // Permission hooks describe the pending request, not who is reviewing
+        // it. Keep that lifecycle fact, but don't present automated work as a
+        // request for human input. Restore its attention if a human prompt follows.
+        if tracked.snapshot.kind == AgentKind::Codex
+            && tracked.snapshot.base_state == BaseState::Blocked
+        {
+            if observation.rule_id.as_deref() == Some("codex-automatic-approval-review")
+                && observation.state == BaseState::Working
+            {
+                if tracked.automatic_review_attention.is_none() {
+                    tracked.automatic_review_attention = tracked.snapshot.attention.take();
+                }
+                tracked.snapshot.display_state = DisplayState::Working;
+                tracked.conflict_since_ms = None;
+                return tracked.snapshot.clone();
+            }
+            tracked.snapshot.display_state = DisplayState::Blocked;
+            if let Some(attention) = tracked.automatic_review_attention.take() {
+                tracked.snapshot.attention = Some(attention);
+            }
+        }
         if observation.state != tracked.snapshot.base_state {
             let since = *tracked
                 .conflict_since_ms
@@ -413,6 +436,7 @@ impl StateMachine {
             AgentEventType::Error => BaseState::Working,
         };
         let old = tracked.snapshot.base_state;
+        tracked.automatic_review_attention = None;
         tracked.snapshot.base_state = next;
         tracked.snapshot.display_state = display_for(next);
         tracked.snapshot.reason_category = report.reason_category.clone();
@@ -568,6 +592,15 @@ impl StateMachine {
             .collect();
         values.sort_by(|a, b| stable_order_key(a).cmp(&stable_order_key(b)));
         values
+    }
+
+    pub fn has_pending_codex_permission(&self, pane_id: &str) -> bool {
+        self.agents.values().any(|tracked| {
+            tracked.snapshot.target.pane_id == pane_id
+                && tracked.snapshot.kind == AgentKind::Codex
+                && tracked.snapshot.base_state == BaseState::Blocked
+                && !tracked.snapshot.exited
+        })
     }
 
     pub fn next_attention(&self) -> Option<&AttentionEvent> {
@@ -1076,6 +1109,40 @@ mod tests {
         let blocked = machine.observe_estimate(observation(BaseState::Blocked, 900));
         assert_eq!(blocked.display_state, DisplayState::Blocked);
         assert!(blocked.attention.is_none());
+    }
+
+    #[test]
+    fn automatic_review_suppresses_permission_display_and_restores_human_attention() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        let blocked = machine
+            .report_event(
+                &initial.instance_id,
+                &event("permission", "front", AgentEventType::Permission, 10),
+                false,
+            )
+            .unwrap();
+        let attention_id = blocked.attention.unwrap().id;
+        for at in [20, 100, 5_000] {
+            let mut review = observation(BaseState::Working, at);
+            review.rule_id = Some("codex-automatic-approval-review".into());
+            let working = machine.observe_estimate(review);
+            assert_eq!(working.display_state, DisplayState::Working);
+            assert!(working.attention.is_none());
+        }
+        let human = machine.observe_estimate(observation(BaseState::Blocked, 5_100));
+        assert_eq!(human.display_state, DisplayState::Blocked);
+        assert_eq!(human.attention.unwrap().id, attention_id);
+        machine
+            .report_event(
+                &initial.instance_id,
+                &event("activity", "front", AgentEventType::Activity, 5_200),
+                false,
+            )
+            .unwrap();
+        let working = machine.observe_estimate(observation(BaseState::Working, 5_300));
+        assert_eq!(working.display_state, DisplayState::Working);
+        assert!(working.attention.is_none());
     }
 
     #[test]
