@@ -25,16 +25,16 @@ case $range in
     exec tmux switch-client -c "$client" -T prefix
     ;;
   wb_tmux)
-    exec "$script_dir/workbench-menu" tmux "$client"
+    exec "$script_dir/workbench-status-popup" tmux "$client" "$pane"
     ;;
   wb_agent)
-    exec "$script_dir/workbench-menu" agent "$client"
+    exec "$script_dir/workbench-status-popup" agent "$client" "$pane"
     ;;
   wb_sidebar)
     exec "$script_dir/wb-responsive" "$window" "$client"
     ;;
   wb_host)
-    exec "$script_dir/workbench-host-menu" "$client" "$pane"
+    exec "$script_dir/workbench-status-popup" host "$client" "$pane"
     ;;
   wb_usage)
     exec "$script_dir/workbench-agent-usage" menu "$client"

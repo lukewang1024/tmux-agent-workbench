@@ -40,6 +40,12 @@ enum Command {
         json: bool,
     },
     Sidebar,
+    #[command(hide = true)]
+    StatusMenu {
+        kind: tmux_agent_workbench::status_menu::StatusMenuKind,
+        #[arg(long)]
+        pane: String,
+    },
     Pick {
         #[command(subcommand)]
         target: PickTarget,
@@ -1117,6 +1123,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Sidebar => {
             let server = ServerIdentity::discover()?;
             tmux_agent_workbench::sidebar::run(&paths, &server)?;
+        }
+        Command::StatusMenu { kind, pane } => {
+            tmux_agent_workbench::status_menu::run(kind, &pane)?;
         }
         Command::Pick { target } => {
             let server = ServerIdentity::discover()?;

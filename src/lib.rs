@@ -19,6 +19,7 @@ pub mod semantic;
 pub mod server;
 pub mod sidebar;
 pub mod state_machine;
+pub mod status_menu;
 pub mod terminal;
 pub mod tmux;
 pub mod workspace;

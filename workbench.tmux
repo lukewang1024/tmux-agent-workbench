@@ -72,8 +72,10 @@ if [ "$usage_enabled" != off ]; then
 else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
-tmux set-option -s command-alias[920] 'wb-tmux-status-menu=display-menu -M -O -C 0 -T "#[align=centre] tmux " "New window" c "new-window -c \"#{pane_current_path}\"" "Split below" - "split-window -v -c \"#{pane_current_path}\"" "Split right" "|" "split-window -h -c \"#{pane_current_path}\"" "Choose window" w "choose-tree -Zw" "Choose session" s "choose-tree -Zs" Detach d detach-client'
-tmux set-option -s command-alias[921] 'wb-agent-status-menu=display-menu -M -O -C 0 -T "#[align=centre] 󰚩 Agent " /side s "send-keys -l \"/side\"; send-keys Enter" /btw b "send-keys -l \"/btw\"; send-keys Enter" /fork f "send-keys -l \"/fork\"; send-keys Enter"'
+tmux set-option -s command-alias[920] \
+  "wb-tmux-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
+tmux set-option -s command-alias[921] \
+  "wb-agent-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}'\""
 tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
@@ -91,7 +93,7 @@ tmux bind-key -T prefix MouseUp1Status if-shell -F "$workbench_status_ranges" \
   "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" prefix \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"" \
   'display-message -p ""'
 tmux set-option -s command-alias[924] \
-  "wb-host-status=run-shell -b \"sleep 0.15; '$CURRENT_DIR/bin/workbench-host-menu' '#{client_name}' '#{pane_id}'\""
+  "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
   "wb-usage-status=run-shell -b \"sleep 0.15; '$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+kind=${1:-}
+client=${2:-}
+pane=${3:-}
+case $kind in host|tmux|agent) ;; *) exit 2 ;; esac
+case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
+case $pane in '%'|''|%*[!0-9]*) exit 2 ;; %*) ;; *) exit 2 ;; esac
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
+core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
+[ -x "$core" ] || core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
+[ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
+
+case $kind in host) height=10 ;; tmux) height=10 ;; agent) height=7 ;; esac
+sleep 0.15
+exec tmux display-popup -c "$client" -t "$pane" -E -w 44 -h "$height" \
+  "'$core' status-menu '$kind' --pane '$pane'"
