@@ -1,0 +1,130 @@
+#!/bin/sh
+# tmux-agent-workbench promote — escalate whatever the CURRENT PANE is doing into its own
+# dedicated task. Unlike `tmux-agent-workbench new`, the pane itself moves there (via
+# `tmux break-pane`) rather than a brand-new blank agent pane being spawned
+# elsewhere: whatever is already running in it — a live coding-agent session
+# mid-task, a long shell history — keeps running, uninterrupted, now living
+# in the new session's `agent` window. This is the whole point of
+# "promote": you're already in the middle of something, so continue it
+# there instead of starting cold in a second window.
+#
+# A coding task can start from anywhere, not just inside a repo checkout — so
+# a repo is OPTIONAL, exactly like tmux-agent-workbench new's own repos-are-optional design:
+#   - pane is inside a git repo -> that repo is folded in (brand-new
+#     worktree/branch under WORKBENCH_WORKSPACE_ROOT; the pane's own current
+#     checkout is never reused or touched). Default feature name = the
+#     repo's own short name.
+#   - pane isn't inside a repo -> still starts a task, just with no repo
+#     attached yet (grow it later with tmux-agent-workbench add). There's nothing to derive a
+#     name from here, so if you didn't pass one, this ASKS for it — guessing
+#     off the bare directory name would produce a name nobody chose.
+#
+# This is the workspace-aware sibling of tmux-sessionist's prefix+@
+# (promote_pane): same "move this pane into its own session" mechanic, but
+# also gets the worktree/branch/pool bookkeeping right.
+#
+# usage: tmux-agent-workbench promote [feature]
+#   feature   new workspace/session name (default: the repo's own short name
+#             if the pane is in one; prompted for if it isn't and no name
+#             was given). Must not already be an existing session name.
+
+set -eu
+# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
+# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
+WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+usage() {
+  cat <<'EOF'
+usage: tmux-agent-workbench promote [feature]
+
+Move the current tmux pane into a new workspace task. The feature defaults to
+the current repository name; outside a repository it is prompted for.
+
+options:
+  -h, --help  show this help and exit
+EOF
+}
+
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "tmux-agent-workbench promote: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -le 1 ] || { usage >&2; exit 2; }
+
+# Errors here are as likely to run via `run-shell -b` (prefix+M-T, no
+# terminal to show stderr on) as from an interactive shell — so report
+# through tmux display-message too, not just stderr, whenever $TMUX is set.
+die() {
+  echo "tmux-agent-workbench promote: $1" >&2
+  if [ -n "${TMUX:-}" ]; then
+    tmux display-message "tmux-agent-workbench promote: $1"
+  fi
+  exit 1
+}
+[ -n "${TMUX:-}" ] || die "not inside a tmux session"
+
+case ${WORKBENCH_PROMOTE_PANE:-} in
+  %*[!0-9]*|%|'') promote_target= ;;
+  %*) promote_target=$WORKBENCH_PROMOTE_PANE ;;
+  *) promote_target= ;;
+esac
+if [ -n "$promote_target" ]; then
+  cwd=$(tmux display-message -p -t "$promote_target" '#{pane_current_path}')
+  srcpane=$(tmux display-message -p -t "$promote_target" '#{pane_id}')
+else
+  cwd=$(tmux display-message -p '#{pane_current_path}')
+  srcpane=$(tmux display-message -p '#{pane_id}')
+fi
+rname=""
+top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) && rname=$(basename "$top")
+
+if [ -n "${1:-}" ]; then
+  feature=$1
+elif [ -n "$rname" ]; then
+  feature=$rname
+else
+  # No repo here and no name given — ask, don't guess. %1 is single-quoted
+  # here (unlike tmux-agent-workbench new --prompt's deliberately unquoted %1): a task name is
+  # ONE answer, not "feature repo repo…" tokens to word-split, so a name
+  # with a space in it ("tmux plugin") must not be sliced into a feature
+  # plus bogus trailing repo args.
+  exec tmux command-prompt -p 'New task — name it:' "run-shell -b \"tmux-agent-workbench promote '%1'\""
+fi
+
+tmux has-session -t "=$feature" 2>/dev/null && die "a session named '$feature' already exists — pick a different name"
+
+mkdir -p "$WORKBENCH_WORKSPACE_ROOT/$feature"
+
+# break-pane needs a session to break INTO — it won't create one from a bare
+# name. So: create it (throwaway placeholder window), move the real pane in
+# as "agent", then drop the placeholder. Target the placeholder by window_id
+# (stable across renumber-windows), not index.
+tmux new-session -d -s "$feature" -c "$WORKBENCH_WORKSPACE_ROOT/$feature"
+placeholder=$(tmux list-windows -t "$feature" -F '#{window_id}')
+tmux break-pane -d -s "$srcpane" -t "$feature:" -n agent
+tmux kill-window -t "$placeholder"
+tmux set-option -t "$feature" @workbench_task 1
+
+# tmux-agent-sidebar's auto-create only fires from tmux's own after-new-window
+# hook, and break-pane does not trigger that hook (confirmed empirically —
+# unlike new-window/new-session, which is how every OTHER agent window in
+# this system gets created). Without this, a promoted pane's window would be
+# the one place that never gets a sidebar. Call it ourselves: soft dependency
+# — no-ops cleanly if the sidebar plugin isn't installed or auto-create is
+# off. No delay needed here (unlike tmux-agent-workbench inspect's multi-pane builds): the
+# agent window is already a single finished pane by this point, nothing left
+# to race against.
+if [ "$(tmux show-option -gqv @sidebar_auto_create 2>/dev/null || true)" != "off" ]; then
+  sidebar_bin=$(tmux show-option -gqv @agent_sidebar_bin 2>/dev/null || true)
+  if [ -n "$sidebar_bin" ] && command -v "$sidebar_bin" >/dev/null 2>&1; then
+    agent_window_id=$(tmux display-message -p -t "$feature:agent" '#{window_id}')
+    "$sidebar_bin" toggle --create-only "$agent_window_id" "$WORKBENCH_WORKSPACE_ROOT/$feature" || true
+  fi
+fi
+
+if [ -n "$rname" ]; then
+  WORKBENCH_FEATURE="$feature" tmux-agent-workbench add "$rname"
+fi
+
+exec tmux switch-client -t "$feature"

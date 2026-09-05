@@ -1,112 +1,20 @@
 #!/bin/sh
-# mux-run-task — append a pane to a repo's inspection window and run a
-# long-lived command there without moving the current tmux client.
-#
-# usage: mux-run-task [--name <label>] <repo-path> <command>
+# Compatibility entry point; all new callers use tmux-agent-workbench.
 set -eu
-
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-dir=$(cd "$(dirname "$self")" && pwd -P)
-# shellcheck disable=SC1091 # path is resolved from this script at runtime
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 . "$dir/../lib/deprecation.sh"
-
-task_name=task
+label=task
 if [ "${1:-}" = --name ]; then
-  [ $# -ge 3 ] || { echo "usage: mux-run-task [--name <label>] <repo-path> <command>" >&2; exit 2; }
-  task_name=$2
+  [ $# -ge 3 ] || { echo 'usage: tmux-agent-workbench run [--name <label>] <repo> --shell <command>' >&2; exit 2; }
+  label=$2
   shift 2
 fi
-[ $# -ge 2 ] || { echo "usage: mux-run-task [--name <label>] <repo-path> <command>" >&2; exit 2; }
-path=$1
+[ $# -ge 2 ] || { echo 'usage: tmux-agent-workbench run [--name <label>] <repo> --shell <command>' >&2; exit 2; }
+repo=$1
 shift
-task_command=$*
-
-path=$(cd "$path" 2>/dev/null && pwd -P) || {
-  echo "mux-run-task: no such dir: $path" >&2
-  exit 1
-}
-
-sess=${WORKBENCH_SESSION:-}
-if [ -z "$sess" ]; then
-  [ -n "${TMUX:-}" ] || {
-    echo "mux-run-task: not inside tmux (or set WORKBENCH_SESSION)" >&2
-    exit 1
-  }
-  sess=$(tmux display-message -p '#S')
-fi
-
-find_project_window() {
-  for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
-    task_root=$(tmux show-options -wqv -t "$task_window" @workbench_project_root)
-    if [ "$task_root" = "$path" ]; then
-      printf '%s\n' "$task_window"
-      return 0
-    fi
-  done
-
-  # Generated tmuxinator windows predate the project-root marker. Resolve
-  # those by the canonical cwd shared by their inspection panes.
-  for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
-    if tmux list-panes -t "$task_window" -F '#{pane_current_path}' |
-      grep -qxF "$path"; then
-      printf '%s\n' "$task_window"
-      return 0
-    fi
-  done
-  return 1
-}
-
-window_id=$(find_project_window || true)
-if [ -z "$window_id" ]; then
-  WORKBENCH_SESSION=$sess "$dir/mux-inspect" "$path"
-  window_id=$(find_project_window || true)
-fi
-[ -n "$window_id" ] || {
-  echo "mux-run-task: no inspection window for $path" >&2
-  exit 1
-}
-
-# Preserve the pane that was active before adding the detached task. Passing
-# the new task pane to tmux-layout-keep-sidebar would make its final
-# select-pane activate that pane and interrupt an attached client.
-active_pane=$(tmux list-panes -t "$window_id" -f '#{pane_active}' \
-  -F '#{pane_id}' | sed -n 1p)
-
-anchor=$(tmux list-panes -t "$window_id" \
-  -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | tail -1)
-[ -n "$anchor" ] || {
-  echo "mux-run-task: inspection window has no workspace pane" >&2
-  exit 1
-}
-
-# Start through a non-interactive POSIX shell. Sending keys to a freshly split
-# login shell races its startup files and can silently lose the task command.
-# shellcheck disable=SC2016 # expansion belongs to the task pane's /bin/sh
-task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" \
-  -e "WORKBENCH_TASK_COMMAND=$task_command" -P -F '#{pane_id}' \
-  'exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"')
-tmux set-option -p -t "$task_pane" @pane_role task
-tmux set-option -p -t "$task_pane" remain-on-exit on
-tmux set-option -p -t "$task_pane" @workbench_task_name "$task_name"
-tmux set-option -p -t "$task_pane" @workbench_task_command "$task_command"
-tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
-tmux select-pane -Z -t "$task_pane" -T "$task_name"
-
-# Keep the sidebar as a full-height side column when that integration is
-# installed; otherwise apply the native layout directly.
-if command -v tmux-layout-keep-sidebar >/dev/null 2>&1; then
-  tmux-layout-keep-sidebar even-vertical "${active_pane:-$anchor}"
-else
-  tmux select-layout -t "$window_id" even-vertical >/dev/null
-fi
-
-[ -z "$active_pane" ] || tmux select-pane -Z -t "$active_pane"
-
-printf '%s\n' "$task_pane"
+exec "$dir/tmux-agent-workbench-cli" run --name "$label" "$repo" --shell "$*"

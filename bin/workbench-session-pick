@@ -1,45 +1,11 @@
 #!/bin/sh
-# Pick any configured tmuxinator project, then start it or switch to its
-# existing tmux session. This is the canonical Workbench "new" entrypoint.
+# Compatibility entry point; all new callers use tmux-agent-workbench.
 set -eu
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-bin_dir=$(CDPATH= cd -- "$(dirname "$self")" && pwd -P)
-. "$bin_dir/../lib/deprecation.sh"
-
-if ! command -v tmuxinator >/dev/null 2>&1; then
-  printf '%s\n' 'workbench-session-pick: tmuxinator not found' >&2
-  exit 1
-fi
-
-projects()
-{
-  tmuxinator list -n | sed '1d; /^[[:space:]]*$/d'
-}
-
-if [ "${1:-}" = "--list" ]; then
-  projects
-  exit 0
-fi
-
-[ -n "${TMUX:-}" ] || {
-  printf '%s\n' 'workbench-session-pick: not inside tmux' >&2
-  exit 1
-}
-if ! command -v workbench-fzf-tmux >/dev/null 2>&1; then
-  printf '%s\n' 'workbench-session-pick: workbench-fzf-tmux not found' >&2
-  exit 1
-fi
-
-project=$(projects | workbench-fzf-tmux -p 60%,70% \
-  --no-sort --border-label ' workbench projects ' --prompt 'New › ' \
-  --bind 'tab:down,btab:up') || exit 0
-[ -n "$project" ] || exit 0
-
-exec tmuxinator start "$project"
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+. "$dir/../lib/deprecation.sh"
+exec "$dir/tmux-agent-workbench-cli" pick project "$@"

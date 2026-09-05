@@ -1,0 +1,35 @@
+#!/bin/sh
+# Pick any configured tmuxinator project, then start it or switch to its
+# existing tmux session. This is the canonical Workbench "new" entrypoint.
+set -eu
+
+if ! command -v tmuxinator >/dev/null 2>&1; then
+  printf '%s\n' 'tmux-agent-workbench pick project: tmuxinator not found' >&2
+  exit 1
+fi
+
+projects()
+{
+  tmuxinator list -n | sed '1d; /^[[:space:]]*$/d'
+}
+
+if [ "${1:-}" = "--list" ]; then
+  projects
+  exit 0
+fi
+
+[ -n "${TMUX:-}" ] || {
+  printf '%s\n' 'tmux-agent-workbench pick project: not inside tmux' >&2
+  exit 1
+}
+if ! command -v workbench-fzf-tmux >/dev/null 2>&1; then
+  printf '%s\n' 'tmux-agent-workbench pick project: workbench-fzf-tmux not found' >&2
+  exit 1
+fi
+
+project=$(projects | workbench-fzf-tmux -p 60%,70% \
+  --no-sort --border-label ' workbench projects ' --prompt 'New › ' \
+  --bind 'tab:down,btab:up') || exit 0
+[ -n "$project" ] || exit 0
+
+exec tmuxinator start "$project"

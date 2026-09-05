@@ -20,7 +20,7 @@ for name in ws-new ws-add ws-done ws-promote ws-new-prompt; do
       rc=$?
     fi
     wb_assert "$name $flag exits 0" test "$rc" -eq 0
-    wb_assert "$name $flag prints usage" grep -q "^usage: $name" "$out"
+    wb_assert "$name $flag prints public usage" grep -q '^usage: tmux-agent-workbench ' "$out"
   done
 
   out="$WB_TEST_TMPDIR/$name-unknown.out"
@@ -31,6 +31,16 @@ for name in ws-new ws-add ws-done ws-promote ws-new-prompt; do
   fi
   wb_assert "$name rejects an unknown option with exit 2" test "$rc" -eq 2
   wb_assert "$name names the unknown option" grep -q "unknown option: --definitely-unknown" "$out"
+
+  case $name in
+    ws-new-prompt) set -- new --prompt ;;
+    *) set -- "${name#ws-}" ;;
+  esac
+  public_out=$("$bindir/../../bin/tmux-agent-workbench-cli" "$@" --help 2>&1)
+  wb_assert "$name public entry has public help" sh -c \
+    'printf "%s\n" "$1" | grep -q "^usage: tmux-agent-workbench "' sh "$public_out"
+  wb_assert "$name public entry does not traverse legacy shim" sh -c \
+    '! printf "%s\n" "$1" | grep -q "is deprecated"' sh "$public_out"
 done
 
 wb_assert "ws-new --help creates no workspace named --help" \

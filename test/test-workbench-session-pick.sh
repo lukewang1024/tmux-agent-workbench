@@ -30,7 +30,7 @@ wb_assert "project list removes tmuxinator heading" test "$output" = "alpha
 beta"
 
 TMUX=test WORKBENCH_TEST_CALLS=$calls PATH=$fake_bin:$PATH \
-  "$repo/bin/workbench-session-pick"
+  "$repo/bin/tmux-agent-workbench-cli" pick project
 wb_assert "picker starts selected tmuxinator project" grep -qx 'start beta' "$calls"
 
 wb_test_report

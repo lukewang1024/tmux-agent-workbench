@@ -42,4 +42,10 @@ case ${1:-} in
   *) usage ;;
 esac
 
-exec mux-run-task --name "$label" "$repo" "$command_string"
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+exec "$dir/wb-run-task" --name "$label" "$repo" "$command_string"

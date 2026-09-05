@@ -130,6 +130,10 @@ wb_test_setup() {
   printf '#!/bin/sh\nexec %s -L %s "$@"\n' "$real_tmux" "$WB_TEST_SOCKET" > "$WB_TEST_BINDIR/tmux"
   chmod +x "$WB_TEST_BINDIR/tmux"
 
+  # Exercise this checkout's public API, independent of a user's installation.
+  wb_test_repo=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+  ln -s "$wb_test_repo/bin/tmux-agent-workbench-cli" "$WB_TEST_BINDIR/tmux-agent-workbench"
+
   PATH="$WB_TEST_BINDIR:$PATH"
   export PATH
 

@@ -1,124 +1,14 @@
 #!/bin/sh
-# mux-agent — launch the task's coding agent in the current directory.
-#
-# Under the task/window model a session == one task, and the agent is the
-# session-level driver living in its own full window (not a per-repo sidebar).
-# Which CLI it is comes from $WORKBENCH_AGENT so claude / codex / trae / opencode are
-# interchangeable without touching the generated tmuxinator configs (they all
-# just run `mux-agent`).
-#
-# Cross-repo WRITE scope grows by accretion and is handled per-agent when a repo
-# enters the task (see mux-inspect and the AGENTS.md / CLAUDE.md convention),
-# because runtime scope-growth is not uniform across the three:
-#   claude   — /add-dir at runtime (immediate)
-#   codex    — reads the tree by default; restart with --add-dir to WRITE elsewhere
-#   opencode — declare via `references`, or approve `external_directory` on first touch
-#
-# usage: mux-agent [extra args passed through to the agent]
-#        WORKBENCH_AGENT=codex mux-agent      # override per session/pane
+# Compatibility entry point; all new callers use tmux-agent-workbench.
 set -eu
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-bin_dir=$(CDPATH= cd -- "$(dirname "$self")" && pwd -P)
-. "$bin_dir/../lib/deprecation.sh"
-
-exec_codex()
-{
-  for arg do
-    case $arg in
-      --approve-for-me|--yolo|--dangerously-bypass-approvals-and-sandbox|-a|--ask-for-approval|--ask-for-approval=*)
-        exec codex "$@"
-        ;;
-    esac
-  done
-  exec codex --approve-for-me "$@"
-}
-
-exec_claude()
-{
-  for arg do
-    case $arg in
-      --permission-mode|--permission-mode=*|--dangerously-skip-permissions)
-        exec claude "$@"
-        ;;
-    esac
-  done
-  exec claude --permission-mode auto "$@"
-}
-
-exec_trae()
-{
-  for arg do
-    case $arg in
-      --permission-mode|--permission-mode=*|-y|--yolo|--dangerously-bypass-approvals-and-sandbox)
-        exec_trae_command "$@"
-        ;;
-    esac
-  done
-  set -- --permission-mode auto "$@"
-  exec_trae_command "$@"
-}
-
-exec_trae_command()
-{
-  if command -v traex >/dev/null 2>&1; then
-    exec traex "$@"
-  elif command -v trae-agent >/dev/null 2>&1; then
-    exec trae-agent "$@"
-  elif command -v traecli >/dev/null 2>&1; then
-    exec traecli "$@"
-  fi
-  echo "mux-agent: TraeCode CLI not found (tried traex, trae-agent, traecli)" >&2
-  exit 127
-}
-
-exec_opencode()
-{
-  for arg do
-    case $arg in
-      --auto)
-        exec opencode "$@"
-        ;;
-    esac
-  done
-  exec opencode --auto "$@"
-}
-
-# Mark this tmux session as a task workbench. This is the single flag that opts
-# a session into the window-per-role model: only here does the agent-driven
-# `mux-inspect` fold repos in as inspection windows. Sessions where the agent is
-# launched some other way (a bare `claude` in an ad-hoc session) stay unmarked,
-# so that automatic behaviour never leaks into them. Session-scoped, so it lives
-# for the session and is queryable from any pane via `tmux show-option -qv`.
-if [ "${WORKBENCH_MANAGED:-1}" = 1 ] && [ -n "${TMUX:-}" ]; then
-  tmux set-option @workbench_task 1 2>/dev/null || true
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+. "$dir/../lib/deprecation.sh"
+if [ "${WORKBENCH_MANAGED:-1}" = 1 ]; then
+  exec "$dir/tmux-agent-workbench-cli" agent start --managed "$@"
 fi
-
-agent=${WORKBENCH_AGENT:-claude}
-WORKBENCH_AGENT=$agent
-WORKBENCH_PROFILE=${WORKBENCH_PROFILE:-$agent-default}
-export WORKBENCH_AGENT WORKBENCH_PROFILE
-
-# Tool runners may sanitize their child environment before invoking commands.
-# Keep the launch identity on the pane as durable tmux metadata so commands
-# such as mux-handoff can recover it after locating the calling pane.
-if [ -n "${TMUX_PANE:-}" ]; then
-  tmux set-option -p -t "$TMUX_PANE" @workbench_agent "$WORKBENCH_AGENT" 2>/dev/null || true
-  tmux set-option -p -t "$TMUX_PANE" @workbench_profile "$WORKBENCH_PROFILE" 2>/dev/null || true
-fi
-case $agent in
-  claude)   exec_claude "$@" ;;
-  codex)    exec_codex "$@" ;;
-  trae)     exec_trae "$@" ;;
-  opencode) exec_opencode "$@" ;;
-  *)
-    echo "mux-agent: unknown WORKBENCH_AGENT='$agent' (want claude|codex|trae|opencode)" >&2
-    exit 2
-    ;;
-esac
+exec "$dir/tmux-agent-workbench-cli" agent start "$@"

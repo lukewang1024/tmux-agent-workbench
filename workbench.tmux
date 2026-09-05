@@ -123,16 +123,15 @@ if [ -n "$adaptive_theme_dir" ] && [ -x "$adaptive_theme_dir/tmux-adaptive-theme
   "$adaptive_theme_dir/tmux-adaptive-theme.tmux"
 fi
 
-# Dependency check: mux-inspect-pick hard-requires fzf-tmux. Everything else
-# in this layer (mux-agent, mux-inspect) has no external binary dependency.
+# The public repo picker requires fzf-tmux.
 if ! command -v fzf-tmux >/dev/null 2>&1; then
   tmux display-message "tmux-agent-workbench: fzf-tmux not found — the sidebar inspect picker won't work until it's installed"
 fi
 
 bind_tracked "@workbench-key-inspect" "@workbench-_bound-inspect" "" \
-  "add repo as inspection window" run-shell -b "$CURRENT_DIR/bin/mux-inspect-pick"
+  "add repo as inspection window" run-shell -b "tmux-agent-workbench pick repo"
 bind_tracked "@workbench-key-project" "@workbench-_bound-project" "" \
-  "pick tmuxinator workbench project" run-shell -b "$CURRENT_DIR/bin/workbench-session-pick"
+  "pick tmuxinator workbench project" run-shell -b "tmux-agent-workbench pick project"
 
 bind_layout() {
   bind_tracked "$1" "$2" "$3" "$4" run-shell -b \

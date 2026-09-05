@@ -1,0 +1,90 @@
+#!/bin/sh
+# tmux-agent-workbench done — tear down a workspace: kill its tmux session (if running), remove
+# each member repo's worktree, drop the workspace dir once it's empty, and
+# regenerate the tmuxinator pool so the stale config disappears with it.
+#
+# usage: tmux-agent-workbench done [--force] <feature>
+#   --force   also discard worktrees with uncommitted changes
+#             (git worktree remove --force). Default: git's own dirty-check
+#             refuses those and leaves them in place, reported — same
+#             "clean gets removed, dirty stays" policy as the archive
+#             runbook's own worktree cleanup, not something reinvented here.
+#
+# Only removes worktrees; each repo's main checkout under WORKBENCH_CODE_ROOT
+# is never touched. If a dirty repo is left behind, the workspace dir itself
+# is left in place too (rerun tmux-agent-workbench done later once it's clean, or with --force).
+
+set -eu
+# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
+# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
+WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
+WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+usage() {
+  cat <<'EOF'
+usage: tmux-agent-workbench done [--force] <feature>
+
+Remove a workspace's tmux session and member worktrees. Dirty worktrees are
+kept unless --force is supplied.
+
+options:
+  --force     discard worktrees with uncommitted changes
+  -h, --help  show this help and exit
+EOF
+}
+
+force=0
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --force) force=1; shift ;;
+  --) shift ;;
+  -*) echo "tmux-agent-workbench done: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "tmux-agent-workbench done: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -eq 1 ] || { usage >&2; exit 2; }
+feature=$1
+wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
+
+if tmux has-session -t "=$feature" 2>/dev/null; then
+  tmux kill-session -t "=$feature"
+  echo "tmux-agent-workbench done: killed tmux session $feature"
+fi
+
+if [ ! -d "$wsdir" ]; then
+  echo "tmux-agent-workbench done: no such workspace dir: $wsdir"
+else
+  kept=0
+  for d in "$wsdir"/*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    # macOS may expose the same directory through /var and /private/var.
+    # Compare physical paths so Git's canonical path is not mistaken for a
+    # different worktree; this is a no-op on ordinary Linux paths.
+    d=$(cd "$d" && pwd -P)
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    top=$(cd "$top" && pwd -P)
+    [ "$top" = "$d" ] || continue
+    main=$(git -C "$d" worktree list --porcelain | sed -n '1s/^worktree //p')
+    if [ "$force" = 1 ]; then
+      git -C "$main" worktree remove --force "$d"
+      echo "tmux-agent-workbench done: removed $d"
+    elif err=$(git -C "$main" worktree remove "$d" 2>&1); then
+      echo "tmux-agent-workbench done: removed $d"
+    else
+      echo "tmux-agent-workbench done: KEPT (rerun with --force to discard): $d" >&2
+      printf '%s\n' "$err" >&2
+      kept=$((kept + 1))
+    fi
+  done
+  if rmdir "$wsdir" 2>/dev/null; then
+    echo "tmux-agent-workbench done: removed empty workspace dir $wsdir"
+  elif [ "$kept" -gt 0 ]; then
+    echo "tmux-agent-workbench done: $wsdir left in place ($kept dirty repo(s) remain)"
+  fi
+fi
+
+tmux-agent-workbench projects rebuild "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"

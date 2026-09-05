@@ -1,48 +1,11 @@
 #!/bin/sh
-# ws-new-prompt — tmux prefix+N entry point: prompt for the whole `ws-new`
-# argument line in one go, then hand off. Kept out of tmux.conf entirely (same
-# rationale as sesh-connect) so the %1-in-quotes substitution never has to
-# fight tmux.conf's own quoting layer.
-#
-# usage: type "feature" alone, or "feature repo[:branch] repo[:branch] ..."
-#        at the prompt — repos are optional, fold more in later with ws-add.
+# Compatibility entry point; all new callers use tmux-agent-workbench.
 set -eu
-# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
-# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-dir=$(cd "$(dirname "$self")" && pwd -P)
-
-usage() {
-  cat <<'EOF'
-usage: ws-new-prompt
-
-Open the tmux prompt used to enter a ws-new feature and optional repositories.
-
-options:
-  -h, --help  show this help and exit
-EOF
-}
-
-case ${1-} in
-  -h|--help) usage; exit 0 ;;
-  --) shift ;;
-  -*) echo "ws-new-prompt: unknown option: $1" >&2; usage >&2; exit 2 ;;
-esac
-[ $# -eq 0 ] || { usage >&2; exit 2; }
-[ -n "${TMUX:-}" ] || { echo "ws-new-prompt: not inside a tmux session" >&2; exit 1; }
-
-if [ -n "${WORKBENCH_TARGET_CLIENT:-}" ]; then
-  tmux command-prompt -t "$WORKBENCH_TARGET_CLIENT" \
-    -p 'New workspace — feature [repo[:branch] ...]:' \
-    "run-shell -b \"$dir/ws-new %1\""
-else
-  tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
-    "run-shell -b \"$dir/ws-new %1\""
-fi
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+. "$dir/../../lib/deprecation.sh"
+exec "$dir/../../bin/tmux-agent-workbench-cli" new --prompt "$@"

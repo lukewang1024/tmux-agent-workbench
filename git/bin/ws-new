@@ -1,107 +1,11 @@
 #!/bin/sh
-# ws-new — start a new initiative: create the workspace + its tmux task
-# session. Repos are OPTIONAL — a workspace can start as pure exploration
-# ("what does this task even touch?") with no repo attached yet. Any repos
-# you already know about are folded in immediately; whatever comes up later
-# gets added the same way `mux-inspect` already grows a task at the
-# tmux-window level — by calling `ws-add <repo>` (human or agent) the moment
-# it actually enters scope. This is the "instead of a bare new session" entry
-# point: a workspace needs at least its own dir before anything can be rooted
-# there, so a plain new tmux session on its own isn't quite enough.
-#
-# usage: ws-new <feature> [repo[:branch] ...]
-#   feature  workspace name — the dir under WORKBENCH_WORKSPACE_ROOT
-#            (~/Workspace), and the tmux session name.
-#   repo     short name of a repo's main checkout under WORKBENCH_CODE_ROOT
-#            (~/Code), e.g. `web-app` for ~/Code/myorg/web-app. `:branch`
-#            overrides the per-repo branch (default: same name as the
-#            feature). Handed off to `ws-add` one at a time — see that
-#            script for the worktree/branch-selection details.
-#
-# Idempotent: re-run against an existing workspace to fold in more repos (or
-# just to re-attach) — the session and each repo's worktree are left alone if
-# they already exist.
-
+# Compatibility entry point; all new callers use tmux-agent-workbench.
 set -eu
-# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
-# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-dir=$(cd "$(dirname "$self")" && pwd -P)
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 . "$dir/../../lib/deprecation.sh"
-
-WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
-
-usage() {
-  cat <<'EOF'
-usage: ws-new <feature> [repo[:branch] ...]
-
-Create or reopen a workspace task. Repositories are optional and may specify
-an explicit branch with repo:branch.
-
-options:
-  -h, --help  show this help and exit
-EOF
-}
-
-case ${1-} in
-  -h|--help) usage; exit 0 ;;
-  --) shift ;;
-  -*) echo "ws-new: unknown option: $1" >&2; usage >&2; exit 2 ;;
-esac
-[ $# -ge 1 ] || { usage >&2; exit 2; }
-feature=$1; shift
-
-wsdir="$WORKBENCH_WORKSPACE_ROOT/$feature"
-mkdir -p "$wsdir"
-
-# Register the workspace dir with zoxide so it's discoverable in the directory
-# pickers even with no live session for it — both sesh (prefix+T) and
-# mux-inspect-pick (prefix+G) list zoxide entries, so this one add surfaces the
-# workspace in both. No-op if zoxide isn't installed.
-if command -v zoxide > /dev/null 2>&1; then zoxide add "$wsdir" || true; fi
-
-if ! tmux has-session -t "=$feature" 2>/dev/null; then
-  tmux new-session -d -s "$feature" -c "$wsdir" -n agent
-  tmux set-option -t "$feature" @workbench_task 1
-  # Pin the window name to "agent" — same reason as the inspection windows in
-  # mux-inspect: automatic-rename (on by default) would otherwise retitle it
-  # after the running command (claude/node/…) once mux-agent starts.
-  tmux set-window-option -t "$feature:agent" automatic-rename off
-  tmux send-keys -t "$feature:agent" mux-agent Enter
-fi
-
-for arg in "$@"; do
-  WORKBENCH_FEATURE="$feature" "$dir/ws-add" "$arg"
-done
-
-# tmux-agent-sidebar (if installed) auto-creates its sidebar on after-new-window,
-# but that hook never fires for a session's FIRST window — which is exactly this
-# agent window (born from `new-session` above). So it alone is skipped while the
-# inspection windows that ws-add/mux-inspect add via `new-window` each get one.
-# The session is also detached until the switch/attach below, so its width is
-# unknown and the sidebar's width gate couldn't evaluate yet either. Bridge both:
-# once a client has attached, invoke the sidebar's own create-only for the agent
-# window, deferred so the window width is real. It self-gates on
-# @sidebar_auto_create_min_width and no-ops if a sidebar already exists, so this
-# is safe on idempotent re-runs. Soft dependency — skipped when the sidebar isn't
-# installed, matching how mux-inspect already treats it.
-sb=$(tmux show-option -gv @agent_sidebar_bin 2>/dev/null || true)
-if [ -n "$sb" ] && [ -x "$sb" ]; then
-  delay=$(tmux show-option -gv @sidebar_auto_create_delay 2>/dev/null || true)
-  case "$delay" in '' | 0 | 0.0) delay=0.5 ;; esac
-  agent_win=$(tmux display-message -p -t "$feature:agent" '#{window_id}')
-  tmux run-shell -b "sleep $delay; '$sb' toggle --create-only '$agent_win' '$wsdir'"
-fi
-
-if [ -n "${TMUX:-}" ]; then
-  exec tmux switch-client -t "$feature"
-else
-  exec tmux attach -t "$feature"
-fi
+exec "$dir/../../bin/tmux-agent-workbench-cli" new "$@"

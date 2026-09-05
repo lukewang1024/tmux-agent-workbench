@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # workbench-git.tmux — layer 2 (git-worktree workspace) TPM entrypoint.
 #
-# Depends on layer 1 (../workbench.tmux) for mux-inspect/@workbench_task —
+# Depends on layer 1 (../workbench.tmux) for inspection windows and @workbench_task —
 # never duplicates that logic. Loads automatically alongside layer 1 from the
 # same single @tpm_plugins entry (TPM discovers every executable *.tmux file
 # under the plugin tree). Opt out of this layer entirely — e.g. you only want
@@ -40,8 +40,8 @@ esac
 # prompt. Capital M-T, not M-t twice — and not M-n/M-N, which would collide
 # with tmux core's next-window -a / nothing-but-still-confusing-with-core-M-n.
 bind_tracked "@workbench-key-regen" "@workbench-_bound-regen" "" \
-  "regenerate tmuxinator pool configs" run-shell -b "$CURRENT_DIR/bin/gen-tmuxinator-configs"
+  "regenerate tmuxinator pool configs" run-shell -b "tmux-agent-workbench projects rebuild"
 bind_tracked "@workbench-key-new" "@workbench-_bound-new" "" \
-  "new workspace (feature + repos)" run-shell -b "$CURRENT_DIR/bin/ws-new-prompt"
+  "new workspace (feature + repos)" run-shell -b "tmux-agent-workbench new --prompt"
 bind_tracked "@workbench-key-promote" "@workbench-_bound-promote" "" \
-  "promote current repo into a new task" run-shell -b "$CURRENT_DIR/bin/ws-promote"
+  "promote current repo into a new task" run-shell -b "tmux-agent-workbench promote"

@@ -27,10 +27,10 @@ usage: tmux-agent-workbench <command> [args]
 
 tmux workspace workflow (distinct from the distributed `workbench` CLI)
 
-workflow: new add done promote inspect run
+workflow: new [--prompt] add done promote inspect run projects rebuild
 agents:   agent start|list|goto|next|profiles|handoff
 clients:  attach, client serve|status|setup
-ui:       sidebar, popup, pick
+ui:       sidebar, popup, pick repo|project|session|agent
 system:   status, doctor, config, hooks, daemon
 EOF
 }
@@ -59,11 +59,12 @@ command_name=$1
 shift
 export WB_SHIM_CALL=1
 case $command_name in
-  new) run_and_reconcile "$plugin_dir/git/bin/ws-new" "$@" ;;
-  add) run_and_reconcile "$plugin_dir/git/bin/ws-add" "$@" ;;
-  done) run_and_reconcile "$plugin_dir/git/bin/ws-done" "$@" ;;
-  promote) run_and_reconcile "$plugin_dir/git/bin/ws-promote" "$@" ;;
-  inspect) exec "$plugin_dir/bin/mux-inspect" "$@" ;;
+  new) if [ "${1:-}" = --prompt ]; then shift; exec "$plugin_dir/git/bin/wb-new-prompt" "$@"; fi
+      run_and_reconcile "$plugin_dir/git/bin/wb-new" "$@" ;;
+  add) run_and_reconcile "$plugin_dir/git/bin/wb-add" "$@" ;;
+  done) run_and_reconcile "$plugin_dir/git/bin/wb-done" "$@" ;;
+  promote) run_and_reconcile "$plugin_dir/git/bin/wb-promote" "$@" ;;
+  inspect) exec "$plugin_dir/bin/wb-inspect" "$@" ;;
   run) exec "$plugin_dir/bin/wb-run" "$@" ;;
   agent)
     [ $# -gt 0 ] || { usage >&2; exit 2; }
@@ -73,13 +74,13 @@ case $command_name in
       start)
         managed=0
         if [ "${1:-}" = "--managed" ]; then managed=1; shift; fi
-        WORKBENCH_MANAGED=$managed exec "$plugin_dir/bin/mux-agent" "$@"
+        WORKBENCH_MANAGED=$managed exec "$plugin_dir/bin/wb-agent" "$@"
         ;;
       list) need_core; exec "$core" snapshot --json ;;
       goto) need_core; exec "$core" pick agent ;;
       next) need_core; exec "$core" attention next ;;
-      profiles) exec "$plugin_dir/bin/mux-handoff" profiles "$@" ;;
-      handoff) exec "$plugin_dir/bin/mux-handoff" "$@" ;;
+      profiles) exec "$plugin_dir/bin/wb-handoff" profiles "$@" ;;
+      handoff) exec "$plugin_dir/bin/wb-handoff" "$@" ;;
       *) echo "tmux-agent-workbench agent: unknown command: $agent_command" >&2; exit 2 ;;
     esac
     ;;
@@ -95,7 +96,14 @@ case $command_name in
     exec tmux display-popup -c "$client" -E -w 100% -h 100% \
       "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' '$core' sidebar"
     ;;
-  pick) need_core; exec "$core" pick "$@" ;;
+  projects) [ "${1:-}" = rebuild ] || { usage >&2; exit 2; }; shift
+    exec "$plugin_dir/git/bin/gen-tmuxinator-configs" "$@" ;;
+  pick)
+    case ${1:-} in
+      repo) shift; exec "$plugin_dir/bin/wb-inspect-pick" "$@" ;;
+      project) shift; exec "$plugin_dir/bin/wb-project-pick" "$@" ;;
+    esac
+    need_core; exec "$core" pick "$@" ;;
   status) need_core; exec "$core" status "$@" ;;
   doctor|config|hooks|daemon) need_core; exec "$core" "$command_name" "$@" ;;
   -h|--help|help) usage ;;

@@ -1,0 +1,39 @@
+#!/bin/sh
+# tmux-agent-workbench new --prompt — tmux prefix+N entry point: prompt for the whole `tmux-agent-workbench new`
+# argument line in one go, then hand off. Kept out of tmux.conf entirely (same
+# rationale as sesh-connect) so the %1-in-quotes substitution never has to
+# fight tmux.conf's own quoting layer.
+#
+# usage: type "feature" alone, or "feature repo[:branch] repo[:branch] ..."
+#        at the prompt — repos are optional, fold more in later with tmux-agent-workbench add.
+set -eu
+# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
+# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
+
+usage() {
+  cat <<'EOF'
+usage: tmux-agent-workbench new --prompt
+
+Open the tmux prompt used to enter a tmux-agent-workbench new feature and optional repositories.
+
+options:
+  -h, --help  show this help and exit
+EOF
+}
+
+case ${1-} in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  -*) echo "tmux-agent-workbench new --prompt: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ $# -eq 0 ] || { usage >&2; exit 2; }
+[ -n "${TMUX:-}" ] || { echo "tmux-agent-workbench new --prompt: not inside a tmux session" >&2; exit 1; }
+
+if [ -n "${WORKBENCH_TARGET_CLIENT:-}" ]; then
+  tmux command-prompt -t "$WORKBENCH_TARGET_CLIENT" \
+    -p 'New workspace — feature [repo[:branch] ...]:' \
+    "run-shell -b \"tmux-agent-workbench new %1\""
+else
+  tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
+    "run-shell -b \"tmux-agent-workbench new %1\""
+fi

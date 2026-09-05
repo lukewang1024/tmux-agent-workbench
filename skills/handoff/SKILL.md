@@ -8,7 +8,7 @@ description: Hand an in-progress coding task to another configured coding-agent 
 Transfer the entire active task; do not narrow it to the unfinished step that happens to be visible now.
 
 1. If the user named an exact profile, use it exactly. If they named only an
-   agent family or gave no target, run `mux-handoff profiles --json` and choose
+   agent family or gave no target, run `tmux-agent-workbench agent profiles --json` and choose
    a concrete profile yourself based on the remaining task. Do not ask merely
    because several profiles match, and do not silently substitute another
    profile after choosing one.
@@ -21,7 +21,7 @@ Transfer the entire active task; do not narrow it to the unfinished step that ha
    quoted heredoc so shell syntax in the summary cannot execute:
 
    ```sh
-   mux-handoff --target <exact-profile> <<'HANDOFF_SUMMARY'
+   tmux-agent-workbench agent handoff --target <exact-profile> <<'HANDOFF_SUMMARY'
    <summary>
    HANDOFF_SUMMARY
    ```
@@ -37,4 +37,4 @@ Transfer the entire active task; do not narrow it to the unfinished step that ha
 The target shares the current filesystem and working directory. The mechanism
 does not migrate transient process environment or processes attached to this
 pane. A user may stop the automatic close during the grace period with
-`mux-handoff cancel`.
+`tmux-agent-workbench agent handoff cancel`.

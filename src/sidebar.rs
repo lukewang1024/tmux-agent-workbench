@@ -353,18 +353,18 @@ fn event_loop(
                         }
                     }
                     KeyCode::Char('i') => {
-                        if run_command("mux-inspect-pick", true)? {
+                        if run_public_workbench(&["pick", "repo"], true)? {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('W') => {
-                        if run_command("ws-new-prompt", true)? {
+                        if run_public_workbench(&["new", "--prompt"], true)? {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('P') if selection_visible => promote_selected(&rows, selected)?,
                     KeyCode::Char('R') => {
-                        run_command("gen-tmuxinator-configs", false)?;
+                        run_public_workbench(&["projects", "rebuild"], false)?;
                     }
                     KeyCode::Char('n') => {
                         if run_workbench(&["attention", "next"], true)? {
@@ -1437,9 +1437,21 @@ fn show_global_menu(
         return Err("invalid sidebar pane id".into());
     }
     let mut items = vec![
-        ("New", "N", "run-shell -b workbench-session-pick".into()),
-        ("Inspect repo", "i", "run-shell -b mux-inspect-pick".into()),
-        ("New workspace", "W", "run-shell -b ws-new-prompt".into()),
+        (
+            "New",
+            "N",
+            "run-shell -b tmux-agent-workbench pick project".into(),
+        ),
+        (
+            "Inspect repo",
+            "i",
+            "run-shell -b tmux-agent-workbench pick repo".into(),
+        ),
+        (
+            "New workspace",
+            "W",
+            "run-shell -b tmux-agent-workbench new --prompt".into(),
+        ),
         (
             "Promote selected",
             "P",
@@ -1448,7 +1460,7 @@ fn show_global_menu(
         (
             "Rebuild projects",
             "R",
-            "run-shell -b gen-tmuxinator-configs".into(),
+            "run-shell -b tmux-agent-workbench projects rebuild".into(),
         ),
         ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
         (
@@ -1487,11 +1499,18 @@ fn run_workbench(args: &[&str], clear_popup: bool) -> Result<bool, Box<dyn std::
 }
 
 fn run_session_picker() -> Result<bool, Box<dyn std::error::Error>> {
-    dispatch_command("workbench-session-pick", std::iter::empty::<&OsStr>(), true)
+    run_public_workbench(&["pick", "project"], true)
 }
 
-fn run_command(program: &str, clear_popup: bool) -> Result<bool, Box<dyn std::error::Error>> {
-    dispatch_command(program, std::iter::empty::<&OsStr>(), clear_popup)
+fn run_public_workbench(
+    args: &[&str],
+    clear_popup: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    dispatch_command(
+        "tmux-agent-workbench",
+        args.iter().map(OsStr::new),
+        clear_popup,
+    )
 }
 
 fn dispatch_command<I, S>(
@@ -1571,7 +1590,8 @@ fn promote_selected(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::er
     let Some(pane) = pane.filter(|pane| safe_target(pane, '%')) else {
         return Ok(());
     };
-    Command::new("ws-promote")
+    Command::new("tmux-agent-workbench")
+        .arg("promote")
         .env("WORKBENCH_PROMOTE_PANE", pane)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

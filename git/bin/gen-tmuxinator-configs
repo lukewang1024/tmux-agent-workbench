@@ -14,7 +14,7 @@
 #                              gets an agent-only config. One config per
 #                              directory, with every known repo pre-built as
 #                              its own inspection window (there's no need to
-#                              wait on lazy `mux-inspect` accretion for repos
+#                              wait on lazy `tmux-agent-workbench inspect` accretion for repos
 #                              already present — though it still works for a
 #                              repo the task touches later).
 #
@@ -30,7 +30,7 @@
 # matched against the generated session name, so it covers both pools).
 #
 # Layout (task/window model — a session is a task, seeded with one repo):
-#   - agent window: the session-level coding agent (mux-agent → claude/codex/
+#   - agent window: the session-level coding agent (tmux-agent-workbench agent start --managed → claude/codex/
 #     opencode via $WORKBENCH_AGENT), rooted at the repo. This is where you
 #     steer.
 #   - <repo> window: that repo's inspection surface, three panes stacked
@@ -38,10 +38,10 @@
 #     lazygit), an empty scratchpad shell in the middle, an editor on the
 #     bottom ($VISUAL/$EDITOR else nvim falling back to vim) (+ a dev-server
 #     pane for frontends). Full-screen, small-screen safe. Matches what
-#     `mux-inspect` builds at runtime, so a pre-seeded window and a later
+#     `tmux-agent-workbench inspect` builds at runtime, so a pre-seeded window and a later
 #     accreted one look the same.
 # The task grows by accretion: fold more repos in as inspection windows with
-# prefix+G (manual) or `mux-inspect <path>` (the agent, per the AGENTS.md
+# prefix+G (manual) or `tmux-agent-workbench inspect <path>` (the agent, per the AGENTS.md
 # convention). The seed repo above is just window count 1 of that same model.
 #
 # Re-running: this is the single source of truth driving tmuxinator configs
@@ -89,7 +89,7 @@ done
 IGNORE="$DEST/.genignore"
 written=0 skipped=0
 
-# Same resolution mux-inspect uses at runtime, done once here so every
+# Same resolution tmux-agent-workbench inspect uses at runtime, done once here so every
 # generated window matches whatever a later accreted window would look like.
 GIT_TOOL=$(resolve_git_tool)
 EDITOR_CMD=$(resolve_editor)
@@ -164,7 +164,7 @@ for r in $roots; do
     printf 'root: %s\n' "$r"
     printf 'startup_window: agent\n'
     printf 'windows:\n'
-    printf '  - agent:\n            - mux-agent\n'
+    printf '  - agent:\n            - tmux-agent-workbench agent start --managed\n'
     printf '  - %s:\n' "$name"
     printf '      layout: even-vertical\n'
     printf '      panes:\n'
@@ -217,7 +217,7 @@ if [ -n "$WS_ROOT" ]; then
       printf 'root: %s\n' "$w"
       printf 'startup_window: agent\n'
       printf 'windows:\n'
-      printf '  - agent:\n            - mux-agent\n'
+      printf '  - agent:\n            - tmux-agent-workbench agent start --managed\n'
       for m in $members; do
         mname=$(basename "$m" | tr ' .:/' '____')
         if [ -f "$m/package.json" ] || [ -f "$m/pnpm-workspace.yaml" ] || [ -f "$m/frontend/package.json" ]; then
