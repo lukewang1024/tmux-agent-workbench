@@ -1686,14 +1686,18 @@ fn ensure_daemon_with_announcement(
             .and_then(|value| value.get("engine_version"))
             .and_then(|value| value.as_str())
             .unwrap_or_default();
+        let daemon_pid = response
+            .result
+            .as_ref()
+            .and_then(|value| value.get("pid"))
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok());
         if response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
             && version == tmux_agent_workbench::ENGINE_VERSION
+            && daemon_pid.is_some_and(running_executable_matches)
         {
-            let pid = response
-                .result
-                .as_ref()
-                .and_then(|value| value.get("pid"))
-                .map(ToString::to_string)
+            let pid = daemon_pid
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".into());
             if announce {
                 println!("daemon already running (pid {pid})");
@@ -1763,9 +1767,33 @@ fn ensure_daemon_with_announcement(
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn running_executable_matches(pid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let running = fs::metadata(format!("/proc/{pid}/exe"));
+    let current = std::env::current_exe().and_then(fs::metadata);
+    matches!((running, current), (Ok(running), Ok(current)) if
+        running.dev() == current.dev() && running.ino() == current.ino())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn running_executable_matches(_pid: u32) -> bool {
+    // Engine/protocol checks remain the portable fallback. Platforms without
+    // procfs should bump ENGINE_VERSION when the daemon method table changes.
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn detects_the_current_and_missing_daemon_executable() {
+        assert!(running_executable_matches(std::process::id()));
+        assert!(!running_executable_matches(u32::MAX));
+    }
 
     #[test]
     fn pane_selection_preserves_existing_zoom() {
