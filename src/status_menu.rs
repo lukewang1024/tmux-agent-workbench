@@ -13,9 +13,10 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
+    layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    text::{Line, Span},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -68,33 +69,38 @@ pub fn run(kind: StatusMenuKind, pane: &str) -> Result<(), Box<dyn std::error::E
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    title: &str,
+    _title: &str,
     actions: &[Action],
 ) -> Result<Option<usize>, Box<dyn std::error::Error>> {
     let mut selected = 0;
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {title} "));
-            let inner = block.inner(area);
+            let list_area = Rect::new(0, 0, area.width, area.height.saturating_sub(1));
             let items = actions.iter().map(|action| {
-                ListItem::new(Line::from(format!(" {}  [{}]", action.label, action.key)))
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(&action.label, primary_style()),
+                    Span::raw("  "),
+                    Span::styled(format!("[{}]", action.key), muted_style()),
+                ]))
             });
             let list = List::new(items)
-                .block(block)
                 .highlight_style(
                     Style::default()
                         .bg(Color::DarkGray)
+                        .fg(Color::Rgb(235, 235, 245))
                         .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("›");
             let mut state = ListState::default().with_selected(Some(selected));
-            frame.render_stateful_widget(list, area, &mut state);
-            if inner.height == 0 {
-                return;
-            }
+            frame.render_stateful_widget(list, list_area, &mut state);
+            let close = Line::from(vec![Span::raw(" "), Span::styled("× close", muted_style())])
+                .right_aligned();
+            frame.render_widget(
+                Paragraph::new(close),
+                Rect::new(0, area.height.saturating_sub(1), area.width, 1),
+            );
         })?;
 
         match event::read()? {
@@ -110,17 +116,40 @@ fn event_loop(
                 }
                 _ => {}
             },
-            Event::Mouse(mouse)
-                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
-            {
-                let row = usize::from(mouse.row).saturating_sub(1);
-                if row < actions.len() {
-                    return Ok(Some(row));
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollDown => selected = (selected + 1) % actions.len(),
+                MouseEventKind::ScrollUp => {
+                    selected = selected.checked_sub(1).unwrap_or(actions.len() - 1)
                 }
-            }
+                MouseEventKind::Moved if usize::from(mouse.row) < actions.len() => {
+                    selected = usize::from(mouse.row)
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let row = usize::from(mouse.row);
+                    if row < actions.len() {
+                        return Ok(Some(row));
+                    }
+                    if row + 1 == usize::from(terminal.size()?.height)
+                        && usize::from(mouse.column) + 8 >= usize::from(terminal.size()?.width)
+                    {
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
+}
+
+fn primary_style() -> Style {
+    Style::default().fg(Color::Rgb(235, 235, 245))
+}
+
+fn muted_style() -> Style {
+    // Keep status popups on the same semantic palette as Agent Sidebar:
+    // bright neutral content, ANSI bright-black for secondary controls.
+    Style::default().fg(Color::DarkGray)
 }
 
 fn actions(

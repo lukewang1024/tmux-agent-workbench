@@ -34,6 +34,19 @@ wait_sidebar_state()
   done
 }
 
+wait_window_option()
+{
+  option_target=$1
+  option_format=$2
+  option_expected=$3
+  option_tries=0
+  while [ "$(tmux -S "$socket" display-message -p -t "$option_target" "$option_format")" != "$option_expected" ]; do
+    option_tries=$((option_tries + 1))
+    [ "$option_tries" -lt 40 ] || return 1
+    sleep 0.05
+  done
+}
+
 export XDG_CONFIG_HOME="$test_root/config"
 export XDG_STATE_HOME="$test_root/state"
 export XDG_CACHE_HOME="$test_root/cache"
@@ -151,7 +164,8 @@ wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-host-status' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-usage-status' >/dev/null
-tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*send-prefix -t =' >/dev/null
+tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*switch-client -T prefix' >/dev/null
+tmux -S "$socket" list-keys -T prefix | grep 'MouseUp1Status.*switch-client -T prefix' >/dev/null
 if tmux -S "$socket" list-keys -T root | grep 'MouseUp1Status' >/dev/null; then exit 1; fi
 for status_range in wb_prefix wb_tmux wb_agent wb_sidebar wb_host wb_usage; do
   [ "${#status_range}" -le 15 ]
@@ -324,13 +338,19 @@ tmux -S "$socket" select-pane -t "$source_sidebar"
 "$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
   --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
   --pane "$agent_pane" --source-pane "$source_sidebar" --responsive
-tmux -S "$socket" list-panes -t source-restore -f '#{pane_active}' -F '#{pane_id}' | \
-  grep "^$source_main$" >/dev/null
+tries=0
+while ! tmux -S "$socket" list-panes -t source-restore -f '#{pane_active}' -F '#{pane_id}' | \
+  grep "^$source_main$" >/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 40 ] || exit 1
+  sleep 0.05
+done
 
 # Interactive Workbench focus is a viewport transition as well as a target
 # change. A narrow client must enter responsive zoom even when the destination
 # was previously wide and unzoomed.
-focus_client=$(tmux -S "$socket" list-clients -F '#{client_name}' | sed -n '1p')
+focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
+  sort -n | sed -n '1s/^[0-9][0-9]* //p')
 # Disable the resize-driven path so this assertion proves focus itself owns the
 # transition instead of racing an asynchronous client-resized hook.
 tmux -S "$socket" set-hook -gu 'client-resized[920]'
@@ -342,24 +362,32 @@ fi
 "$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
   --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
   --pane "$agent_pane" --source-pane "$source_sidebar" --responsive
-[ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 1 ]
-[ "$(tmux -S "$socket" show-option -wvq -t agent-pick @responsive_auto_zoom)" = 1 ]
+wait_window_option agent-pick '#{window_zoomed_flag}' 1
+wait_window_option agent-pick '#{@responsive_auto_zoom}' 1
 
 # A notification click has no source pane/client and uses plain focus. It must
 # not mutate the window-global zoom state based on some other narrow client.
-tmux -S "$socket" resize-pane -Z -t "$agent_pane"
 tmux -S "$socket" set-option -wqu -t agent-pick @responsive_auto_zoom
+if [ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 1 ]; then
+  tmux -S "$socket" resize-pane -Z -t "$agent_pane"
+fi
+wait_window_option agent-pick '#{window_zoomed_flag}' 0
 "$binary" focus --session "$(tmux -S "$socket" display-message -p -t agent-pick '#{session_id}')" \
   --window "$(tmux -S "$socket" display-message -p -t "$agent_pane" '#{window_id}')" \
   --pane "$agent_pane"
-[ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 0 ]
+wait_window_option agent-pick '#{window_zoomed_flag}' 0
 
 # Session rows remain actionable even when no last-active non-sidebar pane is
 # available: the hidden focus command accepts a session-only target.
 tmux -S "$socket" new-session -d -s session-only
 session_only_id=$(tmux -S "$socket" display-message -p -t session-only '#{session_id}')
 "$binary" focus --session "$session_only_id"
-tmux -S "$socket" list-clients -F '#{session_id}' | grep "^$session_only_id$" >/dev/null
+tries=0
+while ! tmux -S "$socket" list-clients -F '#{session_id}' | grep "^$session_only_id$" >/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 40 ] || exit 1
+  sleep 0.05
+done
 
 tmux -S "$socket" kill-server
 exec 8>&-

@@ -101,9 +101,11 @@ tmux set-option -s command-alias[927] \
   'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_host}" wb-host-status "if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status"'
 tmux bind-key -T root MouseDown1Status wb-status-route
 tmux bind-key -T prefix MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'send-prefix -t =' wb-status-route
+  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route
 tmux unbind-key -T root MouseUp1Status 2>/dev/null || true
-tmux unbind-key -T prefix MouseUp1Status 2>/dev/null || true
+tmux bind-key -T prefix MouseUp1Status if-shell -F \
+  '#{==:#{mouse_status_range},wb_prefix}' \
+  'switch-client -T prefix' 'switch-client -T prefix'
 # A Session press moves the client into the prefix table. Its release is then
 # decoded in that table; keep it there so touch behaves like a physical prefix.
 tmux bind-key -T root MouseDown3Status if-shell -F \
