@@ -143,11 +143,11 @@ badge() {
   left=$(printf '%s\n' "$detail" | sed -n 's/.* \([0-9][0-9]*\)%L.*/\1/p' | head -n 1)
   case $left in
     ''|*[!0-9]*) return ;;
-    *) used=$((100 - left)) ;;
+    *) remaining=$left ;;
   esac
   # Font Awesome battery glyphs are visually smaller than the Material set and
   # inherit the surrounding Agent Status capsule's foreground/background. Fill
-  # represents remaining plan capacity; the number remains "used".
+  # represents remaining plan capacity; the number uses the same semantics.
   if [ "$left" -ge 88 ]; then
     icon=''
   elif [ "$left" -ge 63 ]; then
@@ -163,7 +163,7 @@ badge() {
   if [ "$width" -lt "$compact_min" ]; then
     return
   else
-    printf '   %s %s%% · T %s ' "$icon" "$used" "${daily:-0}"
+    printf '   %s %s%% · T %s ' "$icon" "$remaining" "${daily:-0}"
   fi
 }
 
