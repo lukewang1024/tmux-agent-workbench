@@ -15,15 +15,20 @@ command -v ssh-connect >/dev/null 2>&1 || {
   exit 127
 }
 
-set -- tmux display-menu -M -O -c "$client" -t "$pane" \
+set -- tmux display-menu -M -O -C 0 -c "$client" -t "$pane" \
   -T '#[align=centre] 󰍹 SSH '
 found=0
+keys=123456789abcdefghijklmnopqrstuvwxyz
+index=1
 while IFS= read -r host; do
   [ -n "$host" ] || continue
+  key=$(printf '%s' "$keys" | cut -c "$index")
+  [ -n "$key" ] || break
   quoted=$(printf '%s' "$host" | sed "s/'/'\\\\''/g")
-  set -- "$@" "$host" "" \
+  set -- "$@" "$host" "$key" \
     "new-window -c \"#{pane_current_path}\" -n '$quoted' \"exec ssh-connect connect '$quoted'\""
   found=1
+  index=$((index + 1))
 done <<EOF
 $(ssh-connect hosts list)
 EOF

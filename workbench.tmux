@@ -46,19 +46,19 @@ esac
 # load first and survive every later theme repaint.
 tmux set-option -g @adaptive_context_state '#{@workbench_window_state}'
 tmux set-option -g @adaptive_context_label '#{@workbench_window_label}'
-tmux set-option -g @adaptive_context_range_open '#[range=user|agent_status]'
+tmux set-option -g @adaptive_context_range_open '#[range=user|wb_usage]'
 tmux set-option -g @adaptive_context_range_close '#[range=]'
-tmux set-option -g @adaptive_session_range_open '#[range=user|workbench_prefix]'
+tmux set-option -g @adaptive_session_range_open '#[range=user|wb_prefix]'
 tmux set-option -g @adaptive_session_range_close '#[range=]'
 tmux set-option -g @adaptive_host_icon '󰍹'
-tmux set-option -g @adaptive_host_range_open '#[range=user|workbench_host]'
+tmux set-option -g @adaptive_host_range_open '#[range=user|wb_host]'
 tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_action_1_icon ''
-tmux set-option -g @adaptive_action_1_range workbench_tmux
+tmux set-option -g @adaptive_action_1_range wb_tmux
 tmux set-option -g @adaptive_action_2_icon '󰚩'
-tmux set-option -g @adaptive_action_2_range workbench_agent
+tmux set-option -g @adaptive_action_2_range wb_agent
 tmux set-option -g @adaptive_action_3_icon ''
-tmux set-option -g @adaptive_action_3_range workbench_sidebar
+tmux set-option -g @adaptive_action_3_range wb_sidebar
 usage_enabled="$(tmux show-option -gqv @workbench-usage 2>/dev/null || true)"
 if [ "$usage_enabled" != off ]; then
   old_usage_source="$(tmux show-option -gqv @agent_usage_source 2>/dev/null || true)"
@@ -72,19 +72,26 @@ if [ "$usage_enabled" != off ]; then
 else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
-workbench_status_ranges='#{||:#{==:#{mouse_status_range},workbench_prefix},#{||:#{==:#{mouse_status_range},workbench_host},#{||:#{==:#{mouse_status_range},workbench_tmux},#{||:#{==:#{mouse_status_range},workbench_agent},#{||:#{==:#{mouse_status_range},workbench_sidebar},#{==:#{mouse_status_range},agent_status}}}}}}'
-tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
-  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root '#{client_name}' '#{window_id}'\"" \
-  'select-window -t ='
-tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
-  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix '#{client_name}' '#{window_id}'\"" \
-  'select-window -t ='
+tmux set-option -s command-alias[920] 'wb-tmux-status-menu=display-menu -M -O -C 0 -T "#[align=centre] tmux " "New window" c "new-window -c \"#{pane_current_path}\"" "Split below" - "split-window -v -c \"#{pane_current_path}\"" "Split right" "|" "split-window -h -c \"#{pane_current_path}\"" "Choose window" w "choose-tree -Zw" "Choose session" s "choose-tree -Zs" Detach d detach-client'
+tmux set-option -s command-alias[921] 'wb-agent-status-menu=display-menu -M -O -C 0 -T "#[align=centre] 󰚩 Agent " /side s "send-keys -l \"/side\"; send-keys Enter" /btw b "send-keys -l \"/btw\"; send-keys Enter" /fork f "send-keys -l \"/fork\"; send-keys Enter"'
+tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}'\""
+tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
+status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
+tmux bind-key -T root MouseDown1Status "$status_click_action"
+tmux bind-key -T prefix MouseDown1Status "$status_click_action"
+workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}'
+tmux bind-key -T root MouseDown1Status if-shell -F \
+  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \
+  "if-shell -F '$workbench_status_ranges' 'run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" root \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"' 'select-window -t ='"
+tmux bind-key -T prefix MouseDown1Status if-shell -F \
+  '#{==:#{mouse_status_range},wb_prefix}' 'send-prefix -t =' \
+  "if-shell -F '$workbench_status_ranges' 'run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" prefix \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"' 'select-window -t ='"
 # A Session press moves the client into the prefix table. Its release is then
 # decoded in that table; keep it there so touch behaves like a physical prefix.
 tmux bind-key -T prefix MouseUp1Status switch-client -T prefix
 tmux unbind-key -T root MouseUp1Status 2>/dev/null || true
 tmux bind-key -T root MouseDown3Status if-shell -F \
-  '#{==:#{mouse_status_range},agent_status}' \
+  '#{==:#{mouse_status_range},wb_usage}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'
 
 # If the optional theme loaded first, ask it to consume the newly registered

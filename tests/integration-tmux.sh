@@ -150,7 +150,11 @@ tmux -S "$socket" new-window -d -n sidebar-check
 wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*workbench-status-click' >/dev/null
+tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*send-prefix -t =' >/dev/null
 tmux -S "$socket" list-keys -T prefix | grep 'MouseUp1Status.*switch-client -T prefix' >/dev/null
+for status_range in wb_prefix wb_tmux wb_agent wb_sidebar wb_host wb_usage; do
+  [ "${#status_range}" -le 15 ]
+done
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null
 responsive_main_pane=$(tmux -S "$socket" list-panes -t sidebar-check \
   -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | sed -n '1p')

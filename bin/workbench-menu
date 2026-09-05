@@ -8,7 +8,7 @@ esac
 
 case ${1:-} in
   tmux)
-    exec tmux display-menu -M -O -c "$client" -T '#[align=centre] tmux ' \
+    exec tmux display-menu -M -O -C 0 -c "$client" -T '#[align=centre] tmux ' \
       'New window' c 'new-window -c "#{pane_current_path}"' \
       'Split below' - 'split-window -v -c "#{pane_current_path}"' \
       'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
@@ -17,7 +17,7 @@ case ${1:-} in
       'Detach' d detach-client
     ;;
   agent)
-    exec tmux display-menu -M -O -c "$client" -T '#[align=centre] 󰚩 Agent ' \
+    exec tmux display-menu -M -O -C 0 -c "$client" -T '#[align=centre] 󰚩 Agent ' \
       '/side' s 'send-keys -l "/side"; send-keys Enter' \
       '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
       '/fork' f 'send-keys -l "/fork"; send-keys Enter'

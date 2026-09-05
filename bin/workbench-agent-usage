@@ -203,6 +203,10 @@ detail() {
 }
 
 menu() {
+  client=${1:-$(tmux display-message -p '#{client_name}')}
+  case $client in
+    ''|*[!A-Za-z0-9_./-]*) return 2 ;;
+  esac
   agent=$(source_name)
   value=$(render "$agent")
   case $agent in
@@ -234,7 +238,7 @@ menu() {
 
   # -M handles subsequent mouse events; -O ignores the opening click's release,
   # so the menu remains visible after the user lets go of the left button.
-  tmux display-menu -M -O -b rounded -T " Usage · $name " -x C -y C \
+  tmux display-menu -M -O -C 0 -c "$client" -b rounded -T " Usage · $name " -x C -y C \
     "#{?#{==:1,1},-,}$daily_line" '' '' \
     "#{?#{==:1,1},-,}$weekly_line" '' '' \
     "#{?#{==:1,1},-,}$monthly_line" '' '' \
@@ -305,7 +309,7 @@ case ${1:-badge} in
   render) render "${2:-}" ;;
   detail) detail ;;
   focus) focus ;;
-  menu) menu ;;
+  menu) menu "${2:-}" ;;
   cycle) cycle ;;
   select) select_source "${2:-}" ;;
   *) printf 'usage: %s [badge|choose|detail|focus|menu|render|cycle|select]\n' "${0##*/}" >&2; exit 2 ;;

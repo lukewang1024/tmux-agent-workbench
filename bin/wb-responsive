@@ -20,7 +20,14 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$(tmux display-message -p '#{socket_path}')
 export TMUX_AGENT_WORKBENCH_TMUX_SOCKET
 
-client=${2:-$(tmux display-message -p '#{client_name}')}
+client=${2:-}
+if [ -z "$client" ]; then
+  client=$(tmux list-clients -F '#{client_name} #{window_id}' | \
+    awk -v target="${1:-}" '$2 == target { print $1; found = 1; exit } END { if (!found) exit 1 }') || true
+fi
+if [ -z "$client" ] && [ "$(tmux list-clients -F '#{client_name}' | wc -l | tr -d ' ')" -eq 1 ]; then
+  client=$(tmux list-clients -F '#{client_name}')
+fi
 case $client in
   ''|*[!A-Za-z0-9_./-]*) tmux display-message 'Workbench client unavailable'; exit 1 ;;
 esac
