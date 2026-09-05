@@ -286,6 +286,9 @@ Three status actions share the Host capsule immediately before Agent Status:
 tmux and Agent open the same menus as `M-t` and `M-a`, while Sidebar performs
 the same responsive toggle as `Tab`. Workbench owns their ranges and behavior;
 the adaptive theme owns their placement, separators, and colors.
+The Host segment is a separate clickable range: it launches the existing
+`ssh-connect` picker in the current pane, so host filtering and SSH behavior
+remain owned by the dotfiles command rather than duplicated in Workbench.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

@@ -50,6 +50,9 @@ tmux set-option -g @adaptive_context_range_open '#[range=user|agent_status]'
 tmux set-option -g @adaptive_context_range_close '#[range=]'
 tmux set-option -g @adaptive_session_range_open '#[range=user|workbench_prefix]'
 tmux set-option -g @adaptive_session_range_close '#[range=]'
+tmux set-option -g @adaptive_host_icon '󰍹'
+tmux set-option -g @adaptive_host_range_open '#[range=user|workbench_host]'
+tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_action_1_icon ''
 tmux set-option -g @adaptive_action_1_range workbench_tmux
 tmux set-option -g @adaptive_action_2_icon '󰚩'
@@ -69,10 +72,13 @@ if [ "$usage_enabled" != off ]; then
 else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
-tmux bind-key -T root MouseDown1Status run-shell -b \
-  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root '#{client_name}' '#{mouse_window}'"
-tmux bind-key -T prefix MouseDown1Status run-shell -b \
-  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix '#{client_name}' '#{mouse_window}'"
+workbench_status_ranges='#{||:#{==:#{mouse_status_range},workbench_prefix},#{||:#{==:#{mouse_status_range},workbench_host},#{||:#{==:#{mouse_status_range},workbench_tmux},#{||:#{==:#{mouse_status_range},workbench_agent},#{||:#{==:#{mouse_status_range},workbench_sidebar},#{==:#{mouse_status_range},agent_status}}}}}}'
+tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
+  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root '#{client_name}' '#{window_id}'\"" \
+  'select-window -t ='
+tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
+  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix '#{client_name}' '#{window_id}'\"" \
+  'select-window -t ='
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},agent_status}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'

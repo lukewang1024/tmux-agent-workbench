@@ -24,11 +24,12 @@ case $range in
   workbench_sidebar)
     exec "$script_dir/wb-responsive" "$window" "$client"
     ;;
+  workbench_host)
+    tmux send-keys -t "$pane" -l 'ssh-connect'
+    exec tmux send-keys -t "$pane" Enter
+    ;;
   agent_status)
     exec workbench-agent-usage menu
     ;;
-  *)
-    [ -z "$window" ] || exec tmux select-window -t "$window"
-    exit 0
-    ;;
+  *) exit 0 ;;
 esac
