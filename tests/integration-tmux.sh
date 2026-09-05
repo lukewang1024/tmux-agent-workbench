@@ -149,9 +149,10 @@ tmux -S "$socket" list-panes -t workbench-test:1 -F '#{@pane_role}' | \
 tmux -S "$socket" new-window -d -n sidebar-check
 wait_sidebar_state sidebar-check present
 tmux -S "$socket" list-keys -T prefix | grep 'wb-responsive' >/dev/null
-tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb_prefix' >/dev/null
-tmux -S "$socket" list-keys -T root | grep 'MouseUp1Status.*workbench-status-click' >/dev/null
-tmux -S "$socket" list-keys -T prefix | grep 'MouseUp1Status.*workbench-status-click' >/dev/null
+tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-host-status' >/dev/null
+tmux -S "$socket" list-keys -T root | grep 'MouseDown1Status.*wb-usage-status' >/dev/null
+tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*send-prefix -t =' >/dev/null
+if tmux -S "$socket" list-keys -T root | grep 'MouseUp1Status' >/dev/null; then exit 1; fi
 for status_range in wb_prefix wb_tmux wb_agent wb_sidebar wb_host wb_usage; do
   [ "${#status_range}" -le 15 ]
 done

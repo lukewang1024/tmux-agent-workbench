@@ -291,12 +291,12 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-Status-bar overlays use a shared mouse-release barrier. A status click begins
-on `MouseDown`; creating an overlay before its paired `MouseUp` would make the
-new menu or popup close immediately. The status dispatcher therefore waits
-briefly before opening every overlay, and tmux menus additionally use `-M -O`.
-New status actions should use this dispatcher instead of opening overlays
-directly. Keyboard menu bindings bypass the delay and remain immediate.
+Status-bar overlays open from `MouseDown`, matching tmux's native menu event
+model. Static menus open synchronously with `-O`, so the opening release is
+ignored while later mouse choices still execute normally. Host and Usage need
+to build dynamic content first, so only those two cross a short release barrier
+before opening. No overlay is opened from `MouseUp`: doing so can select an
+item under the release and accidentally enter a full-screen chooser.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit
