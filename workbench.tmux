@@ -48,6 +48,14 @@ tmux set-option -g @adaptive_context_state '#{@workbench_window_state}'
 tmux set-option -g @adaptive_context_label '#{@workbench_window_label}'
 tmux set-option -g @adaptive_context_range_open '#[range=user|agent_status]'
 tmux set-option -g @adaptive_context_range_close '#[range=]'
+tmux set-option -g @adaptive_session_range_open '#[range=user|workbench_prefix]'
+tmux set-option -g @adaptive_session_range_close '#[range=]'
+tmux set-option -g @adaptive_action_1_icon ''
+tmux set-option -g @adaptive_action_1_range workbench_tmux
+tmux set-option -g @adaptive_action_2_icon ''
+tmux set-option -g @adaptive_action_2_range workbench_agent
+tmux set-option -g @adaptive_action_3_icon ''
+tmux set-option -g @adaptive_action_3_range workbench_sidebar
 usage_enabled="$(tmux show-option -gqv @workbench-usage 2>/dev/null || true)"
 if [ "$usage_enabled" != off ]; then
   old_usage_source="$(tmux show-option -gqv @agent_usage_source 2>/dev/null || true)"
@@ -61,9 +69,10 @@ if [ "$usage_enabled" != off ]; then
 else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
-tmux bind-key -T root MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},agent_status}' \
-  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage menu'" 'select-window -t ='
+tmux bind-key -T root MouseDown1Status run-shell -b \
+  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root"
+tmux bind-key -T prefix MouseDown1Status run-shell -b \
+  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix"
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},agent_status}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'

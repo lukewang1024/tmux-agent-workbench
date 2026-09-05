@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+range=${1:-}
+pane=${2:-}
+key_table=${3:-root}
+
+case $range in
+  workbench_prefix)
+    if [ "$key_table" = prefix ]; then
+      exec tmux send-prefix -t "$pane"
+    fi
+    exec tmux switch-client -T prefix
+    ;;
+  workbench_tmux)
+    exec tmux display-menu -M -O -b rounded -T ' tmux ' -x C -y C \
+      'New window' c 'new-window -c "#{pane_current_path}"' \
+      'Split below' - 'split-window -v -c "#{pane_current_path}"' \
+      'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
+      'Choose window' w 'choose-tree -Zw' \
+      'Choose session' s 'choose-tree -Zs' \
+      'Detach' d detach-client
+    ;;
+  workbench_agent)
+    exec tmux display-menu -M -O -b rounded -T ' Agent ' -x C -y C \
+      '/side' s 'send-keys -l "/side"; send-keys Enter' \
+      '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
+      '/fork' f 'send-keys -l "/fork"; send-keys Enter' \
+      '' \
+      'Go to agent' g 'run-shell -b "tmux-agent-workbench agent goto"' \
+      'Next attention' n 'run-shell -b "tmux-agent-workbench agent next"'
+    ;;
+  workbench_sidebar)
+    exec tmux display-menu -M -O -b rounded -T ' Workbench ' -x C -y C \
+      'Toggle sidebar' t 'run-shell -b "tmux-agent-workbench sidebar-control toggle #{window_id}"' \
+      'Toggle all sidebars' a 'run-shell -b "tmux-agent-workbench sidebar-control toggle-all"' \
+      'Open popup' p 'run-shell -b "tmux-agent-workbench popup"'
+    ;;
+  agent_status)
+    exec workbench-agent-usage menu
+    ;;
+  *) exit 0 ;;
+esac
