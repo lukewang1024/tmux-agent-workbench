@@ -759,8 +759,19 @@ fn handle(
             .map_err(|error| error.to_string()),
         "client.register" => parse_params::<ClientRegisterParams>(request.params).and_then(|params| {
             uuid::Uuid::parse_str(&params.device_id).map_err(|_| "invalid device id")?;
-            let mut state = state.write().expect("state poisoned");
-            let (endpoint_id, attachment_token) = state.clients.register(params.device_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+            let (endpoint_id, attachment_token, replaced_attachments) = {
+                let mut state = state.write().expect("state poisoned");
+                let replaced_attachments = state.clients.replace_device(&params.device_id);
+                let (endpoint_id, attachment_token) = state.clients.register(params.device_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+                (endpoint_id, attachment_token, replaced_attachments)
+            };
+            for attachment in replaced_attachments {
+                let _ = std::process::Command::new("tmux")
+                    .arg("-S")
+                    .arg(&server.socket_path)
+                    .args(["detach-client", "-t", &attachment])
+                    .status();
+            }
             Ok(json!({"endpoint_id": endpoint_id, "attachment_token": attachment_token, "heartbeat_seconds": 15}))
         }),
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {

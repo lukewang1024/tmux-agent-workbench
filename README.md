@@ -387,6 +387,10 @@ event's exact session, window, and pane. Closing the SSH attachment removes the
 endpoint. No listening port, reverse tunnel, or third-party push provider is
 required.
 
+The remote daemon keeps one attachment per device. Reconnecting from the same
+phone or computer detaches its older tmux client before attaching the new one,
+so repeated `client attach` calls do not accumulate hidden clients.
+
 ### Legacy SSH notification relay
 
 Run one user-level listener on the laptop (under launchd, systemd --user, or a

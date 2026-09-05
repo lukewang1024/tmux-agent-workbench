@@ -30,6 +30,7 @@ pub struct Endpoint {
     pub overlay_visible: bool,
     pub active_target: Option<TmuxTarget>,
     pub attachment: Option<String>,
+    previous_attachment: Option<String>,
     pub last_activity_ms: u64,
     pub detached_at_ms: Option<u64>,
     pending: Vec<SemanticEvent>,
@@ -71,6 +72,7 @@ impl ClientRegistry {
                 overlay_visible: false,
                 active_target: None,
                 attachment: None,
+                previous_attachment: None,
                 last_activity_ms: now_ms,
                 detached_at_ms: None,
                 pending: Vec::new(),
@@ -120,11 +122,36 @@ impl ClientRegistry {
             .endpoints
             .get_mut(endpoint_id)
             .ok_or("unknown endpoint")?;
-        endpoint.attachment = None;
+        endpoint.previous_attachment = endpoint.attachment.take();
         endpoint.detached_at_ms = Some(now_ms);
         endpoint.focus = FocusState::Unknown;
         endpoint.active_target = None;
         Ok(())
+    }
+
+    /// Remove older registrations for one physical client and return any tmux
+    /// client names that may still be attached. A reconnect can then take over
+    /// instead of leaving another hidden `tmux attach-session` behind.
+    pub fn replace_device(&mut self, device_id: &str) -> Vec<String> {
+        let replaced_ids: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter(|(_, endpoint)| endpoint.device_id == device_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut attachments = Vec::new();
+        for endpoint_id in &replaced_ids {
+            if let Some(endpoint) = self.endpoints.remove(endpoint_id) {
+                if let Some(attachment) = endpoint.attachment.or(endpoint.previous_attachment) {
+                    if !attachments.contains(&attachment) {
+                        attachments.push(attachment);
+                    }
+                }
+            }
+        }
+        self.bind_tokens
+            .retain(|_, token| !replaced_ids.contains(&token.endpoint_id));
+        attachments
     }
 
     pub fn attachment(&self, endpoint_id: &str) -> Result<Option<&str>, String> {
@@ -353,5 +380,28 @@ mod tests {
         assert_eq!(registry.attachment(&id).unwrap(), None);
         registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
         assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/7"));
+    }
+
+    #[test]
+    fn reconnect_replaces_the_same_device_and_recovers_its_attachment() {
+        let mut registry = ClientRegistry::default();
+        let (old_id, token) =
+            registry.register("d".into(), "phone".into(), "termux".into(), vec![], 0);
+        registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
+        registry.detach(&old_id, 2).unwrap();
+
+        assert_eq!(registry.replace_device("d"), vec!["/dev/pts/7"]);
+        assert!(registry.attachment(&old_id).is_err());
+    }
+
+    #[test]
+    fn reconnect_does_not_replace_another_device() {
+        let mut registry = ClientRegistry::default();
+        let (id, token) =
+            registry.register("other".into(), "mac".into(), "macos".into(), vec![], 0);
+        registry.bind(&token, "/dev/pts/8".into(), 1).unwrap();
+
+        assert!(registry.replace_device("d").is_empty());
+        assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/8"));
     }
 }

@@ -795,7 +795,7 @@ fn client_attach_pty(
     if let Some(value) = session {
         validate_safe_name(value, "session")?;
     }
-    ensure_daemon(paths)?;
+    ensure_daemon_quiet(paths)?;
     let tty = std::env::var("SSH_TTY")
         .or_else(|_| std::env::var("TTY"))
         .unwrap_or_else(|_| "unknown".into());
