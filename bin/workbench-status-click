@@ -8,11 +8,6 @@ client=${4:-}
 window=${5:-}
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 
-after_mouse_release()
-{
-  sleep "${WORKBENCH_STATUS_MOUSE_DELAY:-0.15}"
-}
-
 if [ "$(tmux show-option -gqv @workbench-status-click-debug 2>/dev/null || true)" = on ]; then
   state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
   log_dir=$state_home/tmux-agent-workbench
@@ -30,23 +25,18 @@ case $range in
     exec tmux switch-client -c "$client" -T prefix
     ;;
   wb_tmux)
-    after_mouse_release
     exec "$script_dir/workbench-menu" tmux "$client"
     ;;
   wb_agent)
-    after_mouse_release
     exec "$script_dir/workbench-menu" agent "$client"
     ;;
   wb_sidebar)
-    after_mouse_release
     exec "$script_dir/wb-responsive" "$window" "$client"
     ;;
   wb_host)
-    after_mouse_release
     exec "$script_dir/workbench-host-menu" "$client" "$pane"
     ;;
   wb_usage)
-    after_mouse_release
     exec "$script_dir/workbench-agent-usage" menu "$client"
     ;;
   *)

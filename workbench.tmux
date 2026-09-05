@@ -79,17 +79,19 @@ tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux bind-key -T root MouseDown1Status "$status_click_action"
 tmux bind-key -T prefix MouseDown1Status "$status_click_action"
-workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}'
-tmux bind-key -T root MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \
-  "if-shell -F '$workbench_status_ranges' 'run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" root \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"' 'select-window -t ='"
-tmux bind-key -T prefix MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'send-prefix -t =' \
-  "if-shell -F '$workbench_status_ranges' 'run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" prefix \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"' 'select-window -t ='"
+workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_prefix},#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}}'
+tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
+  'display-message -p ""' 'select-window -t ='
+tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
+  'display-message -p ""' 'select-window -t ='
+tmux bind-key -T root MouseUp1Status if-shell -F "$workbench_status_ranges" \
+  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" root \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"" \
+  'display-message -p ""'
+tmux bind-key -T prefix MouseUp1Status if-shell -F "$workbench_status_ranges" \
+  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" prefix \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"" \
+  'display-message -p ""'
 # A Session press moves the client into the prefix table. Its release is then
 # decoded in that table; keep it there so touch behaves like a physical prefix.
-tmux bind-key -T prefix MouseUp1Status switch-client -T prefix
-tmux unbind-key -T root MouseUp1Status 2>/dev/null || true
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},wb_usage}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'
