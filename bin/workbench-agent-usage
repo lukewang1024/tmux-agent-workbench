@@ -163,7 +163,7 @@ badge() {
   if [ "$width" -lt "$compact_min" ]; then
     return
   else
-    printf '   %s %s%% · T %s ' "$icon" "$remaining" "${daily:-0}"
+    printf '  %s %s%% · T %s' "$icon" "$remaining" "${daily:-0}"
   fi
 }
 

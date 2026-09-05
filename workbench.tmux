@@ -53,6 +53,8 @@ tmux set-option -g @adaptive_session_range_close '#[range=]'
 tmux set-option -g @adaptive_host_icon '󰍹'
 tmux set-option -g @adaptive_host_range_open '#[range=user|wb_host]'
 tmux set-option -g @adaptive_host_range_close '#[range=]'
+tmux set-option -g @adaptive_cpu_range_open '#[range=user|wb_cpu]'
+tmux set-option -g @adaptive_cpu_range_close '#[range=]'
 tmux set-option -g @adaptive_action_1_icon ''
 tmux set-option -g @adaptive_action_1_range wb_tmux
 tmux set-option -g @adaptive_action_2_icon '󰚩'
@@ -81,7 +83,7 @@ tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux bind-key -T root MouseDown1Status "$status_click_action"
 tmux bind-key -T prefix MouseDown1Status "$status_click_action"
-workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_prefix},#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}}'
+workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_prefix},#{||:#{==:#{mouse_status_range},wb_cpu},#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}}}'
 tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
   'display-message -p ""' 'select-window -t ='
 tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
@@ -96,9 +98,11 @@ tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
   "wb-usage-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
+tmux set-option -s command-alias[928] \
+  'wb-cpu-status=display-popup -E -b rounded -T " CPU · btop " -w 90% -h 90% "exec btop"'
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
-  'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_host}" wb-host-status "if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status"'
+  'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-cpu-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
 tmux bind-key -T root MouseDown1Status wb-status-route
 tmux bind-key -T prefix MouseDown1Status if-shell -F \
   '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route
