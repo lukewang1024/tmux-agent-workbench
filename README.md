@@ -280,6 +280,12 @@ focuses the active Agent, and the status suffix shows the selected provider's
 remaining-limit battery plus today's token total. Codex, Claude Code, Trae, and
 OpenCode can be selected in the menu. Token totals come from local `ccusage`
 data and are cached under `$XDG_STATE_HOME/tmux-agent-workbench/usage`.
+Below the theme's compact-width threshold the complete usage suffix is hidden.
+
+Three status actions share the Host capsule immediately before Agent Status:
+tmux and Agent open the same menus as `M-t` and `M-a`, while Sidebar performs
+the same responsive toggle as `Tab`. Workbench owns their ranges and behavior;
+the adaptive theme owns their placement, separators, and colors.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

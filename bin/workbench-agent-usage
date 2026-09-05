@@ -161,7 +161,7 @@ badge() {
   case $compact_min in ''|*[!0-9]*) compact_min=70 ;; esac
   case $width in ''|*[!0-9]*) width=9999 ;; esac
   if [ "$width" -lt "$compact_min" ]; then
-    printf '   %s ' "$icon"
+    return
   else
     printf '   %s %s%% · T %s ' "$icon" "$used" "${daily:-0}"
   fi

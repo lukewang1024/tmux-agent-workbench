@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+client=${2:-}
+
+case $client in
+  ''|*[!A-Za-z0-9_./-]*) exit 2 ;;
+esac
+
+case ${1:-} in
+  tmux)
+    exec tmux display-menu -M -O -c "$client" -T '#[align=centre] tmux ' \
+      'New window' c 'new-window -c "#{pane_current_path}"' \
+      'Split below' - 'split-window -v -c "#{pane_current_path}"' \
+      'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
+      'Choose window' w 'choose-tree -Zw' \
+      'Choose session' s 'choose-tree -Zs' \
+      'Detach' d detach-client
+    ;;
+  agent)
+    exec tmux display-menu -M -O -c "$client" -T '#[align=centre] 󰚩 Agent ' \
+      '/side' s 'send-keys -l "/side"; send-keys Enter' \
+      '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
+      '/fork' f 'send-keys -l "/fork"; send-keys Enter'
+    ;;
+  *) exit 2 ;;
+esac

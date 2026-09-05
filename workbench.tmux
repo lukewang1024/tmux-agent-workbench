@@ -52,7 +52,7 @@ tmux set-option -g @adaptive_session_range_open '#[range=user|workbench_prefix]'
 tmux set-option -g @adaptive_session_range_close '#[range=]'
 tmux set-option -g @adaptive_action_1_icon ''
 tmux set-option -g @adaptive_action_1_range workbench_tmux
-tmux set-option -g @adaptive_action_2_icon ''
+tmux set-option -g @adaptive_action_2_icon '󰚩'
 tmux set-option -g @adaptive_action_2_range workbench_agent
 tmux set-option -g @adaptive_action_3_icon ''
 tmux set-option -g @adaptive_action_3_range workbench_sidebar
@@ -70,9 +70,9 @@ else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
 tmux bind-key -T root MouseDown1Status run-shell -b \
-  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root"
+  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root '#{client_name}' '#{mouse_window}'"
 tmux bind-key -T prefix MouseDown1Status run-shell -b \
-  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix"
+  "$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix '#{client_name}' '#{mouse_window}'"
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},agent_status}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'
@@ -128,18 +128,9 @@ bind_pane @workbench-key-pane-up-arrow @workbench-_bound-pane-up-arrow Up "selec
 bind_pane @workbench-key-pane-right-arrow @workbench-_bound-pane-right-arrow Right "select pane right with responsive zoom" -R
 
 bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open agent command menu" \
-  display-menu -T '#[align=centre] 󰚩 Agent ' \
-  '/side' s 'send-keys -l "/side"; send-keys Enter' \
-  '/btw' b 'send-keys -l "/btw"; send-keys Enter' \
-  '/fork' f 'send-keys -l "/fork"; send-keys Enter'
+  run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}'"
 bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
-  display-menu -T '#[align=centre] tmux ' \
-  'New window' c 'new-window -c "#{pane_current_path}"' \
-  'Split below' - 'split-window -v -c "#{pane_current_path}"' \
-  'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
-  'Choose window' w 'choose-tree -Zw' \
-  'Choose session' s 'choose-tree -Zs' \
-  'Detach' d detach-client
+  run-shell "$CURRENT_DIR/bin/workbench-menu tmux '#{client_name}'"
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell
