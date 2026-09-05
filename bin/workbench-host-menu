@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+client=${1:-}
+pane=${2:-}
+case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
+case $pane in
+  '%'|''|%*[!0-9]*) exit 2 ;;
+  %*) ;;
+  *) exit 2 ;;
+esac
+
+command -v ssh-connect >/dev/null 2>&1 || {
+  tmux display-message -c "$client" 'ssh-connect is unavailable'
+  exit 127
+}
+
+set -- tmux display-menu -M -O -c "$client" -t "$pane" \
+  -T '#[align=centre] 󰍹 SSH '
+found=0
+while IFS= read -r host; do
+  [ -n "$host" ] || continue
+  quoted=$(printf '%s' "$host" | sed "s/'/'\\\\''/g")
+  set -- "$@" "$host" "" \
+    "new-window -c \"#{pane_current_path}\" -n '$quoted' \"exec ssh-connect connect '$quoted'\""
+  found=1
+done <<EOF
+$(ssh-connect hosts list)
+EOF
+
+if [ "$found" -eq 0 ]; then
+  tmux display-message -c "$client" 'ssh-connect has no configured hosts'
+  exit 1
+fi
+exec "$@"

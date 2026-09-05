@@ -79,6 +79,9 @@ tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
 tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
   "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' prefix '#{client_name}' '#{window_id}'\"" \
   'select-window -t ='
+# The first Session press switches to the prefix table on MouseDown. Preserve
+# that table across the matching release so a second press can send C-b.
+tmux bind-key -T prefix MouseUp1Status switch-client -T prefix
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},agent_status}' \
   "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'

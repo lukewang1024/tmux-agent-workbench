@@ -8,6 +8,15 @@ client=${4:-}
 window=${5:-}
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 
+# A status action starts on MouseDown. If an overlay is created immediately,
+# the matching MouseUp is delivered to that new menu/popup and closes it. Keep
+# all status-triggered overlays behind one release barrier. Keyboard bindings
+# call their launchers directly and therefore remain immediate.
+after_mouse_release()
+{
+  sleep "${WORKBENCH_STATUS_MOUSE_DELAY:-0.15}"
+}
+
 case $range in
   workbench_prefix)
     if [ "$key_table" = prefix ]; then
@@ -16,19 +25,23 @@ case $range in
     exec tmux switch-client -c "$client" -T prefix
     ;;
   workbench_tmux)
+    after_mouse_release
     exec "$script_dir/workbench-menu" tmux "$client"
     ;;
   workbench_agent)
+    after_mouse_release
     exec "$script_dir/workbench-menu" agent "$client"
     ;;
   workbench_sidebar)
+    after_mouse_release
     exec "$script_dir/wb-responsive" "$window" "$client"
     ;;
   workbench_host)
-    tmux send-keys -t "$pane" -l 'ssh-connect'
-    exec tmux send-keys -t "$pane" Enter
+    after_mouse_release
+    exec "$script_dir/workbench-host-menu" "$client" "$pane"
     ;;
   agent_status)
+    after_mouse_release
     exec workbench-agent-usage menu
     ;;
   *) exit 0 ;;
