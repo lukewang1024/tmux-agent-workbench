@@ -535,6 +535,33 @@ matcher = { contains = { value = "approval ready" } }"#;
     }
 
     #[test]
+    fn codex_automatic_review_overrides_action_required_until_human_input() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let codex = set.get(AgentKind::Codex);
+        for status in [
+            "• Automatically reviewing the approval (3s)",
+            "Automatically reviewing approval…",
+            "• Reviewing approval request (3s • esc to interrupt)",
+        ] {
+            let content = format!("Would you like to run the following command?\n{status}");
+            let result = codex.classify(&content, "Action Required");
+            assert_eq!(result.state, BaseState::Working, "{status}");
+            assert!(result.strong_visible_signal);
+            assert!(result.reason_category.is_none());
+        }
+        for content in [
+            "Would you like to run the following command?\nPress enter to confirm",
+            "› Explain Automatically reviewing the approval",
+            "The tool printed Reviewing approval request",
+        ] {
+            assert_eq!(
+                codex.classify(content, "Action Required").state,
+                BaseState::Blocked
+            );
+        }
+    }
+
+    #[test]
     fn codex_osc_title_is_a_strong_stable_signal() {
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);

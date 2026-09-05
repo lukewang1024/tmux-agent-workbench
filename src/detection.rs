@@ -470,6 +470,8 @@ impl Detector {
         // title while a turn is active; ignoring it here made working detection
         // depend on the slowest and least reliable observation path.
         if matches!(title_result.state, BaseState::Working | BaseState::Blocked)
+            && !title_needs_capture(process.kind, title_result.state)
+            && !self.machine.has_pending_codex_permission(&pane_id)
             && !title_result.skip_state_update
         {
             let cached = CachedClassification {
@@ -560,6 +562,8 @@ impl Detector {
         let pane_id = pane.target.pane_id.clone();
         let title_result = manifests.get(process.kind).classify("", &pane.title);
         let cached = if matches!(title_result.state, BaseState::Working | BaseState::Blocked)
+            && !title_needs_capture(process.kind, title_result.state)
+            && !self.machine.has_pending_codex_permission(&pane_id)
             && !title_result.skip_state_update
         {
             CachedClassification {
@@ -703,6 +707,12 @@ fn kind_label(kind: AgentKind) -> &'static str {
     }
 }
 
+// Codex uses Action Required for both human prompts and automatic review.
+// Consult the live overlay before publishing blocked attention.
+fn title_needs_capture(kind: AgentKind, state: BaseState) -> bool {
+    kind == AgentKind::Codex && state == BaseState::Blocked
+}
+
 fn meaningful_window_label(label: &str) -> bool {
     !label.trim().is_empty()
         && !matches!(
@@ -729,6 +739,13 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_action_required_needs_overlay_capture() {
+        assert!(title_needs_capture(AgentKind::Codex, BaseState::Blocked));
+        assert!(!title_needs_capture(AgentKind::Codex, BaseState::Working));
+        assert!(!title_needs_capture(AgentKind::Claude, BaseState::Blocked));
+    }
 
     #[test]
     fn unmatched_checkpoint_remains_pending_until_process_discovery() {

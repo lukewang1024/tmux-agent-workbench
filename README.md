@@ -353,6 +353,12 @@ diagnosis; estimated transitions are dimmed and can never create attention or
 notifications. Snapshot schema v1 keeps `base_state`/`display_state` and adds
 `state_source`, `confidence`, `estimated_state`, and `hook_health`.
 
+Codex automatic approval review displays as `working`, including when the pane
+title says `Action Required`. The detector checks the live review overlay before
+classifying that title. For hook-backed permission requests, the lifecycle state
+is retained while the working display temporarily suppresses input attention;
+a subsequent human approval prompt restores the blocked display and attention.
+
 Workbench also consumes two non-lifecycle CESP signals without changing the
 canonical pane state: `session.start` plays a greeting once for startup/resume
 (not compaction), while native failure events and failed `PostToolUse` payloads
