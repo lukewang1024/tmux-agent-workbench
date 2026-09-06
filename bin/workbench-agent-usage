@@ -2,7 +2,7 @@
 # Workbench-owned tmux widget for per-agent token usage and plan limits.
 
 state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench/usage
-ttl=300
+ttl=600
 
 source_name() {
   value=$(tmux show-option -gqv @workbench-usage-source 2>/dev/null)
@@ -43,7 +43,11 @@ latest_limits() {
     [ -n "$line" ] && break
   done
   [ -n "$line" ] || return
-  printf '%s\n' "$line" | jq -r '
+  printf '%s\n' "$line" | format_limits
+}
+
+format_limits() {
+  jq -r '
     .payload.rate_limits as $limits
     | [$limits.primary, $limits.secondary, $limits.individual_limit]
     | map(select(. != null and .used_percent != null and .window_minutes != null))
@@ -94,7 +98,15 @@ build_cache() {
   case $agent in
     codex)
       label=Cdx
-      limit=$(latest_limits "${CODEX_HOME:-$HOME/.codex}/sessions")
+      if workbench-codex-limits > "$state_dir/codex-limits.$$.json" 2>/dev/null &&
+         jq -e '.payload.rate_limits.primary != null or .payload.rate_limits.secondary != null' "$state_dir/codex-limits.$$.json" >/dev/null 2>&1; then
+        mv "$state_dir/codex-limits.$$.json" "$state_dir/codex-limits.json"
+        limit=$(format_limits < "$state_dir/codex-limits.json")
+      else
+        limit=$(format_limits 2>/dev/null < "$state_dir/codex-limits.json")
+        limit="${limit:-—} (stale)"
+      fi
+      rm -f "$state_dir/codex-limits.$$.json"
       ;;
     claude)
       label=Cl
@@ -123,6 +135,7 @@ build_cache() {
 
 render() {
   agent=${1:-$(source_name)}
+  case $agent in codex|claude|trae|opencode) ;; *) return 2 ;; esac
   cache=$state_dir/$agent
   now=$(date +%s)
   modified=0
@@ -130,9 +143,44 @@ render() {
     modified=$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || printf 0)
     case $modified in ''|*[!0-9]*) modified=0 ;; esac
   fi
-  [ $((now - modified)) -lt "$ttl" ] || build_cache "$agent"
+  if [ $((now - modified)) -ge "$ttl" ]; then
+    # tmux owns the refresh job; status rendering only reads the shared cache.
+    tmux run-shell -b "workbench-agent-usage refresh $agent automatic" 2>/dev/null || true
+  fi
   [ -s "$cache" ] || return
   cat "$cache"
+}
+
+refresh() (
+  agent=${1:-$(source_name)}
+  case $agent in codex|claude|trae|opencode) ;; *) exit 2 ;; esac
+  mkdir -p "$state_dir"
+  lock=$state_dir/$agent.refresh-lock
+  # Recover a lock left behind by a terminated process.
+  if [ -d "$lock" ]; then
+    lock_time=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || date +%s)
+    if [ $(( $(date +%s) - lock_time )) -gt 120 ]; then
+      rmdir "$lock" 2>/dev/null || true
+    fi
+  fi
+  mkdir "$lock" 2>/dev/null || exit 0
+  trap 'rmdir "$lock" 2>/dev/null || true' 0
+  trap 'exit 1' HUP INT TERM
+  # Queued automatic jobs must recheck freshness after acquiring the lock.
+  if [ "${2:-}" = automatic ] && [ -f "$state_dir/$agent" ]; then
+    modified=$(stat -c %Y "$state_dir/$agent" 2>/dev/null || stat -f %m "$state_dir/$agent" 2>/dev/null || printf 0)
+    [ $(( $(date +%s) - modified )) -ge "$ttl" ] || exit 0
+  fi
+  build_cache "$agent"
+  tmux refresh-client -S 2>/dev/null || true
+)
+
+refresh_menu() {
+  client=${1:-}
+  case $client in ''|*[!A-Za-z0-9_./-]*) return 2 ;; esac
+  refresh "$(source_name)"
+  sleep 0.1
+  menu "$client"
 }
 
 badge() {
@@ -231,13 +279,19 @@ menu() {
   monthly_line=$(printf '%-10s %15s' 'Monthly' "$monthly tokens")
   limit_line=$(printf '%-10s %15s' 'Plan limit' "$limit")
 
-  codex_mark='  '; claude_mark='  '; trae_mark='  '; opencode_mark='  '
+  codex_mark=' '; claude_mark=' '; trae_mark=' '; opencode_mark=' '
   case $agent in
-    codex) codex_mark='✓ ' ;;
-    claude) claude_mark='✓ ' ;;
-    trae) trae_mark='✓ ' ;;
-    opencode) opencode_mark='✓ ' ;;
+    codex) codex_mark='✓' ;;
+    claude) claude_mark='✓' ;;
+    trae) trae_mark='✓' ;;
+    opencode) opencode_mark='✓' ;;
   esac
+
+  # Keep provider names flush left and the selection marker in a fixed column.
+  codex_line=$(printf '%-25s%s' 'Codex' "$codex_mark")
+  claude_line=$(printf '%-25s%s' 'Claude Code' "$claude_mark")
+  trae_line=$(printf '%-25s%s' 'Trae' "$trae_mark")
+  opencode_line=$(printf '%-25s%s' 'OpenCode' "$opencode_mark")
 
   # -M handles subsequent mouse events; -O ignores the opening click's release,
   # so the menu remains visible after the user lets go of the left button.
@@ -248,10 +302,12 @@ menu() {
     "#{?#{==:1,1},-,}$monthly_line" '' '' \
     "#{?#{==:1,1},-,}$limit_line" '' '' \
     '' \
-    "${codex_mark}Codex" c 'run-shell -b "workbench-agent-usage choose codex"' \
-    "${claude_mark}Claude Code" l 'run-shell -b "workbench-agent-usage choose claude"' \
-    "${trae_mark}Trae" t 'run-shell -b "workbench-agent-usage choose trae"' \
-    "${opencode_mark}OpenCode" o 'run-shell -b "workbench-agent-usage choose opencode"' || menu_status=$?
+    'Refresh now' r "run-shell -b 'workbench-agent-usage refresh-menu $client'" \
+    '' \
+    "$codex_line" c 'run-shell -b "workbench-agent-usage choose codex"' \
+    "$claude_line" l 'run-shell -b "workbench-agent-usage choose claude"' \
+    "$trae_line" t 'run-shell -b "workbench-agent-usage choose trae"' \
+    "$opencode_line" o 'run-shell -b "workbench-agent-usage choose opencode"' || menu_status=$?
   # A duplicate touch can race after the first menu is already visible. tmux
   # returns 2 for that client-local collision; it is not an action failure.
   case $menu_status in 0|2) return 0 ;; *) return "$menu_status" ;; esac
@@ -314,10 +370,12 @@ case ${1:-badge} in
   badge) badge "${2:-}" ;;
   choose) choose_source "${2:-}" ;;
   render) render "${2:-}" ;;
+  refresh) refresh "${2:-}" "${3:-}" ;;
+  refresh-menu) refresh_menu "${2:-}" ;;
   detail) detail ;;
   focus) focus ;;
   menu) menu "${2:-}" ;;
   cycle) cycle ;;
   select) select_source "${2:-}" ;;
-  *) printf 'usage: %s [badge|choose|detail|focus|menu|render|cycle|select]\n' "${0##*/}" >&2; exit 2 ;;
+  *) printf 'usage: %s [badge|choose|detail|focus|menu|render|refresh|refresh-menu|cycle|select]\n' "${0##*/}" >&2; exit 2 ;;
 esac
