@@ -148,7 +148,7 @@ bind_layout @workbench-key-layout-main-horizontal-mirrored @workbench-_bound-lay
 bind_layout @workbench-key-layout-main-vertical-mirrored @workbench-_bound-layout-main-vertical-mirrored M-7 "main-vertical-mirrored without resizing sidebar" main-vertical-mirrored
 
 bind_pane() {
-  bind_tracked_repeat "$1" "$2" "$3" "$4" run-shell "$CURRENT_DIR/bin/workbench-select-pane '$5'"
+  bind_tracked "$1" "$2" "$3" "$4" run-shell "$CURRENT_DIR/bin/workbench-select-pane '$5'"
 }
 bind_pane @workbench-key-pane-left @workbench-_bound-pane-left h "select pane left with responsive zoom" -L
 bind_pane @workbench-key-pane-down @workbench-_bound-pane-down j "select pane down with responsive zoom" -D

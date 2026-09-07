@@ -303,6 +303,14 @@ Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit
 the usage suffix while retaining the Agent Status capsule and focus behavior.
 
+Usage refreshes in the background every ten minutes while the status bar is
+rendering. Choose **Refresh now** (`r`) in the Usage menu to bypass the cache.
+Codex plan limits come from `account/rateLimits/read` via `codex app-server`,
+not session logs; this requires `codex` and Python 3 on the tmux server's PATH.
+All windows share the cache under `$XDG_STATE_HOME/tmux-agent-workbench/usage`.
+Failed quota requests retain the last successful reading with a `(stale)` label
+in the Usage menu. Requests time out after twenty seconds.
+
 Per-Agent manifest overrides live at
 `$XDG_CONFIG_HOME/tmux-agent-workbench/manifests/{codex,claude,trae,opencode}.toml`.
 One local file replaces that Agent's whole bundled manifest; Workbench does not
