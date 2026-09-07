@@ -41,6 +41,40 @@ enum Row {
     Spacer,
 }
 
+/// Shared geometry for rendering and hit testing. Status, overflow and popup
+/// footer lines never map to an agent row.
+#[derive(Debug, Clone, Copy)]
+struct SidebarViewport {
+    first_row: usize,
+    row_height: usize,
+}
+
+impl SidebarViewport {
+    fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
+        let first_row = usize::from(notice.is_some());
+        let available = content_height.saturating_sub(first_row);
+        let row_height = if notice == Some("disconnected") {
+            0
+        } else if total > available {
+            available.saturating_sub(1)
+        } else {
+            available
+        };
+        Self {
+            first_row,
+            row_height,
+        }
+    }
+
+    fn row_at(self, screen_row: u16, scroll: usize, total: usize) -> Option<usize> {
+        let offset = usize::from(screen_row).checked_sub(self.first_row)?;
+        if offset >= self.row_height {
+            return None;
+        }
+        scroll.checked_add(offset).filter(|row| *row < total)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FooterButton {
     New,
@@ -214,11 +248,12 @@ fn event_loop(
                 dirty = true;
             }
         }
-        let viewport_height = if rows.len() > content_height {
-            content_height.saturating_sub(1)
-        } else {
-            content_height
-        };
+        let viewport = SidebarViewport::new(
+            content_height,
+            rows.len(),
+            connection_notice(disconnected, snapshot.is_some()),
+        );
+        let viewport_height = viewport.row_height;
         if dirty {
             keep_visible(selected, viewport_height, rows.len(), &mut scroll);
             let selected_key = selection_visible
@@ -238,17 +273,15 @@ fn event_loop(
                         Style::default().add_modifier(Modifier::DIM),
                     )));
                 } else {
-                    let row_height = if connection_notice(disconnected, snapshot.is_some())
+                    if connection_notice(disconnected, snapshot.is_some())
                         == Some("stale · reconnecting")
                     {
                         lines.push(Line::from(Span::styled(
                             "stale · reconnecting",
                             muted_style(),
                         )));
-                        viewport_height.saturating_sub(1)
-                    } else {
-                        viewport_height
-                    };
+                    }
+                    let row_height = viewport.row_height;
                     for row in rows.iter().skip(scroll).take(row_height) {
                         lines.push(if matches!(row, Row::Actions) {
                             render_actions(area.width, footer_hover)
@@ -268,6 +301,7 @@ fn event_loop(
                         lines.push(Line::from(format!("↕ {hidden} hidden")));
                     }
                 }
+                lines.truncate(content_height);
                 while lines.len() < content_height {
                     lines.push(Line::default());
                 }
@@ -327,7 +361,10 @@ fn event_loop(
                         if show_row_menu(
                             &rows,
                             selected,
-                            Some((0, selected.saturating_sub(scroll) as u16)),
+                            Some((
+                                0,
+                                (viewport.first_row + selected.saturating_sub(scroll)) as u16,
+                            )),
                         )? {
                             return Ok(());
                         }
@@ -405,8 +442,11 @@ fn event_loop(
                 }
                 match mouse.kind {
                     MouseEventKind::Moved => {
-                        let row = scroll + usize::from(mouse.row);
-                        footer_hover = if matches!(rows.get(row), Some(Row::Actions)) {
+                        let hovered = viewport.row_at(mouse.row, scroll, rows.len());
+                        footer_hover = if matches!(
+                            hovered.and_then(|row| rows.get(row)),
+                            Some(Row::Actions)
+                        ) {
                             action_button(size.width, mouse.column)
                         } else if popup_mode()
                             && usize::from(mouse.row) == body_height.saturating_sub(1)
@@ -415,16 +455,18 @@ fn event_loop(
                         } else {
                             None
                         };
-                        if matches!(
-                            rows.get(row),
-                            Some(
-                                Row::Session(_)
-                                    | Row::SessionSub(_)
-                                    | Row::Agent(_)
-                                    | Row::AgentSub(_)
-                                    | Row::Conversation(_, _)
+                        if let Some(row) = hovered.filter(|&row| {
+                            matches!(
+                                rows.get(row),
+                                Some(
+                                    Row::Session(_)
+                                        | Row::SessionSub(_)
+                                        | Row::Agent(_)
+                                        | Row::AgentSub(_)
+                                        | Row::Conversation(_, _)
+                                )
                             )
-                        ) {
+                        }) {
                             selected = row;
                             selection_visible = true;
                         } else {
@@ -446,7 +488,9 @@ fn event_loop(
                         {
                             return Ok(());
                         }
-                        let clicked = scroll + usize::from(mouse.row);
+                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
+                            continue;
+                        };
                         if let Some(Row::AgentSection(sort)) = rows.get(clicked)
                             && agent_sort_button(size.width, *sort, mouse.column)
                         {
@@ -498,7 +542,9 @@ fn event_loop(
                         }
                     }
                     MouseEventKind::Down(MouseButton::Right) => {
-                        let clicked = scroll + usize::from(mouse.row);
+                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
+                            continue;
+                        };
                         if matches!(
                             rows.get(clicked),
                             Some(
@@ -1694,6 +1740,58 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_banner_clicks_stay_on_the_rendered_agent() {
+        let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
+        let viewport = SidebarViewport::new(8, rows.len(), Some("stale · reconnecting"));
+        assert_eq!(viewport.row_at(0, 0, rows.len()), None);
+        assert_eq!(
+            rows[viewport.row_at(2, 0, rows.len()).unwrap()],
+            "A subtitle"
+        );
+        assert_eq!(rows[viewport.row_at(3, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(5, 0, rows.len()), None);
+    }
+
+    #[test]
+    fn scrolled_viewport_excludes_banner_overflow_and_footer() {
+        // Six content lines: banner + four rows + overflow; popup footer
+        // follows at screen row six and must not activate any hidden row.
+        let viewport = SidebarViewport::new(6, 20, Some("stale · reconnecting"));
+        assert_eq!(viewport.row_height, 4);
+        assert_eq!(viewport.row_at(0, 7, 20), None);
+        assert_eq!(viewport.row_at(1, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(4, 7, 20), Some(10));
+        for row in [5, 6, 7] {
+            assert_eq!(viewport.row_at(row, 7, 20), None);
+        }
+    }
+
+    #[test]
+    fn banner_uses_space_even_when_rows_previously_fitted() {
+        let normal = SidebarViewport::new(4, 4, None);
+        assert_eq!(normal.row_at(3, 0, 4), Some(3));
+        let stale = SidebarViewport::new(4, 4, Some("stale · reconnecting"));
+        assert_eq!(stale.row_height, 2);
+        assert_eq!(stale.row_at(3, 0, 4), None);
+        let overflow = SidebarViewport::new(4, 10, None);
+        assert_eq!(overflow.row_at(2, 0, 10), Some(2));
+        assert_eq!(overflow.row_at(3, 0, 10), None);
+    }
+
+    #[test]
+    fn empty_disconnected_and_tiny_viewports_have_no_agent_targets() {
+        for height in [0, 1] {
+            let viewport = SidebarViewport::new(height, 10, Some("stale · reconnecting"));
+            for row in 0..3 {
+                assert_eq!(viewport.row_at(row, 0, 10), None);
+            }
+        }
+        assert_eq!(SidebarViewport::new(10, 0, None).row_at(0, 0, 0), None);
+        let disconnected = SidebarViewport::new(10, 4, Some("disconnected"));
+        assert_eq!(disconnected.row_at(1, 0, 4), None);
+    }
 
     #[test]
     fn connection_notice_preserves_a_stale_snapshot() {
