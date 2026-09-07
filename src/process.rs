@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
 
-use sysinfo::{Pid, Process, ProcessesToUpdate, System};
+use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::model::{AgentKind, ProcessFingerprint};
 
@@ -38,7 +38,16 @@ impl ProcessSource for ProcessTree {
         roots: &[u32],
         aliases: &HashMap<String, AgentKind>,
     ) -> HashMap<u32, AgentProcess> {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        // Detection needs identity and ancestry, not resource counters or every
+        // kernel thread. Keep command lines for Node/Bun/Deno agent wrappers.
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .without_tasks()
+                .with_exe(UpdateKind::OnlyIfNotSet)
+                .with_cmd(UpdateKind::OnlyIfNotSet),
+        );
         find_agents(&self.system, roots, aliases)
     }
 }
@@ -155,6 +164,52 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_refresh_keeps_identity_and_removes_exited_agents() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut tree = ProcessTree::default();
+        let aliases = HashMap::from([("sleep".into(), AgentKind::Codex)]);
+        let found = tree.agents_for_roots(&[pid], &aliases);
+        // Always reap the child, including when an assertion below fails.
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let agent = found.get(&pid).expect("native agent identity is retained");
+        assert_eq!(agent.fingerprint.pid, pid);
+        assert!(agent.fingerprint.executable.ends_with("sleep"));
+        assert!(
+            !tree
+                .system
+                .process(Pid::from_u32(pid))
+                .unwrap()
+                .cmd()
+                .is_empty()
+        );
+        assert!(tree.agents_for_roots(&[pid], &aliases).is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn minimal_refresh_does_not_inventory_worker_threads() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(unsafe { libc::syscall(libc::SYS_gettid) } as u32)
+                .unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = rx.recv().unwrap();
+        let mut tree = ProcessTree::default();
+        tree.agents_for_roots(&[std::process::id()], &HashMap::new());
+        let inventoried = tree.system.process(Pid::from_u32(tid)).is_some();
+        done_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(!inventoried);
+    }
 
     #[test]
     fn exact_aliases_do_not_treat_shell_text_as_agent() {

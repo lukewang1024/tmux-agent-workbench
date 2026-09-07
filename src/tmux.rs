@@ -102,6 +102,22 @@ impl Tmux {
         }
     }
 
+    /// A sidebar can be visible without being focused. Zoomed-away panes and
+    /// windows in detached sessions do not need foreground refresh cadence.
+    pub fn sidebar_visible(&self, pane: &str) -> Result<bool, TmuxError> {
+        let output = self.output_with_timeout(
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{window_active}:#{session_attached}:#{window_zoomed_flag}:#{pane_active}",
+            ],
+            Duration::from_millis(250),
+        )?;
+        Ok(sidebar_is_visible(output.trim()))
+    }
+
     fn visible_panes(&self) -> Result<HashSet<String>, TmuxError> {
         let output = self.output(&["list-clients", "-F", "#{pane_id}\u{1f}#{client_flags}\u{1f}#{@workbench_overlay_visible}\u{1f}#{@workbench_selected_implies_focused}"])?;
         Ok(output
@@ -294,9 +310,27 @@ fn tail_utf8(value: &str, max_bytes: usize) -> String {
     value[start..].to_owned()
 }
 
+fn sidebar_is_visible(state: &str) -> bool {
+    let fields: Vec<_> = state.split(':').collect();
+    fields.len() == 4
+        && fields[0] == "1"
+        && fields[1].parse::<u32>().is_ok_and(|attached| attached > 0)
+        && (fields[2] == "0" || fields[3] == "1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_visibility_includes_unfocused_but_excludes_hidden_panes() {
+        assert!(sidebar_is_visible("1:1:0:0"));
+        assert!(sidebar_is_visible("1:2:1:1"));
+        assert!(!sidebar_is_visible("0:1:0:1"));
+        assert!(!sidebar_is_visible("1:0:0:1"));
+        assert!(!sidebar_is_visible("1:1:1:0"));
+        assert!(!sidebar_is_visible(""));
+    }
 
     #[test]
     fn parses_inventory_and_visibility() {

@@ -118,9 +118,7 @@ pub fn exchange(
     })?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    serde_json::to_writer(&mut stream, request)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    write_message(&mut stream, request)?;
 
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
@@ -134,15 +132,54 @@ pub fn read_request(stream: &UnixStream) -> Result<Request, io::Error> {
 }
 
 pub fn write_response(mut stream: &UnixStream, response: &Response) -> Result<(), io::Error> {
-    serde_json::to_writer(&mut stream, response).map_err(io::Error::other)?;
-    stream.write_all(b"\n")?;
-    stream.flush()
+    write_message(&mut stream, response)
+}
+
+// Serialize once: serde's small writes must not each become a socket syscall.
+fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(message).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes)?;
+    writer.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn large_message_is_batched_and_keeps_newline_framing() {
+        #[derive(Default)]
+        struct Writer {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let message = Response::success(
+            "test".into(),
+            serde_json::json!({
+                "agents": (0..100).map(|i| serde_json::json!({"id": i, "label": "line\nquote\""})).collect::<Vec<_>>()
+            }),
+        );
+        let mut writer = Writer::default();
+        write_message(&mut writer, &message).unwrap();
+        assert_eq!(writer.calls, 1);
+        assert_eq!(writer.bytes.iter().filter(|b| **b == b'\n').count(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Response>(&writer.bytes).unwrap(),
+            message
+        );
+    }
 
     #[test]
     fn protocol_messages_reject_unknown_fields() {

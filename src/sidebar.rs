@@ -121,6 +121,10 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     result
 }
 
+fn refresh_interval(visible: bool) -> Duration {
+    Duration::from_secs(if visible { 1 } else { 5 })
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     paths: &Paths,
@@ -129,12 +133,24 @@ fn event_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
     let fetch_socket = socket.clone();
-    let (refresh_tx, refresh_rx) = mpsc::sync_channel::<()>(1);
+    let (refresh_tx, refresh_rx) = mpsc::sync_channel::<bool>(1);
+    let visibility_tmux = crate::tmux::Tmux::new(server.clone());
+    let visibility_pane = std::env::var("TMUX_PANE").ok();
+    let is_popup = popup_mode();
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        while refresh_rx.recv().is_ok() {
+        let mut visible = true;
+        let mut next_visibility_check = Instant::now();
+        while let Ok(interactive) = refresh_rx.recv() {
+            if !is_popup && (interactive || Instant::now() >= next_visibility_check) {
+                visible = visibility_pane
+                    .as_deref()
+                    .and_then(|pane| visibility_tmux.sidebar_visible(pane).ok())
+                    .unwrap_or(true);
+                next_visibility_check = Instant::now() + Duration::from_secs(5);
+            }
             let result = fetch_snapshot(&fetch_socket).map_err(|error| error.to_string());
-            let _ = snapshot_tx.try_send(result);
+            let _ = snapshot_tx.try_send((result, visible));
         }
     });
     let mut detailed = false;
@@ -157,13 +173,16 @@ fn event_loop(
     let mut disconnected = snapshot.is_none();
     let mut last_success = snapshot.as_ref().map(|_| Instant::now());
     let mut last_failure_log = Instant::now() - Duration::from_secs(10);
+    let mut visible = true;
     let mut next_refresh = Instant::now();
     let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
     let mut dirty = true;
     let mut initial_selection = true;
     let mut last_content_height = usize::MAX;
     loop {
-        if let Ok(result) = snapshot_rx.try_recv() {
+        if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
+            visible = now_visible;
+            next_refresh = Instant::now() + refresh_interval(visible);
             match result {
                 Ok(fetched) => {
                     let selected_key = rows.get(selected).and_then(selection_key);
@@ -206,11 +225,16 @@ fn event_loop(
             dirty = true;
         }
         if Instant::now() >= next_refresh {
-            let _ = refresh_tx.try_send(());
-            next_refresh = Instant::now() + Duration::from_secs(1);
+            let _ = refresh_tx.try_send(false);
+            next_refresh = Instant::now() + refresh_interval(visible);
         }
         if Instant::now() >= next_sort_sync {
-            next_sort_sync = Instant::now() + Duration::from_millis(200);
+            next_sort_sync = Instant::now()
+                + if visible {
+                    Duration::from_millis(200)
+                } else {
+                    Duration::from_secs(5)
+                };
             if let Some(saved) = persisted_agent_sort(paths)
                 && saved != agent_sort
             {
@@ -316,10 +340,20 @@ fn event_loop(
             dirty = false;
         }
 
-        if !event::poll(Duration::from_millis(50))? {
+        if !event::poll(if visible {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(250)
+        })? {
             continue;
         }
         let input = event::read()?;
+        if matches!(input, Event::FocusGained) || (!visible && !matches!(input, Event::FocusLost)) {
+            let _ = refresh_tx.try_send(true);
+            visible = true;
+            next_refresh = Instant::now() + refresh_interval(true);
+            next_sort_sync = Instant::now();
+        }
         dirty = true;
         match input {
             Event::FocusGained => {
