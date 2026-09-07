@@ -1,3 +1,6 @@
+mod attached_process;
+mod terminal_lease;
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -300,6 +303,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     let hello = read_frame(std::io::stdin().lock())?;
     let ClientMessage::Hello {
         device_id,
+        terminal_id,
         device_label,
         kind,
         capabilities,
@@ -313,7 +317,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     let registration = ipc_call(
         paths,
         "client.register",
-        serde_json::json!({"device_id": device_id, "device_label": device_label, "kind": kind, "capabilities": capabilities}),
+        serde_json::json!({"device_id": device_id, "terminal_id": terminal_id, "device_label": device_label, "kind": kind, "capabilities": capabilities}),
     )?;
     let endpoint_id = registration
         .get("endpoint_id")
@@ -644,13 +648,14 @@ fn client_attach(
             .map_err(Into::into);
     };
     validate_ssh_host(host)?;
-    let mut control = ProcessCommand::new("ssh")
+    let terminal = terminal_lease::TerminalLease::acquire(paths)?;
+    let mut control = attached_process::AttachedProcess::new(ProcessCommand::new("ssh")
         .args(["-o", "ClearAllForwardings=yes"])
         .arg(host)
         .arg("tmux_socket=$(tmux display-message -p '#{socket_path}') && export TMUX_AGENT_WORKBENCH_TMUX_SOCKET=\"$tmux_socket\" && exec tmux-agent-workbench client serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .spawn()?;
+        .spawn()?);
     use tmux_agent_workbench::client_protocol::{ClientMessage, read_frame, write_frame};
     let id = device_id(paths)?;
     let kind = if cfg!(target_os = "macos") {
@@ -664,10 +669,15 @@ fn client_attach(
     };
     let label = std::env::var("HOSTNAME").unwrap_or_else(|_| kind.into());
     write_frame(
-        control.stdin.as_mut().ok_or("control stdin unavailable")?,
+        control
+            .child
+            .stdin
+            .as_mut()
+            .ok_or("control stdin unavailable")?,
         &ClientMessage::Hello {
             version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
             device_id: id,
+            terminal_id: Some(terminal.id.clone()),
             device_label: label,
             kind: kind.into(),
             capabilities: vec![
@@ -680,17 +690,21 @@ fn client_attach(
     )?;
     let welcome = read_frame(
         control
+            .child
             .stdout
             .as_mut()
             .ok_or("control stdout unavailable")?,
     )?;
     let ClientMessage::Welcome {
-        attachment_token, ..
+        attachment_token,
+        endpoint_id,
+        ..
     } = welcome
     else {
         return Err("remote rejected client hello".into());
     };
     validate_safe_name(&attachment_token, "attachment token")?;
+    uuid::Uuid::parse_str(&endpoint_id).map_err(|_| "invalid endpoint id")?;
     let mut remote = format!(
         "tmux_socket=$(tmux display-message -p '#{{socket_path}}') && export TMUX_AGENT_WORKBENCH_TMUX_SOCKET=\"$tmux_socket\" && exec tmux-agent-workbench client attach-pty --bind {attachment_token}"
     );
@@ -698,19 +712,22 @@ fn client_attach(
         remote.push_str(" --session ");
         remote.push_str(session);
     }
-    let mut pty = ProcessCommand::new("ssh")
-        .args(["-o", "ClearAllForwardings=yes", "-t", host, &remote])
-        .spawn()?;
+    let mut pty = attached_process::AttachedProcess::new(
+        ProcessCommand::new("ssh")
+            .args(["-o", "ClearAllForwardings=yes", "-t", host, &remote])
+            .spawn()?,
+    );
     let mut event_targets: HashMap<String, tmux_agent_workbench::model::TmuxTarget> =
         HashMap::new();
     let mut next_heartbeat = Instant::now() + Duration::from_secs(15);
     let status = loop {
-        if let Some(status) = pty.try_wait()? {
+        if let Some(status) = pty.child.try_wait()? {
             break status;
         }
-        if let Some(stdin) = control.stdin.as_mut() {
+        if let Some(stdin) = control.child.stdin.as_mut() {
             for (event_id, target) in &event_targets {
-                if fs::remove_file(click_path(paths, event_id)).is_ok() {
+                if fs::remove_file(click_path(paths, &format!("{endpoint_id}.{event_id}"))).is_ok()
+                {
                     write_frame(
                         &mut *stdin,
                         &ClientMessage::FocusTarget {
@@ -727,21 +744,18 @@ fn client_attach(
             continue;
         }
         next_heartbeat = Instant::now() + Duration::from_secs(15);
-        if let Some(stdin) = control.stdin.as_mut() {
-            if write_frame(
+        if let Some(stdin) = control.child.stdin.as_mut() {
+            write_frame(
                 &mut *stdin,
                 &ClientMessage::Heartbeat {
                     version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
                     activity_unix_ms: now_ms(),
                 },
-            )
-            .is_err()
-            {
-                break pty.wait()?;
-            }
+            )?;
             loop {
                 match read_frame(
                     control
+                        .child
                         .stdout
                         .as_mut()
                         .ok_or("control stdout unavailable")?,
@@ -755,7 +769,13 @@ fn client_attach(
                         ..
                     } => {
                         event_targets.insert(event_id.clone(), target);
-                        platform_notify(paths, &event_id, &category, &title, &body)?;
+                        platform_notify(
+                            paths,
+                            &format!("{endpoint_id}.{event_id}"),
+                            &category,
+                            &title,
+                            &body,
+                        )?;
                         let _ = write_frame(
                             &mut *stdin,
                             &ClientMessage::EventAccepted {
@@ -770,7 +790,7 @@ fn client_attach(
             }
         }
     };
-    if let Some(stdin) = control.stdin.as_mut() {
+    if let Some(stdin) = control.child.stdin.as_mut() {
         let _ = write_frame(
             stdin,
             &ClientMessage::Goodbye {
@@ -778,7 +798,9 @@ fn client_attach(
             },
         );
     }
-    let _ = control.wait();
+    // The control peer may not close after Goodbye; bounded cleanup also runs
+    // on every error return above.
+    drop(control);
     if status.success() {
         Ok(())
     } else {
@@ -853,22 +875,39 @@ fn device_id(paths: &Paths) -> Result<String, Box<dyn std::error::Error>> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))
         .ok_or("home directory unavailable")?;
     let directory = data_root.join("tmux-agent-workbench/client");
-    fs::create_dir_all(&directory)?;
-    let path = directory.join("device-id");
-    if let Ok(value) = fs::read_to_string(&path) {
-        uuid::Uuid::parse_str(value.trim()).map_err(|_| "invalid stored device id")?;
-        return Ok(value.trim().into());
-    }
-    let value = uuid::Uuid::new_v4().to_string();
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    use std::io::Write;
-    writeln!(file, "{value}")?;
     let _ = paths;
-    Ok(value)
+    load_or_create_device_id(&directory)
+}
+
+fn load_or_create_device_id(
+    directory: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join("device-id");
+    if !path.exists() {
+        let value = uuid::Uuid::new_v4().to_string();
+        let temporary = directory.join(format!(".device-id-{value}"));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            use std::io::Write;
+            writeln!(file, "{value}")?;
+            // Publish a complete identity atomically. Concurrent first connects
+            // all read the winner; none observes a partially written UUID.
+            match fs::hard_link(&temporary, &path) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                result => result,
+            }
+        })();
+        let _ = fs::remove_file(temporary);
+        result?;
+    }
+    let value = fs::read_to_string(path)?;
+    uuid::Uuid::parse_str(value.trim()).map_err(|_| "invalid stored device id")?;
+    Ok(value.trim().into())
 }
 
 fn validate_safe_name(value: &str, label: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1787,6 +1826,48 @@ fn running_executable_matches(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_first_connections_share_one_complete_device_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let ids = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        load_or_create_device_id(root.path()).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn notification_clicks_are_isolated_between_connections() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: root.path().into(),
+            state_dir: root.path().into(),
+            cache_dir: root.path().into(),
+            runtime_dir: root.path().into(),
+        };
+        let a = "endpoint-a.codex.42";
+        let b = "endpoint-b.codex.42";
+        let first = termux_click_action(&paths, a, std::path::Path::new("/system/bin/am")).unwrap();
+        let second =
+            termux_click_action(&paths, b, std::path::Path::new("/system/bin/am")).unwrap();
+        assert_ne!(first, second);
+        fs::write(click_path(&paths, a), "").unwrap();
+        assert!(fs::remove_file(click_path(&paths, b)).is_err());
+        assert!(fs::remove_file(click_path(&paths, a)).is_ok());
+    }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]

@@ -93,6 +93,8 @@ struct AckParams {
 #[serde(deny_unknown_fields)]
 struct ClientRegisterParams {
     device_id: String,
+    #[serde(default)]
+    terminal_id: Option<String>,
     device_label: String,
     kind: String,
     capabilities: Vec<String>,
@@ -727,10 +729,11 @@ fn handle(
             .map_err(|error| error.to_string()),
         "client.register" => parse_params::<ClientRegisterParams>(request.params).and_then(|params| {
             uuid::Uuid::parse_str(&params.device_id).map_err(|_| "invalid device id")?;
+            if let Some(id) = &params.terminal_id { uuid::Uuid::parse_str(id).map_err(|_| "invalid terminal id")?; }
             let (endpoint_id, attachment_token, replaced_attachments) = {
                 let mut state = state.write().expect("state poisoned");
-                let replaced_attachments = state.clients.replace_device(&params.device_id);
-                let (endpoint_id, attachment_token) = state.clients.register(params.device_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+                let replaced_attachments = state.clients.replace_terminal(&params.device_id, params.terminal_id.as_deref());
+                let (endpoint_id, attachment_token) = state.clients.register_terminal(params.device_id, params.terminal_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
                 (endpoint_id, attachment_token, replaced_attachments)
             };
             for attachment in replaced_attachments {

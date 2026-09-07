@@ -412,9 +412,23 @@ event's exact session, window, and pane. Closing the SSH attachment removes the
 endpoint. No listening port, reverse tunnel, or third-party push provider is
 required.
 
-The remote daemon keeps one attachment per device. Reconnecting from the same
-phone or computer detaches its older tmux client before attaching the new one,
-so repeated `client attach` calls do not accumulate hidden clients.
+Each local terminal has its own identity and attachment. Multiple Termux tabs
+on the same phone can connect simultaneously. Reconnecting from the same
+terminal replaces only that terminal's old remote client. A local terminal
+lock prevents two Workbench connections from writing to the same terminal;
+close the existing connection before starting another there. Notification
+actions are scoped to the connection that received them.
+
+Clients attached to the same tmux session still share its selected window.
+Use `--session` with different sessions when independent navigation is needed.
+This does not change tmux's shared pane layout or zoom semantics.
+
+Upgrade the remote Workbench installation before upgrading clients: the Hello
+message now includes an optional `terminal_id`. Updated servers accept older
+clients without that field, but do not evict connections by device ID or infer
+which old terminal they should replace. Older servers reject the new field;
+the updated client cleans up that failed connection instead of falling back
+to device-wide replacement. Both ends need updating for terminal-aware reconnects.
 
 ### Legacy SSH notification relay
 

@@ -12,6 +12,8 @@ pub enum ClientMessage {
     Hello {
         version: u32,
         device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
         device_label: String,
         kind: String,
         capabilities: Vec<String>,
@@ -184,6 +186,22 @@ mod tests {
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &message).unwrap();
         assert_eq!(read_frame(bytes.as_slice()).unwrap(), message);
+    }
+
+    #[test]
+    fn hello_accepts_legacy_clients_and_round_trips_terminal_identity() {
+        let legacy = serde_json::json!({"type":"hello", "version":2, "device_id":"phone",
+            "device_label":"phone", "kind":"termux", "capabilities":[]});
+        let mut hello: ClientMessage = serde_json::from_value(legacy).unwrap();
+        if let ClientMessage::Hello { terminal_id, .. } = &mut hello {
+            assert!(terminal_id.is_none());
+            *terminal_id = Some("terminal-a".into());
+        } else {
+            panic!("expected hello");
+        }
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &hello).unwrap();
+        assert_eq!(read_frame(bytes.as_slice()).unwrap(), hello);
     }
 
     #[test]

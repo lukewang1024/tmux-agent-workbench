@@ -23,6 +23,7 @@ pub enum FocusState {
 pub struct Endpoint {
     pub id: String,
     pub device_id: String,
+    pub terminal_id: Option<String>,
     pub device_label: String,
     pub kind: String,
     pub capabilities: HashSet<String>,
@@ -58,6 +59,18 @@ impl ClientRegistry {
         capabilities: Vec<String>,
         now_ms: u64,
     ) -> (String, String) {
+        self.register_terminal(device_id, None, device_label, kind, capabilities, now_ms)
+    }
+
+    pub fn register_terminal(
+        &mut self,
+        device_id: String,
+        terminal_id: Option<String>,
+        device_label: String,
+        kind: String,
+        capabilities: Vec<String>,
+        now_ms: u64,
+    ) -> (String, String) {
         let endpoint_id = Uuid::new_v4().to_string();
         let token = Uuid::new_v4().to_string();
         self.endpoints.insert(
@@ -65,6 +78,7 @@ impl ClientRegistry {
             Endpoint {
                 id: endpoint_id.clone(),
                 device_id,
+                terminal_id,
                 device_label,
                 kind,
                 capabilities: capabilities.into_iter().collect(),
@@ -129,14 +143,19 @@ impl ClientRegistry {
         Ok(())
     }
 
-    /// Remove older registrations for one physical client and return any tmux
-    /// client names that may still be attached. A reconnect can then take over
-    /// instead of leaving another hidden `tmux attach-session` behind.
-    pub fn replace_device(&mut self, device_id: &str) -> Vec<String> {
+    /// Reconnect only replaces this terminal, never another terminal on the device.
+    /// Legacy clients without a terminal identity cannot safely claim an old one.
+    pub fn replace_terminal(&mut self, device_id: &str, terminal_id: Option<&str>) -> Vec<String> {
+        let Some(terminal_id) = terminal_id else {
+            return Vec::new();
+        };
         let replaced_ids: Vec<_> = self
             .endpoints
             .iter()
-            .filter(|(_, endpoint)| endpoint.device_id == device_id)
+            .filter(|(_, endpoint)| {
+                endpoint.device_id == device_id
+                    && endpoint.terminal_id.as_deref() == Some(terminal_id)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         let mut attachments = Vec::new();
@@ -382,21 +401,37 @@ mod tests {
     #[test]
     fn attachment_is_available_only_after_binding() {
         let mut registry = ClientRegistry::default();
-        let (id, token) = registry.register("d".into(), "phone".into(), "termux".into(), vec![], 0);
+        let (id, token) = registry.register_terminal(
+            "d".into(),
+            Some("terminal-a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
         assert_eq!(registry.attachment(&id).unwrap(), None);
         registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
         assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/7"));
     }
 
     #[test]
-    fn reconnect_replaces_the_same_device_and_recovers_its_attachment() {
+    fn reconnect_replaces_the_same_terminal_and_recovers_its_attachment() {
         let mut registry = ClientRegistry::default();
-        let (old_id, token) =
-            registry.register("d".into(), "phone".into(), "termux".into(), vec![], 0);
+        let (old_id, token) = registry.register_terminal(
+            "d".into(),
+            Some("terminal-a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
         registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
         registry.detach(&old_id, 2).unwrap();
 
-        assert_eq!(registry.replace_device("d"), vec!["/dev/pts/7"]);
+        assert_eq!(
+            registry.replace_terminal("d", Some("terminal-a")),
+            vec!["/dev/pts/7"]
+        );
         assert!(registry.attachment(&old_id).is_err());
     }
 
@@ -407,7 +442,62 @@ mod tests {
             registry.register("other".into(), "mac".into(), "macos".into(), vec![], 0);
         registry.bind(&token, "/dev/pts/8".into(), 1).unwrap();
 
-        assert!(registry.replace_device("d").is_empty());
+        assert!(
+            registry
+                .replace_terminal("d", Some("terminal-a"))
+                .is_empty()
+        );
         assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/8"));
+    }
+
+    #[test]
+    fn reconnect_preserves_sibling_terminal_and_invalidates_only_old_tokens() {
+        let mut registry = ClientRegistry::default();
+        let (a, a_token) = registry.register_terminal(
+            "phone".into(),
+            Some("a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
+        let (b, b_token) = registry.register_terminal(
+            "phone".into(),
+            Some("b".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
+        registry.bind(&a_token, "/dev/pts/1".into(), 1).unwrap();
+        assert_eq!(
+            registry.replace_terminal("phone", Some("a")),
+            vec!["/dev/pts/1"]
+        );
+        assert!(registry.bind(&a_token, "/dev/pts/3".into(), 2).is_err());
+        registry.bind(&b_token, "/dev/pts/2".into(), 2).unwrap();
+        let (new_a, token) = registry.register_terminal(
+            "phone".into(),
+            Some("a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            3,
+        );
+        registry.bind(&token, "/dev/pts/3".into(), 4).unwrap();
+        assert!(registry.detach(&a, 5).is_err());
+        assert_eq!(registry.attachment(&b).unwrap(), Some("/dev/pts/2"));
+        assert_eq!(registry.attachment(&new_a).unwrap(), Some("/dev/pts/3"));
+    }
+
+    #[test]
+    fn legacy_connections_never_evict_other_terminals() {
+        let mut registry = ClientRegistry::default();
+        let (id, token) =
+            registry.register("phone".into(), "phone".into(), "termux".into(), vec![], 0);
+        registry.bind(&token, "/dev/pts/1".into(), 1).unwrap();
+        assert!(registry.replace_terminal("phone", None).is_empty());
+        assert!(registry.replace_terminal("phone", Some("new")).is_empty());
+        assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/1"));
     }
 }
