@@ -1,0 +1,16 @@
+#!/bin/sh
+# Explicit migration cleanup; normal runs retain each task slot's last output.
+set -eu
+dir=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+. "$dir/../lib/resolve-session.sh"
+. "$dir/../lib/project-window.sh"
+[ $# -eq 0 ] || [ "$#:$1" = '1:--dead-tasks' ] || { echo 'usage: tmux-agent-workbench prune [--dead-tasks]' >&2; exit 2; }
+sess=$(workbench_resolve_session) || exit 1
+[ "$(tmux show-option -qv -t "$sess" @workbench_task)" = 1 ] || exit 0
+workbench_prune_windows
+if [ "${1:-}" = --dead-tasks ]; then
+  for pane in $(tmux list-panes -s -t "$sess" -f '#{&&:#{==:#{@pane_role},task},#{pane_dead}}' -F '#{pane_id}'); do
+    tmux kill-pane -t "$pane"
+    echo "workbench: removed dead task pane $pane" >&2
+  done
+fi

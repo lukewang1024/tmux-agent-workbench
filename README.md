@@ -668,3 +668,22 @@ project conventions from) so it knows to call `tmux-agent-workbench inspect` / `
 its work crosses into another repo, and how each of the three supported
 agents (Claude Code, Codex, opencode) should separately grow its own
 *write* scope once the window exists.
+
+### Task pane reuse and cleanup
+
+`tmux-agent-workbench run --name dev <repo> -- npm run dev` uses `dev` as a
+stable task slot in that repository's window. Repeating it replaces the running
+process or retained result in the same pane. Use stable names (`dev`, `build`,
+`test`); different names deliberately allow concurrent tasks. The latest task's
+output remains visible after exit, including commands that finish immediately.
+
+In workspace sessions, paths are mapped to a direct member by Git common-directory
+identity. A temporary worktree uses that member's inspection window but retains
+its own working directory for the command. Unregistered repositories require
+`tmux-agent-workbench add` first.
+
+`inspect` and `run` opportunistically remove inspection windows with missing root
+directories, excluding those with live task or agent panes. For immediate cleanup
+after deleting worktrees, run `tmux-agent-workbench prune` in the target session.
+`tmux-agent-workbench prune --dead-tasks` additionally discards all retained dead
+task panes. Existing worktrees and unmarked windows are preserved.
