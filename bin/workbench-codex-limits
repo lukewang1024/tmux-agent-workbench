@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Read account quota through Codex's authenticated app-server protocol."""
+import json
+import os
+import selectors
+import subprocess
+import sys
+import time
+
+
+def query():
+    # No thread is started and credentials remain owned by Codex.
+    process = subprocess.Popen(
+        ['codex', 'app-server', '--stdio'], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+
+    def send(message):
+        process.stdin.write((json.dumps(message) + '\n').encode())
+        process.stdin.flush()
+
+    try:
+        send({'id': 1, 'method': 'initialize', 'params': {
+            'clientInfo': {'name': 'workbench_usage', 'version': '1.0'},
+        }})
+        deadline = time.monotonic() + 20
+        buffer = b''
+        while time.monotonic() < deadline:
+            if not selector.select(timeout=min(1, max(0, deadline - time.monotonic()))):
+                continue
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError('Codex closed the connection')
+            buffer += chunk
+            while b'\n' in buffer:
+                line, buffer = buffer.split(b'\n', 1)
+                message = json.loads(line)
+                if message.get('id') not in (1, 2):
+                    continue
+                if 'error' in message:
+                    raise RuntimeError('Codex quota request failed')
+                if message['id'] == 1:
+                    send({'method': 'initialized', 'params': {}})
+                    send({'id': 2, 'method': 'account/rateLimits/read', 'params': {}})
+                else:
+                    result = message['result']
+                    buckets = result.get('rateLimitsByLimitId')
+                    # Never substitute a model-specific bucket (e.g. Spark).
+                    limits = (buckets.get('codex') if buckets is not None
+                              else result.get('rateLimits'))
+                    if not limits or limits.get('limitId') not in (None, 'codex'):
+                        raise RuntimeError('No Codex account quota returned')
+                    normalized = {'plan_type': limits.get('planType')}
+                    for source, target in [('primary', 'primary'), ('secondary', 'secondary'),
+                                           ('individualLimit', 'individual_limit')]:
+                        window = limits.get(source)
+                        if not window:
+                            continue
+                        used, duration = window.get('usedPercent'), window.get('windowDurationMins')
+                        if not isinstance(used, (int, float)) or not isinstance(duration, (int, float)):
+                            continue
+                        normalized[target] = {'used_percent': max(0, min(100, used)),
+                                              'window_minutes': duration,
+                                              'resets_at': window.get('resetsAt')}
+                    if not any(k in normalized for k in ('primary', 'secondary')):
+                        raise RuntimeError('No valid quota windows returned')
+                    return {'updated_at': int(time.time()), 'payload': {'rate_limits': normalized}}
+        raise RuntimeError('Codex quota request timed out')
+    finally:
+        selector.close()
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdin.close()
+        process.stdout.close()
+
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(query()))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        print('workbench-codex-limits: ' + str(error), file=sys.stderr)
+        sys.exit(1)
