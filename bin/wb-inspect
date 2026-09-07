@@ -74,7 +74,11 @@ if [ "$force" = 0 ] && [ "$(tmux show-option -t "$sess" -qv @workbench_task)" !=
   echo "tmux-agent-workbench inspect: not a task workbench session (no @workbench_task); skipping — pass --force to override" >&2
   exit 0
 fi
-path=$(cd "$path" 2>/dev/null && pwd -P) || { echo "tmux-agent-workbench inspect: no such dir: $1" >&2; exit 1; }
+path=$(cd "$path" 2>/dev/null && pwd -P) || { echo "tmux-agent-workbench inspect: no such dir: $path" >&2; exit 1; }
+
+. "$dir/../lib/project-window.sh"
+path=$(workbench_project_root "$path") || exit 1
+workbench_prune_windows
 
 name=$(basename "$path" | tr ' .:/' '____')   # tmux-safe window name
 

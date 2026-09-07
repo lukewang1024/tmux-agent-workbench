@@ -1,5 +1,5 @@
 #!/bin/sh
-# tmux-agent-workbench run — append a pane to a repo's inspection window and run a
+# tmux-agent-workbench run — reuse a named pane in a repo's inspection window and run a
 # long-lived command there without moving the current tmux client.
 #
 # usage: tmux-agent-workbench run [--name <label>] <repo-path> <command>
@@ -35,10 +35,20 @@ path=$(cd "$path" 2>/dev/null && pwd -P) || {
 . "$dir/../lib/resolve-session.sh"
 sess=$(workbench_resolve_session) || exit 1
 
+. "$dir/../lib/project-window.sh"
+project_root=$(workbench_project_root "$path") || exit 1
+workbench_prune_windows
+
+# Serialize lookup and creation across concurrent callers in this session.
+lock="workbench-run-$sess"
+tmux wait-for -L "$lock"
+trap 'tmux wait-for -U "$lock"' 0
+trap 'exit 1' HUP INT TERM
+
 find_project_window() {
   for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
     task_root=$(tmux show-options -wqv -t "$task_window" @workbench_project_root)
-    if [ "$task_root" = "$path" ]; then
+    if [ "$task_root" = "$project_root" ]; then
       printf '%s\n' "$task_window"
       return 0
     fi
@@ -48,7 +58,7 @@ find_project_window() {
   # those by the canonical cwd shared by their inspection panes.
   for task_window in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
     if tmux list-panes -t "$task_window" -F '#{pane_current_path}' |
-      grep -qxF "$path"; then
+      grep -qxF "$project_root"; then
       printf '%s\n' "$task_window"
       return 0
     fi
@@ -58,7 +68,7 @@ find_project_window() {
 
 window_id=$(find_project_window || true)
 if [ -z "$window_id" ]; then
-  WORKBENCH_SESSION=$sess tmux-agent-workbench inspect "$path"
+  WORKBENCH_SESSION=$sess tmux-agent-workbench inspect "$project_root"
   window_id=$(find_project_window || true)
 fi
 [ -n "$window_id" ] || {
@@ -79,18 +89,38 @@ anchor=$(tmux list-panes -t "$window_id" \
   exit 1
 }
 
-# Start through a non-interactive POSIX shell. Sending keys to a freshly split
-# login shell races its startup files and can silently lose the task command.
-# shellcheck disable=SC2016 # expansion belongs to the task pane's /bin/sh
-task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" \
-  -e "WORKBENCH_TASK_COMMAND=$task_command" -P -F '#{pane_id}' \
-  'exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"')
+# A stable name is the task slot within the owning repository, independent of
+# the temporary checkout or command. Replace live tasks as well as dead ones.
+task_pane=
+for candidate in $(tmux list-panes -t "$window_id" -F '#{pane_id}'); do
+  [ "$(tmux show-options -pqv -t "$candidate" @pane_role)" = task ] || continue
+  [ "$(tmux show-options -pqv -t "$candidate" @workbench_task_name)" = "$task_name" ] || continue
+  if [ -z "$task_pane" ]; then task_pane=$candidate
+  else
+    [ "$active_pane" != "$candidate" ] || active_pane=$task_pane
+    tmux kill-pane -t "$candidate"
+  fi
+done
+
+if [ -n "$task_pane" ]; then
+  tmux respawn-pane -k -t "$task_pane" -c "$path" \
+    -e "WORKBENCH_TASK_COMMAND=$task_command" \
+    'exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"'
+else
+  # Hold startup until remain-on-exit is set, including for instant commands.
+  ready="workbench-task-ready-$$"
+  task_pane=$(tmux split-window -d -v -t "$anchor" -c "$path" \
+    -e "WORKBENCH_TASK_COMMAND=$task_command" -e "WORKBENCH_TASK_READY=$ready" \
+    -P -F '#{pane_id}' \
+    'tmux wait-for "$WORKBENCH_TASK_READY"; exec /bin/sh -c "$WORKBENCH_TASK_COMMAND"')
+fi
 tmux set-option -p -t "$task_pane" @pane_role task
 tmux set-option -p -t "$task_pane" remain-on-exit on
 tmux set-option -p -t "$task_pane" @workbench_task_name "$task_name"
 tmux set-option -p -t "$task_pane" @workbench_task_command "$task_command"
 tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
 tmux select-pane -Z -t "$task_pane" -T "$task_name"
+[ -z "${ready:-}" ] || tmux wait-for -S "$ready"
 
 # Keep the sidebar as a full-height side column when that integration is
 # installed; otherwise apply the native layout directly.
