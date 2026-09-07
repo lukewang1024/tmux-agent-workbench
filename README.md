@@ -99,6 +99,12 @@ native Android target. Tagged releases provide Android arm64 and x86_64 assets;
 install the Termux `rust` package only when using an unreleased revision or an
 architecture without a release asset.
 
+The public CLI and tmux plugin prefer the installed core over any binary left
+under `target/release`. Thus a release upgrade also takes effect on machines
+that previously built from source. To run a development build explicitly, set
+`TMUX_AGENT_WORKBENCH_BIN` to that binary's absolute path. Without an installed
+core, the checkout's release binary remains available as a fallback.
+
 If you want layer 2 disabled from the start, set this **before** the
 `@tpm_plugins` line so it's in effect the first time the plugin loads:
 

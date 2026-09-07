@@ -177,10 +177,11 @@ ATTENTION_BIN="${TMUX_AGENT_WORKBENCH_BIN:-}"
 if [ -n "$ATTENTION_BIN" ] && [ ! -x "$ATTENTION_BIN" ]; then
   ATTENTION_BIN=""
 fi
-if [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/target/release/tmux-agent-workbench" ]; then
-  ATTENTION_BIN="$CURRENT_DIR/target/release/tmux-agent-workbench"
-elif [ -z "$ATTENTION_BIN" ] && [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core" ]; then
+# Match the public CLI: an installed release wins over stale checkout builds.
+if [ -z "$ATTENTION_BIN" ] && [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core" ]; then
   ATTENTION_BIN="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core"
+elif [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/target/release/tmux-agent-workbench" ]; then
+  ATTENTION_BIN="$CURRENT_DIR/target/release/tmux-agent-workbench"
 fi
 
 if [ -n "$ATTENTION_BIN" ]; then

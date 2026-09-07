@@ -2,6 +2,7 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+sh "$repo/tests/core-selection.sh"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/workbench-install-test.XXXXXX")
 installer_cargo_home=${CARGO_HOME:-$HOME/.cargo}
 installer_rustup_home=${RUSTUP_HOME:-$HOME/.rustup}

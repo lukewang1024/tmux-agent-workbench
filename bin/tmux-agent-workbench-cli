@@ -11,13 +11,15 @@ while [ -h "$self" ]; do
 done
 plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
 
+# Installed releases are authoritative. A checkout build is only a fallback;
+# developers can opt into it explicitly through TMUX_AGENT_WORKBENCH_BIN.
 core=${TMUX_AGENT_WORKBENCH_BIN:-}
+installed_core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
+if [ -z "$core" ] && [ -x "$installed_core" ]; then
+  core=$installed_core
+fi
 if [ -z "$core" ] && [ -x "$plugin_dir/target/release/tmux-agent-workbench" ]; then
   core=$plugin_dir/target/release/tmux-agent-workbench
-fi
-if [ -z "$core" ]; then
-  installed_core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
-  [ ! -x "$installed_core" ] || core=$installed_core
 fi
 
 usage()
