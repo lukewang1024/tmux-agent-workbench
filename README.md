@@ -359,10 +359,21 @@ classifying that title. For hook-backed permission requests, the lifecycle state
 is retained while the working display temporarily suppresses input attention;
 a subsequent human approval prompt restores the blocked display and attention.
 
+All outgoing channels use one notification pipeline: the state machine supplies
+attention, `NotificationScheduler` rechecks it after one second, and
+`NotificationPipeline` routes the resulting semantic event to a client or the
+local/legacy-relay fallback. Automatic review suppression, cancellation,
+expiration, and acceptance deduplication run before transport selection. A
+channel switch cannot replay an accepted event. Client queues are revalidated
+again before dequeue; obsolete relay retries are cancelled too. Restored
+attention must agree with the reconciled live snapshot before it can notify.
+Adapters handle platform rendering, framing, and transport retries only.
+
 Workbench also consumes two non-lifecycle CESP signals without changing the
-canonical pane state: `session.start` plays a greeting once for startup/resume
-(not compaction), while native failure events and failed `PostToolUse` payloads
-play `task.error` and optionally show a background error notification. Raw tool
+canonical pane state: `session.start` is silent on every channel, while native
+failure events and failed `PostToolUse` payloads produce `task.error` through the
+same pipeline without the attention debounce. The legacy HTTP relay protocol
+continues to support only `task.complete` and `input.required`. Raw tool
 payloads are inspected only inside the short-lived reporter and are never sent
 to the daemon or persisted. OpenPeon categories are resolved from the active
 pack, so a separate notification hook such as Peon Ping is not required.

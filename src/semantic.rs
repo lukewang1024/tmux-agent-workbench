@@ -133,6 +133,10 @@ impl SemanticRouter {
         }
     }
 
+    pub fn is_accepted(&self, event_id: &str) -> bool {
+        self.accepted_events.contains(event_id)
+    }
+
     pub fn accepted(&mut self, event_id: &str, endpoint_id: &str) {
         self.accepted
             .entry(event_id.into())

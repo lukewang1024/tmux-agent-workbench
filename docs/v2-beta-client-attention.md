@@ -51,6 +51,27 @@ and baseline for hook-first lifecycle detection. The target release is
 - Theme and dotfiles enable Beta features by machine-readable capabilities,
   never by parsing a version string.
 
+## Notification pipeline implementation
+
+The daemon owns one `NotificationPipeline` (`src/notification_pipeline.rs`).
+Its scheduler (`src/notification.rs`) validates live attention and performs the
+one-second recheck before any transport is selected. It emits the same semantic
+event category, ID, deadline, title, and body for local output and clients.
+The legacy relay encodes the supported complete/input categories from that
+validated event instead of deriving events from successful desktop delivery.
+
+The pipeline owns the common router and acceptance ledger. Switching from a
+client to local output, or reconnecting after local delivery, does not create a
+second notification for an accepted ID. Transport acceptance remains separate
+from human acknowledgement. Endpoint focus and local visibility remain routing
+policy; adapters do not interpret approval hooks or terminal text.
+
+Lifecycle changes remove pending notifications and revoke client/relay queues.
+Client dequeue repeats this validation so a hook arriving between daemon ticks
+can cancel an obsolete request. Restored attention is rebuilt from reconciled
+live snapshots and passes the same debounce; error events retain their original
+deadline. `session.start` is silent. Wire protocols remain unchanged.
+
 ## Security and persistence
 
 Checkpoint files are atomic mode-0600 files below

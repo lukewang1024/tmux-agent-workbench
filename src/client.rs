@@ -172,6 +172,12 @@ impl ClientRegistry {
         Ok(())
     }
 
+    pub fn retain_events(&mut self, valid: &HashSet<String>) {
+        for endpoint in self.endpoints.values_mut() {
+            endpoint.pending.retain(|event| valid.contains(&event.id));
+        }
+    }
+
     pub fn take_pending(
         &mut self,
         endpoint_id: &str,

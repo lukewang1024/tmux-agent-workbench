@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -16,7 +16,7 @@ use crate::model::{
     AgentKind, AgentSnapshot, AttentionEvent, AttentionKind, BaseState, DisplayState, HookHealth,
     RelayFocus, StateConfidence, StateSource, TmuxTarget,
 };
-use crate::notification::{NotificationBackend, NotificationCategory, SystemBackend};
+use crate::notification::{Notification, NotificationBackend, NotificationCategory, SystemBackend};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
 
@@ -57,43 +57,52 @@ impl RelaySender {
         }
     }
 
-    pub fn enqueue(&mut self, agents: &[AgentSnapshot], now_ms: u64) {
+    pub fn enqueue(&mut self, notification: &Notification, now_ms: u64) {
+        // Legacy relay protocol supports only these two event categories.
+        if !matches!(
+            notification.event.category,
+            NotificationCategory::TaskComplete | NotificationCategory::InputRequired
+        ) {
+            return;
+        }
         let Ok(store) = load_store(&self.store_path) else {
             return;
         };
         let Some(outbound) = store.outbound else {
             return;
         };
-        for agent in agents {
-            let Some(attention) = &agent.attention else {
-                continue;
-            };
-            self.pending
-                .entry(attention.id.clone())
-                .or_insert_with(|| PendingOutbound {
-                    event: RelayEvent {
-                        event_id: attention.id.clone(),
-                        event_type: match attention.kind {
-                            AttentionKind::Done => "task.complete",
-                            AttentionKind::Blocked => "input.required",
-                        }
-                        .into(),
-                        remote_id: outbound.remote_id.clone(),
-                        agent_kind: format!("{:?}", agent.kind).to_ascii_lowercase(),
-                        agent_label: agent.label.clone(),
-                        session: agent.target.session_name.clone(),
-                        reason_category: agent.reason_category.clone(),
-                        focus: Some(RelayEventFocus {
-                            tmux_socket: self.tmux_socket.clone(),
-                            session_id: agent.target.session_id.clone(),
-                            pane_id: agent.target.pane_id.clone(),
-                        }),
-                    },
-                    next_attempt_ms: now_ms,
-                    deadline_ms: now_ms.saturating_add(60_000),
-                    delay_ms: 250,
-                });
-        }
+        let agent = &notification.agent;
+        let event = &notification.event;
+        self.pending
+            .entry(event.id.clone())
+            .or_insert_with(|| PendingOutbound {
+                event: RelayEvent {
+                    event_id: event.id.clone(),
+                    event_type: event.category.name().into(),
+                    remote_id: outbound.remote_id.clone(),
+                    agent_kind: format!("{:?}", agent.kind).to_ascii_lowercase(),
+                    agent_label: agent.label.clone(),
+                    session: agent.target.session_name.clone(),
+                    reason_category: agent.reason_category.clone(),
+                    focus: Some(RelayEventFocus {
+                        tmux_socket: self.tmux_socket.clone(),
+                        session_id: agent.target.session_id.clone(),
+                        pane_id: agent.target.pane_id.clone(),
+                    }),
+                },
+                next_attempt_ms: now_ms,
+                deadline_ms: event.deadline_unix_ms.min(now_ms.saturating_add(60_000)),
+                delay_ms: 250,
+            });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_event_ids(&self) -> Vec<&str> {
+        self.pending.keys().map(String::as_str).collect()
+    }
+
+    pub fn retain_events(&mut self, valid: &HashSet<String>) {
+        self.pending.retain(|id, _| valid.contains(id));
     }
 
     pub fn tick(&mut self, now_ms: u64) {
@@ -114,7 +123,7 @@ impl RelaySender {
             let Some(item) = self.pending.get_mut(&id) else {
                 continue;
             };
-            if send_event(&outbound, &item.event).is_ok() {
+            if now_ms > item.deadline_ms || send_event(&outbound, &item.event).is_ok() {
                 self.pending.remove(&id);
             } else if !item.record_failure(now_ms) {
                 eprintln!("tmux-agent-workbench: relay event {id} dropped after 60 seconds");
@@ -391,24 +400,18 @@ fn deliver_event<B: NotificationBackend>(
         exited_at_unix_ms: None,
         conversations: Vec::new(),
     };
-    if config.notifications.sound {
-        let muted = (kind == AttentionKind::Done && config.notifications.mute_done)
-            || (kind == AttentionKind::Blocked && config.notifications.mute_request);
-        if !muted {
-            backend.sound(
-                if kind == AttentionKind::Done {
-                    NotificationCategory::TaskComplete
-                } else {
-                    NotificationCategory::InputRequired
-                },
-                config,
-            )?;
-        }
-    }
-    if config.notifications.enabled {
-        backend.desktop(&agent, config.notifications.style)?;
-    }
-    Ok(())
+    let category = if kind == AttentionKind::Done {
+        NotificationCategory::TaskComplete
+    } else {
+        NotificationCategory::InputRequired
+    };
+    let notification = Notification::new(
+        agent.attention.as_ref().unwrap().id.clone(),
+        category,
+        now_ms(),
+        agent,
+    );
+    crate::notification::deliver_local(&notification, true, config, backend)
 }
 
 pub fn pair(paths: &Paths, ssh_host: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1158,7 +1161,7 @@ mod tests {
 
         fn desktop(
             &mut self,
-            _agent: &AgentSnapshot,
+            _notification: &Notification,
             _style: crate::config::NotificationStyle,
         ) -> Result<(), String> {
             self.desktops += 1;

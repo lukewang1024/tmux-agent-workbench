@@ -19,7 +19,8 @@ use crate::detection::{Detector, MetadataReport};
 use crate::ipc::{Request, Response, read_request, write_response};
 use crate::manifest::{ManifestError, ManifestSet};
 use crate::model::{AgentEventReport, DetachedAgentEventReport, Snapshot};
-use crate::notification::{NotificationScheduler, SystemBackend};
+use crate::notification::SystemBackend;
+use crate::notification_pipeline::NotificationPipeline;
 use crate::paths::Paths;
 use crate::relay::RelaySender;
 use crate::server::ServerIdentity;
@@ -65,12 +66,11 @@ struct State {
     manifests: ManifestSet,
     snapshot: Snapshot,
     detector: Detector,
-    notifier: NotificationScheduler,
+    notifications: NotificationPipeline,
     notification_backend: SystemBackend,
     relay_sender: RelaySender,
     clients: ClientRegistry,
     server_incarnation: String,
-    semantic_router: crate::semantic::SemanticRouter,
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
     recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
 }
@@ -190,12 +190,11 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         manifests,
         snapshot: Snapshot::empty(server.socket_path.display().to_string(), now_unix_ms()),
         detector: Detector::new(server.clone()),
-        notifier: NotificationScheduler::default(),
+        notifications: NotificationPipeline::new(semantic_router),
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
         clients: ClientRegistry::default(),
         server_incarnation,
-        semantic_router,
         recovered_pending,
         recovered_runtimes,
     }));
@@ -336,19 +335,18 @@ fn update_snapshot(
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
                 {
-                    state.notifier.observe_session_start(
+                    state.notifications.scheduler.observe_session_start(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
                 }
                 if report.event == crate::model::AgentEventType::Error {
-                    state.notifier.observe_task_error(
+                    state.notifications.scheduler.observe_task_error(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
-                    route_instant_event(&mut state, &report, &agent, now);
                 }
             }
         }
@@ -371,43 +369,60 @@ fn update_snapshot(
         if changed {
             state.snapshot.generation = state.snapshot.generation.saturating_add(1);
             publish_status_fragments(&state.snapshot);
-            persist_checkpoint(paths, server_key, &state);
         }
         state.snapshot.observed_at_unix_ms = now;
-        let agents = state.snapshot.agents.clone();
-        route_new_attention(&mut state, now);
-        route_recovered_events(&mut state, now);
-        state.notifier.observe(now, &agents);
-        let mut notifier = std::mem::take(&mut state.notifier);
-        let delivered = if state.clients.ranked("notification", now).is_empty() {
-            notifier.deliver_due(now, &agents, &config, &mut state.notification_backend)
-        } else {
-            Vec::new()
-        };
-        state.notifier = notifier;
-        state.relay_sender.enqueue(&delivered, now);
+        let accepted_before = state.notifications.router.accepted_event_ids().len();
+        restore_notifications(&mut state, now);
+        dispatch_notifications(&mut state, now);
+        if changed || state.notifications.router.accepted_event_ids().len() != accepted_before {
+            persist_checkpoint(paths, server_key, &state);
+        }
         *published.write().expect("snapshot poisoned") = state.snapshot.clone();
     }
     state.relay_sender.tick(now);
 }
 
-fn route_recovered_events(state: &mut State, now_ms: u64) {
-    let events = std::mem::take(&mut state.recovered_pending);
-    for event in events {
+fn restore_notifications(state: &mut State, now_ms: u64) {
+    let mut unresolved = Vec::new();
+    for event in std::mem::take(&mut state.recovered_pending) {
         if now_ms > event.deadline_unix_ms {
             continue;
         }
-        match state.semantic_router.route(&event, &state.clients, now_ms) {
-            crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
-                if let Some(endpoint) = endpoints.first() {
-                    let _ = state.clients.queue(endpoint, event.clone());
-                }
-                state.recovered_pending.push(event);
-            }
-            crate::semantic::RouteDecision::Watched { .. }
-            | crate::semantic::RouteDecision::Silent => {}
-            crate::semantic::RouteDecision::Expired => {}
+        if let Some(agent) = state
+            .snapshot
+            .agents
+            .iter()
+            .find(|a| a.target.pane_id == event.target.pane_id)
+        {
+            state.notifications.scheduler.restore(event, agent, now_ms);
+        } else {
+            unresolved.push(event);
         }
+    }
+    state.recovered_pending = unresolved;
+}
+
+fn refresh_notifications(state: &mut State, now_ms: u64) {
+    let agents = state.detector.machine_snapshots();
+    state
+        .notifications
+        .refresh(now_ms, &agents, &mut state.clients, &mut state.relay_sender);
+}
+
+fn dispatch_notifications(state: &mut State, now_ms: u64) {
+    let agents = state.detector.machine_snapshots();
+    let seen = state.notifications.dispatch(
+        now_ms,
+        &agents,
+        &state.config,
+        crate::notification_pipeline::DeliveryTargets {
+            clients: &mut state.clients,
+            relay: &mut state.relay_sender,
+            local: &mut state.notification_backend,
+        },
+    );
+    for id in seen {
+        let _ = state.detector.acknowledge(&id);
     }
 }
 
@@ -451,54 +466,6 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
     }
 }
 
-fn route_new_attention(state: &mut State, now_ms: u64) {
-    let new_events: Vec<_> = state
-        .snapshot
-        .agents
-        .iter()
-        .filter_map(|agent| {
-            let attention = agent.attention.as_ref()?;
-            if attention.seen {
-                return None;
-            }
-            let category = match attention.kind {
-                crate::model::AttentionKind::Done => {
-                    crate::semantic::SemanticCategory::TaskComplete
-                }
-                crate::model::AttentionKind::Blocked => {
-                    crate::semantic::SemanticCategory::InputRequired
-                }
-            };
-            Some(crate::semantic::SemanticEvent {
-                id: attention.id.clone(),
-                category,
-                target: agent.target.clone(),
-                created_unix_ms: attention.since_unix_ms,
-                deadline_unix_ms: attention
-                    .since_unix_ms
-                    .saturating_add(category.horizon_ms()),
-                title: format!("Workbench · {}", agent.label),
-                body: format!("{} · {}", category.name(), agent.target.session_name),
-            })
-        })
-        .collect();
-    for event in new_events {
-        match state.semantic_router.route(&event, &state.clients, now_ms) {
-            crate::semantic::RouteDecision::Watched {
-                mark_seen: true, ..
-            } => {
-                let _ = state.detector.acknowledge(&event.id);
-            }
-            crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
-                if let Some(endpoint) = endpoints.first() {
-                    let _ = state.clients.queue(endpoint, event);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 fn server_incarnation(server: &ServerIdentity) -> String {
     let output = std::process::Command::new("tmux")
         .arg("-S")
@@ -514,8 +481,9 @@ fn server_incarnation(server: &ServerIdentity) -> String {
 }
 
 fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
-    let pending = state.clients.pending_events();
-    let delivered_event_ids = state.semantic_router.accepted_event_ids();
+    let mut pending = state.notifications.scheduler.pending_events();
+    pending.extend(state.recovered_pending.clone());
+    let delivered_event_ids = state.notifications.router.accepted_event_ids();
     let recent_endpoint = state
         .clients
         .ranked("notification", now_unix_ms())
@@ -787,6 +755,7 @@ fn handle(
         "client.heartbeat" => parse_params::<ClientHeartbeatParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
             state.clients.heartbeat(&params.endpoint_id, params.activity_unix_ms)?;
+            refresh_notifications(&mut state, now_unix_ms());
             let events = state.clients.take_pending(&params.endpoint_id, now_unix_ms())?;
             Ok(json!({"accepted": true, "events": events}))
         }),
@@ -796,7 +765,9 @@ fn handle(
             Ok(json!({"accepted": true}))
         }),
         "client.accepted" => parse_params::<ClientAcceptedParams>(request.params).map(|params| {
-            state.write().expect("state poisoned").semantic_router.accepted(&params.event_id, &params.endpoint_id);
+            let mut state = state.write().expect("state poisoned");
+            state.notifications.router.accepted(&params.event_id, &params.endpoint_id);
+            persist_checkpoint(paths, &server.key, &state);
             json!({"accepted": true})
         }),
         "client.detach" => parse_params::<ClientDetachParams>(request.params).and_then(|params| {
@@ -878,19 +849,18 @@ fn handle(
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
                 {
-                    state.notifier.observe_session_start(
+                    state.notifications.scheduler.observe_session_start(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
                 }
                 if report.event == crate::model::AgentEventType::Error {
-                    state.notifier.observe_task_error(
+                    state.notifications.scheduler.observe_task_error(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
-                    route_instant_event(&mut state, &report, &agent, now);
                 }
                 state.snapshot.agents = state.detector.machine_snapshots();
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);
@@ -963,19 +933,18 @@ fn handle(
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
                 {
-                    state.notifier.observe_session_start(
+                    state.notifications.scheduler.observe_session_start(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
                 }
                 if report.event == crate::model::AgentEventType::Error {
-                    state.notifier.observe_task_error(
+                    state.notifications.scheduler.observe_task_error(
                         report.occurred_at_unix_ms,
                         &report.event_id,
                         &agent,
                     );
-                    route_instant_event(&mut state, &report, &agent, now);
                 }
                 state.snapshot.agents = state.detector.machine_snapshots();
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);
@@ -989,46 +958,6 @@ fn handle(
     match result {
         Ok(result) => Response::success(request.id, result),
         Err(error) => Response::error(request.id, "request_failed", error),
-    }
-}
-
-fn route_instant_event(
-    state: &mut State,
-    report: &AgentEventReport,
-    agent: &crate::model::AgentSnapshot,
-    now_ms: u64,
-) {
-    let category = match report.event {
-        crate::model::AgentEventType::Error => crate::semantic::SemanticCategory::TaskError,
-        crate::model::AgentEventType::SessionStart => {
-            crate::semantic::SemanticCategory::SessionStart
-        }
-        _ => return,
-    };
-    let event = crate::semantic::SemanticEvent {
-        id: report.event_id.clone(),
-        category,
-        target: agent.target.clone(),
-        created_unix_ms: report.occurred_at_unix_ms,
-        deadline_unix_ms: report
-            .occurred_at_unix_ms
-            .saturating_add(category.horizon_ms()),
-        title: format!("Workbench · {}", agent.label),
-        body: format!("{} · {}", category.name(), agent.target.session_name),
-    };
-    match state.semantic_router.route(&event, &state.clients, now_ms) {
-        crate::semantic::RouteDecision::Deliver { endpoints, .. } => {
-            if let Some(endpoint) = endpoints.first() {
-                let _ = state.clients.queue(endpoint, event);
-            }
-        }
-        crate::semantic::RouteDecision::Watched {
-            sound_endpoint: Some(endpoint),
-            ..
-        } => {
-            let _ = state.clients.queue(&endpoint, event);
-        }
-        _ => {}
     }
 }
 

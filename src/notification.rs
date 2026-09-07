@@ -14,13 +14,9 @@ const DONE_WAV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/done.wav"));
 const REQUEST_WAV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/request.wav"));
 const RECHECK_MS: u64 = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NotificationCategory {
-    TaskComplete,
-    InputRequired,
-    SessionStart,
-    TaskError,
-}
+// One category vocabulary for lifecycle, routing and every transport.
+pub use crate::semantic::SemanticCategory as NotificationCategory;
+use crate::semantic::SemanticEvent;
 
 #[derive(Debug, Deserialize)]
 struct OpenPeonManifest {
@@ -38,144 +34,202 @@ struct OpenPeonSound {
     file: String,
 }
 
+/// A notification has already passed lifecycle validation. Transports consume
+/// this value without interpreting hooks, terminal text, or agent state.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub event: SemanticEvent,
+    pub agent: AgentSnapshot,
+}
+
 #[derive(Debug, Clone)]
 struct Pending {
     due_ms: u64,
-    category: NotificationCategory,
-    agent: AgentSnapshot,
+    notification: Notification,
     requires_attention: bool,
 }
 
+/// The sole lifecycle gate, shared by local, client and relay delivery.
+/// A ready event remains available until the common router accepts it; this
+/// permits switching transports without restarting its deadline or debounce.
 #[derive(Default)]
 pub struct NotificationScheduler {
     pending: HashMap<String, Pending>,
-    delivered: HashSet<String>,
 }
 
 pub trait NotificationBackend {
     fn sound(&mut self, category: NotificationCategory, config: &Config) -> Result<(), String>;
-    fn desktop(&mut self, agent: &AgentSnapshot, style: NotificationStyle) -> Result<(), String>;
+    fn desktop(
+        &mut self,
+        notification: &Notification,
+        style: NotificationStyle,
+    ) -> Result<(), String>;
 }
 
 impl NotificationScheduler {
     pub fn observe(&mut self, now_ms: u64, agents: &[AgentSnapshot]) {
+        let mut active = HashSet::new();
         for agent in agents {
-            let Some(event) = &agent.attention else {
+            let Some(attention) = &agent.attention else {
                 continue;
             };
-            if !self.delivered.contains(&event.id) {
-                self.pending.entry(event.id.clone()).or_insert(Pending {
-                    due_ms: now_ms.saturating_add(RECHECK_MS),
-                    category: category_for_attention(agent, event.kind),
-                    agent: agent.clone(),
-                    requires_attention: true,
-                });
+            let valid = match attention.kind {
+                AttentionKind::Blocked => agent.display_state == DisplayState::Blocked,
+                AttentionKind::Done => {
+                    agent.display_state == DisplayState::Done
+                        || (attention.seen && agent.base_state == BaseState::Idle)
+                }
+            };
+            if !valid {
+                continue;
             }
+            let category = category_for_attention(agent, attention.kind);
+            let notification = Notification::new(
+                attention.id.clone(),
+                category,
+                attention.since_unix_ms,
+                agent.clone(),
+            );
+            if now_ms > notification.event.deadline_unix_ms {
+                continue;
+            }
+            active.insert(attention.id.clone());
+            let pending = self.pending.entry(attention.id.clone()).or_insert(Pending {
+                due_ms: now_ms.saturating_add(RECHECK_MS),
+                notification: notification.clone(),
+                requires_attention: true,
+            });
+            pending.notification = notification;
         }
+        self.pending.retain(|id, pending| {
+            now_ms <= pending.notification.event.deadline_unix_ms
+                && (!pending.requires_attention || active.contains(id))
+        });
     }
 
-    pub fn observe_session_start(&mut self, now_ms: u64, event_id: &str, agent: &AgentSnapshot) {
-        if self.delivered.contains(event_id) {
-            return;
-        }
-        self.pending.entry(event_id.to_owned()).or_insert(Pending {
-            due_ms: now_ms,
-            category: NotificationCategory::SessionStart,
-            agent: agent.clone(),
-            requires_attention: false,
-        });
+    pub fn observe_session_start(&mut self, _now_ms: u64, _event_id: &str, _agent: &AgentSnapshot) {
+        // Session startup is intentionally silent on every transport.
     }
 
     pub fn observe_task_error(&mut self, now_ms: u64, event_id: &str, agent: &AgentSnapshot) {
-        if self.delivered.contains(event_id) {
-            return;
-        }
-        self.pending.entry(event_id.to_owned()).or_insert(Pending {
+        self.pending.entry(event_id.into()).or_insert(Pending {
             due_ms: now_ms,
-            category: NotificationCategory::TaskError,
-            agent: agent.clone(),
+            notification: Notification::new(
+                event_id.into(),
+                NotificationCategory::TaskError,
+                now_ms,
+                agent.clone(),
+            ),
             requires_attention: false,
         });
     }
 
-    pub fn deliver_due<B: NotificationBackend>(
-        &mut self,
-        now_ms: u64,
-        agents: &[AgentSnapshot],
-        config: &Config,
-        backend: &mut B,
-    ) -> Vec<AgentSnapshot> {
-        let mut delivered_agents = Vec::new();
-        let due: Vec<_> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.due_ms <= now_ms)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for event_id in due {
-            let Some(pending) = self.pending.remove(&event_id) else {
-                continue;
-            };
-            let (agent, seen) = if pending.requires_attention {
-                let Some((agent, event)) = agents.iter().find_map(|agent| {
-                    agent
-                        .attention
-                        .as_ref()
-                        .filter(|event| event.id == event_id)
-                        .map(|event| (agent, event))
-                }) else {
-                    continue;
-                };
-                let valid = match pending.category {
-                    NotificationCategory::TaskError => {
-                        agent.base_state == BaseState::Idle
-                            && agent.reason_category.as_deref() == Some("task_error")
-                    }
-                    _ => match event.kind {
-                        AttentionKind::Blocked => agent.base_state == BaseState::Blocked,
-                        AttentionKind::Done => agent.display_state == DisplayState::Done,
-                    },
-                };
-                if !valid {
-                    continue;
-                }
-                (agent.clone(), event.seen)
-            } else {
-                (pending.agent.clone(), false)
-            };
+    pub fn ready(&self, now_ms: u64) -> Vec<Notification> {
+        self.pending
+            .values()
+            .filter(|pending| {
+                pending.due_ms <= now_ms && now_ms <= pending.notification.event.deadline_unix_ms
+            })
+            .map(|pending| pending.notification.clone())
+            .collect()
+    }
 
-            if config.notifications.sound {
-                let muted = match pending.category {
-                    NotificationCategory::TaskComplete | NotificationCategory::TaskError => {
-                        config.notifications.mute_done
-                    }
-                    NotificationCategory::InputRequired => config.notifications.mute_request,
-                    NotificationCategory::SessionStart => false,
-                };
-                let should_sound = match pending.category {
-                    NotificationCategory::TaskComplete => true,
-                    NotificationCategory::InputRequired | NotificationCategory::TaskError => true,
-                    NotificationCategory::SessionStart => false,
-                };
-                if !muted && should_sound {
-                    if let Err(error) = backend.sound(pending.category, config) {
-                        eprintln!("tmux-agent-workbench: sound delivery failed: {error}");
-                    }
-                }
-            }
-            let should_desktop =
-                pending.category != NotificationCategory::SessionStart && !agent.visible && !seen;
-            if config.notifications.enabled && should_desktop {
-                if let Err(error) = backend.desktop(&agent, config.notifications.style) {
-                    eprintln!("tmux-agent-workbench: desktop delivery failed: {error}");
-                }
-            }
-            self.delivered.insert(event_id);
-            if pending.requires_attention && !agent.visible && !seen {
-                delivered_agents.push(agent);
-            }
+    pub fn pending_events(&self) -> Vec<SemanticEvent> {
+        self.pending
+            .values()
+            .map(|p| p.notification.event.clone())
+            .collect()
+    }
+
+    pub fn restore(&mut self, event: SemanticEvent, agent: &AgentSnapshot, now_ms: u64) {
+        // Attention events are rebuilt from reconciled live snapshots, so an
+        // obsolete checkpoint can never manufacture a blocked notification.
+        if event.category == NotificationCategory::TaskError && now_ms <= event.deadline_unix_ms {
+            self.pending.entry(event.id.clone()).or_insert(Pending {
+                due_ms: now_ms,
+                notification: Notification {
+                    event,
+                    agent: agent.clone(),
+                },
+                requires_attention: false,
+            });
         }
-        delivered_agents
+    }
+}
+
+impl Notification {
+    pub(crate) fn new(
+        id: String,
+        category: NotificationCategory,
+        at: u64,
+        agent: AgentSnapshot,
+    ) -> Self {
+        let title = format!("Workbench · {}", agent.label);
+        let body = match category {
+            NotificationCategory::TaskComplete => {
+                format!("Task complete · {}", agent.target.session_name)
+            }
+            NotificationCategory::TaskError => {
+                format!("Task failed · {}", agent.target.session_name)
+            }
+            NotificationCategory::InputRequired => format!(
+                "Input required · {} · {}",
+                agent.target.session_name,
+                agent.reason_category.as_deref().unwrap_or("blocked")
+            ),
+            NotificationCategory::SessionStart => {
+                format!("Session started · {}", agent.target.session_name)
+            }
+        };
+        Self {
+            event: SemanticEvent {
+                id,
+                category,
+                target: agent.target.clone(),
+                created_unix_ms: at,
+                deadline_unix_ms: at.saturating_add(category.horizon_ms()),
+                title,
+                body,
+            },
+            agent,
+        }
+    }
+
+    pub fn desktop_allowed(&self) -> bool {
+        !self.agent.visible && !self.agent.attention.as_ref().is_some_and(|a| a.seen)
+    }
+}
+
+/// Platform output only: no lifecycle parsing, timers, or deduplication here.
+pub fn deliver_local<B: NotificationBackend>(
+    notification: &Notification,
+    desktop: bool,
+    config: &Config,
+    backend: &mut B,
+) -> Result<(), String> {
+    let category = notification.event.category;
+    let muted = match category {
+        NotificationCategory::TaskComplete | NotificationCategory::TaskError => {
+            config.notifications.mute_done
+        }
+        NotificationCategory::InputRequired => config.notifications.mute_request,
+        NotificationCategory::SessionStart => true,
+    };
+    let mut errors = Vec::new();
+    if config.notifications.sound && !muted {
+        if let Err(error) = backend.sound(category, config) {
+            errors.push(error);
+        }
+    }
+    if config.notifications.enabled && desktop {
+        if let Err(error) = backend.desktop(notification, config.notifications.style) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -295,10 +349,14 @@ impl NotificationBackend for SystemBackend {
         spawn_audio(&path, config.notifications.volume)
     }
 
-    fn desktop(&mut self, agent: &AgentSnapshot, style: NotificationStyle) -> Result<(), String> {
-        let Some((title, body)) = notification_text(agent) else {
-            return Ok(());
-        };
+    fn desktop(
+        &mut self,
+        notification: &Notification,
+        style: NotificationStyle,
+    ) -> Result<(), String> {
+        let agent = &notification.agent;
+        let title = &notification.event.title;
+        let body = &notification.event.body;
         #[cfg(target_os = "macos")]
         {
             match style {
@@ -314,25 +372,6 @@ impl NotificationBackend for SystemBackend {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         Err("desktop notifications are unsupported on this platform".into())
     }
-}
-
-fn notification_text(agent: &AgentSnapshot) -> Option<(String, String)> {
-    let title = format!("Workbench · {}", agent.label);
-    if agent.reason_category.as_deref() == Some("task_error") {
-        return Some((
-            title,
-            format!("Task failed · {}", agent.target.session_name),
-        ));
-    }
-    let body = match agent.attention.as_ref()?.kind {
-        AttentionKind::Done => format!("Task complete · {}", agent.target.session_name),
-        AttentionKind::Blocked => format!(
-            "Input required · {} · {}",
-            agent.target.session_name,
-            agent.reason_category.as_deref().unwrap_or("blocked")
-        ),
-    };
-    Some((title, body))
 }
 
 fn category_for_attention(agent: &AgentSnapshot, kind: AttentionKind) -> NotificationCategory {
@@ -581,7 +620,7 @@ mod tests {
         }
         fn desktop(
             &mut self,
-            _agent: &AgentSnapshot,
+            _notification: &Notification,
             _style: NotificationStyle,
         ) -> Result<(), String> {
             self.desktops += 1;
@@ -643,48 +682,295 @@ mod tests {
         }
     }
 
+    struct TestPipeline {
+        pipeline: crate::notification_pipeline::NotificationPipeline,
+        clients: crate::client::ClientRegistry,
+        relay: crate::relay::RelaySender,
+        _temp: tempfile::TempDir,
+    }
+
+    impl Default for TestPipeline {
+        fn default() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = Paths {
+                config_dir: temp.path().into(),
+                state_dir: temp.path().into(),
+                cache_dir: temp.path().into(),
+                runtime_dir: temp.path().into(),
+            };
+            fs::write(paths.relay_file(), "[outbound]\nremote_id = 'fixture'\ntoken = 'test'\nendpoint = 'http://127.0.0.1:1'\n").unwrap();
+            let server = crate::server::ServerIdentity {
+                socket_path: "/tmp/test.sock".into(),
+                key: "test".into(),
+            };
+            Self {
+                pipeline: Default::default(),
+                clients: Default::default(),
+                relay: crate::relay::RelaySender::new(&paths, &server),
+                _temp: temp,
+            }
+        }
+    }
+
+    impl TestPipeline {
+        fn observe(&mut self, at: u64, agents: &[AgentSnapshot]) {
+            self.pipeline.scheduler.observe(at, agents);
+        }
+        fn observe_session_start(&mut self, at: u64, id: &str, agent: &AgentSnapshot) {
+            self.pipeline.scheduler.observe_session_start(at, id, agent);
+        }
+        fn observe_task_error(&mut self, at: u64, id: &str, agent: &AgentSnapshot) {
+            self.pipeline.scheduler.observe_task_error(at, id, agent);
+        }
+        fn dispatch(
+            &mut self,
+            at: u64,
+            agents: &[AgentSnapshot],
+            config: &Config,
+            backend: &mut FakeBackend,
+        ) {
+            self.pipeline.dispatch(
+                at,
+                agents,
+                config,
+                crate::notification_pipeline::DeliveryTargets {
+                    clients: &mut self.clients,
+                    relay: &mut self.relay,
+                    local: backend,
+                },
+            );
+        }
+        fn connect(&mut self, at: u64) -> String {
+            self.clients
+                .register(
+                    "device".into(),
+                    "phone".into(),
+                    "termux".into(),
+                    vec!["notification".into()],
+                    at,
+                )
+                .0
+        }
+    }
+
+    #[test]
+    fn every_transport_uses_the_same_recheck_and_automatic_review_cancellation() {
+        for remote in [false, true] {
+            let mut h = TestPipeline::default();
+            let endpoint = remote.then(|| h.connect(0));
+            let mut backend = FakeBackend::default();
+            let config = Config::default();
+            let blocked = agent(AttentionKind::Blocked, false, false);
+            h.dispatch(0, &[blocked.clone()], &config, &mut backend);
+            h.dispatch(999, &[blocked.clone()], &config, &mut backend);
+            assert!(h.clients.pending_events().is_empty());
+            assert!(h.relay.pending_event_ids().is_empty());
+            assert!(backend.sounds.is_empty());
+            let mut review = blocked.clone();
+            review.attention = None;
+            review.display_state = DisplayState::Working;
+            h.dispatch(1_000, &[review], &config, &mut backend);
+            // Same ID returning after review needs a fresh recheck window.
+            h.dispatch(10_000, &[blocked.clone()], &config, &mut backend);
+            h.dispatch(10_999, &[blocked.clone()], &config, &mut backend);
+            assert!(h.clients.pending_events().is_empty());
+            assert!(h.relay.pending_event_ids().is_empty());
+            assert!(backend.sounds.is_empty());
+            h.dispatch(11_000, &[blocked.clone()], &config, &mut backend);
+            if let Some(endpoint) = endpoint {
+                let queued = h.clients.take_pending(&endpoint, 11_000).unwrap();
+                assert_eq!(queued.len(), 1);
+                assert_eq!(queued[0].category, NotificationCategory::InputRequired);
+                assert_eq!(queued[0].id, "event-1");
+                assert!(backend.sounds.is_empty());
+            } else {
+                assert_eq!(backend.sounds, vec![NotificationCategory::InputRequired]);
+                assert_eq!(backend.desktops, 1);
+                assert_eq!(h.relay.pending_event_ids(), vec!["event-1"]);
+            }
+        }
+    }
+
+    #[test]
+    fn revokes_client_and_relay_queues_when_attention_disappears_or_is_seen() {
+        for remote in [false, true] {
+            for seen in [false, true] {
+                let mut h = TestPipeline::default();
+                if remote {
+                    h.connect(0);
+                }
+                let mut backend = FakeBackend::default();
+                let config = Config::default();
+                let mut blocked = agent(AttentionKind::Blocked, false, false);
+                h.dispatch(0, &[blocked.clone()], &config, &mut backend);
+                h.dispatch(1_000, &[blocked.clone()], &config, &mut backend);
+                assert_eq!(
+                    h.clients.pending_events().len() + h.relay.pending_event_ids().len(),
+                    1
+                );
+                if seen {
+                    blocked.attention.as_mut().unwrap().seen = true;
+                } else {
+                    blocked.attention = None;
+                    blocked.display_state = DisplayState::Working;
+                }
+                // The same refresh is used immediately before client dequeue.
+                h.pipeline
+                    .refresh(1_001, &[blocked], &mut h.clients, &mut h.relay);
+                assert!(h.clients.pending_events().is_empty());
+                assert!(h.relay.pending_event_ids().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn transport_switch_shares_acceptance_and_does_not_restart_debounce() {
+        let mut h = TestPipeline::default();
+        let mut backend = FakeBackend::default();
+        let config = Config::default();
+        let agents = [agent(AttentionKind::Done, false, false)];
+        h.dispatch(0, &agents, &config, &mut backend);
+        let endpoint = h.connect(500);
+        h.dispatch(1_000, &agents, &config, &mut backend);
+        assert_eq!(h.clients.take_pending(&endpoint, 1_000).unwrap().len(), 1);
+        h.pipeline.router.accepted("event-1", &endpoint);
+        h.clients = Default::default();
+        h.dispatch(1_001, &agents, &config, &mut backend);
+        assert!(backend.sounds.is_empty());
+        assert!(h.relay.pending_event_ids().is_empty());
+        // Restart restores the same global acceptance, regardless of channel.
+        let accepted = h.pipeline.router.accepted_event_ids();
+        h.pipeline = Default::default();
+        h.pipeline.router.restore_accepted(accepted);
+        h.dispatch(2_000, &agents, &config, &mut backend);
+        h.dispatch(3_000, &agents, &config, &mut backend);
+        assert!(backend.sounds.is_empty());
+    }
+
+    #[test]
+    fn local_delivery_is_not_replayed_when_a_client_connects() {
+        let mut h = TestPipeline::default();
+        let mut backend = FakeBackend::default();
+        let config = Config::default();
+        let agents = [agent(AttentionKind::Done, false, false)];
+        h.dispatch(0, &agents, &config, &mut backend);
+        h.dispatch(1_000, &agents, &config, &mut backend);
+        h.connect(1_001);
+        h.dispatch(2_000, &agents, &config, &mut backend);
+        assert!(h.clients.pending_events().is_empty());
+        assert_eq!(backend.desktops, 1);
+    }
+
+    #[test]
+    fn expired_or_mismatched_attention_never_reaches_any_transport() {
+        for remote in [false, true] {
+            let mut h = TestPipeline::default();
+            if remote {
+                h.connect(0);
+            }
+            let mut backend = FakeBackend::default();
+            let config = Config::default();
+            let mut blocked = agent(AttentionKind::Blocked, false, false);
+            blocked.display_state = DisplayState::Working;
+            h.dispatch(0, &[blocked.clone()], &config, &mut backend);
+            h.dispatch(2_000, &[blocked.clone()], &config, &mut backend);
+            assert!(h.clients.pending_events().is_empty());
+            assert!(backend.sounds.is_empty());
+            blocked.display_state = DisplayState::Blocked;
+            h.dispatch(300_001, &[blocked.clone()], &config, &mut backend);
+            h.dispatch(302_000, &[blocked], &config, &mut backend);
+            assert!(h.clients.pending_events().is_empty());
+            assert!(h.relay.pending_event_ids().is_empty());
+            assert!(backend.sounds.is_empty());
+        }
+    }
+
+    #[test]
+    fn errors_share_category_and_deduplication_with_client_delivery() {
+        let mut h = TestPipeline::default();
+        let endpoint = h.connect(0);
+        let mut backend = FakeBackend::default();
+        let config = Config::default();
+        let mut failed = agent(AttentionKind::Done, false, false);
+        failed.attention = None;
+        failed.display_state = DisplayState::Working;
+        h.observe_task_error(10, "error-1", &failed);
+        h.dispatch(10, &[], &config, &mut backend);
+        let events = h.clients.take_pending(&endpoint, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].category, NotificationCategory::TaskError);
+        assert_eq!(events[0].body, "Task failed · s");
+        h.pipeline.router.accepted("error-1", &endpoint);
+        h.clients = Default::default();
+        h.dispatch(20, &[], &config, &mut backend);
+        assert!(backend.sounds.is_empty());
+    }
+
+    #[test]
+    fn recovery_revalidates_attention_and_preserves_error_deadlines() {
+        let mut h = TestPipeline::default();
+        let blocked = agent(AttentionKind::Blocked, false, false);
+        let old = Notification::new(
+            "event-1".into(),
+            NotificationCategory::InputRequired,
+            0,
+            blocked.clone(),
+        );
+        h.pipeline.scheduler.restore(old.event, &blocked, 2_000);
+        assert!(h.pipeline.scheduler.ready(3_000).is_empty());
+        let error = Notification::new(
+            "error-1".into(),
+            NotificationCategory::TaskError,
+            0,
+            blocked.clone(),
+        );
+        h.pipeline.scheduler.restore(error.event, &blocked, 59_999);
+        assert_eq!(h.pipeline.scheduler.ready(60_000).len(), 1);
+        assert!(h.pipeline.scheduler.ready(60_001).is_empty());
+    }
+
     #[test]
     fn rechecks_for_one_second_sounds_visible_done_and_suppresses_desktop() {
-        let mut scheduler = NotificationScheduler::default();
+        let mut scheduler = TestPipeline::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
         let agents = vec![agent(AttentionKind::Done, false, false)];
         scheduler.observe(0, &agents);
-        scheduler.deliver_due(999, &agents, &config, &mut backend);
+        scheduler.dispatch(999, &agents, &config, &mut backend);
         assert!(backend.sounds.is_empty());
         let visible = vec![agent(AttentionKind::Done, true, true)];
-        scheduler.deliver_due(1_000, &visible, &config, &mut backend);
+        scheduler.dispatch(1_000, &visible, &config, &mut backend);
         assert_eq!(backend.sounds, vec![NotificationCategory::TaskComplete]);
         assert_eq!(backend.desktops, 0);
     }
 
     #[test]
     fn visible_blocked_plays_request_sound_without_desktop() {
-        let mut scheduler = NotificationScheduler::default();
+        let mut scheduler = TestPipeline::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
         let agents = vec![agent(AttentionKind::Blocked, true, true)];
         scheduler.observe(0, &agents);
-        scheduler.deliver_due(1_000, &agents, &config, &mut backend);
+        scheduler.dispatch(1_000, &agents, &config, &mut backend);
         assert_eq!(backend.sounds, vec![NotificationCategory::InputRequired]);
         assert_eq!(backend.desktops, 0);
     }
 
     #[test]
     fn background_done_delivers_once_at_the_one_second_recheck() {
-        let mut scheduler = NotificationScheduler::default();
+        let mut scheduler = TestPipeline::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
         let agents = vec![agent(AttentionKind::Done, false, false)];
         scheduler.observe(0, &agents);
-        scheduler.deliver_due(999, &agents, &config, &mut backend);
+        scheduler.dispatch(999, &agents, &config, &mut backend);
         assert!(backend.sounds.is_empty());
-        scheduler.deliver_due(1_000, &agents, &config, &mut backend);
+        scheduler.dispatch(1_000, &agents, &config, &mut backend);
         assert_eq!(backend.sounds, vec![NotificationCategory::TaskComplete]);
         assert_eq!(backend.desktops, 1);
 
         scheduler.observe(1_001, &agents);
-        scheduler.deliver_due(3_000, &agents, &config, &mut backend);
+        scheduler.dispatch(3_000, &agents, &config, &mut backend);
         assert_eq!(backend.sounds, vec![NotificationCategory::TaskComplete]);
         assert_eq!(backend.desktops, 1);
     }
@@ -732,7 +1018,13 @@ mod tests {
     #[test]
     fn desktop_text_contains_only_agent_session_and_reason_metadata() {
         let blocked = agent(AttentionKind::Blocked, false, false);
-        let (title, body) = notification_text(&blocked).unwrap();
+        let notification = Notification::new(
+            "event-1".into(),
+            NotificationCategory::InputRequired,
+            0,
+            blocked,
+        );
+        let (title, body) = (notification.event.title, notification.event.body);
         assert_eq!(title, "Workbench · build");
         assert_eq!(body, "Input required · s · blocked");
         assert!(!body.contains('%'));
@@ -740,23 +1032,23 @@ mod tests {
 
     #[test]
     fn session_start_is_fully_silent_without_attention() {
-        let mut scheduler = NotificationScheduler::default();
+        let mut scheduler = TestPipeline::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
         let mut started = agent(AttentionKind::Done, true, true);
         started.attention = None;
         scheduler.observe_session_start(10, "start-1", &started);
-        scheduler.deliver_due(10, &[], &config, &mut backend);
+        scheduler.dispatch(10, &[], &config, &mut backend);
         assert!(backend.sounds.is_empty());
         assert_eq!(backend.desktops, 0);
         scheduler.observe_session_start(20, "start-1", &started);
-        scheduler.deliver_due(20, &[], &config, &mut backend);
+        scheduler.dispatch(20, &[], &config, &mut backend);
         assert!(backend.sounds.is_empty());
     }
 
     #[test]
     fn task_error_uses_error_category_even_when_visible() {
-        let mut scheduler = NotificationScheduler::default();
+        let mut scheduler = TestPipeline::default();
         let mut backend = FakeBackend::default();
         let config = Config::default();
         let mut failed = agent(AttentionKind::Done, true, true);
@@ -765,7 +1057,7 @@ mod tests {
         failed.reason_category = Some("task_error".into());
         failed.attention = None;
         scheduler.observe_task_error(0, "error-1", &failed);
-        scheduler.deliver_due(0, &[], &config, &mut backend);
+        scheduler.dispatch(0, &[], &config, &mut backend);
         assert_eq!(backend.sounds, vec![NotificationCategory::TaskError]);
         assert_eq!(backend.desktops, 0);
     }

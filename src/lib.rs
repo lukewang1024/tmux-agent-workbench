@@ -11,6 +11,7 @@ pub mod layout;
 pub mod manifest;
 pub mod model;
 pub mod notification;
+pub mod notification_pipeline;
 pub mod paths;
 pub mod picker;
 pub mod process;

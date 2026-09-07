@@ -101,12 +101,21 @@ impl StateMachine {
             } else {
                 return true;
             };
+            let event_id = format!("{}.{}", tracked.runtime_id, checkpoint.attention_seq);
+            // Notification deadlines must not restart with the daemon. Old
+            // checkpoints without an event timestamp keep the legacy fallback.
+            let occurred_at_ms = checkpoint
+                .pending
+                .iter()
+                .find(|event| event.id == event_id)
+                .map(|event| event.created_unix_ms)
+                .unwrap_or(restored_at_ms);
             Some(attention(
                 &tracked.runtime_id,
                 checkpoint.attention_seq,
                 kind,
                 false,
-                restored_at_ms,
+                occurred_at_ms,
             ))
         } else {
             None
@@ -339,8 +348,10 @@ impl StateMachine {
         if tracked.snapshot.kind == AgentKind::Codex
             && tracked.snapshot.base_state == BaseState::Blocked
         {
-            if observation.rule_id.as_deref() == Some("codex-automatic-approval-review")
-                && observation.state == BaseState::Working
+            if (observation.rule_id.as_deref() == Some("codex-automatic-approval-review")
+                && observation.state == BaseState::Working)
+                || (tracked.automatic_review_attention.is_some()
+                    && observation.state != BaseState::Blocked)
             {
                 if tracked.automatic_review_attention.is_none() {
                     tracked.automatic_review_attention = tracked.snapshot.attention.take();
@@ -887,6 +898,21 @@ mod tests {
         assert_eq!(restored.hook_health, HookHealth::Stale);
         assert_eq!(restored.hook_session_id.as_deref(), Some("thread"));
         assert_eq!(restored.attention.unwrap().id, "runtime.4");
+        let mut checkpoint = checkpoint;
+        checkpoint.pending.push(crate::semantic::SemanticEvent::new(
+            "runtime",
+            4,
+            crate::semantic::SemanticCategory::TaskComplete,
+            initial.target,
+            100,
+            "title".into(),
+            "body".into(),
+        ));
+        // Even an expired event keeps its original creation time on recovery;
+        // the common scheduler will reject it rather than extend its lifetime.
+        assert!(machine.restore_checkpoint(&checkpoint, 400_000));
+        let restored = machine.snapshots().remove(0);
+        assert_eq!(restored.attention.unwrap().since_unix_ms, 100);
     }
 
     #[test]
@@ -1129,6 +1155,12 @@ mod tests {
             let working = machine.observe_estimate(review);
             assert_eq!(working.display_state, DisplayState::Working);
             assert!(working.attention.is_none());
+        }
+        // A repaint or resumed spinner is not evidence of a human prompt.
+        for state in [BaseState::Working, BaseState::Unknown, BaseState::Idle] {
+            let repaint = machine.observe_estimate(observation(state, 5_050));
+            assert_eq!(repaint.display_state, DisplayState::Working);
+            assert!(repaint.attention.is_none());
         }
         let human = machine.observe_estimate(observation(BaseState::Blocked, 5_100));
         assert_eq!(human.display_state, DisplayState::Blocked);
