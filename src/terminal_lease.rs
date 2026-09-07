@@ -13,6 +13,15 @@ pub(crate) struct TerminalLease {
     _lock: File,
 }
 
+impl Drop for TerminalLease {
+    fn drop(&mut self) {
+        // A concurrent fork can temporarily inherit the file description until
+        // exec closes it. Closing our fd alone then leaves the lock held by that
+        // child. Explicitly release ownership when the attach scope ends.
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
+
 fn identity(tty: &[u8]) -> String {
     let hash = Sha256::digest(tty);
     uuid::Uuid::from_bytes(hash[..16].try_into().unwrap()).to_string()
@@ -81,6 +90,8 @@ mod tests {
         let b = identity(b"/dev/pts/2");
         assert_ne!(a, b);
         let first = TerminalLease::acquire_id(&paths, a.clone()).unwrap();
+        // Model a file description inherited by a concurrently spawned child.
+        let _inherited = first._lock.try_clone().unwrap();
         let _second = TerminalLease::acquire_id(&paths, b).unwrap();
         assert!(TerminalLease::acquire_id(&paths, a.clone()).is_err());
         drop(first);
