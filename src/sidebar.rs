@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::config::{AgentSort, Config};
-use crate::ipc::{Request, call};
+use crate::ipc::{ClientError, Request, call};
 use crate::model::{
     AgentSnapshot, ConversationSnapshot, DisplayState, SessionSnapshot, Snapshot, StateSource,
 };
@@ -1313,6 +1313,24 @@ fn keep_visible(selected: usize, height: usize, total: usize, scroll: &mut usize
     *scroll = (*scroll).min(total.saturating_sub(height));
 }
 
+fn acknowledge_attention(socket: &std::path::Path, event_id: &str) -> Result<(), ClientError> {
+    match call(
+        socket,
+        &Request::new("attention.ack", serde_json::json!({"event_id": event_id})),
+        Duration::from_secs(1),
+    ) {
+        // A rendered row can outlive its event when another client acknowledges
+        // it or the daemon expires it. The desired state is already reached.
+        Err(ClientError::Remote { code, message })
+            if code == "request_failed" && message == "attention event not found" =>
+        {
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session)) => {
@@ -1341,11 +1359,7 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             if let Some(event) = &agent.attention {
                 let server = ServerIdentity::discover()?;
                 let paths = Paths::discover()?;
-                call(
-                    &paths.socket_for_server(&server.key),
-                    &Request::new("attention.ack", serde_json::json!({"event_id": event.id})),
-                    Duration::from_secs(1),
-                )?;
+                acknowledge_attention(&paths.socket_for_server(&server.key), &event.id)?;
             }
         }
         Some(Row::Agent(agent) | Row::AgentSub(agent)) => {
@@ -1773,6 +1787,43 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acknowledge_attention_tolerates_expired_events_but_preserves_other_errors() {
+        use crate::ipc::{Response, read_request, write_response};
+        use std::os::unix::net::UnixListener;
+
+        for failure in [
+            None,
+            Some("attention event not found"),
+            Some("permission denied"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("ack.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let worker = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let request = read_request(&stream).unwrap();
+                assert_eq!(request.method, "attention.ack");
+                assert_eq!(request.params["event_id"], "expired-event");
+                let response = match failure {
+                    Some(message) => Response::error(request.id, "request_failed", message),
+                    None => {
+                        Response::success(request.id, serde_json::json!({"acknowledged": true}))
+                    }
+                };
+                write_response(&stream, &response).unwrap();
+            });
+            let result = super::acknowledge_attention(&socket, "expired-event");
+            worker.join().unwrap();
+            assert_eq!(result.is_ok(), failure != Some("permission denied"));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            super::acknowledge_attention(&dir.path().join("missing.sock"), "event"),
+            Err(crate::ipc::ClientError::Connect { .. })
+        ));
+    }
+
     use super::*;
 
     #[test]
