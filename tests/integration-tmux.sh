@@ -244,9 +244,10 @@ TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$socket \
   "$repo/bin/workbench-resurrect-save-hook" "$resurrect_file"
 [ "$(grep -c '^pane' "$resurrect_file")" = 2 ]
 saved_layout=$(grep '^window' "$resurrect_file" | cut -f7)
-main_layout=$(tmux -S "$socket" show-window-options -v \
-  -t layout-preserve @workbench_main_layout)
-[ "$saved_layout" = "$main_layout" ]
+# The layout is derived from the current pane geometry, not the cache captured
+# before sidebar creation. Detailed restore/resize coverage lives separately.
+[ -n "$saved_layout" ]
+python3 "$repo/tests/resurrect-layout.py"
 
 # Adding a workspace pane while the sidebar is open invalidates the saved main
 # layout's pane count. Closing remains successful and preserves the new pane.
