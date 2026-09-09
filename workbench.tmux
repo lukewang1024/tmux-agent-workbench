@@ -55,6 +55,7 @@ tmux set-option -g @adaptive_host_range_open '#[range=user|wb_host]'
 tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_cpu_range_open '#[range=user|wb_cpu]'
 tmux set-option -g @adaptive_cpu_range_close '#[range=]'
+. "$CURRENT_DIR/lib/host-metrics.sh"
 tmux set-option -g @adaptive_action_1_icon ''
 tmux set-option -g @adaptive_action_1_range wb_tmux
 tmux set-option -g @adaptive_action_2_icon '󰚩'

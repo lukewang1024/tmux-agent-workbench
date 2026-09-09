@@ -288,6 +288,12 @@ OpenCode can be selected in the menu. Token totals come from local `ccusage`
 data and are cached under `$XDG_STATE_HOME/tmux-agent-workbench/usage`.
 Below the theme's compact-width threshold the complete usage suffix is hidden.
 
+Host metrics are enabled by default in the adaptive theme Host capsule: CPU
+at 80 columns, and CPU/memory/disk/upload/download at 140 columns. Workbench
+owns sampling, caching, width defaults and the btop click action. Set
+`@workbench-host-metrics off` to disable them. See [host metrics](docs/host-metrics.md)
+for threshold overrides, platform support and the standalone CLI.
+
 Three status actions share the Host capsule immediately before Agent Status:
 tmux and Agent open the same menus as `M-t` and `M-a`, while Sidebar performs
 the same responsive toggle as `Tab`. Workbench owns their ranges and behavior;
