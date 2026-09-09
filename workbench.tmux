@@ -78,7 +78,7 @@ tmux set-option -s command-alias[920] \
   "wb-tmux-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[921] \
   "wb-agent-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}'\""
-tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}'\""
+tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'\""
 tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux bind-key -T root MouseDown1Status "$status_click_action"

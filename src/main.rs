@@ -48,6 +48,12 @@ enum Command {
         kind: tmux_agent_workbench::status_menu::StatusMenuKind,
         #[arg(long)]
         pane: String,
+        #[arg(long)]
+        client: String,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        page: usize,
     },
     Pick {
         #[command(subcommand)]
@@ -1163,8 +1169,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let server = ServerIdentity::discover()?;
             tmux_agent_workbench::sidebar::run(&paths, &server)?;
         }
-        Command::StatusMenu { kind, pane } => {
-            tmux_agent_workbench::status_menu::run(kind, &pane)?;
+        Command::StatusMenu {
+            kind,
+            pane,
+            client,
+            action,
+            page,
+        } => {
+            tmux_agent_workbench::status_menu::run(kind, &pane, &client, action.as_deref(), page)?;
         }
         Command::Pick { target } => {
             let server = ServerIdentity::discover()?;

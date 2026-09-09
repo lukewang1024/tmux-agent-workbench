@@ -307,7 +307,9 @@ menu() {
     "$codex_line" c 'run-shell -b "workbench-agent-usage choose codex"' \
     "$claude_line" l 'run-shell -b "workbench-agent-usage choose claude"' \
     "$trae_line" t 'run-shell -b "workbench-agent-usage choose trae"' \
-    "$opencode_line" o 'run-shell -b "workbench-agent-usage choose opencode"' || menu_status=$?
+    "$opencode_line" o 'run-shell -b "workbench-agent-usage choose opencode"' \
+    '' \
+    '× close' Escape '' || menu_status=$?
   # A duplicate touch can race after the first menu is already visible. tmux
   # returns 2 for that client-local collision; it is not an action failure.
   case $menu_status in 0|2) return 0 ;; *) return "$menu_status" ;; esac

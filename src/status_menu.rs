@@ -1,24 +1,6 @@
-use std::io::{self, stdout};
 use std::process::Command;
 
 use clap::ValueEnum;
-use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-        MouseEventKind,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph},
-};
-
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum StatusMenuKind {
     Host,
@@ -40,116 +22,121 @@ enum ActionCommand {
     Host(String),
 }
 
-pub fn run(kind: StatusMenuKind, pane: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    kind: StatusMenuKind,
+    pane: &str,
+    client: &str,
+    action: Option<&str>,
+    page: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_pane(pane)?;
     let (title, actions) = actions(kind)?;
-    if actions.is_empty() {
-        return Err("no menu entries".into());
+    if let Some(label) = action {
+        let selected = actions
+            .iter()
+            .find(|action| action.label == label)
+            .ok_or("menu action no longer available")?;
+        return execute_action(selected, pane);
     }
-
-    enable_raw_mode()?;
-    let mut output = stdout();
-    execute!(output, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(output);
-    let mut terminal = Terminal::new(backend)?;
-    let selected = event_loop(&mut terminal, title, &actions);
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-
-    if let Some(index) = selected? {
-        execute_action(&actions[index], pane)?;
+    let clients = tmux_output(&[
+        "list-clients",
+        "-F",
+        "#{client_name} #{client_width} #{client_height}",
+    ])?;
+    let size = clients
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next()? == client).then(|| {
+                Some((
+                    fields.next()?.parse::<usize>().ok()?,
+                    fields.next()?.parse::<usize>().ok()?,
+                ))
+            })?
+        })
+        .ok_or("Workbench client disappeared")?;
+    let page_size = size.1.saturating_sub(7).max(1);
+    let page = page.min(actions.len().saturating_sub(1) / page_size);
+    let start = page * page_size;
+    let executable = std::env::current_exe()?;
+    let kind_name = match kind {
+        StatusMenuKind::Host => "host",
+        StatusMenuKind::Tmux => "tmux",
+        StatusMenuKind::Agent => "agent",
+    };
+    let base = format!(
+        "{} status-menu {} --pane {} --client {}",
+        shell_quote(&executable.to_string_lossy()),
+        kind_name,
+        shell_quote(pane),
+        shell_quote(client)
+    );
+    let mut command = Command::new("tmux");
+    command.args([
+        "display-menu",
+        "-M",
+        "-O",
+        "-C",
+        "0",
+        "-c",
+        client,
+        "-t",
+        pane,
+        "-b",
+        "rounded",
+        "-T",
+        &format!(" {title} "),
+        "-x",
+        "C",
+        "-y",
+        "C",
+    ]);
+    for action in actions.iter().skip(start).take(page_size) {
+        command.args([
+            menu_label(&action.label, size.0),
+            action.key.to_string(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!("{base} --action {}", shell_quote(&action.label)))
+            ),
+        ]);
     }
-    Ok(())
+    if page > 0 {
+        command.args([
+            "Previous page".into(),
+            "[".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!("{base} --page {}", page - 1))
+            ),
+        ]);
+    }
+    if start + page_size < actions.len() {
+        command.args([
+            "Next page".into(),
+            "]".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!("{base} --page {}", page + 1))
+            ),
+        ]);
+    }
+    command.args(["", "× close", "Escape", ""]);
+    let status = command.status()?;
+    match status.code() {
+        Some(0 | 2) => Ok(()), // Repeated opening clicks may race with an existing menu.
+        _ => Err("could not display status menu".into()),
+    }
 }
 
-fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    _title: &str,
-    actions: &[Action],
-) -> Result<Option<usize>, Box<dyn std::error::Error>> {
-    let mut selected = 0;
-    loop {
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let list_area = Rect::new(0, 0, area.width, area.height.saturating_sub(1));
-            let items = actions.iter().map(|action| {
-                ListItem::new(Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(&action.label, primary_style()),
-                    Span::raw("  "),
-                    Span::styled(format!("[{}]", action.key), muted_style()),
-                ]))
-            });
-            let list = List::new(items)
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .fg(Color::Rgb(235, 235, 245))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("›");
-            let mut state = ListState::default().with_selected(Some(selected));
-            frame.render_stateful_widget(list, list_area, &mut state);
-            let close = Line::from(vec![Span::raw(" "), Span::styled("× close", muted_style())])
-                .right_aligned();
-            frame.render_widget(
-                Paragraph::new(close),
-                Rect::new(0, area.height.saturating_sub(1), area.width, 1),
-            );
-        })?;
-
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                KeyCode::Up => selected = selected.checked_sub(1).unwrap_or(actions.len() - 1),
-                KeyCode::Down => selected = (selected + 1) % actions.len(),
-                KeyCode::Enter => return Ok(Some(selected)),
-                KeyCode::Char(ch) => {
-                    if let Some(index) = actions.iter().position(|action| action.key == ch) {
-                        return Ok(Some(index));
-                    }
-                }
-                _ => {}
-            },
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollDown => selected = (selected + 1) % actions.len(),
-                MouseEventKind::ScrollUp => {
-                    selected = selected.checked_sub(1).unwrap_or(actions.len() - 1)
-                }
-                MouseEventKind::Moved if usize::from(mouse.row) < actions.len() => {
-                    selected = usize::from(mouse.row)
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let row = usize::from(mouse.row);
-                    if row < actions.len() {
-                        return Ok(Some(row));
-                    }
-                    if row + 1 == usize::from(terminal.size()?.height)
-                        && usize::from(mouse.column) + 8 >= usize::from(terminal.size()?.width)
-                    {
-                        return Ok(None);
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-}
-
-fn primary_style() -> Style {
-    Style::default().fg(Color::Rgb(235, 235, 245))
-}
-
-fn muted_style() -> Style {
-    // Keep status popups on the same semantic palette as Agent Sidebar:
-    // bright neutral content, ANSI bright-black for secondary controls.
-    Style::default().fg(Color::DarkGray)
+fn menu_label(label: &str, client_width: usize) -> String {
+    // Leave room for the native border and shortcut. Escape tmux formats so
+    // dynamic host names remain labels rather than executable format strings.
+    label
+        .chars()
+        .take(client_width.saturating_sub(10).max(1))
+        .collect::<String>()
+        .replace('#', "##")
 }
 
 fn actions(

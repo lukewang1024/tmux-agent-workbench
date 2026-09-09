@@ -18,11 +18,6 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 [ -x "$core" ] || core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
 [ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
 
-case $kind in
-  host) height=12; title=SSH ;;
-  tmux) height=14; title=tmux ;;
-  agent) height=6; title=Agent ;;
-esac
-sleep 0.15
-exec tmux display-popup -c "$client" -t "$pane" -E -b rounded -T " $title " -w 48 -h "$height" \
-  "'$core' status-menu '$kind' --pane '$pane'"
+# Native menus share Usage's mouse handling: opening release is ignored,
+# subsequent outside clicks dismiss. The core sizes/pages for this client.
+exec "$core" status-menu "$kind" --pane "$pane" --client "$client"
