@@ -40,29 +40,32 @@ class MetricsTest(unittest.TestCase):
 
     def test_linux_delta_and_cache(self):
         self.sample()
-        self.assertEqual(self.run_metrics(), '   --  󰍛  40%  󰋊  40%  󰕒         --  󰇚         --')
+        self.assertEqual(self.run_metrics(), '󰻠 -- 󰍛 40% 󰋊 40% 󰕒 -- 󰇚 --')
+        self.assertEqual(self.run_metrics('compact'), '󰻠 -- 󰍛 40%')
+        self.assertEqual(self.run_metrics('standard'), '󰻠 -- 󰍛 40% 󰋊 40%')
         self.mock('date', 'echo 1002')
         self.sample(total=200, idle=75, rx=5096, tx=4048)
-        self.assertEqual(self.run_metrics(), '  75%  󰍛  40%  󰋊  40%  󰕒   0.00MB/s  󰇚   0.00MB/s')
-        self.assertEqual(self.run_metrics('cpu'), '  75%')
+        self.assertEqual(self.run_metrics(), '󰻠 75% 󰍛 40% 󰋊 40% 󰕒 0.00MB/s 󰇚 0.00MB/s')
+        self.assertEqual(self.run_metrics('compact'), '󰻠 75% 󰍛 40%')
+        self.assertEqual(self.run_metrics('standard'), '󰻠 75% 󰍛 40% 󰋊 40%')
+        self.assertEqual(self.run_metrics('cpu'), '󰻠 75%')
 
     def test_android_restricted_proc(self):
-        self.assertEqual(self.run_metrics(), '   --  󰍛   --  󰋊  40%  󰕒         --  󰇚         --')
+        self.assertEqual(self.run_metrics(), '󰻠 -- 󰍛 -- 󰋊 40% 󰕒 -- 󰇚 --')
 
     def test_interface_change_and_counter_reset(self):
         self.sample()
         self.run_metrics()
         self.mock('date', 'echo 1002')
         self.sample(total=200, idle=75, iface='wlan0')
-        self.assertTrue(self.run_metrics().endswith('󰕒         --  󰇚         --'))
+        self.assertTrue(self.run_metrics().endswith('󰕒 -- 󰇚 --'))
         self.mock('date', 'echo 1004')
         self.sample(total=10, idle=5, rx=0, tx=0, iface='wlan0')
-        self.assertEqual(self.run_metrics(), '   --  󰍛  40%  󰋊  40%  󰕒         --  󰇚         --')
+        self.assertEqual(self.run_metrics(), '󰻠 -- 󰍛 40% 󰋊 40% 󰕒 -- 󰇚 --')
 
-    def test_width_stays_fixed_across_values_units_and_unavailable(self):
+    def test_values_are_compact_across_units_and_unavailable(self):
         self.sample()
-        baseline = self.run_metrics()
-        baseline_cpu = self.run_metrics('cpu')
+        self.run_metrics()
         for index, rate in enumerate([0, 9, 999, 1023, 1024, 1024**2,
                                       1024**3, 1024**4, 1024**6], 1):
             with self.subTest(rate=rate):
@@ -73,10 +76,10 @@ class MetricsTest(unittest.TestCase):
                 self.sample(total=200, idle=50 if index % 2 else 149,
                             rx=2*rate, tx=2*rate)
                 rendered = self.run_metrics()
-                self.assertEqual(len(rendered), len(baseline))
-                self.assertEqual(len(self.run_metrics('cpu')), len(baseline_cpu))
-                for icon in ['󰍛', '󰋊', '󰕒', '󰇚']:
-                    self.assertEqual(rendered.index(icon), baseline.index(icon))
+                self.assertNotIn('  ', rendered)
+                cpu_rendered = self.run_metrics('cpu')
+                self.assertNotIn('  ', cpu_rendered)
+                self.assertTrue(cpu_rendered.startswith('󰻠 '))
 
     def test_macos_uses_live_deltas_despite_frozen_netstat(self):
         self.mock('uname', 'echo Darwin')
@@ -85,10 +88,10 @@ class MetricsTest(unittest.TestCase):
         self.mock('vm_stat', "printf 'Mach Virtual Memory Statistics: (page size of 4096 bytes)\\nPages active: 100.\\nPages wired down: 200.\\nPages occupied by compressor: 50.\\n'")
         self.mock('nettop', "printf ',bytes_in,bytes_out,\\napp.1,123456789,987654321,\\n,bytes_in,bytes_out,\\napp.1,2000000,1000000,\\n'")
         self.mock('netstat', "echo 'en0 1500 <Link#1> aa:bb 10 0 1000 20 0 2000 0'")
-        self.assertTrue(self.run_metrics().startswith('  25%  󰍛  35%'))
+        self.assertTrue(self.run_metrics().startswith('󰻠 25% 󰍛 35%'))
         self.mock('date', 'echo 1002')
         self.mock('netstat', "printf 'en0 1500 <Link#1> aa:bb 10 0 5096 20 0 4048 0\\nen0 1500 192.168.1 192.168.1.2 10 - 5096 20 - 4048 -\\n'")
-        self.assertTrue(self.run_metrics().endswith('󰕒   1.00MB/s  󰇚   2.00MB/s'))
+        self.assertTrue(self.run_metrics().endswith('󰕒 1.00MB/s 󰇚 2.00MB/s'))
 
 
 if __name__ == '__main__':

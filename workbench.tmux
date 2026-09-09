@@ -99,11 +99,12 @@ tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
   "wb-usage-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
-tmux set-option -s command-alias[928] \
-  'wb-cpu-status=display-popup -E -b rounded -T " CPU · btop " -w 90% -h 90% "exec btop"'
+tmux set-option -su command-alias[928] 2>/dev/null || true
+tmux set-option -s command-alias[929] \
+  "wb-metrics-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-host-metrics-menu' '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
-  'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-cpu-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
+  'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-metrics-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
 tmux bind-key -T root MouseDown1Status wb-status-route
 tmux bind-key -T prefix MouseDown1Status if-shell -F \
   '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+client=${1:-}
+pane=${2:-}
+case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
+case $pane in '%'|''|%*[!0-9]*) exit 2 ;; %*) ;; *) exit 2 ;; esac
+
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+mode=$(tmux show-option -gqv @workbench-host-metrics-mode 2>/dev/null || true)
+case $mode in compact|standard|full) ;; *) mode=compact ;; esac
+
+compact_line='  Compact  · CPU + memory'
+standard_line='  Standard · CPU + memory + disk'
+full_line='  Full     · all metrics'
+case $mode in
+  compact) compact_line="✓ Compact  · CPU + memory" ;;
+  standard) standard_line="✓ Standard · CPU + memory + disk" ;;
+  full) full_line="✓ Full     · all metrics" ;;
+esac
+
+exec tmux display-menu -M -O -C 0 -c "$client" -t "$pane" -b rounded \
+  -T '#[align=centre] 󰻠 Resources ' \
+  "$compact_line" c "run-shell -b '$script_dir/workbench-host-metrics-mode compact'" \
+  "$standard_line" s "run-shell -b '$script_dir/workbench-host-metrics-mode standard'" \
+  "$full_line" f "run-shell -b '$script_dir/workbench-host-metrics-mode full'" \
+  '' \
+  '  Open btop' b 'display-popup -E -b rounded -T " btop " -w 90% -h 90% "exec btop"' \
+  '' \
+  '× close (Esc)' '' ''

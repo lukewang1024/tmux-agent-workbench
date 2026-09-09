@@ -7,7 +7,7 @@ umask 077
 metrics_cache="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-agent-workbench/host-metrics"
 mkdir -p "$metrics_cache" || exit 1
 mode=${1:-full}
-case "$mode" in full|cpu) ;; *) exit 2 ;; esac
+case "$mode" in compact|standard|full|cpu) ;; *) exit 2 ;; esac
 now=$(date +%s)
 # Atomic directory lock prevents simultaneous status clients racing snapshots.
 if [ -r "$metrics_cache/lock/pid" ]; then
@@ -108,12 +108,17 @@ $values
 EOF
 [ -z "$total" ] || cpu=$sampled_cpu
 printf '%s %s %s %s %s %s\n' "$now" "${iface:--}" "${rx:--}" "${tx:--}" "${total:--}" "${idle:--}" > "$metrics_cache/counters"
-# Fixed ASCII value columns: percentages 4, speeds 10 (including units).
-# Precision caps also prevent unexpected values from widening the status bar.
-# Nerd Fonts: oct-cpu, md-memory, md-harddisk, md-upload, md-download.
-printf ' %4.4s' "$cpu" > "$metrics_cache/cpu.tmp"
-printf ' %4.4s  󰍛 %4.4s  󰋊 %4.4s  󰕒 %10.10s  󰇚 %10.10s' "$cpu" "$mem" "$disk" "$up" "$down" > "$metrics_cache/full.tmp"
+# Keep the host capsule compact: one space after each icon and one space
+# between metrics. Values are already formatted to their useful precision;
+# adding fixed-width padding makes the status bar unnecessarily wide.
+# Nerd Fonts: md-cpu-64-bit, md-memory, md-harddisk, md-upload, md-download.
+printf '󰻠 %s' "$cpu" > "$metrics_cache/cpu.tmp"
+printf '󰻠 %s 󰍛 %s' "$cpu" "$mem" > "$metrics_cache/compact.tmp"
+printf '󰻠 %s 󰍛 %s 󰋊 %s' "$cpu" "$mem" "$disk" > "$metrics_cache/standard.tmp"
+printf '󰻠 %s 󰍛 %s 󰋊 %s 󰕒 %s 󰇚 %s' "$cpu" "$mem" "$disk" "$up" "$down" > "$metrics_cache/full.tmp"
 mv "$metrics_cache/cpu.tmp" "$metrics_cache/cpu"
+mv "$metrics_cache/compact.tmp" "$metrics_cache/compact"
+mv "$metrics_cache/standard.tmp" "$metrics_cache/standard"
 mv "$metrics_cache/full.tmp" "$metrics_cache/full"
 printf '%s\n' "$now" > "$metrics_cache/time"
 cat "$metrics_cache/$mode"

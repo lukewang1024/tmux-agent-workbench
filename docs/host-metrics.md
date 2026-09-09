@@ -1,18 +1,24 @@
 # tmux host metrics
 
-At 140 columns and above the host capsule shows CPU, memory, disk usage, upload
-speed and download speed together. At 80–139 columns it shows only CPU; below
-80 columns the existing theme hides metrics. Percentage fields occupy 4 columns; each rate occupies 10 columns, including
-its unit. Values are right-aligned; unavailable values use the same padding.
+The resource capsule has three selectable modes. Compact shows CPU and memory,
+Standard adds disk usage, and Full adds upload and download speed. Below the
+theme's 80-column threshold the capsule is hidden; the selected mode is kept
+when it becomes visible again. Each icon is followed by one space, and each
+metric is separated from the next by one space; values have no extra left
+padding, so the capsule stays compact.
 Rates use decimal MB/s (1 MB = 1,000,000 bytes), with two decimals. Rates above
 999.99 MB/s display `>999MB/s` without widening the field.
 
 The sampler ships in tmux-agent-workbench; no dotfiles bootstrap is needed.
-Run `tmux-agent-workbench host-metrics [full|cpu]` to sample it directly.
+Run `tmux-agent-workbench host-metrics [compact|standard|full|cpu]` to sample it
+directly. Click the resource capsule to choose Compact, Standard or Full, or to
+open btop. The selection is stored in the tmux server option
+`@workbench-host-metrics-mode` and defaults to `compact`.
 The plugin registers it in the optional tmux-adaptive-theme host capsule by default.
 Set `@workbench-host-metrics off` and reload the plugin to hide it.
 `@workbench-host-metrics-min-width` (80) and
-`@workbench-host-metrics-full-min-width` (140) override the width thresholds.
+`@workbench-host-metrics-full-min-width` (140) are retained for compatibility;
+mode selection is now explicit rather than width-dependent.
 Without tmux-adaptive-theme the sampler remains available through the CLI;
 the plugin does not replace a custom status-right template.
 It is invoked through `sh`, including on Termux where `/bin/sh` may not exist.
@@ -36,7 +42,7 @@ Samples share a two-second cache in `$XDG_CACHE_HOME/tmux-agent-workbench/host-m
 120 seconds apart show `--` until a new baseline is established. The tmux
 status interval controls subsequent refreshes. No traffic payload is collected.
 
-Icons use Nerd Fonts: `oct-cpu`, `md-memory`, `md-harddisk`, `md-upload`,
+Icons use Nerd Fonts: `md-cpu-64-bit`, `md-memory`, `md-harddisk`, `md-upload`,
 `md-download`, verified against the official glyph map:
 https://github.com/ryanoasis/nerd-fonts/blob/master/glyphnames.json
 

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+mode=$(tmux show-option -gqv @workbench-host-metrics-mode 2>/dev/null || true)
+case $mode in
+  compact|standard|full) ;;
+  *) mode=compact ;;
+esac
+exec "$script_dir/workbench-host-metrics" "$mode"

@@ -38,10 +38,10 @@ class MetricsPluginTest(unittest.TestCase):
         self.set_option('status-right', 'custom-theme')
         self.load()
         self.assertEqual(self.option('@workbench-host-metrics'), 'on')
+        self.assertEqual(self.option('@workbench-host-metrics-mode'), 'compact')
         self.assertEqual(self.option('@adaptive_cpu_min_width'), '80')
         widget = self.option('@adaptive_cpu')
-        self.assertIn('#{client_width},140', widget)
-        self.assertIn(str(ROOT / 'bin/workbench-host-metrics'), widget)
+        self.assertIn(str(ROOT / 'bin/workbench-host-metrics-status'), widget)
         self.assertNotIn('dotfiles', widget)
         self.load()
         self.assertEqual(self.option('@adaptive_cpu'), widget)
@@ -50,15 +50,17 @@ class MetricsPluginTest(unittest.TestCase):
     def test_overrides_disable_and_reenable(self):
         self.set_option('@workbench-host-metrics-min-width', '90')
         self.set_option('@workbench-host-metrics-full-min-width', '160')
+        self.set_option('@workbench-host-metrics-mode', 'standard')
         self.load()
         self.assertEqual(self.option('@adaptive_cpu_min_width'), '90')
-        self.assertIn('#{client_width},160', self.option('@adaptive_cpu'))
+        self.assertEqual(self.option('@workbench-host-metrics-mode'), 'standard')
+        self.assertIn(str(ROOT / 'bin/workbench-host-metrics-status'), self.option('@adaptive_cpu'))
         self.set_option('@workbench-host-metrics', 'off')
         self.load()
         self.assertEqual(self.option('@adaptive_cpu'), '')
         self.set_option('@workbench-host-metrics', 'on')
         self.load()
-        self.assertIn('#{client_width},160', self.option('@adaptive_cpu'))
+        self.assertIn(str(ROOT / 'bin/workbench-host-metrics-status'), self.option('@adaptive_cpu'))
 
 
 if __name__ == '__main__':

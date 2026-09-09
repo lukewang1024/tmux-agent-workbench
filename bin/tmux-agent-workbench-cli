@@ -32,7 +32,7 @@ tmux workspace workflow (distinct from the distributed `workbench` CLI)
 workflow: new [--prompt] add done promote inspect run prune projects rebuild
 agents:   agent start|list|goto|next|profiles|handoff
 clients:  attach, client serve|status|setup
-ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [full|cpu]
+ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [compact|standard|full|cpu]
 system:   status, doctor, config, hooks, daemon
 EOF
 }

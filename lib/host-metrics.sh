@@ -3,6 +3,7 @@
 # Keep data and width policy here; the optional theme owns visual presentation.
 for metrics_default in \
   '@workbench-host-metrics on' \
+  '@workbench-host-metrics-mode compact' \
   '@workbench-host-metrics-min-width 80' \
   '@workbench-host-metrics-full-min-width 140'; do
   metrics_option=${metrics_default% *}
@@ -15,9 +16,8 @@ done
 if [ "$(tmux show-option -gqv @workbench-host-metrics)" = off ]; then
   tmux set-option -g @adaptive_cpu ''
 else
-  metrics_full_width=$(tmux show-option -gqv @workbench-host-metrics-full-min-width)
   tmux set-option -g @adaptive_cpu \
-    "#{?#{e|>=:#{client_width},$metrics_full_width},#(sh '$CURRENT_DIR/bin/workbench-host-metrics' full),#(sh '$CURRENT_DIR/bin/workbench-host-metrics' cpu)}"
+    "#(sh '$CURRENT_DIR/bin/workbench-host-metrics-status')"
 fi
 tmux set-option -g @adaptive_cpu_min_width \
   "$(tmux show-option -gqv @workbench-host-metrics-min-width)"
