@@ -121,7 +121,8 @@ pub fn run(
             ),
         ]);
     }
-    command.args(["", "× close", "Escape", ""]);
+    // Escape already dismisses native menus; render its short name explicitly.
+    command.args(["", "× close (Esc)", "", ""]);
     let status = command.status()?;
     match status.code() {
         Some(0 | 2) => Ok(()), // Repeated opening clicks may race with an existing menu.
