@@ -535,6 +535,81 @@ matcher = { contains = { value = "approval ready" } }"#;
     }
 
     #[test]
+    fn traex_question_overrides_interrupt_hint_and_spinner() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let trae = set.get(AgentKind::Trae);
+        let question = "◆ Finished inspecting profiles\n──────────────────\n\
+            Question 1/1 (1 unanswered)\nWhich profile should be used?\n\
+            ❯ 1. Sync profile\n  2. Keep existing profile\n\
+            tab to add notes | enter to submit answer | esc to interrupt\n";
+        for title in [
+            "[ ! ] Action Required | deployment | project",
+            "[ . ] Action Required | deployment | project",
+            "⠴ deployment",
+            "deployment",
+            "",
+        ] {
+            let result = trae.classify(question, title);
+            assert_eq!(result.state, BaseState::Blocked, "{title}");
+            assert_eq!(result.reason_category.as_deref(), Some("input"));
+            assert_eq!(result.rule_id.as_deref(), Some("trae-question"));
+            assert!(result.strong_visible_signal);
+        }
+        let working = trae.classify(
+            &format!("{question}\n──────────────────\n◆ Working (esc to interrupt)"),
+            "deployment",
+        );
+        assert_eq!(working.state, BaseState::Working);
+        let idle = trae.classify(
+            &format!("{question}\n──────────────────\n❯ Summarize recent commits"),
+            "deployment",
+        );
+        assert_eq!(idle.state, BaseState::Idle);
+        assert_eq!(
+            trae.classify("◆ Working (esc to interrupt)", "deployment")
+                .state,
+            BaseState::Working
+        );
+    }
+
+    #[test]
+    fn traex_action_required_distinguishes_automatic_review_from_human_input() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let trae = set.get(AgentKind::Trae);
+        let title = "[ ! ] Action Required | deployment | project";
+        for status in [
+            "• Automatically reviewing the approval (3s)",
+            "Automatically reviewing approval…",
+            "◆ Reviewing approval request (3s • esc to interrupt)",
+        ] {
+            let result = trae.classify(status, title);
+            assert_eq!(result.state, BaseState::Working, "{status}");
+            assert_eq!(
+                result.rule_id.as_deref(),
+                Some("trae-automatic-approval-review")
+            );
+        }
+        for content in [
+            "",
+            "Would you like to run the following command?\nPress enter to confirm",
+            "❯ Explain Automatically reviewing the approval",
+            "⚠ Automatic approval review approved (risk: low, authorization: high)",
+            "Automatically reviewing approval…\n──────────────────\nWaiting for approval",
+        ] {
+            assert_eq!(
+                trae.classify(content, title).state,
+                BaseState::Blocked,
+                "{content}"
+            );
+        }
+        let idle = trae.classify(
+            "Automatically reviewing approval…\n──────────────────\n❯ Summarize recent commits",
+            "deployment",
+        );
+        assert_eq!(idle.state, BaseState::Idle);
+    }
+
+    #[test]
     fn codex_automatic_review_overrides_action_required_until_human_input() {
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);

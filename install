@@ -28,6 +28,7 @@ PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 BIN_DIR=""
 INCLUDE_GIT=1
+RELEASE_ONLY=${TMUX_AGENT_WORKBENCH_RELEASE_ONLY:-0}
 for arg in "$@"; do
   case "$arg" in
     --no-git) INCLUDE_GIT=0 ;;
@@ -52,8 +53,10 @@ CORE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin"
 mkdir -p "$BIN_DIR" "$CORE_DIR"
 
 # Attention v2 binary. Release assets use
-# tmux-agent-workbench-<rust-target>.tar.gz; a source checkout falls back to a
-# local Cargo release build when the matching asset is unavailable.
+# tmux-agent-workbench-<rust-target>.tar.gz; a source checkout normally falls
+# back to a local Cargo release build when the matching asset is unavailable.
+# TMUX_AGENT_WORKBENCH_RELEASE_ONLY=1 disables that fallback and always
+# installs the latest GitHub release asset.
 install_attention_binary() {
   attention_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$PLUGIN_DIR/Cargo.toml" | head -1)
   attention_termux=0
@@ -93,6 +96,30 @@ install_attention_binary() {
     chmod 755 "$attention_stage"
     mv -f "$attention_stage" "$attention_destination"
   }
+  if [ "$RELEASE_ONLY" = 1 ]; then
+    [ -n "$attention_target" ] || {
+      echo "install: no GitHub release asset for this platform" >&2
+      return 1
+    }
+    command -v curl >/dev/null 2>&1 || {
+      echo "install: curl is required for release-only installation" >&2
+      return 1
+    }
+    attention_tmp=$(mktemp -d)
+    attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/latest/download/tmux-agent-workbench-$attention_target.tar.gz"
+    if curl -fsSL "$attention_url" -o "$attention_tmp/archive.tar.gz" &&
+       tar -xzf "$attention_tmp/archive.tar.gz" -C "$attention_tmp" &&
+       [ -x "$attention_tmp/tmux-agent-workbench" ]; then
+      install_attention_file "$attention_tmp/tmux-agent-workbench"
+      rm -rf "$attention_tmp"
+      echo "installed latest GitHub release $attention_destination"
+      return 0
+    fi
+    rm -rf "$attention_tmp"
+    echo "install: latest GitHub release asset could not be downloaded" >&2
+    return 1
+  fi
+
   if [ "${TMUX_AGENT_WORKBENCH_INSTALL_SOURCE:-0}" != 1 ] &&
      [ -x "$attention_destination" ] &&
      [ "$($attention_destination --version 2>/dev/null | awk '{print $2}')" = "$attention_version" ]; then

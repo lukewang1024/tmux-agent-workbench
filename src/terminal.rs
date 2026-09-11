@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
@@ -89,6 +90,7 @@ pub fn interactive_ssh_tty(_host: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_ssh_tty(output: &str, host: &str) -> Option<String> {
     output
         .lines()

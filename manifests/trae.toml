@@ -3,6 +3,32 @@ min_engine_version = "2.0.0-alpha.3"
 aliases = ["trae", "traex", "trae-cli", "traecode"]
 
 [[rules]]
+id = "trae-question"
+priority = 1300
+state = "blocked"
+reason_category = "input"
+region = "after_last_rule"
+visible = "blocker"
+matcher = { line_regex = { value = "(?i)^\\s*tab to add notes\\s*\\|\\s*enter to submit answer\\s*\\|\\s*esc to interrupt\\s*$" } }
+
+[[rules]]
+id = "trae-automatic-approval-review"
+priority = 1200
+state = "working"
+region = "after_last_rule"
+visible = "working"
+matcher = { line_regex = { value = "(?i)^\\s*[•●◆⋄⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\\s*(automatically reviewing (the )?approval|reviewing approval request)([ .…(].*)?$" } }
+
+[[rules]]
+id = "trae-title-blocked"
+priority = 1100
+state = "blocked"
+reason_category = "input"
+region = "pane_title"
+visible = "blocker"
+matcher = { contains = { value = "Action Required" } }
+
+[[rules]]
 id = "trae-title-working"
 priority = 1050
 state = "working"
@@ -45,7 +71,7 @@ matcher = { all = { items = [
 id = "trae-working"
 priority = 200
 state = "working"
-region = "bottom_lines"
+region = "after_last_rule"
 visible = "working"
 matcher = { any = { items = [
   { line_regex = { value = "(?i)^\\s*[•●].*(thinking|working|running)" } },

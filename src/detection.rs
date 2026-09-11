@@ -707,10 +707,13 @@ fn kind_label(kind: AgentKind) -> &'static str {
     }
 }
 
-// Codex uses Action Required for both human prompts and automatic review.
-// Consult the live overlay before publishing blocked attention.
+// Live dialogs distinguish automatic review from user input, even with a stale Trae spinner.
 fn title_needs_capture(kind: AgentKind, state: BaseState) -> bool {
-    kind == AgentKind::Codex && state == BaseState::Blocked
+    matches!(
+        (kind, state),
+        (AgentKind::Codex, BaseState::Blocked)
+            | (AgentKind::Trae, BaseState::Blocked | BaseState::Working)
+    )
 }
 
 fn meaningful_window_label(label: &str) -> bool {
@@ -741,8 +744,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_action_required_needs_overlay_capture() {
+    fn action_required_needs_overlay_capture() {
         assert!(title_needs_capture(AgentKind::Codex, BaseState::Blocked));
+        assert!(title_needs_capture(AgentKind::Trae, BaseState::Blocked));
+        assert!(title_needs_capture(AgentKind::Trae, BaseState::Working));
         assert!(!title_needs_capture(AgentKind::Codex, BaseState::Working));
         assert!(!title_needs_capture(AgentKind::Claude, BaseState::Blocked));
     }
