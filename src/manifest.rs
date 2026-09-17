@@ -637,6 +637,54 @@ matcher = { contains = { value = "approval ready" } }"#;
     }
 
     #[test]
+    fn queued_async_question_with_idle_composer_is_not_blocked() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let codex = set.get(AgentKind::Codex);
+        for prompt in [
+            "› Ask Codex to do anything",
+            "›⠁Ask Codex to do anything  ⢀ ⠂",
+        ] {
+            let plain = codex.classify(prompt, "task");
+            assert_eq!(plain.state, BaseState::Idle);
+            assert!(plain.strong_visible_signal);
+            let screen = format!(
+                "1 background terminal running
+• Queued follow-up inputs
+  ? 1 question
+    shift + ← to answer
+{prompt}
+gpt-6-astra medium"
+            );
+            let idle = codex.classify(&screen, "[ ! ] Action Required | task");
+            assert_eq!(idle.state, BaseState::Idle);
+            assert_eq!(idle.rule_id.as_deref(), Some("codex-queued-question-idle"));
+            assert!(idle.strong_visible_signal);
+            let active =
+                codex.classify(&format!("{screen}\n• Working (esc to interrupt)"), "⠹ task");
+            assert_eq!(active.state, BaseState::Working);
+            let approval = codex.classify(
+                &format!("{screen}\nPress enter to confirm"),
+                "Action Required",
+            );
+            assert_eq!(approval.state, BaseState::Blocked);
+            let review = codex.classify(
+                &format!("{screen}\n• Automatically reviewing approval"),
+                "Action Required",
+            );
+            assert_eq!(review.state, BaseState::Working);
+        }
+        assert_eq!(
+            codex
+                .classify(
+                    "• Queued follow-up inputs\n? 1 question\nshift + ← to answer",
+                    "Action Required"
+                )
+                .state,
+            BaseState::Blocked
+        );
+    }
+
+    #[test]
     fn codex_osc_title_is_a_strong_stable_signal() {
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);

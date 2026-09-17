@@ -1076,7 +1076,17 @@ fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
 }
 
 fn agent_status(agent: &AgentSnapshot) -> String {
-    let mut status = if agent.display_state == DisplayState::Blocked {
+    if agent.display_state == DisplayState::Blocked
+        && agent.base_state != crate::model::BaseState::Blocked
+        && agent.hook_health == crate::model::HookHealth::Conflict
+    {
+        return "input · hook conflict".to_owned();
+    }
+    let mut status = if agent.display_state == DisplayState::Idle
+        && agent.rule_id.as_deref() == Some("codex-queued-question-idle")
+    {
+        "idle · question queued"
+    } else if agent.display_state == DisplayState::Blocked {
         agent.reason_category.as_deref().unwrap_or("blocked")
     } else {
         state_name(agent.display_state)
@@ -1088,6 +1098,9 @@ fn agent_status(agent: &AgentSnapshot) -> String {
             status.push_str(" !")
         }
         crate::model::HookHealth::Healthy => {}
+    }
+    if agent.stale {
+        status.push_str(" · stale");
     }
     status
 }
@@ -2294,6 +2307,27 @@ mod tests {
             .collect();
         assert!(rendered.contains(" ! · "));
         assert!(!rendered.contains("conflict"));
+    }
+
+    #[test]
+    fn blocked_display_fallback_explains_hook_conflict() {
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let agent = &mut snapshot.agents[0];
+        agent.base_state = crate::model::BaseState::Working;
+        agent.display_state = DisplayState::Blocked;
+        agent.hook_health = crate::model::HookHealth::Conflict;
+        assert_eq!(agent_status(agent), "input · hook conflict");
+    }
+
+    #[test]
+    fn queued_question_is_an_idle_detail() {
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let agent = &mut snapshot.agents[0];
+        agent.display_state = DisplayState::Idle;
+        agent.rule_id = Some("codex-queued-question-idle".into());
+        assert!(agent_status(agent).starts_with("idle · question queued"));
     }
 
     #[test]

@@ -12,6 +12,23 @@ visible = "working"
 matcher = { line_regex = { value = "(?i)^\\s*[•●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\\s*(automatically reviewing (the )?approval|reviewing approval request)([ .…(].*)?$" } }
 
 [[rules]]
+id = "codex-queued-question-idle"
+priority = 1150
+state = "idle"
+region = "bottom_lines"
+visible = "idle"
+# A queued asynchronous question can keep Action Required in the title after
+# the main turn ends. Require the queue UI and the idle composer together.
+matcher = { all = { items = [
+  { line_regex = { value = "^\\s*[•●]?\\s*Queued follow-up inputs\\s*$" } },
+  { line_regex = { value = "^\\s*[?]\\s+[0-9]+ questions?\\s*$" } },
+  { contains = { value = "to answer" } },
+  { line_regex = { value = "^\\s*[›❯][\\s⠁-⣿]*Ask Codex to do anything.*$" } },
+  { not = { item = { contains = { value = "esc to interrupt" } } } },
+  { not = { item = { contains = { value = "Press enter to confirm" } } } }
+] } }
+
+[[rules]]
 id = "codex-title-blocked"
 priority = 1100
 state = "blocked"
@@ -106,4 +123,4 @@ priority = 220
 state = "idle"
 region = "bottom_non_empty_lines"
 visible = "idle"
-matcher = { line_regex = { value = "^\\s*[›❯](\\s+.*)?\\s*$" } }
+matcher = { line_regex = { value = "^\\s*[›❯](\\s+.*|[⠁-⣿]*Ask Codex to do anything.*)?\\s*$" } }

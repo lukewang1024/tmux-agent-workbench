@@ -47,6 +47,16 @@ an implementation checkpoint so work can resume safely after context compaction.
 - Additive snapshot-v1 source/confidence/estimate/hook-health fields. Screen
   evidence is advisory only, is dimmed in the sidebar, and cannot create
   blocked/done attention or notifications.
+- Capture failures preserve authoritative hook lifecycle and attention; capture
+  health is marked stale independently and reset only on successful capture.
+  Strong screen evidence sustained for three seconds can restore the displayed
+  working/idle/blocked state while leaving hook lifecycle and notification
+  sequence unchanged. Confirmed display survives capture failures and repaint
+  gaps; a new hook event immediately takes over. Weak or interrupted candidates
+  do not qualify. Restored hook checkpoints follow the same rule. Codex's queued
+  asynchronous question plus idle composer is idle with a question detail, not
+  a blocked permission dialog. Idle sampling continues until display recovery
+  is confirmed, even when the captured frame has not changed.
 - Explicit idempotent `hooks install|check|remove` management for Claude JSON,
   Codex TOML, TraeX JSON, and the OpenCode XDG plugin. Foreign hooks and unknown
   configuration survive install/remove; malformed input fails atomically.

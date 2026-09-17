@@ -121,7 +121,14 @@ impl Detector {
                     .last_capture_revision
                     .get(&pane.target.pane_id)
                     .is_some_and(|revision| revision == &pane.content_revision);
-            if due && !unchanged_idle {
+            // A cached idle frame must not stop confirmation/recovery sampling.
+            let settled_idle = unchanged_idle
+                && self.machine.snapshots().iter().any(|agent| {
+                    agent.target.pane_id == pane.target.pane_id
+                        && !agent.stale
+                        && matches!(agent.display_state, DisplayState::Idle | DisplayState::Done)
+                });
+            if due && !settled_idle {
                 self.capture(&pane, process, config, manifests, now, now_ms);
             } else if let Some(instance) = self.pane_instances.get(&pane.target.pane_id) {
                 self.machine.set_visibility(instance, pane.visible);
@@ -497,6 +504,9 @@ impl Detector {
             config.detection.capture_bytes,
         ) {
             Ok(content) => {
+                if let Some(instance) = self.pane_instances.get(&pane_id) {
+                    self.machine.mark_capture_success(instance);
+                }
                 let result = manifests.get(process.kind).classify(&content, &pane.title);
                 let cached = if result.skip_state_update {
                     self.last_classification.get(&pane_id).cloned().unwrap_or(

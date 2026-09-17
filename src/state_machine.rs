@@ -46,6 +46,8 @@ struct Tracked {
     last_hook_event_at_ms: u64,
     active_hook_session_id: Option<String>,
     conflict_since_ms: Option<u64>,
+    display_candidate: Option<(BaseState, u64)>,
+    confirmed_display: Option<BaseState>,
     seen_event_ids: Vec<String>,
     runtime_id: String,
     attention_seq: u64,
@@ -193,6 +195,8 @@ impl StateMachine {
                 last_hook_event_at_ms: 0,
                 active_hook_session_id: None,
                 conflict_since_ms: None,
+                display_candidate: None,
+                confirmed_display: None,
                 seen_event_ids: Vec::new(),
                 runtime_id,
                 attention_seq,
@@ -321,7 +325,7 @@ impl StateMachine {
         let has_hook = self
             .agents
             .get(&instance_id)
-            .is_some_and(|tracked| tracked.last_hook_at_ms.is_some());
+            .is_some_and(|tracked| tracked.snapshot.state_source == StateSource::Hook);
         if !has_hook {
             let snapshot = self.observe(observation.clone());
             let tracked = self
@@ -342,6 +346,24 @@ impl StateMachine {
         tracked.snapshot.process = Some(observation.process);
         tracked.snapshot.visible = observation.visible;
         tracked.snapshot.estimated_state = Some(observation.state);
+        // Keep the last confirmed display through repaint/capture gaps. New
+        // strong evidence must remain stable before replacing it.
+        let candidate = (observation.strong_visible_signal
+            && observation.state != BaseState::Unknown
+            && observation.state != tracked.snapshot.base_state)
+            .then_some(observation.state);
+        if tracked.display_candidate.map(|(state, _)| state) != candidate {
+            tracked.display_candidate = candidate.map(|state| (state, observation.observed_at_ms));
+        }
+        if observation.state == tracked.snapshot.base_state && observation.strong_visible_signal {
+            tracked.confirmed_display = None;
+        }
+        tracked.snapshot.display_state = display_for(
+            tracked
+                .confirmed_display
+                .unwrap_or(tracked.snapshot.base_state),
+        );
+        refresh_attention_display(&mut tracked.snapshot);
         // Permission hooks describe the pending request, not who is reviewing
         // it. Keep that lifecycle fact, but don't present automated work as a
         // request for human input. Restore its attention if a human prompt follows.
@@ -351,7 +373,8 @@ impl StateMachine {
             if (observation.rule_id.as_deref() == Some("codex-automatic-approval-review")
                 && observation.state == BaseState::Working)
                 || (tracked.automatic_review_attention.is_some()
-                    && observation.state != BaseState::Blocked)
+                    && observation.state != BaseState::Blocked
+                    && observation.rule_id.as_deref() != Some("codex-queued-question-idle"))
             {
                 if tracked.automatic_review_attention.is_none() {
                     tracked.automatic_review_attention = tracked.snapshot.attention.take();
@@ -360,12 +383,14 @@ impl StateMachine {
                 tracked.conflict_since_ms = None;
                 return tracked.snapshot.clone();
             }
-            tracked.snapshot.display_state = DisplayState::Blocked;
+            if tracked.confirmed_display.is_none() {
+                tracked.snapshot.display_state = DisplayState::Blocked;
+            }
             if let Some(attention) = tracked.automatic_review_attention.take() {
                 tracked.snapshot.attention = Some(attention);
             }
         }
-        if observation.state != tracked.snapshot.base_state {
+        if observation.state != tracked.snapshot.base_state || tracked.confirmed_display.is_some() {
             let since = *tracked
                 .conflict_since_ms
                 .get_or_insert(observation.observed_at_ms);
@@ -383,6 +408,13 @@ impl StateMachine {
         } else {
             tracked.conflict_since_ms = None;
             tracked.snapshot.hook_health = HookHealth::Healthy;
+        }
+        if let Some((state, since)) = tracked.display_candidate {
+            if observation.observed_at_ms.saturating_sub(since) >= 3_000 {
+                tracked.confirmed_display = Some(state);
+                tracked.snapshot.display_state = display_for(state);
+                tracked.snapshot.rule_id = observation.rule_id;
+            }
         }
         tracked.snapshot.clone()
     }
@@ -434,6 +466,9 @@ impl StateMachine {
         tracked.snapshot.state_source = StateSource::Hook;
         tracked.snapshot.confidence = StateConfidence::High;
         tracked.snapshot.hook_health = HookHealth::Healthy;
+        tracked.conflict_since_ms = None;
+        tracked.display_candidate = None;
+        tracked.confirmed_display = None;
         tracked.snapshot.visible = visible;
         tracked.snapshot.exited = false;
         tracked.snapshot.exited_at_unix_ms = None;
@@ -494,6 +529,15 @@ impl StateMachine {
         Ok(tracked.snapshot.clone())
     }
 
+    /// Only a successful capture clears capture health; hooks and cached title
+    /// estimates do not prove that the capture path has recovered.
+    pub fn mark_capture_success(&mut self, instance_id: &str) {
+        if let Some(tracked) = self.agents.get_mut(instance_id) {
+            tracked.snapshot.stale = false;
+            tracked.stale_since = None;
+        }
+    }
+
     pub fn mark_capture_failure(
         &mut self,
         instance_id: &str,
@@ -503,7 +547,10 @@ impl StateMachine {
         let tracked = self.agents.get_mut(instance_id)?;
         let stale_since = *tracked.stale_since.get_or_insert(now_ms);
         tracked.snapshot.stale = true;
-        if now_ms.saturating_sub(stale_since) >= stale_grace_ms {
+        tracked.display_candidate = None;
+        if tracked.snapshot.state_source != StateSource::Hook
+            && now_ms.saturating_sub(stale_since) >= stale_grace_ms
+        {
             tracked.snapshot.base_state = BaseState::Unknown;
             tracked.snapshot.display_state = DisplayState::Unknown;
             tracked.snapshot.reason_category = None;
@@ -687,7 +734,13 @@ fn refresh_attention_display(snapshot: &mut AgentSnapshot) {
         .attention
         .as_ref()
         .is_some_and(|event| event.kind == AttentionKind::Done && !event.seen);
-    if snapshot.base_state == BaseState::Idle && unseen_done {
+    if snapshot.base_state == BaseState::Idle
+        && unseen_done
+        && matches!(
+            snapshot.display_state,
+            DisplayState::Idle | DisplayState::Done
+        )
+    {
         snapshot.display_state = DisplayState::Done;
     } else if snapshot.display_state == DisplayState::Done {
         snapshot.display_state = display_for(snapshot.base_state);
@@ -997,6 +1050,254 @@ mod tests {
                 .unwrap()
                 .base_state,
             BaseState::Unknown
+        );
+    }
+
+    #[test]
+    fn capture_failure_preserves_hook_state_and_attention_then_recovers() {
+        for kind in [
+            AgentEventType::Working,
+            AgentEventType::Permission,
+            AgentEventType::Stop,
+        ] {
+            let mut machine = StateMachine::default();
+            let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+            let hooked = machine
+                .report_event(
+                    &initial.instance_id,
+                    &event("hook", "front", kind, 1),
+                    false,
+                )
+                .unwrap();
+            for at in [10, 4_000, 10_000] {
+                let stale = machine
+                    .mark_capture_failure(&initial.instance_id, at, 3_000)
+                    .unwrap();
+                assert!(stale.stale);
+                assert_eq!(stale.base_state, hooked.base_state);
+                assert_eq!(stale.display_state, hooked.display_state);
+                assert_eq!(
+                    stale.attention.as_ref().map(|a| &a.id),
+                    hooked.attention.as_ref().map(|a| &a.id)
+                );
+            }
+            machine.mark_capture_success(&initial.instance_id);
+            let recovered = machine.observe_estimate(observation(hooked.base_state, 10_100));
+            assert!(!recovered.stale);
+            assert_eq!(recovered.hook_health, HookHealth::Healthy);
+            assert!(machine.agents[&initial.instance_id].stale_since.is_none());
+            machine.mark_capture_failure(&initial.instance_id, 20_000, 3_000);
+            assert_eq!(
+                machine.agents[&initial.instance_id].stale_since,
+                Some(20_000)
+            );
+        }
+    }
+
+    #[test]
+    fn strong_blocker_fallback_is_display_only_and_hooks_retake_control() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        machine
+            .report_event(
+                &initial.instance_id,
+                &event("w", "front", AgentEventType::Working, 1),
+                false,
+            )
+            .unwrap();
+        let before = machine.checkpoint_metadata(&initial.instance_id).unwrap();
+        let blocker = |at| {
+            let mut o = observation(BaseState::Blocked, at);
+            o.strong_visible_signal = true;
+            o
+        };
+        assert_eq!(
+            machine.observe_estimate(blocker(100)).display_state,
+            DisplayState::Working
+        );
+        let fallback = machine.observe_estimate(blocker(3_100));
+        assert_eq!(fallback.base_state, BaseState::Working);
+        assert_eq!(fallback.display_state, DisplayState::Blocked);
+        assert_eq!(fallback.hook_health, HookHealth::Conflict);
+        assert!(fallback.attention.is_none());
+        assert_eq!(
+            machine.checkpoint_metadata(&initial.instance_id).unwrap(),
+            before
+        );
+        assert!(machine.next_attention().is_none());
+        assert_eq!(
+            machine
+                .set_visibility(&initial.instance_id, true)
+                .unwrap()
+                .display_state,
+            DisplayState::Blocked
+        );
+        let permission = event("p", "front", AgentEventType::Permission, 4_000);
+        let hooked = machine
+            .report_event(&initial.instance_id, &permission, false)
+            .unwrap();
+        assert_eq!(hooked.hook_health, HookHealth::Healthy);
+        let attention_id = hooked.attention.unwrap().id;
+        assert_eq!(
+            machine
+                .report_event(&initial.instance_id, &permission, false)
+                .unwrap()
+                .attention
+                .unwrap()
+                .id,
+            attention_id
+        );
+        let resumed = machine
+            .report_event(
+                &initial.instance_id,
+                &event("resume", "front", AgentEventType::Activity, 5_000),
+                false,
+            )
+            .unwrap();
+        assert_eq!(resumed.display_state, DisplayState::Working);
+        assert!(resumed.attention.is_none());
+        // A new conflict must wait for a full fresh confirmation window.
+        assert_eq!(
+            machine.observe_estimate(blocker(5_100)).display_state,
+            DisplayState::Working
+        );
+        assert_eq!(
+            machine
+                .observe_estimate(observation(BaseState::Idle, 8_100))
+                .display_state,
+            DisplayState::Working
+        );
+        assert!(machine.next_attention().is_none());
+    }
+
+    #[test]
+    fn restored_unknown_hook_state_can_display_a_blocker_without_new_attention() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        let process = initial.process.as_ref().unwrap();
+        let checkpoint = crate::checkpoint::RuntimeCheckpoint {
+            version: 1,
+            server_incarnation: "test".into(),
+            runtime_id: "restored".into(),
+            process_fingerprint: format!(
+                "{}:{}:{}",
+                process.pid, process.started_at_ticks, process.executable
+            ),
+            previous_state: "unknown".into(),
+            attention_seq: 1,
+            seen_seq: 0,
+            hook_session_id: Some("front".into()),
+            delivered_event_ids: Vec::new(),
+            pending: Vec::new(),
+            recent_endpoint: None,
+        };
+        assert!(machine.restore_checkpoint(&checkpoint, 10));
+        for at in [100, 3_100] {
+            let mut o = observation(BaseState::Blocked, at);
+            o.strong_visible_signal = true;
+            machine.observe_estimate(o);
+        }
+        let recovered = &machine.snapshots()[0];
+        assert_eq!(recovered.base_state, BaseState::Unknown);
+        assert_eq!(recovered.display_state, DisplayState::Blocked);
+        assert_eq!(recovered.state_source, StateSource::Hook);
+        assert!(recovered.attention.is_none());
+        machine.mark_capture_failure(&initial.instance_id, 4_000, 3_000);
+        machine.mark_capture_failure(&initial.instance_id, 8_000, 3_000);
+        machine.mark_capture_success(&initial.instance_id);
+        assert_eq!(
+            machine
+                .observe_estimate(observation(BaseState::Unknown, 9_000))
+                .display_state,
+            DisplayState::Blocked
+        );
+        assert_eq!(
+            machine.checkpoint_metadata(&initial.instance_id).unwrap().1,
+            1
+        );
+    }
+
+    #[test]
+    fn confirmed_idle_survives_capture_gaps_without_completion_and_hook_resumes() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        machine
+            .report_event(
+                &initial.instance_id,
+                &event("w", "front", AgentEventType::Working, 1),
+                false,
+            )
+            .unwrap();
+        let mut idle = observation(BaseState::Idle, 100);
+        idle.strong_visible_signal = true;
+        machine.observe_estimate(idle.clone());
+        idle.observed_at_ms = 3_100;
+        assert_eq!(
+            machine.observe_estimate(idle.clone()).display_state,
+            DisplayState::Idle
+        );
+        for at in [4_000, 8_000] {
+            let failed = machine
+                .mark_capture_failure(&initial.instance_id, at, 3_000)
+                .unwrap();
+            assert_eq!(failed.display_state, DisplayState::Idle);
+            assert!(failed.stale);
+        }
+        machine.mark_capture_success(&initial.instance_id);
+        let repaint = machine.observe_estimate(observation(BaseState::Unknown, 9_000));
+        assert_eq!(repaint.display_state, DisplayState::Idle);
+        assert!(!repaint.stale);
+        assert!(repaint.attention.is_none());
+        idle.observed_at_ms = 9_100;
+        let recovered = machine.observe_estimate(idle);
+        assert_eq!(recovered.display_state, DisplayState::Idle);
+        assert_eq!(recovered.base_state, BaseState::Working);
+        assert!(machine.next_attention().is_none());
+        let resumed = machine
+            .report_event(
+                &initial.instance_id,
+                &event("resume", "front", AgentEventType::Activity, 10_000),
+                false,
+            )
+            .unwrap();
+        assert_eq!(resumed.display_state, DisplayState::Working);
+        assert_eq!(resumed.hook_health, HookHealth::Healthy);
+    }
+
+    #[test]
+    fn weak_or_interrupted_blockers_do_not_trigger_fallback() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        machine
+            .report_event(
+                &initial.instance_id,
+                &event("w", "front", AgentEventType::Working, 1),
+                false,
+            )
+            .unwrap();
+        for at in [100, 4_000] {
+            assert_eq!(
+                machine
+                    .observe_estimate(observation(BaseState::Blocked, at))
+                    .display_state,
+                DisplayState::Working
+            );
+        }
+        let mut strong = observation(BaseState::Blocked, 5_000);
+        strong.strong_visible_signal = true;
+        machine.observe_estimate(strong.clone());
+        machine.mark_capture_failure(&initial.instance_id, 6_000, 3_000);
+        machine.mark_capture_success(&initial.instance_id);
+        strong.observed_at_ms = 9_000;
+        assert_eq!(
+            machine.observe_estimate(strong.clone()).display_state,
+            DisplayState::Working
+        );
+        machine.observe_estimate(observation(BaseState::Unknown, 10_000));
+        strong.observed_at_ms = 12_000;
+        assert_eq!(
+            machine.observe_estimate(strong).display_state,
+            DisplayState::Working
         );
     }
 
