@@ -1140,6 +1140,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
                 }
+                // Global hooks also run in ordinary terminals and desktop apps.
+                Err(tmux_agent_workbench::server::ServerError::NotInTmux) => {}
                 Err(error) => return Err(error.into()),
             }
             println!("{{}}");

@@ -97,7 +97,8 @@ pub fn ingest_detached(
     };
     let report = detached_report_from_payload(agent, event_name, &payload)?;
     let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
-    let mut accepted = 0_u32;
+    // Hooks are installed globally, so an agent may legitimately run outside
+    // tmux. Try detached association, but no matching daemon is a normal no-op.
     if let Ok(entries) = fs::read_dir(&paths.runtime_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -108,13 +109,8 @@ pub fn ingest_detached(
             if !name.starts_with("daemon-") || !name.ends_with(".sock") {
                 continue;
             }
-            if call(&path, &request, Duration::from_millis(150)).is_ok() {
-                accepted = accepted.saturating_add(1);
-            }
+            let _ = call(&path, &request, Duration::from_millis(150));
         }
-    }
-    if accepted == 0 {
-        return Err("no Workbench daemon could associate the Codex hook with a live pane".into());
     }
     Ok(())
 }
