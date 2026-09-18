@@ -82,19 +82,6 @@ tmux set-option -s command-alias[921] \
 tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'\""
 tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
-tmux bind-key -T root MouseDown1Status "$status_click_action"
-tmux bind-key -T prefix MouseDown1Status "$status_click_action"
-workbench_status_ranges='#{||:#{==:#{mouse_status_range},wb_prefix},#{||:#{==:#{mouse_status_range},wb_cpu},#{||:#{==:#{mouse_status_range},wb_host},#{||:#{==:#{mouse_status_range},wb_tmux},#{||:#{==:#{mouse_status_range},wb_agent},#{||:#{==:#{mouse_status_range},wb_sidebar},#{==:#{mouse_status_range},wb_usage}}}}}}}'
-tmux bind-key -T root MouseDown1Status if-shell -F "$workbench_status_ranges" \
-  'display-message -p ""' 'select-window -t ='
-tmux bind-key -T prefix MouseDown1Status if-shell -F "$workbench_status_ranges" \
-  'display-message -p ""' 'select-window -t ='
-tmux bind-key -T root MouseUp1Status if-shell -F "$workbench_status_ranges" \
-  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" root \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"" \
-  'display-message -p ""'
-tmux bind-key -T prefix MouseUp1Status if-shell -F "$workbench_status_ranges" \
-  "run-shell -b \"$CURRENT_DIR/bin/workbench-status-click \\\"#{mouse_status_range}\\\" \\\"#{pane_id}\\\" prefix \\\"#{client_name}\\\" \\\"#{window_id}\\\"\"" \
-  'display-message -p ""'
 tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
@@ -105,18 +92,19 @@ tmux set-option -s command-alias[929] \
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
   'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-metrics-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
-tmux bind-key -T root MouseDown1Status wb-status-route
-tmux bind-key -T prefix MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route
-tmux unbind-key -T root MouseUp1Status 2>/dev/null || true
+# Open after release. Native menus then receive a complete subsequent click,
+# including its coordinates, without depending on hover events (touch screens).
+# Empty branches must emit nothing: display-message -p enters the output pager.
+# Session enters the prefix table on press and keeps it on release.
+tmux bind-key -T root MouseDown1Status if-shell -F \
+  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' ''
+tmux bind-key -T prefix MouseDown1Status switch-client -T prefix
+tmux bind-key -T root MouseUp1Status wb-status-route
 tmux bind-key -T prefix MouseUp1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' \
-  'switch-client -T prefix' 'switch-client -T prefix'
-# A Session press moves the client into the prefix table. Its release is then
-# decoded in that table; keep it there so touch behaves like a physical prefix.
+  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route
 tmux bind-key -T root MouseDown3Status if-shell -F \
   '#{==:#{mouse_status_range},wb_usage}' \
-  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" 'display-message -p ""'
+  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" ''
 
 # If the optional theme loaded first, ask it to consume the newly registered
 # context values once. Future theme repaints read the same retained options.

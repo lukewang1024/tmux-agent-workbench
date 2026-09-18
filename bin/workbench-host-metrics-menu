@@ -19,7 +19,7 @@ case $mode in
   full) full_line="✓ Full     · all metrics" ;;
 esac
 
-exec tmux display-menu -M -O -C 0 -c "$client" -t "$pane" -b rounded \
+exec tmux display-menu -M -C 0 -c "$client" -t "$pane" -b rounded \
   -T '#[align=centre] 󰻠 Resources ' \
   "$compact_line" c "run-shell -b '$script_dir/workbench-host-metrics-mode compact'" \
   "$standard_line" s "run-shell -b '$script_dir/workbench-host-metrics-mode standard'" \

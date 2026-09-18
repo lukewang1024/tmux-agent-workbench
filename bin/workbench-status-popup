@@ -18,6 +18,6 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 [ -x "$core" ] || core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
 [ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
 
-# Native menus share Usage's mouse handling: opening release is ignored,
-# subsequent outside clicks dismiss. The core sizes/pages for this client.
+# Status bindings open after release, so native menus can select by click
+# coordinates without requiring hover. The core sizes/pages for this client.
 exec "$core" status-menu "$kind" --pane "$pane" --client "$client"

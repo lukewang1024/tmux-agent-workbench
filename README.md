@@ -304,13 +304,11 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-Status-bar overlays open from `MouseDown`, matching tmux's native menu event
-model. Host, tmux, and Agent actions use a compact Workbench popup with the
-same Crossterm mouse-down handling as the Sidebar; they do not depend on
-`display-menu` release-to-select behavior. The popup waits for the opening
-release before enabling its own mouse capture. No overlay is opened from
-`MouseUp`: doing so can select an item under the release and accidentally enter
-a full-screen chooser.
+Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
+use native menus that select the row at the next click's coordinates, including
+on touch screens without hover events. The opening release is consumed before
+the menu appears. Escape or clicking outside dismisses the menu; keyboard
+shortcuts and arrow-key navigation remain available.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

@@ -75,7 +75,6 @@ pub fn run(
     command.args([
         "display-menu",
         "-M",
-        "-O",
         "-C",
         "0",
         "-c",

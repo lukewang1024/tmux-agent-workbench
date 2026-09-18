@@ -15,7 +15,7 @@ command -v ssh-connect >/dev/null 2>&1 || {
   exit 127
 }
 
-set -- tmux display-menu -M -O -C 0 -c "$client" -t "$pane" \
+set -- tmux display-menu -M -C 0 -c "$client" -t "$pane" \
   -T '#[align=centre] 󰍹 SSH '
 found=0
 keys=123456789abcdefghijklmnopqrstuvwxyz

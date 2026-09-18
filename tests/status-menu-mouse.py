@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     ssh = shim / 'ssh-connect'
     ssh.write_text('#!/bin/sh\nprintf "%s\\n" dev-host test-host\n')
     ssh.chmod(0o755)
-    env['PATH'] = str(shim) + ':' + env['PATH']
+    env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
 
@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 output += os.read(master, 65536)
         return output
 
-    def close_position(output):
+    def item_position(output, label="close"):
         # Track the native menu's cursor writes to click the rendered Close row.
         screen = {}
         x = y = 0
@@ -74,9 +74,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 x += 1
         for row in range(30):
             text = ''.join(screen.get((col, row), ' ') for col in range(80))
-            if 'close' in text:
-                return text.index('close') + 2, row + 1
-        raise AssertionError(('Close position missing', screen))
+            if label in text:
+                return text.index(label) + 2, row + 1
+        raise AssertionError(('Menu item position missing', label, screen))
 
     def wait_for_text(proc, needle=b'close'):
         output = b''
@@ -91,7 +91,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     client_process = None
     menu = None
     try:
-        tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30')
+        tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '/bin/sh')
+        tmux('set-option', '-g', 'default-shell', '/bin/sh')
         tmux('set-option', '-g', 'mouse', 'on')
         tmux('set-option', '-g', 'status', 'off')
         tmux('set-option', '-g', '@workbench-usage-source', 'opencode')
@@ -106,22 +107,19 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 break
             drain(0.05)
         drain()
-        for kind in ('host', 'tmux', 'agent', 'usage'):
+        for kind in ('host', 'tmux', 'agent', 'usage', 'metrics'):
             for close in ('outside', 'escape', 'button'):
                 args = ([str(repo / 'bin/workbench-agent-usage'), 'menu', client] if kind == 'usage'
+                        else [str(repo / 'bin/workbench-host-metrics-menu'), client, pane] if kind == 'metrics'
                         else [str(repo / 'bin/workbench-status-popup'), kind, client, pane])
                 menu = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
-                # Releasing the click that opened a menu must not dismiss it.
-                os.write(master, b'\x1b[<0;1;1m')
-                drain(0.1)
-                assert menu.poll() is None, (kind, 'opening release dismissed menu')
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
                 elif close == 'escape':
                     os.write(master, b'\x1b')
                 else:
-                    x, y = close_position(rendered)
+                    x, y = item_position(rendered)
                     os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
                 for _ in range(40):
                     drain(0.05)
@@ -130,6 +128,29 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 assert menu.poll() == 0, (kind, close, menu.poll())
                 assert tmux('list-windows', '-F', '#{window_id}').count('\n') == 0
                 print('PASS', kind, close)
+        # Touch sends a press/release without any preceding hover/motion.
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        x, y = item_position(rendered, '/btw')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=3)
+        drain(0.3)
+        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
+        tmux('send-keys', '-t', pane, 'C-u')
+        print('PASS touch selects action without hover')
+        menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        x, y = item_position(rendered, 'Standard')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=3)
+        for _ in range(40):
+            if tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard':
+                break
+            drain(0.05)
+        assert tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard'
+        print('PASS metrics touch action')
         # A native Agent action still prefills the source pane without Enter.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -137,8 +158,65 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/side' in tmux('capture-pane', '-p', '-t', pane)
+        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
         print('PASS agent action targets source pane')
+        # Exercise the real status binding block: opening press/release must not
+        # activate the first row, then a touch selects New window exactly once.
+        import shlex
+        source = (repo / 'workbench.tmux').read_text()
+        bindings = source[source.index('tmux bind-key -T root MouseDown1Status if-shell'):]
+        bindings = bindings[:bindings.index('tmux bind-key -T root MouseDown3Status')]
+        action = shlex.join([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane])
+        route = ('wb-status-route=if-shell -F '
+                 + shlex.quote('#{==:#{mouse_status_range},wb_tmux}') + ' '
+                 + shlex.quote('run-shell -b ' + shlex.quote(action)) + ' '
+                 + shlex.quote('select-window -t ='))
+        tmux('set-option', '-s', 'command-alias[927]', route)
+        subprocess.run(['sh', '-c', bindings], env=env, check=True)
+        tmux('set-option', '-g', 'status', 'on')
+        tmux('set-option', '-g', 'status-left', '')
+        tmux('set-option', '-g', 'status-right', '#[range=user|wb_tmux]MENU#[range=]')
+        drain()
+        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        os.write(master, b'\x1b[<0;78;30M\x1b[<0;78;30m')
+        rendered = wait_for_text(client_process)
+        assert tmux('list-windows', '-F', '#{window_id}').splitlines() == before
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0', 'opening status menu left an output pager'
+        x, y = item_position(rendered, 'New window')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        drain(0.5)
+        after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        assert len(after) == len(before) + 1, 'status touch did not create exactly one window'
+        tmux('kill-window', '-t', next(window for window in after if window not in before))
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        # A normal window-tab click also must not leave an output pager behind.
+        other = tmux('new-window', '-d', '-P', '-F', '#{window_id}', '-n', 'touch-target')
+        tmux('set-option', '-g', 'window-status-format', '#W')
+        tmux('set-option', '-g', 'window-status-current-format', '#W')
+        tmux('refresh-client', '-S')
+        rendered = drain(0.3)
+        x, y = item_position(rendered, 'touch-target')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        drain(0.3)
+        assert tmux('display-message', '-p', '#{window_id}') == other
+        assert set(tmux('list-panes', '-s', '-F', '#{pane_in_mode}').splitlines()) == {'0'}
+        tmux('kill-window', '-t', other)
+        tmux('set-option', '-g', 'status', 'off')
+        drain(0.3)
+        print('PASS window tab touch leaves no output pager')
+        print('PASS status opening release and subsequent touch action')
+        menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        x, y = item_position(rendered, 'Claude Code')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=3)
+        drain(0.5)
+        assert tmux('show-option', '-gqv', '@workbench-usage-source') == 'claude'
+        # The provider switch reopens Usage; wait for it to settle, then dismiss.
+        os.write(master, b'\x1b')
+        drain(0.6)
+        print('PASS usage touch action')
         # Narrow clients retain usable menus and Close rather than rejecting width.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 30, 0, 0))
         import signal
