@@ -1,20 +1,47 @@
 name: release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       repair_release_tag:
-        description: 'Existing release to repair (production files must match its tag)'
-        required: false
+        description: 'Rebuild an existing immutable tag using CI-validated test tooling'
+        required: true
         type: string
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.prepare.outputs.enabled }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      source: ${{ steps.prepare.outputs.source }}
+      validation: ${{ steps.prepare.outputs.validation }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_RELEASE_TAG: ${{ inputs.repair_release_tag }}
+        run: python3 .github/scripts/prepare-release.py
   build:
+    needs: prepare
+    if: needs.prepare.outputs.enabled == 'true'
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -45,15 +72,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify repair source matches the published release
-        if: inputs.repair_release_tag != ''
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          fetch-depth: 0
+      - name: Use the validated installer test fixture
         env:
-          RELEASE_TAG: ${{ inputs.repair_release_tag }}
-        run: |
-          case "$RELEASE_TAG" in v[0-9]*) ;; *) exit 1 ;; esac
-          git check-ref-format "refs/tags/$RELEASE_TAG"
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          git diff --exit-code "$RELEASE_TAG" HEAD -- . ':!tests' ':!.github'
+          VALIDATION_REF: ${{ needs.prepare.outputs.validation }}
+        run: git show "$VALIDATION_REF:tests/core-selection.sh" > tests/core-selection.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -85,13 +110,15 @@ jobs:
           cp "target/${{ matrix.target }}/release/tmux-agent-workbench" dist/
           cp README.md LICENSE dist/
           tar -C dist -czf "tmux-agent-workbench-${{ matrix.target }}.tar.gz" .
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || inputs.repair_release_tag != ''
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ inputs.repair_release_tag || github.ref_name }}
-          files: tmux-agent-workbench-${{ matrix.target }}.tar.gz
+          name: rust-${{ matrix.target }}
+          path: tmux-agent-workbench-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
   windows-companion:
-    if: inputs.repair_release_tag == ''
+    needs: prepare
+    if: needs.prepare.outputs.enabled == 'true'
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -102,6 +129,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -112,9 +141,30 @@ jobs:
           Compress-Archive -Path "windows-companion/bin/Release/net9.0-windows10.0.19041.0/${{ matrix.runtime }}/publish/*" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: windows-${{ matrix.runtime }}
+          path: |
             wb-client-${{ matrix.runtime }}.zip
             wb-client-${{ matrix.runtime }}.zip.sha256
+          if-no-files-found: error
+  publish:
+    needs: [prepare, build, windows-companion]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish only after every target succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          test "$(find dist -type f | wc -l)" -eq 11
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
