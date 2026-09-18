@@ -46,7 +46,7 @@ see [Install](#install).
 
 ## Requirements
 
-- **tmux >= 3.2**, **git**, and the shipped `tmux-agent-workbench` binary —
+- **tmux >= 3.6 for interactive status/sidebar menus** (core requires >= 3.2), **git**, and the shipped `tmux-agent-workbench` binary —
   hard requirements. The installer downloads a matching macOS/Linux
   x86_64/aarch64 release, then falls back to a local Cargo build.
 - **tig** or **lazygit** (or any git TUI) — launched in the top pane of every
