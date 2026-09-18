@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      repair_release_tag:
+        description: 'Existing release to repair (production files must match its tag)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -40,6 +45,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify repair source matches the published release
+        if: inputs.repair_release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.repair_release_tag }}
+        run: |
+          case "$RELEASE_TAG" in v[0-9]*) ;; *) exit 1 ;; esac
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git diff --exit-code "$RELEASE_TAG" HEAD -- . ':!tests' ':!.github'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -72,10 +86,12 @@ jobs:
           cp README.md LICENSE dist/
           tar -C dist -czf "tmux-agent-workbench-${{ matrix.target }}.tar.gz" .
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.repair_release_tag != ''
         with:
+          tag_name: ${{ inputs.repair_release_tag || github.ref_name }}
           files: tmux-agent-workbench-${{ matrix.target }}.tar.gz
   windows-companion:
+    if: inputs.repair_release_tag == ''
     strategy:
       matrix:
         include:
