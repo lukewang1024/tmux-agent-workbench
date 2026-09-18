@@ -1080,12 +1080,12 @@ fn agent_status(agent: &AgentSnapshot) -> String {
         && agent.base_state != crate::model::BaseState::Blocked
         && agent.hook_health == crate::model::HookHealth::Conflict
     {
-        return "input · hook conflict".to_owned();
+        return "input !".to_owned();
     }
     let mut status = if agent.display_state == DisplayState::Idle
         && agent.rule_id.as_deref() == Some("codex-queued-question-idle")
     {
-        "idle · question queued"
+        "idle ?"
     } else if agent.display_state == DisplayState::Blocked {
         agent.reason_category.as_deref().unwrap_or("blocked")
     } else {
@@ -2310,24 +2310,24 @@ mod tests {
     }
 
     #[test]
-    fn blocked_display_fallback_explains_hook_conflict() {
+    fn blocked_display_fallback_uses_compact_hook_conflict_marker() {
         let mut snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let agent = &mut snapshot.agents[0];
         agent.base_state = crate::model::BaseState::Working;
         agent.display_state = DisplayState::Blocked;
         agent.hook_health = crate::model::HookHealth::Conflict;
-        assert_eq!(agent_status(agent), "input · hook conflict");
+        assert_eq!(agent_status(agent), "input !");
     }
 
     #[test]
-    fn queued_question_is_an_idle_detail() {
+    fn queued_question_uses_compact_idle_marker() {
         let mut snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let agent = &mut snapshot.agents[0];
         agent.display_state = DisplayState::Idle;
         agent.rule_id = Some("codex-queued-question-idle".into());
-        assert!(agent_status(agent).starts_with("idle · question queued"));
+        assert!(agent_status(agent).starts_with("idle ?"));
     }
 
     #[test]

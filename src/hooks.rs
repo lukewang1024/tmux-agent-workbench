@@ -750,7 +750,9 @@ fn now_ms() -> u64 {
 
 pub fn read_stdin() -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    io::stdin().take(64 * 1024).read_to_end(&mut bytes)?;
+    // Tool results may exceed a screen capture budget. Truncating the JSON
+    // drops the entire lifecycle event; only the small report is forwarded.
+    io::stdin().read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
