@@ -12,7 +12,7 @@ mkdir -p "$plugin/bin" "$plugin/lib" "$plugin/target/release" \
   "$XDG_DATA_HOME/tmux-agent-workbench/bin" "$fixture/bin"
 cp "$repo/bin/tmux-agent-workbench-cli" "$plugin/bin/"
 cp "$repo/workbench.tmux" "$repo/Cargo.toml" "$plugin/"
-cp "$repo/lib/bind-tracked.sh" "$plugin/lib/"
+cp "$repo/lib/bind-tracked.sh" "$repo/lib/host-metrics.sh" "$plugin/lib/"
 
 make_core() {
   printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$1"
