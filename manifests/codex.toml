@@ -6,7 +6,7 @@ aliases = ["codex", "codex-cli"]
 id = "codex-automatic-approval-review"
 priority = 1200
 state = "working"
-region = "bottom_lines"
+region = "codex_status"
 visible = "working"
 # The approval overlay can set Action Required even while its reviewer is busy.
 matcher = { line_regex = { value = "(?i)^\\s*[•●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\\s*(automatically reviewing (the )?approval|reviewing approval request)([ .…(].*)?$" } }
@@ -15,7 +15,7 @@ matcher = { line_regex = { value = "(?i)^\\s*[•●⠋⠙⠹⠸⠼⠴⠦⠧⠇�
 id = "codex-queued-question-idle"
 priority = 1150
 state = "idle"
-region = "bottom_lines"
+region = "codex_status"
 visible = "idle"
 # A queued asynchronous question can keep Action Required in the title after
 # the main turn ends. Require the queue UI and the idle composer together.
@@ -23,7 +23,7 @@ matcher = { all = { items = [
   { line_regex = { value = "^\\s*[•●]?\\s*Queued follow-up inputs\\s*$" } },
   { line_regex = { value = "^\\s*[?]\\s+[0-9]+ questions?\\s*$" } },
   { contains = { value = "to answer" } },
-  { line_regex = { value = "^\\s*[›❯][\\s⠁-⣿]*Ask Codex to do anything.*$" } },
+  { line_regex = { value = "^\\s*[›❯]\\s*$" } },
   { not = { item = { contains = { value = "esc to interrupt" } } } },
   { not = { item = { contains = { value = "Press enter to confirm" } } } }
 ] } }
@@ -55,10 +55,10 @@ matcher = { regex = { value = "^\\s*$" } }
 
 [[rules]]
 id = "codex-approval"
-priority = 300
+priority = 1180
 state = "blocked"
 reason_category = "approval"
-region = "bottom_non_empty_lines"
+region = "codex_status"
 visible = "blocker"
 matcher = { any = { items = [
   { line_regex = { value = "(?i)^\\s*(would you like|do you want) .*[?]\\s*$" } },
@@ -68,10 +68,10 @@ matcher = { any = { items = [
 
 [[rules]]
 id = "codex-resource-limit"
-priority = 290
+priority = 1170
 state = "blocked"
 reason_category = "resource_limit"
-region = "bottom_non_empty_lines"
+region = "codex_status"
 visible = "blocker"
 matcher = { line_regex = { value = "(?i)^\\s*(usage limit|rate limit|you have .* weighted tokens left)" } }
 
@@ -79,7 +79,7 @@ matcher = { line_regex = { value = "(?i)^\\s*(usage limit|rate limit|you have .*
 id = "codex-idle-with-background-terminal"
 priority = 260
 state = "idle"
-region = "bottom_lines"
+region = "codex_status"
 visible = "idle"
 matcher = { all = { items = [
   { contains = { value = "background terminal running" } },
@@ -88,9 +88,9 @@ matcher = { all = { items = [
 
 [[rules]]
 id = "codex-working-interruptible"
-priority = 280
+priority = 1140
 state = "working"
-region = "bottom_lines"
+region = "codex_status"
 visible = "working"
 matcher = { contains = { value = "esc to interrupt" } }
 
@@ -113,7 +113,7 @@ matcher = { all = { items = [
 id = "codex-working"
 priority = 200
 state = "working"
-region = "bottom_lines"
+region = "codex_status"
 visible = "working"
 matcher = { line_regex = { value = "(?i)^\\s*[•●◐◓◑◒].*(working|thinking|running|searching|analyzing)" } }
 
@@ -121,6 +121,6 @@ matcher = { line_regex = { value = "(?i)^\\s*[•●◐◓◑◒].*(working|thin
 id = "codex-idle-prompt"
 priority = 220
 state = "idle"
-region = "bottom_non_empty_lines"
+region = "codex_status"
 visible = "idle"
 matcher = { line_regex = { value = "^\\s*[›❯](\\s+.*|[⠁-⣿]*Ask Codex to do anything.*)?\\s*$" } }

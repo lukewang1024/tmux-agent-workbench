@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -69,6 +70,7 @@ pub enum Region {
     AfterLastPrompt,
     AfterLastRule,
     PaneTitle,
+    CodexStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -175,7 +177,7 @@ impl Manifest {
     pub fn classify(&self, content: &str, title: &str) -> Classification {
         for rule in &self.rules {
             let region = extract_region(content, title, &rule.region);
-            if matcher_matches(&rule.matcher, region) {
+            if matcher_matches(&rule.matcher, &region) {
                 return Classification {
                     state: rule.state.unwrap_or(match rule.visible {
                         Visibility::Idle => BaseState::Idle,
@@ -347,8 +349,9 @@ fn matcher_matches(matcher: &Matcher, input: &str) -> bool {
     }
 }
 
-fn extract_region<'a>(content: &'a str, title: &'a str, region: &Region) -> &'a str {
-    match region {
+fn extract_region<'a>(content: &'a str, title: &'a str, region: &Region) -> Cow<'a, str> {
+    Cow::Borrowed(match region {
+        Region::CodexStatus => return Cow::Owned(codex_status_content(content)),
         Region::PaneTitle => title,
         Region::WholeRecent => content,
         Region::TopLines => lines_range(content, 0, 30),
@@ -357,7 +360,60 @@ fn extract_region<'a>(content: &'a str, title: &'a str, region: &Region) -> &'a 
         Region::PromptBox => prompt_box(content),
         Region::AfterLastPrompt => after_last_prompt(content),
         Region::AfterLastRule => after_last_horizontal_rule(content),
+    })
+}
+
+// Keep only the current footer/status area. The composer is a boundary, not
+// evidence: draft text and its animated Braille background must never match
+// approval, progress, or resource-limit rules.
+fn codex_status_content(content: &str) -> String {
+    let mut offset = 0;
+    let mut composer = None;
+    for line in content.split_inclusive('\n') {
+        if line.trim_start().starts_with(['›', '❯']) {
+            composer = Some(offset);
+        }
+        offset += line.len();
     }
+    let mut status = content;
+    let mut has_composer = false;
+    if let Some(start) = composer {
+        let suffix = &content[start..];
+        let after_prompt = suffix.split_once('\n').map_or("", |(_, tail)| tail);
+        let has_footer = after_prompt.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("gpt-") || line.contains("context left")
+        });
+        let only_animation = after_prompt
+            .chars()
+            .all(|c| c.is_whitespace() || ('\u{2800}'..='\u{28ff}').contains(&c));
+        // An earlier submitted prompt followed by assistant output is history,
+        // not the live composer (e.g. when a permission overlay replaces it).
+        let has_transcript_divider =
+            after_last_horizontal_rule(after_prompt).len() != after_prompt.len();
+        if !has_transcript_divider && (has_footer || only_animation) {
+            status = &content[..start];
+            has_composer = true;
+        }
+    }
+    // Ignore completed transcript above the latest divider or live status.
+    status = after_last_horizontal_rule(status);
+    let mut start = 0;
+    let mut offset = 0;
+    for line in status.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(['•', '●']) && trimmed.contains("esc to interrupt") {
+            start = offset;
+        } else if trimmed.starts_with('─') && trimmed.contains("Worked for ") {
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    let mut result = tail_lines(&status[start..], 30, false).to_owned();
+    if has_composer {
+        result.push_str("\n›\n");
+    }
+    result
 }
 
 fn lines_range(value: &str, start: usize, count: usize) -> &str {
@@ -659,16 +715,18 @@ gpt-6-astra medium"
             assert_eq!(idle.state, BaseState::Idle);
             assert_eq!(idle.rule_id.as_deref(), Some("codex-queued-question-idle"));
             assert!(idle.strong_visible_signal);
-            let active =
-                codex.classify(&format!("{screen}\n• Working (esc to interrupt)"), "⠹ task");
+            let active = codex.classify(
+                &format!("• Working (esc to interrupt)\n{screen}"),
+                "Action Required",
+            );
             assert_eq!(active.state, BaseState::Working);
             let approval = codex.classify(
-                &format!("{screen}\nPress enter to confirm"),
+                &format!("Press enter to confirm\n{screen}"),
                 "Action Required",
             );
             assert_eq!(approval.state, BaseState::Blocked);
             let review = codex.classify(
-                &format!("{screen}\n• Automatically reviewing approval"),
+                &format!("• Automatically reviewing approval\n{screen}"),
                 "Action Required",
             );
             assert_eq!(review.state, BaseState::Working);
@@ -681,6 +739,31 @@ gpt-6-astra medium"
                 )
                 .state,
             BaseState::Blocked
+        );
+    }
+
+    #[test]
+    fn codex_live_status_ignores_animated_multiline_draft_and_pending_question_title() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let codex = set.get(AgentKind::Codex);
+        let working = "• Working (7m 10s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 2 questions\n    shift + ← to answer\n⠁ ⢀ ⠂\n› explain approval\nPress enter to confirm\nusage limit\n  gpt-6-astra medium · /tmp";
+        let result = codex.classify(working, "Action Required | task");
+        assert_eq!(result.state, BaseState::Working);
+        assert_eq!(
+            result.rule_id.as_deref(),
+            Some("codex-working-interruptible")
+        );
+        let idle = working.replace("• Working (7m 10s • esc to interrupt)", "─ Worked for 2m ─");
+        assert_eq!(
+            codex.classify(&idle, "Action Required | task").state,
+            BaseState::Idle
+        );
+        let approval = "› submitted request\n──────────────────\nWould you like to run the following command?\nPress enter to confirm\n  gpt-6-astra medium";
+        assert_eq!(codex.classify(approval, "task").state, BaseState::Blocked);
+        let stale = "Would you like to run the following command?\nPress enter to confirm\n──────────────────\n• Working (esc to interrupt)\n› draft\n  gpt-6-astra medium";
+        assert_eq!(
+            codex.classify(stale, "Action Required").state,
+            BaseState::Working
         );
     }
 
