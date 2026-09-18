@@ -52,6 +52,49 @@ impl ProcessSource for ProcessTree {
     }
 }
 
+/// Recover a hook's owning CLI without relying on sandbox-filtered tmux env.
+pub fn current_agent_ancestor(kind: AgentKind) -> Option<u32> {
+    let aliases = HashMap::from([
+        ("codex".into(), AgentKind::Codex),
+        ("codex-cli".into(), AgentKind::Codex),
+        ("claude".into(), AgentKind::Claude),
+        ("trae".into(), AgentKind::Trae),
+        ("traex".into(), AgentKind::Trae),
+        ("opencode".into(), AgentKind::Opencode),
+    ]);
+    let mut system = System::new();
+    let mut pid = Pid::from_u32(std::process::id());
+    for _ in 0..64 {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .without_tasks()
+                .with_exe(UpdateKind::OnlyIfNotSet)
+                .with_cmd(UpdateKind::OnlyIfNotSet),
+        );
+        let process = system.process(pid)?;
+        if identify(process, &aliases) == Some(kind) {
+            // A TUI can proxy to one app-server shared by several panes. That
+            // backend PID is not evidence of the owning terminal's identity.
+            if is_shared_backend(kind, process.cmd()) {
+                return None;
+            }
+            return Some(pid.as_u32());
+        }
+        let parent = process.parent()?;
+        if parent == pid {
+            return None;
+        }
+        pid = parent;
+    }
+    None
+}
+
+fn is_shared_backend(kind: AgentKind, args: &[std::ffi::OsString]) -> bool {
+    kind == AgentKind::Codex && args.iter().any(|arg| arg == "app-server")
+}
+
 fn find_agents(
     system: &System,
     roots: &[u32],
@@ -164,6 +207,24 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_codex_backend_is_not_a_terminal_owner() {
+        let shared = [
+            "codex",
+            "-c",
+            "features.code_mode_host=true",
+            "app-server",
+            "--listen",
+            "unix://",
+        ]
+        .map(std::ffi::OsString::from);
+        assert!(is_shared_backend(AgentKind::Codex, &shared));
+        assert!(!is_shared_backend(
+            AgentKind::Codex,
+            &["codex".into(), "--yolo".into()]
+        ));
+    }
 
     #[test]
     fn minimal_refresh_keeps_identity_and_removes_exited_agents() {

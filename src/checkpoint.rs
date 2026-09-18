@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::semantic::SemanticEvent;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCheckpoint {
     pub version: u32,
@@ -15,6 +15,12 @@ pub struct RuntimeCheckpoint {
     pub runtime_id: String,
     pub process_fingerprint: String,
     pub previous_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<crate::model::StateSource>,
+    #[serde(default)]
+    pub last_hook_event_at_ms: u64,
+    #[serde(default)]
+    pub hook_event_ids: Vec<String>,
     pub attention_seq: u64,
     pub seen_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +129,7 @@ mod tests {
             delivered_event_ids: vec![],
             pending: vec![],
             recent_endpoint: None,
+            ..Default::default()
         };
         store(&path, &checkpoint).unwrap();
         assert_eq!(

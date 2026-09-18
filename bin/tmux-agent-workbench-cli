@@ -108,6 +108,24 @@ case $command_name in
     esac
     need_core; exec "$core" pick "$@" ;;
   host-metrics) exec sh "$plugin_dir/bin/workbench-host-metrics" "$@" ;;
+  hook)
+    need_core
+    hook_state=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench
+    (umask 077; mkdir -p "$hook_state")
+    hook_error=$(mktemp "$hook_state/hook-error.XXXXXX")
+    trap 'rm -f "$hook_error"' EXIT HUP INT TERM
+    if "$core" hook "$@" 2>"$hook_error"; then
+      cat "$hook_error" >&2
+    else
+      hook_status=$?
+      cat "$hook_error" >&2
+      (umask 077
+        { printf '%s hook %s (exit %s)\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" "$hook_status"
+        cat "$hook_error"; } >>"$hook_state/hook-errors.log"
+      )
+      exit "$hook_status"
+    fi
+    ;;
   status) need_core; exec "$core" status "$@" ;;
   doctor|config|hooks|daemon) need_core; exec "$core" "$command_name" "$@" ;;
   -h|--help|help) usage ;;

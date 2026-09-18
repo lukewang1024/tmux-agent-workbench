@@ -85,11 +85,36 @@ impl StateMachine {
             "unknown" => BaseState::Unknown,
             _ => return false,
         };
+        // Never overwrite a live event that arrived during startup discovery.
+        if tracked.last_hook_at_ms.is_some() {
+            return true;
+        }
+        let hook_source = checkpoint.state_source.unwrap_or_else(|| {
+            if checkpoint.hook_session_id.is_some() && previous != BaseState::Unknown {
+                StateSource::Hook
+            } else {
+                StateSource::Screen
+            }
+        }) == StateSource::Hook
+            && previous != BaseState::Unknown
+            && checkpoint.hook_session_id.is_some();
         tracked.runtime_id = checkpoint.runtime_id.clone();
         tracked.attention_seq = checkpoint.attention_seq;
         tracked.seen_seq = checkpoint.seen_seq;
         tracked.active_hook_session_id = checkpoint.hook_session_id.clone();
         tracked.snapshot.hook_session_id = checkpoint.hook_session_id.clone();
+        tracked.last_hook_event_at_ms = checkpoint.last_hook_event_at_ms;
+        tracked.seen_event_ids = checkpoint.hook_event_ids.clone();
+        if !hook_source {
+            // Legacy versions saved screen estimates (and capture failures) as
+            // hook authority. Keep thread identity, but trust fresh discovery.
+            tracked.snapshot.state_source = StateSource::Screen;
+            tracked.snapshot.confidence = StateConfidence::Low;
+            tracked.snapshot.hook_health = HookHealth::Missing;
+            tracked.snapshot.attention = None;
+            tracked.snapshot.display_state = display_for(tracked.snapshot.base_state);
+            return true;
+        }
         tracked.snapshot.base_state = previous;
         tracked.snapshot.display_state = display_for(previous);
         tracked.snapshot.state_source = StateSource::Hook;
@@ -124,6 +149,18 @@ impl StateMachine {
         };
         refresh_attention_display(&mut tracked.snapshot);
         true
+    }
+
+    pub fn hook_replay_guard(&self, instance_id: &str) -> (u64, Vec<String>) {
+        self.agents
+            .get(instance_id)
+            .map(|tracked| {
+                (
+                    tracked.last_hook_event_at_ms,
+                    tracked.seen_event_ids.clone(),
+                )
+            })
+            .unwrap_or_default()
     }
 
     pub fn checkpoint_metadata(
@@ -256,7 +293,10 @@ impl StateMachine {
         tracked.snapshot.stale = false;
         tracked.stale_since = None;
         tracked.snapshot.manifest_version = observation.manifest_version;
-        tracked.snapshot.hook_session_id = observation.hook_session_id;
+        tracked.snapshot.hook_session_id = tracked
+            .active_hook_session_id
+            .clone()
+            .or(observation.hook_session_id);
 
         if publish_state != BaseState::Working || observation.state != BaseState::Idle {
             tracked.snapshot.base_state = publish_state;
@@ -327,11 +367,18 @@ impl StateMachine {
             .get(&instance_id)
             .is_some_and(|tracked| tracked.snapshot.state_source == StateSource::Hook);
         if !has_hook {
+            let (attention_seq, seen_seq) = self
+                .agents
+                .get(&instance_id)
+                .map(|tracked| (tracked.attention_seq, tracked.seen_seq))
+                .unwrap_or_default();
             let snapshot = self.observe(observation.clone());
             let tracked = self
                 .agents
                 .get_mut(&snapshot.instance_id)
                 .expect("just observed");
+            tracked.attention_seq = attention_seq;
+            tracked.seen_seq = seen_seq;
             tracked.snapshot.state_source = StateSource::Screen;
             tracked.snapshot.confidence = StateConfidence::Low;
             tracked.snapshot.estimated_state = Some(observation.state);
@@ -922,6 +969,75 @@ mod tests {
         assert_eq!(machine.snapshots()[0].display_state, DisplayState::Idle);
     }
 
+    fn checkpoint_for(agent: &AgentSnapshot) -> crate::checkpoint::RuntimeCheckpoint {
+        let p = agent.process.as_ref().unwrap();
+        crate::checkpoint::RuntimeCheckpoint {
+            version: 1,
+            runtime_id: "runtime".into(),
+            process_fingerprint: format!("{}:{}:{}", p.pid, p.started_at_ticks, p.executable),
+            previous_state: "idle".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn screen_checkpoint_never_becomes_hook_authority_or_completion() {
+        for source in [None, Some(StateSource::Screen)] {
+            let mut machine = StateMachine::default();
+            let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+            let mut checkpoint = checkpoint_for(&initial);
+            checkpoint.state_source = source;
+            checkpoint.attention_seq = 5;
+            checkpoint.seen_seq = 0;
+            assert!(machine.restore_checkpoint(&checkpoint, 100));
+            let restored = &machine.snapshots()[0];
+            assert_eq!(restored.state_source, StateSource::Screen);
+            assert_eq!(restored.base_state, BaseState::Working);
+            assert_eq!(restored.hook_health, HookHealth::Missing);
+            assert!(restored.attention.is_none());
+        }
+    }
+
+    #[test]
+    fn restored_hook_rejects_duplicates_and_old_events_but_accepts_new_events() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Working, 0));
+        let mut checkpoint = checkpoint_for(&initial);
+        checkpoint.state_source = Some(StateSource::Hook);
+        checkpoint.hook_session_id = Some("front".into());
+        checkpoint.last_hook_event_at_ms = 100;
+        checkpoint.hook_event_ids = vec!["stop".into()];
+        assert!(machine.restore_checkpoint(&checkpoint, 200));
+        let duplicate = machine
+            .report_event(
+                &initial.instance_id,
+                &event("stop", "front", AgentEventType::Stop, 100),
+                false,
+            )
+            .unwrap();
+        assert!(duplicate.attention.is_none());
+        assert!(
+            machine
+                .report_event(
+                    &initial.instance_id,
+                    &event("old", "front", AgentEventType::Working, 50),
+                    false
+                )
+                .is_err()
+        );
+        let next = machine
+            .report_event(
+                &initial.instance_id,
+                &event("new", "front", AgentEventType::Working, 300),
+                false,
+            )
+            .unwrap();
+        assert_eq!(next.base_state, BaseState::Working);
+        // A delayed restoration may not rewind a hook already received live.
+        assert!(machine.restore_checkpoint(&checkpoint, 400));
+        assert_eq!(machine.snapshots()[0].base_state, BaseState::Working);
+    }
+
     #[test]
     fn checkpoint_restores_unseen_done_and_hook_thread() {
         let mut machine = StateMachine::default();
@@ -944,6 +1060,7 @@ mod tests {
             delivered_event_ids: Vec::new(),
             pending: Vec::new(),
             recent_endpoint: None,
+            ..Default::default()
         };
         assert!(machine.restore_checkpoint(&checkpoint, 500));
         let restored = machine.snapshots().remove(0);
@@ -1171,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_unknown_hook_state_can_display_a_blocker_without_new_attention() {
+    fn legacy_unknown_checkpoint_uses_fresh_screen_until_a_real_hook() {
         let mut machine = StateMachine::default();
         let initial = machine.observe_estimate(observation(BaseState::Working, 0));
         let process = initial.process.as_ref().unwrap();
@@ -1190,31 +1307,27 @@ mod tests {
             delivered_event_ids: Vec::new(),
             pending: Vec::new(),
             recent_endpoint: None,
+            ..Default::default()
         };
         assert!(machine.restore_checkpoint(&checkpoint, 10));
-        for at in [100, 3_100] {
-            let mut o = observation(BaseState::Blocked, at);
-            o.strong_visible_signal = true;
-            machine.observe_estimate(o);
-        }
-        let recovered = &machine.snapshots()[0];
-        assert_eq!(recovered.base_state, BaseState::Unknown);
-        assert_eq!(recovered.display_state, DisplayState::Blocked);
-        assert_eq!(recovered.state_source, StateSource::Hook);
-        assert!(recovered.attention.is_none());
-        machine.mark_capture_failure(&initial.instance_id, 4_000, 3_000);
-        machine.mark_capture_failure(&initial.instance_id, 8_000, 3_000);
-        machine.mark_capture_success(&initial.instance_id);
-        assert_eq!(
-            machine
-                .observe_estimate(observation(BaseState::Unknown, 9_000))
-                .display_state,
-            DisplayState::Blocked
-        );
-        assert_eq!(
-            machine.checkpoint_metadata(&initial.instance_id).unwrap().1,
-            1
-        );
+        let migrated = &machine.snapshots()[0];
+        assert_eq!(migrated.state_source, StateSource::Screen);
+        assert_eq!(migrated.hook_health, HookHealth::Missing);
+        let mut idle = observation(BaseState::Idle, 100);
+        idle.strong_visible_signal = true;
+        let fresh = machine.observe_estimate(idle);
+        assert_eq!(fresh.base_state, BaseState::Idle);
+        assert_eq!(fresh.hook_session_id.as_deref(), Some("front"));
+        assert!(fresh.attention.is_none());
+        let active = machine
+            .report_event(
+                &initial.instance_id,
+                &event("new", "front", AgentEventType::Working, 200),
+                false,
+            )
+            .unwrap();
+        assert_eq!(active.state_source, StateSource::Hook);
+        assert_eq!(active.hook_health, HookHealth::Healthy);
     }
 
     #[test]

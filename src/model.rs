@@ -86,6 +86,8 @@ pub struct AgentEventReport {
 #[serde(deny_unknown_fields)]
 pub struct DetachedAgentEventReport {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
     pub event_id: String,
     pub agent: AgentKind,
     pub session_id: String,

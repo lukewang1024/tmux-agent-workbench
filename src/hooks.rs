@@ -6,7 +6,6 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
 
 use crate::ipc::{Request, call};
@@ -75,7 +74,7 @@ pub fn ingest(
     if call(
         &paths.socket_for_server(&server.key),
         &request,
-        Duration::from_millis(150),
+        Duration::from_millis(750),
     )
     .is_err()
     {
@@ -95,10 +94,14 @@ pub fn ingest_detached(
     } else {
         serde_json::from_slice(input)?
     };
-    let report = detached_report_from_payload(agent, event_name, &payload)?;
+    let mut report = detached_report_from_payload(agent, event_name, &payload)?;
+    if report.agent_pid.is_none() {
+        report.agent_pid = crate::process::current_agent_ancestor(agent);
+    }
     let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
-    // Hooks are installed globally, so an agent may legitimately run outside
-    // tmux. Try detached association, but no matching daemon is a normal no-op.
+    // Global hooks may run outside tmux; an unmatched daemon is a normal no-op.
+    let mut accepted = 0_u32;
+    let mut rejections = Vec::new();
     if let Ok(entries) = fs::read_dir(&paths.runtime_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -109,8 +112,24 @@ pub fn ingest_detached(
             if !name.starts_with("daemon-") || !name.ends_with(".sock") {
                 continue;
             }
-            let _ = call(&path, &request, Duration::from_millis(150));
+            match call(&path, &request, Duration::from_millis(750)) {
+                Ok(_) => {
+                    accepted += 1;
+                    break;
+                }
+                Err(crate::ipc::ClientError::Connect { .. } | crate::ipc::ClientError::Io(_)) => {
+                    let key = name.trim_start_matches("daemon-").trim_end_matches(".sock");
+                    spool_detached(paths, key, &report)?;
+                    accepted += 1;
+                }
+                Err(crate::ipc::ClientError::Remote { .. }) => {}
+                Err(error) => rejections.push(error.to_string()),
+            }
         }
+    }
+    if accepted == 0 && !rejections.is_empty() {
+        return Err(format!("no Workbench daemon could associate the Codex hook with a live pane (session={}, pid={:?}): {}",
+            report.session_id, report.agent_pid, rejections.join("; ")).into());
     }
     Ok(())
 }
@@ -120,9 +139,18 @@ fn detached_report_from_payload(
     event_name: &str,
     payload: &Value,
 ) -> Result<DetachedAgentEventReport, String> {
+    if string_field(
+        payload,
+        &["session_id", "sessionId", "thread_id", "conversation_id"],
+    )
+    .is_none_or(|id| id.is_empty())
+    {
+        return Err("detached hook requires a session identity".into());
+    }
     let full = report_from_payload(agent, event_name, String::new(), String::new(), 0, payload)?;
     Ok(DetachedAgentEventReport {
         version: full.version,
+        agent_pid: (full.agent_pid != 0).then_some(full.agent_pid),
         event_id: full.event_id,
         agent: full.agent,
         session_id: full.session_id,
@@ -151,15 +179,10 @@ fn report_from_payload(
         &["session_id", "sessionId", "thread_id", "conversation_id"],
     )
     .unwrap_or_else(|| format!("pane-{pane_id}"));
-    let event_id =
-        string_field(payload, &["event_id", "eventId", "hook_event_id"]).unwrap_or_else(|| {
-            let mut hash = Sha256::new();
-            hash.update(pane_id.as_bytes());
-            hash.update(event_name.as_bytes());
-            hash.update(session_id.as_bytes());
-            hash.update(serde_json::to_vec(payload).unwrap_or_default());
-            format!("hook-{:x}", hash.finalize())[..37].to_owned()
-        });
+    // Separate invocations can have identical Stop/Working payloads. Only
+    // explicit provider IDs deduplicate; transport retries reuse this report.
+    let event_id = string_field(payload, &["event_id", "eventId", "hook_event_id"])
+        .unwrap_or_else(|| format!("hook-{}", uuid::Uuid::new_v4()));
     let agent_pid = number_field(payload, &["agent_pid", "agentPid", "pid"]).unwrap_or(0) as u32;
     let session_label = string_field(payload, &["thread_name", "threadName", "session_name"])
         .or_else(|| {
@@ -290,21 +313,63 @@ fn pane_identity(server: &ServerIdentity, pane: &str) -> Result<(String, u32), S
     ))
 }
 
+fn spool_detached(
+    paths: &Paths,
+    server_key: &str,
+    report: &DetachedAgentEventReport,
+) -> io::Result<()> {
+    let dir = paths.spool_for_server(server_key).join("detached");
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    // Do not use provider-controlled IDs as filesystem paths.
+    let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    atomic_write(
+        &path,
+        &serde_json::to_vec(report).map_err(io::Error::other)?,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn drain_detached_spool(
+    paths: &Paths,
+    server_key: &str,
+    now: u64,
+) -> Vec<DetachedAgentEventReport> {
+    let dir = paths.spool_for_server(server_key).join("detached");
+    let mut reports = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(report) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<DetachedAgentEventReport>(&bytes).ok())
+                .filter(|r| {
+                    now.saturating_sub(r.occurred_at_unix_ms) <= SPOOL_TTL_MS
+                        && r.occurred_at_unix_ms <= now.saturating_add(5_000)
+                })
+            {
+                reports.push(report);
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
+    reports.sort_by_key(|r| r.occurred_at_unix_ms);
+    reports
+}
+
 fn spool(paths: &Paths, server: &ServerIdentity, report: &AgentEventReport) -> io::Result<()> {
     let dir = paths.spool_for_server(&server.key);
     fs::create_dir_all(&dir)?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    let path = dir.join(format!(
-        "{}-{}.json",
-        report.occurred_at_unix_ms, report.event_id
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    serde_json::to_writer(&mut file, report).map_err(io::Error::other)?;
-    file.write_all(b"\n")
+    let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    atomic_write(
+        &path,
+        &serde_json::to_vec(report).map_err(io::Error::other)?,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))
 }
 
 pub fn drain_spool(paths: &Paths, server_key: &str, now: u64) -> Vec<AgentEventReport> {
@@ -315,6 +380,9 @@ pub fn drain_spool(paths: &Paths, server_key: &str, now: u64) -> Vec<AgentEventR
     let mut reports = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
         let parsed = fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<AgentEventReport>(&bytes).ok());
@@ -785,6 +853,84 @@ mod tests {
         atomic_write(&path, b"{broken").unwrap();
         assert!(merge_json_hooks(&path, "claude", false, true).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn identical_invocations_are_distinct_but_explicit_ids_are_preserved() {
+        let payload = json!({"session_id":"thread", "thread_name":"test"});
+        let first = detached_report_from_payload(AgentKind::Codex, "Stop", &payload).unwrap();
+        let second = detached_report_from_payload(AgentKind::Codex, "Stop", &payload).unwrap();
+        assert_ne!(first.event_id, second.event_id);
+        let explicit = json!({"session_id":"thread", "thread_name":"test", "event_id":"stable", "agent_pid":42});
+        let report = detached_report_from_payload(AgentKind::Codex, "Stop", &explicit).unwrap();
+        assert_eq!(report.event_id, "stable");
+        assert_eq!(report.agent_pid, Some(42));
+        assert!(
+            detached_report_from_payload(AgentKind::Codex, "Stop", &json!({"cwd":"/tmp"})).is_err()
+        );
+    }
+
+    #[test]
+    fn detached_transport_timeout_queues_the_original_event() {
+        use std::os::unix::net::UnixListener;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().into(),
+            state_dir: temp.path().into(),
+            cache_dir: temp.path().into(),
+            runtime_dir: temp.path().into(),
+        };
+        let listener = UnixListener::bind(paths.socket_for_server("test")).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let request = crate::ipc::read_request(&stream).unwrap();
+            std::thread::sleep(Duration::from_millis(1_100));
+            let _ = crate::ipc::write_response(
+                &stream,
+                &crate::ipc::Response::success(request.id, json!({"accepted":true})),
+            );
+            serde_json::from_value::<DetachedAgentEventReport>(request.params).unwrap()
+        });
+        ingest_detached(
+            &paths,
+            AgentKind::Codex,
+            "Stop",
+            br#"{"session_id":"thread","thread_name":"test","event_id":"stop"}"#,
+        )
+        .unwrap();
+        let received = receiver.join().unwrap();
+        assert_eq!(
+            drain_detached_spool(&paths, "test", now_ms()),
+            vec![received]
+        );
+    }
+
+    #[test]
+    fn detached_spool_retains_identity_orders_and_expires_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().into(),
+            state_dir: temp.path().into(),
+            cache_dir: temp.path().into(),
+            runtime_dir: temp.path().join("run"),
+        };
+        let report = |at| {
+            detached_report_from_payload(
+                AgentKind::Codex,
+                "Stop",
+                &json!({"session_id":"thread", "thread_name":"test", "agent_pid":42,
+                "occurred_at_unix_ms":at}),
+            )
+            .unwrap()
+        };
+        let first = report(35_000);
+        let second = report(36_000);
+        for r in [&second, &first, &report(1), &report(100_000)] {
+            spool_detached(&paths, "server", r).unwrap();
+        }
+        let drained = drain_detached_spool(&paths, "server", 40_000);
+        assert_eq!(drained, vec![first, second]);
+        assert!(drain_detached_spool(&paths, "server", 40_000).is_empty());
     }
 
     #[test]

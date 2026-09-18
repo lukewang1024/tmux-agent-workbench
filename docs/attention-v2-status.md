@@ -57,6 +57,17 @@ an implementation checkpoint so work can resume safely after context compaction.
   asynchronous question plus idle composer is idle with a question detail, not
   a blocked permission dialog. Idle sampling continues until display recovery
   is confirmed, even when the captured frame has not changed.
+- Checkpoints retain state provenance and hook replay guards. Legacy screen-only
+  or invalid `unknown` checkpoints resume from fresh screen evidence, preserving
+  thread identity without inventing hook health or completion notifications.
+  Discovery recovery keeps other panes' bindings intact. Detached hooks prefer
+  owning-process ancestry (excluding shared Codex app-server backends), then a
+  bound thread, then an unambiguous canonical CWD; multiple candidates are rejected rather than assigned by process age.
+  Socket timeouts queue the original event for bounded replay. Separate native
+  hook invocations without provider IDs receive distinct IDs, even with identical
+  payloads; retries of a queued event retain their original ID and timestamp.
+  The public hook shim logs failures to the private XDG state hook-errors.log
+  with routing errors and event metadata, never the hook payload.
 - Explicit idempotent `hooks install|check|remove` management for Claude JSON,
   Codex TOML, TraeX JSON, and the OpenCode XDG plugin. Foreign hooks and unknown
   configuration survive install/remove; malformed input fails atomically.

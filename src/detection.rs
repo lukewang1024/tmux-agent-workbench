@@ -126,6 +126,7 @@ impl Detector {
                 && self.machine.snapshots().iter().any(|agent| {
                     agent.target.pane_id == pane.target.pane_id
                         && !agent.stale
+                        && agent.hook_health != crate::model::HookHealth::Stale
                         && matches!(agent.display_state, DisplayState::Idle | DisplayState::Done)
                 });
             if due && !settled_idle {
@@ -166,6 +167,15 @@ impl Detector {
             }
         }
         unmatched
+    }
+
+    pub fn hook_replay_guard(&self, instance_id: &str) -> (u64, Vec<String>) {
+        self.machine.hook_replay_guard(instance_id)
+    }
+
+    pub fn refresh_process_inventory(&mut self) {
+        self.processes = ProcessTree::default();
+        self.wake();
     }
 
     pub fn checkpoint_metadata(
@@ -340,33 +350,40 @@ impl Detector {
                     && agent.hook_session_id.as_deref() == Some(&detached.session_id)
             })
             .collect();
-        let chosen = if bound.len() == 1 {
+        let chosen = if let Some(pid) = detached.agent_pid {
+            let candidates: Vec<_> = snapshots
+                .iter()
+                .filter(|agent| {
+                    !agent.exited
+                        && agent.kind == detached.agent
+                        && agent
+                            .process
+                            .as_ref()
+                            .is_some_and(|process| process.pid == pid)
+                })
+                .collect();
+            unique_agent(&candidates)?
+        } else if bound.len() == 1 {
             bound[0]
         } else if bound.is_empty() {
-            let mut candidates: Vec<_> = snapshots
+            // CWD is a fallback, never a tiebreaker between live CLIs.
+            let cwd = detached
+                .cwd
+                .as_deref()
+                .ok_or("detached hook has no pane identity")?;
+            let candidates: Vec<_> = snapshots
                 .iter()
                 .filter(|agent| {
                     !agent.exited
                         && agent.kind == detached.agent
                         && agent.hook_session_id.is_none()
-                        && detached.cwd.as_deref().is_none_or(|cwd| {
-                            self.panes
-                                .get(&agent.target.pane_id)
-                                .is_some_and(|pane| pane.current_path == cwd)
-                        })
+                        && self
+                            .panes
+                            .get(&agent.target.pane_id)
+                            .is_some_and(|pane| same_directory(&pane.current_path, cwd))
                 })
                 .collect();
-            candidates.sort_by_key(|agent| {
-                agent
-                    .process
-                    .as_ref()
-                    .map(|process| process.started_at_ticks)
-                    .unwrap_or_default()
-            });
-            candidates
-                .last()
-                .copied()
-                .ok_or("no matching live agent pane")?
+            unique_agent(&candidates)?
         } else {
             return Err("agent thread is associated with multiple panes".into());
         };
@@ -382,7 +399,7 @@ impl Detector {
             tmux_session_id: pane.target.session_id.clone(),
             session_id: detached.session_id.clone(),
             session_label: detached.session_label.clone(),
-            agent_pid: 0,
+            agent_pid: detached.agent_pid.unwrap_or(0),
             event: detached.event,
             occurred_at_unix_ms: detached.occurred_at_unix_ms,
             reason_category: detached.reason_category.clone(),
@@ -718,6 +735,22 @@ fn kind_label(kind: AgentKind) -> &'static str {
 }
 
 // Live dialogs distinguish automatic review from user input, even with a stale Trae spinner.
+fn unique_agent<'a>(candidates: &[&'a AgentSnapshot]) -> Result<&'a AgentSnapshot, String> {
+    match candidates {
+        [agent] => Ok(agent),
+        [] => Err("no matching live agent pane".into()),
+        _ => Err("ambiguous live agent panes; refusing to guess".into()),
+    }
+}
+
+fn same_directory(left: &str, right: &str) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 fn title_needs_capture(kind: AgentKind, state: BaseState) -> bool {
     matches!(
         (kind, state),
@@ -753,6 +786,151 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 mod tests {
     use super::*;
 
+    fn routing_detector() -> Detector {
+        let mut detector =
+            Detector::new(ServerIdentity::from_socket("/tmp/routing-test".into()).unwrap());
+        let golden: crate::model::Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        for pid in [42, 43] {
+            let mut target = golden.agents[0].target.clone();
+            target.pane_id = format!("%{pid}");
+            let process = crate::model::ProcessFingerprint {
+                pid,
+                started_at_ticks: pid as u64,
+                executable: "codex".into(),
+            };
+            let observation = Observation {
+                kind: AgentKind::Codex,
+                target: target.clone(),
+                process: process.clone(),
+                label: "test".into(),
+                state: BaseState::Idle,
+                reason_category: None,
+                rule_id: None,
+                evidence: None,
+                strong_visible_signal: true,
+                visible: false,
+                manifest_version: 1,
+                hook_session_id: None,
+                observed_at_ms: 0,
+            };
+            let agent = detector.machine.observe_estimate(observation);
+            detector
+                .pane_instances
+                .insert(target.pane_id.clone(), agent.instance_id);
+            detector.agents.insert(
+                pid,
+                AgentProcess {
+                    kind: AgentKind::Codex,
+                    fingerprint: process,
+                },
+            );
+            detector.panes.insert(
+                target.pane_id.clone(),
+                Pane {
+                    target,
+                    root_pid: pid,
+                    title: "test".into(),
+                    current_command: "codex".into(),
+                    current_path: "/tmp".into(),
+                    role: None,
+                    visible: false,
+                    window_active: false,
+                    pane_active: false,
+                    pane_last: false,
+                    session_visible: false,
+                    content_revision: "1".into(),
+                },
+            );
+        }
+        detector
+    }
+
+    #[test]
+    fn detached_routing_never_guesses_and_refresh_preserves_other_bindings() {
+        let mut detector = routing_detector();
+        let mut report = DetachedAgentEventReport {
+            version: 1,
+            agent_pid: None,
+            event_id: "first".into(),
+            agent: AgentKind::Codex,
+            session_id: "one".into(),
+            session_label: None,
+            event: crate::model::AgentEventType::Working,
+            occurred_at_unix_ms: 10,
+            reason_category: None,
+            cwd: Some("/tmp".into()),
+        };
+        assert!(
+            detector
+                .resolve_agent_event(&report)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(
+            detector
+                .machine_snapshots()
+                .iter()
+                .all(|s| s.hook_session_id.is_none())
+        );
+        report.agent_pid = Some(42);
+        let (_, first) = detector.resolve_agent_event(&report).unwrap();
+        assert_eq!(first.target.pane_id, "%42");
+        let guard = detector.hook_replay_guard(&first.instance_id);
+        detector.refresh_process_inventory();
+        assert_eq!(
+            detector
+                .machine_snapshots()
+                .iter()
+                .find(|s| s.target.pane_id == "%42")
+                .unwrap(),
+            &first
+        );
+        assert_eq!(detector.hook_replay_guard(&first.instance_id), guard);
+        report.agent_pid = Some(999);
+        assert!(detector.resolve_agent_event(&report).is_err());
+        report.agent_pid = None;
+        report.event_id = "next".into();
+        report.occurred_at_unix_ms = 20;
+        assert_eq!(
+            detector
+                .resolve_agent_event(&report)
+                .unwrap()
+                .1
+                .target
+                .pane_id,
+            "%42"
+        );
+        report.agent_pid = Some(42);
+        report.session_id = "background".into();
+        report.event_id = "child-stop".into();
+        report.event = crate::model::AgentEventType::Stop;
+        assert!(detector.resolve_agent_event(&report).is_err());
+        assert_eq!(
+            detector
+                .machine_snapshots()
+                .iter()
+                .find(|s| s.target.pane_id == "%42")
+                .unwrap()
+                .base_state,
+            BaseState::Working
+        );
+    }
+
+    #[test]
+    fn cwd_aliases_match_without_matching_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("alias");
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(same_directory(
+            alias.to_str().unwrap(),
+            real.to_str().unwrap()
+        ));
+        assert!(!same_directory("/missing-one", "/missing-two"));
+    }
+
     #[test]
     fn action_required_needs_overlay_capture() {
         assert!(title_needs_capture(AgentKind::Codex, BaseState::Blocked));
@@ -778,6 +956,7 @@ mod tests {
             delivered_event_ids: Vec::new(),
             pending: Vec::new(),
             recent_endpoint: None,
+            ..Default::default()
         };
 
         assert_eq!(

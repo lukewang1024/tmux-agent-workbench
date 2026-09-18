@@ -352,6 +352,31 @@ fn update_snapshot(
                 }
             }
         }
+        for report in crate::hooks::drain_detached_spool(paths, server_key, now) {
+            match state.detector.resolve_agent_event(&report) {
+                Ok((report, agent)) => {
+                    if report.event == crate::model::AgentEventType::SessionStart
+                        && report.reason_category.as_deref() != Some("compact")
+                    {
+                        state.notifications.scheduler.observe_session_start(
+                            report.occurred_at_unix_ms,
+                            &report.event_id,
+                            &agent,
+                        );
+                    }
+                    if report.event == crate::model::AgentEventType::Error {
+                        state.notifications.scheduler.observe_task_error(
+                            report.occurred_at_unix_ms,
+                            &report.event_id,
+                            &agent,
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!("tmux-agent-workbench: queued detached hook rejected: {error}")
+                }
+            }
+        }
         let agents = state.detector.machine_snapshots();
         let sessions = state.detector.sessions();
         let changed = agents != state.snapshot.agents || sessions != state.snapshot.sessions;
@@ -510,6 +535,9 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
                     process.pid, process.started_at_ticks, process.executable
                 ),
                 previous_state: format!("{:?}", agent.base_state).to_lowercase(),
+                state_source: Some(agent.state_source),
+                last_hook_event_at_ms: state.detector.hook_replay_guard(&agent.instance_id).0,
+                hook_event_ids: state.detector.hook_replay_guard(&agent.instance_id).1,
                 attention_seq,
                 seen_seq,
                 hook_session_id,
@@ -900,35 +928,14 @@ fn handle(
                         match state.detector.resolve_agent_event(&detached) {
                             Ok(resolved) => resolved,
                             Err(scan_error) => {
-                                // A long-lived daemon can retain a stale tmux /
-                                // process inventory after transient system
-                                // failures (notably ENOSPC). Build a clean
-                                // detector off to the side and replace the live
-                                // one only if it can both discover and accept
-                                // this event. Invalid or ambiguous hooks must
-                                // never destroy otherwise healthy state.
-                                let mut recovered = Detector::new(server.clone());
-                                recovered.wake();
-                                recovered
-                                    .tick(&config, &manifests, now)
+                                // Refresh discovery without erasing other panes' hook
+                                // bindings, ordering guards, or notification identities.
+                                state.detector.refresh_process_inventory();
+                                state.detector.tick(&config, &manifests, now)
                                     .map_err(|error| error.to_string())?;
-                                match recovered.resolve_agent_event(&detached) {
-                                    Ok(resolved) => {
-                                        eprintln!(
-                                            "tmux-agent-workbench: detector self-healed after detached hook association failed: {first_error}; retry: {scan_error}"
-                                        );
-                                        state.detector = recovered;
-                                        ipc_metrics
-                                            .detector_recoveries
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        resolved
-                                    }
-                                    Err(recovery_error) => {
-                                        return Err(format!(
-                                            "detached hook association failed: {first_error}; retry: {scan_error}; recovery: {recovery_error}"
-                                        ));
-                                    }
-                                }
+                                state.detector.resolve_agent_event(&detached).map_err(|error| {
+                                    format!("detached hook association failed: {first_error}; retry: {scan_error}; refresh: {error}")
+                                })?
                             }
                         }
                     }
