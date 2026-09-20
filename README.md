@@ -307,8 +307,10 @@ dotfiles command rather than duplicated in Workbench.
 Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
 use native menus that select the row at the next click's coordinates, including
 on touch screens without hover events. The opening release is consumed before
-the menu appears. Escape or clicking outside dismisses the menu; keyboard
-shortcuts and arrow-key navigation remain available.
+the menu appears. Pointer clients can move into a menu without dismissing it;
+Termux clients keep release-based touch selection. Escape or clicking outside
+dismisses the menu; keyboard shortcuts and arrow-key navigation remain
+available.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check real menu mouse dismissal and shortcuts through a tmux client PTY."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import termios
 import time
+import uuid
 
 repo = Path(__file__).resolve().parents[1]
 core = str(Path(sys.argv[1]).resolve())
@@ -88,8 +90,46 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 raise AssertionError(('menu exited before rendering', proc.returncode, proc.stderr.read()))
         raise AssertionError(('menu did not render', output))
 
+    def write_frame(proc, message):
+        payload = json.dumps(message, separators=(',', ':')).encode()
+        proc.stdin.write(len(payload).to_bytes(4, 'big') + payload)
+        proc.stdin.flush()
+
+    def read_frame(proc):
+        header = proc.stdout.read(4)
+        if len(header) != 4:
+            raise AssertionError(('client protocol closed before reply',
+                                  proc.poll(), proc.stderr.read().decode(errors='replace')))
+        length = int.from_bytes(header, 'big')
+        payload = proc.stdout.read(length)
+        if len(payload) != length:
+            raise AssertionError(('truncated client protocol reply', payload))
+        return json.loads(payload)
+
+    def register_termux():
+        proc = subprocess.Popen([core, 'client', 'serve'], env=env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        write_frame(proc, {
+            'type': 'hello', 'version': 2, 'device_id': str(uuid.uuid4()),
+            'terminal_id': str(uuid.uuid4()), 'device_label': 'test-phone',
+            'kind': 'termux', 'capabilities': [],
+        })
+        welcome = read_frame(proc)
+        assert welcome['type'] == 'welcome', welcome
+        attach_env = dict(env, SSH_TTY=os.ttyname(slave))
+        try:
+            subprocess.run([core, 'client', 'attach-pty', '--bind', welcome['attachment_token']],
+                           env=attach_env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        return proc
+
     client_process = None
     menu = None
+    termux = None
+    daemon_started = False
     try:
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '/bin/sh')
         tmux('set-option', '-g', 'default-shell', '/bin/sh')
@@ -98,6 +138,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         tmux('set-option', '-g', '@workbench-usage-source', 'opencode')
         server_pid = tmux('display-message', '-p', '#{pid}')
         env['TMUX'] = f'{socket},{server_pid},0'
+        env['TMUX_AGENT_WORKBENCH_TMUX_SOCKET'] = socket
         pane = tmux('display-message', '-p', '#{pane_id}')
         client_process = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'audit'],
                                           stdin=slave, stdout=slave, stderr=slave, env=env)
@@ -128,6 +169,85 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 assert menu.poll() == 0, (kind, close, menu.poll())
                 assert tmux('list-windows', '-F', '#{window_id}').count('\n') == 0
                 print('PASS', kind, close)
+        # Exercise the status binding while this PTY represents a desktop
+        # pointer. Termux's release-based selection is tested below.
+        # Exercise the real status binding block: opening press/release must not
+        # activate the first row, then mouse motion and click select one action.
+        import shlex
+        source = (repo / 'workbench.tmux').read_text()
+        bindings = source[source.index('tmux bind-key -T root MouseDown1Status if-shell'):]
+        bindings = bindings[:bindings.index('tmux bind-key -T root MouseDown3Status')]
+        action = shlex.join([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane])
+        route = ('wb-status-route=if-shell -F '
+                 + shlex.quote('#{==:#{mouse_status_range},wb_tmux}') + ' '
+                 + shlex.quote('run-shell ' + shlex.quote(action)) + ' '
+                 + shlex.quote('select-window -t ='))
+        tmux('set-option', '-s', 'command-alias[927]', route)
+        subprocess.run(['sh', '-c', bindings], env=env, check=True)
+        tmux('set-option', '-g', 'status', 'on')
+        tmux('set-option', '-g', 'status-left', '')
+        tmux('set-option', '-g', 'status-right', '#[range=user|wb_tmux]MENU#[range=]')
+        drain()
+        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        os.write(master, b'\x1b[<0;78;30M\x1b[<0;78;30m')
+        rendered = wait_for_text(client_process)
+        assert tmux('list-windows', '-F', '#{window_id}').splitlines() == before
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0', 'opening status menu left an output pager'
+        # The binding launches the status popup asynchronously; wait for its
+        # mouse mode and rendering to settle before moving into the menu.
+        drain(0.75)
+        x, y = item_position(rendered, 'New window')
+        os.write(master, f'\x1b[<35;{x};{y}M'.encode())
+        drain(0.1)
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        after = before
+        for _ in range(40):
+            drain(0.05)
+            after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+            if len(after) > len(before):
+                break
+        assert len(after) == len(before) + 1, (
+            'status touch did not create exactly one window', before, after,
+            tmux('capture-pane', '-p', '-t', pane),
+            tmux('list-clients', '-F', '#{client_name} #{client_tty}'),
+        )
+        tmux('kill-window', '-t', next(window for window in after if window not in before))
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        # A normal window-tab click also must not leave an output pager behind.
+        other = tmux('new-window', '-d', '-P', '-F', '#{window_id}', '-n', 'touch-target')
+        tmux('set-option', '-g', 'window-status-format', '#W')
+        tmux('set-option', '-g', 'window-status-current-format', '#W')
+        tmux('refresh-client', '-S')
+        rendered = drain(0.3)
+        x, y = item_position(rendered, 'touch-target')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        drain(0.3)
+        assert tmux('display-message', '-p', '#{window_id}') == other
+        assert set(tmux('list-panes', '-s', '-F', '#{pane_in_mode}').splitlines()) == {'0'}
+        tmux('kill-window', '-t', other)
+        tmux('set-option', '-g', 'status', 'off')
+        drain(0.3)
+        print('PASS window tab touch leaves no output pager')
+        print('PASS status opening release and subsequent mouse action')
+        # Register this PTY as a Termux client so following checks use the
+        # same no-hover menu path as a real phone attachment.
+        subprocess.run([core, 'daemon', 'ensure'], env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        daemon_started = True
+        termux = register_termux()
+        mouse_mode = 'mouse'
+        for _ in range(40):
+            mouse_mode = subprocess.check_output(
+                [core, 'menu-mouse-mode', '--client', client], env=env, text=True
+            ).strip()
+            if mouse_mode == 'touch':
+                break
+            time.sleep(0.05)
+        assert mouse_mode == 'touch', (
+            'Termux attachment was not recognized for the tmux client',
+            mouse_mode,
+            tmux('display-message', '-p', '-c', client, '#{client_tty}'),
+        )
         # Touch sends a press/release without any preceding hover/motion.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -160,51 +280,6 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         drain(0.3)
         assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
         print('PASS agent action targets source pane')
-        # Exercise the real status binding block: opening press/release must not
-        # activate the first row, then a touch selects New window exactly once.
-        import shlex
-        source = (repo / 'workbench.tmux').read_text()
-        bindings = source[source.index('tmux bind-key -T root MouseDown1Status if-shell'):]
-        bindings = bindings[:bindings.index('tmux bind-key -T root MouseDown3Status')]
-        action = shlex.join([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane])
-        route = ('wb-status-route=if-shell -F '
-                 + shlex.quote('#{==:#{mouse_status_range},wb_tmux}') + ' '
-                 + shlex.quote('run-shell -b ' + shlex.quote(action)) + ' '
-                 + shlex.quote('select-window -t ='))
-        tmux('set-option', '-s', 'command-alias[927]', route)
-        subprocess.run(['sh', '-c', bindings], env=env, check=True)
-        tmux('set-option', '-g', 'status', 'on')
-        tmux('set-option', '-g', 'status-left', '')
-        tmux('set-option', '-g', 'status-right', '#[range=user|wb_tmux]MENU#[range=]')
-        drain()
-        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
-        os.write(master, b'\x1b[<0;78;30M\x1b[<0;78;30m')
-        rendered = wait_for_text(client_process)
-        assert tmux('list-windows', '-F', '#{window_id}').splitlines() == before
-        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0', 'opening status menu left an output pager'
-        x, y = item_position(rendered, 'New window')
-        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-        drain(0.5)
-        after = tmux('list-windows', '-F', '#{window_id}').splitlines()
-        assert len(after) == len(before) + 1, 'status touch did not create exactly one window'
-        tmux('kill-window', '-t', next(window for window in after if window not in before))
-        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
-        # A normal window-tab click also must not leave an output pager behind.
-        other = tmux('new-window', '-d', '-P', '-F', '#{window_id}', '-n', 'touch-target')
-        tmux('set-option', '-g', 'window-status-format', '#W')
-        tmux('set-option', '-g', 'window-status-current-format', '#W')
-        tmux('refresh-client', '-S')
-        rendered = drain(0.3)
-        x, y = item_position(rendered, 'touch-target')
-        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-        drain(0.3)
-        assert tmux('display-message', '-p', '#{window_id}') == other
-        assert set(tmux('list-panes', '-s', '-F', '#{pane_in_mode}').splitlines()) == {'0'}
-        tmux('kill-window', '-t', other)
-        tmux('set-option', '-g', 'status', 'off')
-        drain(0.3)
-        print('PASS window tab touch leaves no output pager')
-        print('PASS status opening release and subsequent touch action')
         menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
@@ -228,6 +303,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         print('PASS narrow client with paginated actions')
+        write_frame(termux, {'type': 'goodbye', 'version': 2})
+        termux.wait(timeout=3)
     finally:
         if menu is not None and menu.poll() is None:
             menu.terminate()
@@ -235,5 +312,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if client_process is not None:
             client_process.wait(timeout=3)
+        if termux is not None and termux.poll() is None:
+            termux.terminate()
+            termux.wait(timeout=3)
+        if daemon_started:
+            subprocess.run([core, 'daemon', 'stop'], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.close(master)
         os.close(slave)
