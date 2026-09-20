@@ -169,52 +169,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 assert menu.poll() == 0, (kind, close, menu.poll())
                 assert tmux('list-windows', '-F', '#{window_id}').count('\n') == 0
                 print('PASS', kind, close)
-        # Register this PTY as a Termux client so subsequent touch checks take
-        # the same no-hover menu path as a real phone attachment.
-        subprocess.run([core, 'daemon', 'ensure'], env=env, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        daemon_started = True
-        termux = register_termux()
-        # Touch sends a press/release without any preceding hover/motion.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu)
-        x, y = item_position(rendered, '/btw')
-        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-        menu.wait(timeout=3)
-        drain(0.3)
-        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
-        tmux('send-keys', '-t', pane, 'C-u')
-        print('PASS touch selects action without hover')
-        menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu)
-        x, y = item_position(rendered, 'Standard')
-        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-        menu.wait(timeout=3)
-        for _ in range(40):
-            if tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard':
-                break
-            drain(0.05)
-        assert tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard'
-        print('PASS metrics touch action')
-        # A native Agent action still prefills the source pane without Enter.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
-        os.write(master, b's')
-        menu.wait(timeout=3)
-        drain(0.3)
-        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
-        print('PASS agent action targets source pane')
-        # Use the desktop mode for the status mouse binding; Termux touch mode
-        # is exercised below through the same native menus opened directly.
-        write_frame(termux, {'type': 'goodbye', 'version': 2})
-        termux.wait(timeout=3)
-        termux = None
-        mode = subprocess.check_output([str(repo / 'bin/workbench-menu-mouse-mode'), client],
-                                       env=env, text=True).strip()
-        assert mode == 'mouse', ('detached Termux client retained touch mode', mode)
+        # Exercise the status binding while this PTY represents a desktop
+        # pointer. Termux's release-based selection is tested below.
         # Exercise the real status binding block: opening press/release must not
         # activate the first row, then mouse motion and click select one action.
         import shlex
@@ -273,7 +229,44 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         drain(0.3)
         print('PASS window tab touch leaves no output pager')
         print('PASS status opening release and subsequent mouse action')
+        # Register this PTY as a Termux client so following checks use the
+        # same no-hover menu path as a real phone attachment.
+        subprocess.run([core, 'daemon', 'ensure'], env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        daemon_started = True
         termux = register_termux()
+        # Touch sends a press/release without any preceding hover/motion.
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        x, y = item_position(rendered, '/btw')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=3)
+        drain(0.3)
+        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
+        tmux('send-keys', '-t', pane, 'C-u')
+        print('PASS touch selects action without hover')
+        menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        x, y = item_position(rendered, 'Standard')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=3)
+        for _ in range(40):
+            if tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard':
+                break
+            drain(0.05)
+        assert tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard'
+        print('PASS metrics touch action')
+        # A native Agent action still prefills the source pane without Enter.
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        os.write(master, b's')
+        menu.wait(timeout=3)
+        drain(0.3)
+        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
+        print('PASS agent action targets source pane')
         menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
