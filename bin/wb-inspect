@@ -95,22 +95,21 @@ git_tool=$(resolve_git_tool)
 editor=$(resolve_editor)
 
 # Build detached: three panes stacked even-vertical, cwd = the repo in all.
-# (If tmux-agent-sidebar is installed with auto-create on, it'll add its own
-# pane here too, same as any other window — that's fine: its full-height
-# split narrows this stack uniformly rather than disturbing it.)
-tmux new-window -d -t "$sess:" -n "$name" -c "$path"
+# Keep pane ids so an auto-created sidebar cannot change which pane receives
+# the next split or which panes get the git tool, scratchpad, and editor.
+git_pane=$(tmux new-window -d -t "$sess:" -n "$name" -c "$path" -P -F '#{pane_id}')
 # Pin the window name to the repo. Without this, automatic-rename (on by default)
 # retitles the window after the focused pane's command, so it flips between the
 # git tool / shell / editor as you move between panes — the window's identity is
 # the repo, not whatever happens to be focused, so lock it.
 tmux set-window-option -t "$sess:$name" automatic-rename off
 tmux set-window-option -t "$sess:$name" @workbench_project_root "$path"
-tmux split-window -v -t "$sess:$name" -c "$path"
-tmux split-window -v -t "$sess:$name" -c "$path"
-tmux select-layout -t "$sess:$name" even-vertical
-tmux send-keys -t "$sess:$name.1" "$git_tool" Enter
-tmux send-keys -t "$sess:$name.3" "$editor" Enter
-tmux select-pane -Z -t "$sess:$name.2"        # land in the scratchpad, not tig
+scratch_pane=$(tmux split-window -v -t "$git_pane" -c "$path" -P -F '#{pane_id}')
+editor_pane=$(tmux split-window -v -t "$scratch_pane" -c "$path" -P -F '#{pane_id}')
+"$dir/workbench-layout" even-vertical "$git_pane"
+tmux send-keys -t "$git_pane" "$git_tool" Enter
+tmux send-keys -t "$editor_pane" "$editor" Enter
+tmux select-pane -Z -t "$scratch_pane"       # land in the scratchpad, not tig
 
 [ "$focus" = 1 ] && tmux select-window -t "$sess:$name"
 exit 0
