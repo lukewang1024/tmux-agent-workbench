@@ -15,7 +15,16 @@ command -v ssh-connect >/dev/null 2>&1 || {
   exit 127
 }
 
-set -- tmux display-menu -M -C 0 -c "$client" -t "$pane" \
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd -P)
+mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
+set -- tmux display-menu -M
+[ "$mouse_mode" = touch ] || set -- "$@" -O
+set -- "$@" -C 0 -c "$client" -t "$pane" \
   -T '#[align=centre] 󰍹 SSH '
 found=0
 keys=123456789abcdefghijklmnopqrstuvwxyz

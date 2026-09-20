@@ -1,26 +1,39 @@
 #!/bin/sh
 set -eu
+kind=${1:-}
 client=${2:-}
 
 case $client in
   ''|*[!A-Za-z0-9_./-]*) exit 2 ;;
 esac
 
-case ${1:-} in
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd -P)
+mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
+set -- tmux display-menu -M
+[ "$mouse_mode" = touch ] || set -- "$@" -O
+
+case $kind in
   tmux)
-    exec tmux display-menu -M -C 0 -c "$client" -T '#[align=centre] tmux ' \
+    set -- "$@" -C 0 -c "$client" -T '#[align=centre] tmux ' \
       'New window' c 'new-window -c "#{pane_current_path}"' \
       'Split below' - 'split-window -v -c "#{pane_current_path}"' \
       'Split right' '|' 'split-window -h -c "#{pane_current_path}"' \
       'Choose window' w 'choose-tree -Zw' \
       'Choose session' s 'choose-tree -Zs' \
       'Detach' d detach-client
+    exec "$@"
     ;;
   agent)
-    exec tmux display-menu -M -C 0 -c "$client" -T '#[align=centre] 󰚩 Agent ' \
+    set -- "$@" -C 0 -c "$client" -T '#[align=centre] 󰚩 Agent ' \
       '/side' s 'send-keys -l "/side "' \
       '/btw' b 'send-keys -l "/btw "' \
       '/fork' f 'send-keys -l "/fork "'
+    exec "$@"
     ;;
   *) exit 2 ;;
 esac

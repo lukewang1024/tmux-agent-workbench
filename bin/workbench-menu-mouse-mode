@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+client=${1:-}
+case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+plugin_dir=$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd -P)
+core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
+[ -x "$core" ] || core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
+[ -x "$core" ] || { printf '%s\n' mouse; exit 0; }
+
+exec "$core" menu-mouse-mode --client "$client"
