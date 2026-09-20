@@ -76,19 +76,19 @@ else
   tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
 fi
 tmux set-option -s command-alias[920] \
-  "wb-tmux-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
+  "wb-tmux-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[921] \
-  "wb-agent-status-menu=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}'\""
+  "wb-agent-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'\""
 tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
 status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux set-option -s command-alias[924] \
-  "wb-host-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
+  "wb-host-status=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
-  "wb-usage-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
+  "wb-usage-status=run-shell \"'$CURRENT_DIR/bin/workbench-agent-usage' menu '#{client_name}'\""
 tmux set-option -su command-alias[928] 2>/dev/null || true
 tmux set-option -s command-alias[929] \
-  "wb-metrics-status=run-shell -b \"'$CURRENT_DIR/bin/workbench-host-metrics-menu' '#{client_name}' '#{pane_id}'\""
+  "wb-metrics-status=run-shell \"'$CURRENT_DIR/bin/workbench-host-metrics-menu' '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
   'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-metrics-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
