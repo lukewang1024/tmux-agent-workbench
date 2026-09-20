@@ -167,4 +167,7 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          case "$RELEASE_TAG" in
+            *-*) gh release edit "$RELEASE_TAG" --draft=false --prerelease ;;
+            *)   gh release edit "$RELEASE_TAG" --draft=false --latest ;;
+          esac

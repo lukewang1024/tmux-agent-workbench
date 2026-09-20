@@ -235,6 +235,19 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         daemon_started = True
         termux = register_termux()
+        mouse_mode = 'mouse'
+        for _ in range(40):
+            mouse_mode = subprocess.check_output(
+                [core, 'menu-mouse-mode', '--client', client], env=env, text=True
+            ).strip()
+            if mouse_mode == 'touch':
+                break
+            time.sleep(0.05)
+        assert mouse_mode == 'touch', (
+            'Termux attachment was not recognized for the tmux client',
+            mouse_mode,
+            tmux('display-message', '-p', '-c', client, '#{client_tty}'),
+        )
         # Touch sends a press/release without any preceding hover/motion.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
