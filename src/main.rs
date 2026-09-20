@@ -13,7 +13,9 @@ use tmux_agent_workbench::config::Config;
 use tmux_agent_workbench::daemon;
 use tmux_agent_workbench::ipc::{Request, call, exchange};
 use tmux_agent_workbench::manifest::ManifestSet;
-use tmux_agent_workbench::model::{AgentKind, AgentSnapshot, ConversationRole, DisplayState};
+use tmux_agent_workbench::model::{
+    AgentKind, AgentSnapshot, ConversationRole, DisplayState, Snapshot,
+};
 use tmux_agent_workbench::paths::Paths;
 use tmux_agent_workbench::server::ServerIdentity;
 
@@ -43,6 +45,11 @@ enum Command {
         json: bool,
     },
     Sidebar,
+    #[command(hide = true)]
+    MenuMouseMode {
+        #[arg(long)]
+        client: String,
+    },
     #[command(hide = true)]
     StatusMenu {
         kind: tmux_agent_workbench::status_menu::StatusMenuKind,
@@ -1171,6 +1178,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let server = ServerIdentity::discover()?;
             tmux_agent_workbench::sidebar::run(&paths, &server)?;
         }
+        Command::MenuMouseMode { client } => {
+            println!(
+                "{}",
+                if client_uses_termux_input(&paths, &client) {
+                    "touch"
+                } else {
+                    "mouse"
+                }
+            );
+        }
         Command::StatusMenu {
             kind,
             pane,
@@ -1178,7 +1195,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             action,
             page,
         } => {
-            tmux_agent_workbench::status_menu::run(kind, &pane, &client, action.as_deref(), page)?;
+            let stay_open = !client_uses_termux_input(&paths, &client);
+            tmux_agent_workbench::status_menu::run(
+                kind,
+                &pane,
+                &client,
+                action.as_deref(),
+                page,
+                stay_open,
+            )?;
         }
         Command::Pick { target } => {
             let server = ServerIdentity::discover()?;
@@ -1710,6 +1735,31 @@ fn ipc_call(
         &Request::new(method, params),
         Duration::from_secs(2),
     )?)
+}
+
+fn client_uses_termux_input(paths: &Paths, client: &str) -> bool {
+    let Ok(output) = ProcessCommand::new("tmux")
+        .args(["display-message", "-p", "-c", client, "#{client_tty}"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let tty = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if tty.is_empty() {
+        return false;
+    }
+    let Ok(value) = ipc_call(paths, "snapshot.get", serde_json::Value::Null) else {
+        return false;
+    };
+    let Ok(snapshot) = serde_json::from_value::<Snapshot>(value) else {
+        return false;
+    };
+    snapshot.clients.iter().any(|endpoint| {
+        endpoint.kind == "termux" && endpoint.attachment.as_deref() == Some(tty.as_str())
+    })
 }
 
 fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {

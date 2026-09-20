@@ -28,6 +28,7 @@ pub fn run(
     client: &str,
     action: Option<&str>,
     page: usize,
+    stay_open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_pane(pane)?;
     let (title, actions) = actions(kind)?;
@@ -72,9 +73,11 @@ pub fn run(
         shell_quote(client)
     );
     let mut command = Command::new("tmux");
+    command.args(["display-menu", "-M"]);
+    if stay_open {
+        command.arg("-O");
+    }
     command.args([
-        "display-menu",
-        "-M",
         "-C",
         "0",
         "-c",

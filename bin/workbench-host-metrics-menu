@@ -19,7 +19,10 @@ case $mode in
   full) full_line="✓ Full     · all metrics" ;;
 esac
 
-exec tmux display-menu -M -C 0 -c "$client" -t "$pane" -b rounded \
+mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
+set -- tmux display-menu -M
+[ "$mouse_mode" = touch ] || set -- "$@" -O
+set -- "$@" -C 0 -c "$client" -t "$pane" -b rounded \
   -T '#[align=centre] 󰻠 Resources ' \
   "$compact_line" c "run-shell -b '$script_dir/workbench-host-metrics-mode compact'" \
   "$standard_line" s "run-shell -b '$script_dir/workbench-host-metrics-mode standard'" \
@@ -28,3 +31,4 @@ exec tmux display-menu -M -C 0 -c "$client" -t "$pane" -b rounded \
   '  Open btop' b 'display-popup -E -b rounded -T " btop " -w 90% -h 90% "exec btop"' \
   '' \
   '× close (Esc)' '' ''
+exec "$@"
