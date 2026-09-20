@@ -77,7 +77,7 @@ fi
 }
 
 # Preserve the pane that was active before adding the detached task. Passing
-# the new task pane to tmux-layout-keep-sidebar would make its final
+# the new task pane to workbench-layout would make its final
 # select-pane activate that pane and interrupt an attached client.
 active_pane=$(tmux list-panes -t "$window_id" -f '#{pane_active}' \
   -F '#{pane_id}' | sed -n 1p)
@@ -122,13 +122,10 @@ tmux set-option -p -t "$task_pane" @workbench_project_root "$path"
 tmux select-pane -Z -t "$task_pane" -T "$task_name"
 [ -z "${ready:-}" ] || tmux wait-for -S "$ready"
 
-# Keep the sidebar as a full-height side column when that integration is
-# installed; otherwise apply the native layout directly.
-if command -v tmux-layout-keep-sidebar >/dev/null 2>&1; then
-  tmux-layout-keep-sidebar even-vertical "${active_pane:-$anchor}"
-else
-  tmux select-layout -t "$window_id" even-vertical >/dev/null
-fi
+# The Workbench layout controller removes the sidebar while applying the
+# workspace layout, then restores it as a full-height side column. A plain
+# select-layout would include the sidebar in the vertical stack.
+"$dir/workbench-layout" even-vertical "${active_pane:-$anchor}"
 
 [ -z "$active_pane" ] || tmux select-pane -Z -t "$active_pane"
 

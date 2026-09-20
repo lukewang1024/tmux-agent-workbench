@@ -1,6 +1,21 @@
 #!/bin/sh
 set -eu
 
+self=$0
+case $self in
+  /*) ;;
+  *) self=$(command -v "$self") ;;
+esac
+while [ -h "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+provider_dir=$(cd "$(dirname "$self")" && pwd -P)
+layout_controller=$provider_dir/../bin/workbench-layout
+
 usage() {
   echo "usage: workbench-tmux-provider <workspace.inspect|agent.launch|logs.open> ..." >&2
   exit 2
@@ -70,9 +85,15 @@ case $command in
       [ -f "$log_path" ] || { echo "log not found: $log_path" >&2; exit 2; }
       tmux split-window -d -t "$target" "tail -n 200 -F '$log_path'"
     done
-    tmux select-layout -t "$target" tiled
+    active_pane=$(tmux list-panes -t "$target" \
+      -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id} #{pane_active}' |
+      awk '$2 == 1 { print $1; exit }')
+    [ -n "$active_pane" ] || {
+      echo "no log pane in $target" >&2
+      exit 1
+    }
+    "$layout_controller" tiled "$active_pane"
     printf '{"provider":"tmux","capability":"logs.open","target":"%s"}\n' "$(json_escape "$target")"
     ;;
   *) usage ;;
 esac
-

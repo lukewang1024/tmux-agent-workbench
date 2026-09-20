@@ -520,8 +520,8 @@ to this public API and are retained for compatibility through 2.1.
   long-running task. It creates the inspection window first when necessary,
   tags the new pane with `@pane_role=task`, `@workbench_task_name`,
   `@workbench_task_command`, and `@workbench_project_root`, starts the command,
-  then reapplies `even-vertical`. When `tmux-layout-keep-sidebar` is available,
-  the sidebar remains a full-height side column and only workspace panes are
+  then reapplies `even-vertical` through Workbench's layout controller, keeping
+  the sidebar as a full-height side column while only workspace panes are
   re-laid out. The pane id is printed so callers can capture logs or remove it
   later. Long tasks are added on demand; the default inspection layout remains
   git/shell/editor only.
