@@ -7,6 +7,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import shutil
 import struct
 import subprocess
 import sys
@@ -20,7 +21,8 @@ core = str(Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     root = Path(root)
     socket = str(root / 'tmux.sock')
-    env = dict(os.environ, TERM='xterm-256color', TMUX_AGENT_WORKBENCH_BIN=core)
+    env = dict(os.environ, TERM='xterm-256color', TMUX_AGENT_WORKBENCH_BIN=core,
+               TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket)
     for key in ('TMUX', 'TMUX_PANE'):
         env.pop(key, None)
     for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
@@ -30,6 +32,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     ssh = shim / 'ssh-connect'
     ssh.write_text('#!/bin/sh\nprintf "%s\\n" dev-host test-host\n')
     ssh.chmod(0o755)
+    # macOS system binaries carry restricted BSD flags; copy bytes only.
+    shutil.copyfile(shutil.which('cat'), shim / 'codex')
+    (shim / 'codex').chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
@@ -248,6 +253,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             mouse_mode,
             tmux('display-message', '-p', '-c', client, '#{client_tty}'),
         )
+        # A real foreground process identity is required: a shell must not
+        # receive slash commands. A copied cat binary gives this fixture an
+        # executable named codex without calling any model API.
+        tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
+        tmux('select-pane', '-t', pane, '-T', 'Codex idle')
+        drain(0.3)
         # Touch sends a press/release without any preceding hover/motion.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -271,15 +282,22 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             drain(0.05)
         assert tmux('show-option', '-gqv', '@workbench-host-metrics-mode') == 'standard'
         print('PASS metrics touch action')
+        # The source stays fixed even if the client's active window changes.
+        other = tmux('new-window', '-P', '-F', '#{window_id}', '-n', 'unrelated-shell', '/bin/sh')
+        drain()
         # A native Agent action still prefills the source pane without Enter.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        rendered = wait_for_text(menu)
+        assert b'/side' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
         os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.3)
         assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
-        print('PASS agent action targets source pane')
+        assert '/side' not in tmux('capture-pane', '-p', '-t', other)
+        tmux('kill-window', '-t', other)
+        drain()
+        print('PASS agent action targets source pane after active window changes')
         menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
@@ -292,6 +310,147 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b'\x1b')
         drain(0.6)
         print('PASS usage touch action')
+        # Stale callbacks must not type into a replacement shell.
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        tmux('respawn-pane', '-k', '-t', pane, '/bin/sh')
+        os.write(master, b's')
+        menu.wait(timeout=3)
+        drain(0.4)
+        assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
+        menu = subprocess.Popen([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        assert b'/side' not in rendered and b'No foreground agent' in rendered
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain()
+        missing = subprocess.run([core, 'status-menu', 'agent', '--pane', '%999999', '--client', client,
+                                  '--guard', 'stale', '--action', '/side'], env=env, capture_output=True)
+        assert missing.returncode == 0, missing.stderr
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        print('PASS stale/missing targets rejected without an output pager')
+
+        # Follow the complete Single launch path through real submenus.
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        for key, expected in [(b'a', b'choose agent'), (b'x', b'choose preset'), (b's', b'Permissions:')]:
+            os.write(master, key)
+            wait_for_text(client_process, expected)
+            drain(0.15)
+        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        os.write(master, b's')
+        for _ in range(40):
+            drain(0.05)
+            after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+            if len(after) > len(before): break
+        assert len(after) == len(before) + 1
+        launched = next(w for w in after if w not in before)
+        assert tmux('display-message', '-p', '-t', launched, '#{pane_current_command}') == 'codex'
+        assert tmux('display-message', '-p', '-t', launched, '#{pane_current_path}') == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
+        tmux('kill-window', '-t', launched)
+        drain()
+        print('PASS Single launch wizard preserves source cwd')
+
+        # Record launches at the public agent-team boundary, without paid API
+        # calls. The pane backend creates its own window; no launcher survives.
+        trace = root / 'team-launch.txt'
+        team_cli = shim / 'agent-team'
+        team_cli.write_text('#!/bin/sh\nset -eu\n' +
+            'printf "%s\\n" "$PWD" "$@" > ' + shlex.quote(str(trace)) + '\n' +
+            'case " $* " in *" --tmux "*)\n' +
+            'session=$(tmux display-message -p -t "$TMUX_PANE" "#{session_id}")\n' +
+            'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
+            ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
+        team_cli.chmod(0o755)
+        for preset, presentation, expected in [(b't', b'n', ['codex']), (b'b', b't', ['codex', '--team-budget', '--tmux'])]:
+            menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu)
+            for key, heading in [(b'a', b'choose agent'), (b'x', b'choose preset'), (preset, b'Native subagents'), (presentation, b'Permissions:')]:
+                os.write(master, key)
+                wait_for_text(client_process, heading)
+                drain(0.15)
+            before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+            os.write(master, b's')
+            for _ in range(60):
+                drain(0.05)
+                after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+                if len(after) > len(before) and trace.exists(): break
+            assert len(after) == len(before) + 1, (before, after)
+            recorded = trace.read_text().splitlines()
+            assert recorded[0] == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
+            assert recorded[1:] == expected, recorded
+            tmux('kill-window', '-t', next(w for w in after if w not in before))
+            trace.unlink()
+            drain()
+        print('PASS native Team and tmux Team Budget launch exactly one window')
+
+        tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
+        tmux('select-pane', '-t', pane, '-T', 'Action Required')
+        drain(0.2)
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        tmux('select-pane', '-t', pane, '-T', 'Codex idle')
+        tmux('copy-mode', '-t', pane)
+        drain()
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        assert b'/side' not in rendered
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        tmux('send-keys', '-t', pane, '-X', 'cancel')
+        print('PASS approval and copy mode suppress agent input')
+
+        window = tmux('display-message', '-p', '-t', pane, '#{window_id}')
+        worker = tmux('split-window', '-d', '-P', '-F', '#{pane_id}', '-t', pane, str(shim / 'codex'))
+        for member in (pane, worker): tmux('set-option', '-p', '-t', member, '@agent_team', 'menu-test')
+        state_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/menu-test'
+        state_dir.mkdir(parents=True)
+        (state_dir / 'state.json').write_text(json.dumps({'id': 'menu-test', 'window': window, 'socket': socket,
+            'members': {'lead': {'pane': pane, 'status': 'running'}, 'worker_a': {'pane': worker, 'status': 'ready'}}}))
+        drain()
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        os.write(master, b't')
+        rendered = wait_for_text(client_process, b'worker_a')
+        assert b'lead' in rendered and b'ready' in rendered
+        drain(0.2)
+        # Team layout uses the same sidebar-preserving helper as Alt+4.
+        sidebar = tmux('split-window', '-d', '-P', '-F', '#{pane_id}', '-h', '-b', '-l', '18', '-t', pane, '/bin/sh')
+        tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+        tmux('set-option', '-g', '@sidebar_width', '18')
+        os.write(master, b'L')
+        for _ in range(40):
+            drain(0.05)
+            if tmux('show-option', '-wqv', '-t', window, '@workbench_layout_preset') == 'main-vertical': break
+        drain(0.3)
+        assert tmux('display-message', '-p', '-t', sidebar, '#{pane_width}') == '18'
+        tmux('kill-pane', '-t', sidebar)
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        os.write(master, b't')
+        wait_for_text(client_process, b'worker_a')
+        drain(0.2)
+        os.write(master, b'2')
+        for _ in range(40):
+            drain(0.05)
+            if tmux('display-message', '-p', '#{pane_id}') == worker: break
+        assert tmux('display-message', '-p', '#{pane_id}') == worker
+        tmux('kill-pane', '-t', worker)
+        tmux('set-option', '-p', '-u', '-t', pane, '@agent_team')
+        drain()
+        print('PASS Team member roles, reported progress and pane navigation')
+
         # Narrow clients retain usable menus and Close rather than rejecting width.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 30, 0, 0))
         import signal

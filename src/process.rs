@@ -12,6 +12,33 @@ pub struct AgentProcess {
     pub fingerprint: ProcessFingerprint,
 }
 
+/// Noninteractive jobs may still contribute status, but cannot accept TUI commands.
+pub(crate) fn accepts_terminal_input(agent: &AgentProcess) -> bool {
+    let pid = Pid::from_u32(agent.fingerprint.pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_cmd(UpdateKind::Always),
+    );
+    system.process(pid).is_some_and(|process| {
+        !process.cmd().iter().skip(1).any(|arg| {
+            let arg = arg.to_string_lossy();
+            match agent.kind {
+                AgentKind::Codex | AgentKind::Trae => {
+                    matches!(arg.as_ref(), "exec" | "app-server" | "mcp-server")
+                }
+                AgentKind::Claude => {
+                    matches!(arg.as_ref(), "-p" | "--print") || arg.starts_with("--print=")
+                }
+                AgentKind::Opencode => matches!(arg.as_ref(), "run" | "serve" | "web"),
+            }
+        })
+    })
+}
+
 pub trait ProcessSource {
     fn agents_for_roots(
         &mut self,
