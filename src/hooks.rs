@@ -883,10 +883,15 @@ mod tests {
             runtime_dir: temp.path().into(),
         };
         let listener = UnixListener::bind(paths.socket_for_server("test")).unwrap();
+        let (completed, wait_for_completion) = std::sync::mpsc::channel();
         let receiver = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let request = crate::ipc::read_request(&stream).unwrap();
-            std::thread::sleep(Duration::from_millis(1_100));
+            // Keep the connection open without replying until ingestion times out.
+            // A fixed sleep can race socket timeout rounding and runner scheduling.
+            wait_for_completion
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
             let _ = crate::ipc::write_response(
                 &stream,
                 &crate::ipc::Response::success(request.id, json!({"accepted":true})),
@@ -900,6 +905,7 @@ mod tests {
             br#"{"session_id":"thread","thread_name":"test","event_id":"stop"}"#,
         )
         .unwrap();
+        completed.send(()).unwrap();
         let received = receiver.join().unwrap();
         assert_eq!(
             drain_detached_spool(&paths, "test", now_ms()),
