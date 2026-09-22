@@ -309,7 +309,7 @@ pub fn run(
         index += 3;
     }
     let close = format!(
-        "× close{}(ESC)",
+        "× close{}(esc)",
         " ".repeat(footer_width.saturating_sub(12).max(1))
     );
     command.args([close.as_str(), "", ""]);
