@@ -8,6 +8,14 @@ socket=$test_root/tmux.sock
 
 cleanup()
 {
+  if [ -f "$test_root/local-focus.log" ]; then
+    set +x
+    exec 2>&9
+    printf '%s\n' 'Local focus failure trace:' >&2
+    tail -100 "$test_root/local-focus.log" >&2
+    tmux -S "$socket" list-clients -F '#{client_name} #{client_width} #{session_id} #{pane_id}' >&2 || true
+    tmux -S "$socket" list-panes -a -F '#{pane_id} #{pane_active} #{window_zoomed_flag} #{@responsive_auto_zoom}' >&2 || true
+  fi
   tmux -S "$socket" kill-server >/dev/null 2>&1 || true
   if [ -n "${socket_bootstrap:-}" ]; then
     tmux -S "$socket_bootstrap" kill-server >/dev/null 2>&1 || true
@@ -332,6 +340,8 @@ tmux -S "$socket" list-clients -F '#{pane_id}' | grep "^$agent_pane$" >/dev/null
 
 # Clicking a sidebar makes it active before the handler runs. A cross-window
 printf '%s\n' 'integration phase: local focus'
+exec 9>&2 2>"$test_root/local-focus.log"
+set -x
 # jump must restore the source window's previous pane, otherwise returning to
 # that window lands in the sidebar itself.
 tmux -S "$socket" new-session -d -s source-restore -x 140 -y 40
@@ -404,6 +414,9 @@ while "$binary" daemon status >/dev/null 2>&1; do
 done
 
 # A fresh server must be able to bootstrap its daemon solely from plugin
+set +x
+exec 2>&9 9>&-
+rm "$test_root/local-focus.log"
 printf '%s\n' 'integration phase: daemon bootstrap'
 # sourcing. In particular, the daemon must outlive tmux's short run-shell job.
 socket_bootstrap=$test_root/bootstrap.sock
