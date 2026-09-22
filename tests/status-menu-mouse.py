@@ -56,6 +56,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 output += os.read(master, 65536)
         return output
 
+    def wait_for_pane_text(expected, target):
+        # Menu callbacks run via run-shell -b after the menu process exits.
+        deadline = time.monotonic() + 5
+        while True:
+            content = tmux('capture-pane', '-p', '-t', target)
+            if expected in content:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(('menu action did not reach pane', expected, target, content))
+            drain(0.05)
+
     def item_position(output, label="close"):
         # Track the native menu's cursor writes to click the rendered Close row.
         screen = {}
@@ -272,7 +283,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/side' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
+        wait_for_pane_text('/side', pane)
         tmux('send-keys', '-t', pane, 'C-u')
         print('PASS touch selects action without hover')
         menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
@@ -300,7 +311,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
+        wait_for_pane_text('/side', pane)
         assert '/side' not in tmux('capture-pane', '-p', '-t', other)
         tmux('kill-window', '-t', other)
         drain()
@@ -316,7 +327,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             os.write(master, key)
             menu.wait(timeout=3)
             drain(0.3)
-            assert expected in tmux('capture-pane', '-p', '-t', pane)
+            wait_for_pane_text(expected, pane)
         tmux('send-keys', '-t', pane, 'C-u')
         print('PASS goal and installed pinned skills on main menu; skills prefill only')
         tmux('select-pane', '-t', pane, '-T', '⠋ Codex')
@@ -332,7 +343,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b'q')
         menu.wait(timeout=3)
         drain(0.3)
-        assert '$grill-me' in tmux('capture-pane', '-p', '-t', pane)
+        wait_for_pane_text('$grill-me', pane)
         tmux('send-keys', '-t', pane, 'C-u')
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         print('PASS working Codex retains skill shortcuts and uses /side')
