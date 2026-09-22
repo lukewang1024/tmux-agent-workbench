@@ -747,10 +747,11 @@ after deleting worktrees, run `tmux-agent-workbench prune` in the target session
 `tmux-agent-workbench prune --dead-tasks` additionally discards all retained dead
 task panes. Existing worktrees and unmarked windows are preserved.
 
-### Feishu / Botmux (optional)
+### Botmux (optional)
 
 Install [botmux](https://github.com/deepcoldy/botmux) and Python 3 to enable
-**Feishu / Botmux…** in the Agent and tmux status menus. Configuration, daemon
+**Botmux…** in the Agent status menu. **Launch agent…** is available only in
+the tmux status menu. Configuration, daemon
 start/status, dashboard URL and connection listing run in an interactive popup.
 Credentials and runtime state remain owned by botmux, outside this repository.
 

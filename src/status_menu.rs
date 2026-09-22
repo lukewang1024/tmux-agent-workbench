@@ -531,7 +531,7 @@ fn actions(
             }
         }
         View::Botmux => {
-            title = "Feishu · Botmux".into();
+            title = "Botmux".into();
             actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
             if context.agent.is_some() {
                 if context.role.as_deref().is_some_and(|role| role != "lead") {
@@ -651,13 +651,6 @@ fn actions(
                         options.at(View::Team),
                     ));
                 }
-                actions.push(nav(
-                    "launch",
-                    "Launch agent...",
-                    'a',
-                    kind,
-                    options.at(View::Launch),
-                ));
             }
             StatusMenuKind::Host => {
                 if let Ok(output) = Command::new("ssh-connect").args(["hosts", "list"]).output() {
@@ -687,14 +680,14 @@ fn actions(
         },
     }
     if options.view == View::Root
-        && matches!(kind, StatusMenuKind::Agent | StatusMenuKind::Tmux)
+        && matches!(kind, StatusMenuKind::Agent)
         && executable("botmux")
         && executable("python3")
         && executable("workbench-botmux")
     {
         actions.push(nav(
             "botmux",
-            "Feishu / Botmux...",
+            "Botmux...",
             'f',
             kind,
             options.at(View::Botmux),
