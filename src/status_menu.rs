@@ -24,6 +24,7 @@ pub enum View {
     Ready,
     More,
     Team,
+    Botmux,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum Tool {
@@ -132,6 +133,7 @@ enum ActionCommand {
     Tmux(Vec<String>),
     Agent(String),
     Host(String),
+    Botmux(String),
     Launch,
     Focus(String),
     Disabled,
@@ -528,6 +530,42 @@ fn actions(
                 ));
             }
         }
+        View::Botmux => {
+            title = "Feishu · Botmux".into();
+            actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
+            if context.agent.is_some() {
+                if context.role.as_deref().is_some_and(|role| role != "lead") {
+                    if let Some(lead) = context.team.iter().find(|m| m.label.starts_with("lead")) {
+                        actions.push(Action::new(
+                            "botmux-lead",
+                            "Go to team lead (recommended)",
+                            'l',
+                            ActionCommand::Focus(lead.pane.clone()),
+                        ));
+                    }
+                }
+                actions.push(Action::new(
+                    "botmux-connect",
+                    "Prepare this pane's connect command...",
+                    'c',
+                    ActionCommand::Botmux("connect".into()),
+                ));
+            }
+            for (id, label, key) in [
+                ("status", "Daemon status...", 's'),
+                ("list", "List connections / disconnect help...", 'i'),
+                ("dashboard", "Dashboard URL...", 'd'),
+                ("start", "Start botmux...", 'r'),
+                ("setup", "Configure Feishu bot...", 'u'),
+            ] {
+                actions.push(Action::new(
+                    &format!("botmux-{id}"),
+                    label,
+                    key,
+                    ActionCommand::Botmux(id.into()),
+                ));
+            }
+        }
         View::More => {
             actions.extend(agent_commands(context, true));
         }
@@ -647,6 +685,20 @@ fn actions(
                 }
             }
         },
+    }
+    if options.view == View::Root
+        && matches!(kind, StatusMenuKind::Agent | StatusMenuKind::Tmux)
+        && executable("botmux")
+        && executable("python3")
+        && executable("workbench-botmux")
+    {
+        actions.push(nav(
+            "botmux",
+            "Feishu / Botmux...",
+            'f',
+            kind,
+            options.at(View::Botmux),
+        ));
     }
     if options.view != View::Root {
         actions.push(nav("back", "← Back", 'B', kind, options.at(back)));
@@ -820,6 +872,48 @@ fn execute_action(
         }
         ActionCommand::Agent(text) => {
             tmux(&["send-keys", "-t", &context.pane, "-l", &format!("{text} ")])?;
+        }
+        ActionCommand::Botmux(operation) => {
+            let socket = tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &context.pane,
+                "#{socket_path}",
+            ])?;
+            let root = tmux(&["display-message", "-p", "-t", &context.pane, "#{pane_pid}"])?;
+            let pid = context
+                .agent
+                .as_ref()
+                .map(|a| a.fingerprint.pid.to_string())
+                .unwrap_or_default();
+            let command = [
+                "workbench-botmux",
+                operation,
+                &socket,
+                &context.pane,
+                &root,
+                &pid,
+            ]
+            .iter()
+            .map(|v| shell_quote(v))
+            .collect::<Vec<_>>()
+            .join(" ");
+            tmux(&[
+                "display-popup",
+                "-E",
+                "-c",
+                client,
+                "-t",
+                &context.pane,
+                "-d",
+                &context.cwd,
+                "-w",
+                "85%",
+                "-h",
+                "75%",
+                &command,
+            ])?;
         }
         ActionCommand::Host(host) => {
             tmux(&[
@@ -1028,6 +1122,7 @@ mod tests {
                     View::Ready,
                     View::More,
                     View::Team,
+                    View::Botmux,
                 ] {
                     let (_, actions) = actions(
                         kind,
