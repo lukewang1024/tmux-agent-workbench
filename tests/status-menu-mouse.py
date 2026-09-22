@@ -32,7 +32,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     ssh = shim / 'ssh-connect'
     ssh.write_text('#!/bin/sh\nprintf "%s\\n" dev-host test-host\n')
     ssh.chmod(0o755)
-    shutil.copy2(shutil.which('cat'), shim / 'codex')
+    # macOS system binaries carry restricted BSD flags; copy bytes only.
+    shutil.copyfile(shutil.which('cat'), shim / 'codex')
+    (shim / 'codex').chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
