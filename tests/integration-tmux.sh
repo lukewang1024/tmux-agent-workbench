@@ -83,6 +83,7 @@ fi
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 python3 "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
+python3 "$repo/tests/sidebar-mouse.py" "$binary"
 tmux -f "$repo/tests/fixtures/tmux.conf" -S "$socket" \
   new-session -d -s workbench-test -x 140 -y 40
 

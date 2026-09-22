@@ -357,12 +357,12 @@ fn event_loop(
         dirty = true;
         match input {
             Event::FocusGained => {
+                // tmux focuses this pane before forwarding a mouse click. Keep
+                // the selection and viewport stable until that click is handled;
+                // selecting the current agent here can scroll a different row
+                // underneath the pending mouse coordinates. Initial selection
+                // is resolved when the first snapshot arrives above.
                 selection_visible = true;
-                if let Some(snapshot) = &snapshot
-                    && let Some(current) = current_agent_selection(&rows, snapshot, server)
-                {
-                    selected = current;
-                }
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 if popup_mode()
