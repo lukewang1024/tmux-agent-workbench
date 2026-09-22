@@ -146,7 +146,10 @@ pub fn run(
 ) -> Result<()> {
     validate_pane(pane)?;
     let paths = Paths::discover()?;
-    let context = Context::read(&paths, pane)?;
+    let context = match Context::read(&paths, pane) {
+        Ok(context) => context,
+        Err(error) => return message(client, &format!("Menu unavailable: {error}")),
+    };
     if options
         .guard
         .as_ref()
@@ -170,8 +173,9 @@ pub fn run(
             return run(*next_kind, pane, client, None, 0, stay_open, next);
         }
         if let Err(error) = execute_action(selected, &context, client, options) {
-            message(client, &format!("Menu: {error}"))?;
-            return Err(error);
+            // This is an interactive callback: report the failure in the
+            // client's status line instead of leaving a run-shell output pager.
+            return message(client, &format!("Menu: {error}"));
         }
         return Ok(());
     }

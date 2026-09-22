@@ -326,7 +326,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain()
-        print('PASS stale target rejected and keyboard shell menu adapts')
+        missing = subprocess.run([core, 'status-menu', 'agent', '--pane', '%999999', '--client', client,
+                                  '--guard', 'stale', '--action', '/side'], env=env, capture_output=True)
+        assert missing.returncode == 0, missing.stderr
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        print('PASS stale/missing targets rejected without an output pager')
 
         # Follow the complete Single launch path through real submenus.
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
