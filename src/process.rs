@@ -262,7 +262,21 @@ mod tests {
         let pid = child.id();
         let mut tree = ProcessTree::default();
         let aliases = HashMap::from([("sleep".into(), AgentKind::Codex)]);
-        let found = tree.agents_for_roots(&[pid], &aliases);
+        // Process creation and OS command-line visibility are not atomic (seen
+        // on Linux ARM release runners). Wait for a usable identity snapshot.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let found = loop {
+            let found = tree.agents_for_roots(&[pid], &aliases);
+            let ready = found.contains_key(&pid)
+                && tree
+                    .system
+                    .process(Pid::from_u32(pid))
+                    .is_some_and(|process| !process.cmd().is_empty());
+            if ready || std::time::Instant::now() >= deadline {
+                break found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         // Always reap the child, including when an assertion below fails.
         child.kill().unwrap();
         child.wait().unwrap();

@@ -67,6 +67,20 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 raise AssertionError(('menu action did not reach pane', expected, target, content))
             drain(0.05)
 
+    def wait_for_pane_command(target, expected):
+        # A window exists before its shell execs the requested command. This is
+        # especially visible on macOS release runners; wait for readiness, not
+        # just window creation, before checking launch arguments or cwd.
+        deadline = time.monotonic() + 5
+        while True:
+            actual = tmux('display-message', '-p', '-t', target, '#{pane_current_command}')
+            if actual == expected:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(('launched command did not become ready', target, expected,
+                                      actual, tmux('capture-pane', '-p', '-t', target)))
+            drain(0.05)
+
     def item_position(output, label="close"):
         # Track the native menu's cursor writes to click the rendered Close row.
         screen = {}
@@ -397,7 +411,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             if len(after) > len(before): break
         assert len(after) == len(before) + 1
         launched = next(w for w in after if w not in before)
-        assert tmux('display-message', '-p', '-t', launched, '#{pane_current_command}') == 'codex'
+        wait_for_pane_command(launched, 'codex')
         assert tmux('display-message', '-p', '-t', launched, '#{pane_current_path}') == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
         tmux('kill-window', '-t', launched)
         drain()
@@ -422,6 +436,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             if len(after) > len(before): break
         assert len(after) == len(before) + 1
         budget_window = next(w for w in after if w not in before)
+        wait_for_pane_command(budget_window, 'codex')
         pid = tmux('display-message', '-p', '-t', budget_window, '#{pane_pid}')
         argv = subprocess.check_output(['ps', '-o', 'args=', '-p', pid], text=True)
         assert 'codex -u' in argv, argv
