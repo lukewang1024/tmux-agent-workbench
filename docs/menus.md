@@ -4,7 +4,7 @@
 statusbar tmux / prefix M-t
   Launch agent
     Codex / Claude Code / Trae / OpenCode (installed tools only)
-      Single ───────────────────────────────────────┐
+      Single / Single Budget ───────────────────────────────────────┐
       Team / Team Budget                            │
         Native subagents (default) / tmux panes ─────┤
                                                     Start in source directory
@@ -16,7 +16,7 @@ statusbar tmux / prefix M-t
 
 statusbar Agent / prefix M-a
   actual foreground CLI + state + source pane + team role
-  frequent task commands: goal / btw / plan / compact (where supported)
+  frequent task commands: goal / side question / plan / compact (where supported)
   installed grill-me / handoff skills (prefill, no Enter)
   More commands
   Team members & progress (pane teams only)
@@ -25,7 +25,7 @@ statusbar Agent / prefix M-a
   Launch agent
 ```
 
-Each submenu keeps **Back** (`B`) beside **Close** in the footer on every page. Escape and outside clicks dismiss it. On
+Each submenu keeps **← Back** (`B`) beside **× close** (`Escape`) with right-aligned shortcuts in the footer on every page. Escape and outside clicks dismiss it. On
 short terminals, `[` and `]` change pages. The source pane stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
 carry a hash of the pane/process identity and rebuild their available actions
@@ -43,9 +43,9 @@ before executing; changed processes or unavailable actions show a message.
   model request, clear a draft, submit Enter, or answer an approval themselves.
 - Codex's busy-safe subset follows the local upstream
   `codex-rs/tui/src/slash_command.rs::available_during_task`; `/fork` and
-  `/compact` require idle. The main menu prioritizes `/goal`, `/btw`, `/plan`, and `/compact`.
-  Session branching, diff, status, model and permission controls live in More. Codex `/side` is an alias
-  of `/btw`, so the menu shows only `/btw`.
+  `/compact` require idle. The main menu prioritizes `/goal`, `/side`, `/plan`, and `/compact`.
+  Session branching, diff, status, model and permission controls live in More. Codex `/side` and `/btw` share the same handler; the menu uses only
+  `/side` to match Codex terminology.
 - Claude's catalog follows its [interactive-mode documentation](https://code.claude.com/docs/en/interactive-mode)
   and [command reference](https://code.claude.com/docs/en/commands).
   OpenCode uses its [TUI reference](https://opencode.ai/docs/tui/), including
@@ -58,7 +58,7 @@ before executing; changed processes or unavailable actions show a message.
 - `grill-me` and `handoff` are pinned when a `SKILL.md` exists in the active
   tool's project or global skill directories. Project discovery stops at the
   worktree root. Codex/TraeX prefill `$name`, Claude prefills `/name`, and
-  OpenCode prefills a request to use the named skill. Skills appear at idle,
+  OpenCode prefills a request to use the named skill. Skills remain available while idle or working,
   never execute on menu selection, and retain the CLI's loading/permission
   checks. This is filesystem discovery, not an inventory of enabled plugins
   or per-session skill overrides.
@@ -82,3 +82,27 @@ terminal pagination. Fixture CLI executables and an `agent-team` boundary stub
 avoid paid model requests; this validates menu orchestration, not model quality
 or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
+
+## Single Budget
+
+This preset opens one interactive CLI session, without team instructions or
+worker configuration. The default Codex arguments select `gpt-5.6-luna` with
+`high` reasoning effort. Other CLIs need explicit arguments so the menu does
+not silently label their normal model as a budget model.
+
+Override arguments in `$XDG_CONFIG_HOME/tmux-agent-workbench/launch.toml`
+(default `~/.config/tmux-agent-workbench/launch.toml`):
+
+```toml
+[single_budget]
+codex = ["--model", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"']
+# Examples: choose model identifiers available to your account/provider.
+# claude = ["--model", "sonnet"]
+# traex = ["--model", "YOUR_BUDGET_MODEL"]
+# opencode = ["--model", "YOUR_PROVIDER/YOUR_BUDGET_MODEL"]
+```
+
+An empty argument array disables that tool's budget preset. Values are argv
+items, never shell snippets. Invalid configurations cannot launch, and known
+noninteractive invocations are rejected. The preset shortcuts are Single `s`,
+Single Budget `b`, Team `t`, Team Budget `T`.

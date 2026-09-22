@@ -268,11 +268,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        x, y = item_position(rendered, '/btw')
+        x, y = item_position(rendered, '/side')
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
+        assert '/side' in tmux('capture-pane', '-p', '-t', pane), 'touch did not execute selected action'
         tmux('send-keys', '-t', pane, 'C-u')
         print('PASS touch selects action without hover')
         menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
@@ -294,14 +294,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' not in rendered
+        assert b'/btw' not in rendered
         assert b'Focus this pane' not in rendered and b'Refresh' not in rendered
-        assert b'/btw' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
-        os.write(master, b'b')
+        assert b'/side' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
+        os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
-        assert '/btw' not in tmux('capture-pane', '-p', '-t', other)
+        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
+        assert '/side' not in tmux('capture-pane', '-p', '-t', other)
         tmux('kill-window', '-t', other)
         drain()
         print('PASS agent action targets source pane after active window changes')
@@ -319,6 +319,23 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             assert expected in tmux('capture-pane', '-p', '-t', pane)
         tmux('send-keys', '-t', pane, 'C-u')
         print('PASS goal and installed pinned skills on main menu; skills prefill only')
+        tmux('select-pane', '-t', pane, '-T', '⠋ Codex')
+        for _ in range(60):
+            snapshot = json.loads(subprocess.check_output([core, 'snapshot', '--json'], env=env))
+            if any(a['target']['pane_id'] == pane and a['base_state'] == 'working' for a in snapshot['agents']): break
+            drain(0.05)
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        assert b'working' in rendered and b'grill-me' in rendered and b'handoff' in rendered
+        assert b'/side' in rendered and b'/btw' not in rendered
+        os.write(master, b'q')
+        menu.wait(timeout=3)
+        drain(0.3)
+        assert '$grill-me' in tmux('capture-pane', '-p', '-t', pane)
+        tmux('send-keys', '-t', pane, 'C-u')
+        tmux('select-pane', '-t', pane, '-T', 'Codex idle')
+        print('PASS working Codex retains skill shortcuts and uses /side')
         menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
@@ -336,19 +353,19 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         tmux('respawn-pane', '-k', '-t', pane, '/bin/sh')
-        os.write(master, b'b')
+        os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.4)
-        assert '/btw' not in tmux('capture-pane', '-p', '-t', pane)
+        assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
         menu = subprocess.Popen([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/btw' not in rendered and b'No foreground agent' in rendered
+        assert b'/side' not in rendered and b'No foreground agent' in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain()
         missing = subprocess.run([core, 'status-menu', 'agent', '--pane', '%999999', '--client', client,
-                                  '--guard', 'stale', '--action', '/btw'], env=env, capture_output=True)
+                                  '--guard', 'stale', '--action', '/side'], env=env, capture_output=True)
         assert missing.returncode == 0, missing.stderr
         assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
         print('PASS stale/missing targets rejected without an output pager')
@@ -374,6 +391,33 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         tmux('kill-window', '-t', launched)
         drain()
         print('PASS Single launch wizard preserves source cwd')
+        config_dir = Path(env['XDG_CONFIG_HOME']) / 'tmux-agent-workbench'
+        config_dir.mkdir(parents=True, exist_ok=True)
+        # cat's -u is a harmless fixture argument proving that the configured
+        # budget arguments are passed to a single interactive CLI, not a team.
+        (config_dir / 'launch.toml').write_text("[single_budget]\ncodex = ['-u']\n")
+        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu)
+        for key, heading in [(b'a', b'choose agent'), (b'x', b'Single Budget'), (b'b', b'Permissions:')]:
+            os.write(master, key)
+            wait_for_text(client_process, heading)
+            drain(0.15)
+        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        os.write(master, b's')
+        for _ in range(40):
+            drain(0.05)
+            after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+            if len(after) > len(before): break
+        assert len(after) == len(before) + 1
+        budget_window = next(w for w in after if w not in before)
+        pid = tmux('display-message', '-p', '-t', budget_window, '#{pane_pid}')
+        argv = subprocess.check_output(['ps', '-o', 'args=', '-p', pid], text=True)
+        assert 'codex -u' in argv, argv
+        tmux('kill-window', '-t', budget_window)
+        (config_dir / 'launch.toml').unlink()
+        drain()
+        print('PASS Single Budget uses configured arguments and exactly one window')
 
         # Record launches at the public agent-team boundary, without paid API
         # calls. The pane backend creates its own window; no launcher survives.
@@ -386,7 +430,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
-        for preset, presentation, expected in [(b't', b'n', ['codex']), (b'b', b't', ['codex', '--team-budget', '--tmux'])]:
+        for preset, presentation, expected in [(b't', b'n', ['codex']), (b'T', b't', ['codex', '--team-budget', '--tmux'])]:
             menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu)
@@ -416,7 +460,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/btw' not in rendered and b'Return to the agent prompt' in rendered
+        assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
@@ -425,7 +469,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/btw' not in rendered
+        assert b'/side' not in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         tmux('send-keys', '-t', pane, '-X', 'cancel')
@@ -489,12 +533,18 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'preset'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        _, back_y = item_position(rendered, 'Back')
+        _, back_y = item_position(rendered, '← Back')
+        back_key_x, _ = item_position(rendered, '(B)')
+        close_key_x, _ = item_position(rendered, '(Escape)')
+        assert back_key_x + len('(B)') == close_key_x + len('(Escape)')
         _, close_y = item_position(rendered, 'close')
         assert close_y == back_y + 1, (back_y, close_y)
         os.write(master, b']')
         rendered = wait_for_text(client_process)
-        _, back_y = item_position(rendered, 'Back')
+        _, back_y = item_position(rendered, '← Back')
+        back_key_x, _ = item_position(rendered, '(B)')
+        close_key_x, _ = item_position(rendered, '(Escape)')
+        assert back_key_x + len('(B)') == close_key_x + len('(Escape)')
         _, close_y = item_position(rendered, 'close')
         assert close_y == back_y + 1
         os.write(master, b'B')
