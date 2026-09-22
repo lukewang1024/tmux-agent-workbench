@@ -281,7 +281,38 @@ pub fn run(
     if let Some(back) = back {
         render_action(&mut command, back, &base, size.0);
     }
-    command.args(["× close", "Escape", ""]);
+    // Escape already dismisses menus. Pad its custom label to the same column
+    // as native key labels; inline styles trigger tmux's byte-length truncation
+    // on narrow clients even when the visible label fits.
+    let mut footer_width = ratatui::text::Line::from(format!(
+        " {} ",
+        menu_label(&title, size.0).replace("##", "#")
+    ))
+    .width();
+    let menu_args: Vec<_> = command
+        .get_args()
+        .skip_while(|arg| *arg != "--")
+        .skip(1)
+        .collect();
+    let mut index = 0;
+    while index < menu_args.len() {
+        let label = menu_args[index].to_string_lossy();
+        if label.is_empty() {
+            index += 1;
+            continue;
+        }
+        let key = menu_args[index + 1].to_string_lossy();
+        let label = label.strip_prefix('-').unwrap_or(&label).replace("##", "#");
+        let width = ratatui::text::Line::from(label).width()
+            + if key.is_empty() { 0 } else { key.len() + 3 };
+        footer_width = footer_width.max(width);
+        index += 3;
+    }
+    let close = format!(
+        "× close{}(esc)",
+        " ".repeat(footer_width.saturating_sub(12).max(1))
+    );
+    command.args([close.as_str(), "", ""]);
     match command.status()?.code() {
         Some(0 | 2) => Ok(()),
         _ => Err("could not display status menu".into()),
