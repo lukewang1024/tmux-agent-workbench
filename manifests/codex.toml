@@ -62,8 +62,7 @@ region = "codex_status"
 visible = "blocker"
 matcher = { any = { items = [
   { line_regex = { value = "(?i)^\\s*(would you like|do you want) .*[?]\\s*$" } },
-  { line_regex = { value = "(?i)^\\s*(allow|approve) .*[?]\\s*$" } },
-  { contains = { value = "Press enter to confirm" } }
+  { line_regex = { value = "(?i)^\\s*(allow|approve) .*[?]\\s*$" } }
 ] } }
 
 [[rules]]
@@ -123,4 +122,7 @@ priority = 220
 state = "idle"
 region = "codex_status"
 visible = "idle"
-matcher = { line_regex = { value = "^\\s*[›❯](\\s+.*|[⠁-⣿]*Ask Codex to do anything.*)?\\s*$" } }
+matcher = { all = { items = [
+  { line_regex = { value = "^\\s*[›❯](\\s+.*|[⠁-⣿]*Ask Codex to do anything.*)?\\s*$" } },
+  { not = { item = { line_regex = { value = "^\\s*Select Model and Effort\\s*$" } } } }
+] } }

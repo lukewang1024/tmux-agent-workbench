@@ -693,6 +693,25 @@ matcher = { contains = { value = "approval ready" } }"#;
     }
 
     #[test]
+    fn codex_model_selector_does_not_override_lifecycle_state() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let codex = set.get(AgentKind::Codex);
+        let selector = "⚠ Selected model is at capacity. Please try a different model.\n\n\
+            Select Model and Effort\n\
+            Access legacy models by running codex -m <model_name> or in your config.toml\n\n\
+            1. gpt-6-astra (current)\n\
+            › 2. gpt-5.6-sol\n\n\
+            Press enter to confirm or esc to go back";
+        let working = codex.classify(selector, "⠴ current task");
+        assert_eq!(working.state, BaseState::Working);
+        assert_eq!(working.rule_id.as_deref(), Some("codex-title-working"));
+
+        let unknown = codex.classify(selector, "");
+        assert_eq!(unknown.state, BaseState::Unknown);
+        assert!(unknown.rule_id.is_none());
+    }
+
+    #[test]
     fn queued_async_question_with_idle_composer_is_not_blocked() {
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);
