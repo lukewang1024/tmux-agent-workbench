@@ -746,3 +746,26 @@ directories, excluding those with live task or agent panes. For immediate cleanu
 after deleting worktrees, run `tmux-agent-workbench prune` in the target session.
 `tmux-agent-workbench prune --dead-tasks` additionally discards all retained dead
 task panes. Existing worktrees and unmarked windows are preserved.
+
+### Feishu / Botmux (optional)
+
+Install [botmux](https://github.com/deepcoldy/botmux) and Python 3 to enable
+**Feishu / Botmux…** in the Agent and tmux status menus. Configuration, daemon
+start/status, dashboard URL and connection listing run in an interactive popup.
+Credentials and runtime state remain owned by botmux, outside this repository.
+
+Choose **Prepare this pane’s connect command…**, then paste the copied `/adopt
+session:window.pane` command into a fresh Feishu topic. Configure the bot for the
+same coding agent and disable its sandbox. Clipboard forwarding depends on the
+terminal; the popup also displays the command and tmux retains its paste buffer.
+Copying is only preparation: the Feishu bot confirms the actual connection.
+Botmux currently exposes adoption through its chat command, not a public local
+CLI command. The menu does not read private botmux databases or claim live
+per-pane binding status.
+
+Use one topic per pane for parallel tasks; normally connect a team's lead.
+Workers can be connected deliberately, and their menu offers a shortcut back
+to the lead. Send `/close` in the corresponding topic to disconnect while
+preserving the local agent. No global daemon stop is offered in the menu.
+Botmux scans the default tmux server; custom sockets are rejected explicitly.
+Pane identity and agent ancestry are checked before preparing the command.
