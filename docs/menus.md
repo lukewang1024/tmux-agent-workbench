@@ -25,7 +25,7 @@ statusbar Agent / prefix M-a
   Launch agent
 ```
 
-Each submenu keeps **← Back** (`B`) beside **× close** (`Escape`) with right-aligned shortcuts in the footer on every page. Escape and outside clicks dismiss it. On
+Each submenu keeps **← Back** (`B`) beside **× close** (`ESC`) with right-aligned shortcuts in the footer on every page. Escape and outside clicks dismiss it. On
 short terminals, `[` and `]` change pages. The source pane stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
 carry a hash of the pane/process identity and rebuild their available actions
