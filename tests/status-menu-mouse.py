@@ -402,7 +402,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                 if len(after) > len(before) and trace.exists(): break
             assert len(after) == len(before) + 1, (before, after)
             recorded = trace.read_text().splitlines()
-            assert recorded[0] == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
+            source_cwd = tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
+            assert Path(recorded[0]).samefile(source_cwd), (recorded[0], source_cwd)
             assert recorded[1:] == expected, recorded
             tmux('kill-window', '-t', next(w for w in after if w not in before))
             trace.unlink()
