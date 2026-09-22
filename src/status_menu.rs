@@ -1,25 +1,138 @@
+use crate::{
+    menu_context::{Context, Result, executable, tmux},
+    model::{AgentKind, BaseState},
+    paths::Paths,
+};
+use clap::{Args, ValueEnum};
 use std::process::Command;
 
-use clap::ValueEnum;
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusMenuKind {
     Host,
     Tmux,
     Agent,
 }
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum View {
+    #[default]
+    Root,
+    Panes,
+    Switch,
+    Launch,
+    Preset,
+    Presentation,
+    Ready,
+    More,
+    Team,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum Tool {
+    #[default]
+    Codex,
+    Claude,
+    Traex,
+    Opencode,
+}
+impl Tool {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Traex => "traex",
+            Self::Opencode => "opencode",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
+            Self::Traex => "Trae",
+            Self::Opencode => "OpenCode",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum Preset {
+    #[default]
+    Single,
+    Team,
+    TeamBudget,
+}
+impl Preset {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Team => "team",
+            Self::TeamBudget => "team-budget",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single",
+            Self::Team => "Team",
+            Self::TeamBudget => "Team Budget",
+        }
+    }
+}
+#[derive(Debug, Clone, Args, Default)]
+pub struct MenuOptions {
+    #[arg(long, value_enum, default_value = "root")]
+    pub view: View,
+    #[arg(long, value_enum, default_value = "codex")]
+    pub tool: Tool,
+    #[arg(long, value_enum, default_value = "single")]
+    pub preset: Preset,
+    #[arg(long)]
+    pub panes: bool,
+    #[arg(long)]
+    pub guard: Option<String>,
+}
+impl MenuOptions {
+    fn route(&self) -> String {
+        format!(
+            "--view {} --tool {} --preset {}{}",
+            self.view.to_possible_value().unwrap().get_name(),
+            self.tool.name(),
+            self.preset.name(),
+            if self.panes { " --panes" } else { "" }
+        )
+    }
+    fn at(&self, view: View) -> Self {
+        Self {
+            view,
+            ..self.clone()
+        }
+    }
+}
 #[derive(Debug)]
 struct Action {
+    id: String,
     label: String,
     key: char,
     command: ActionCommand,
 }
-
 #[derive(Debug)]
 enum ActionCommand {
+    Navigate(StatusMenuKind, MenuOptions),
     Tmux(Vec<String>),
     Agent(String),
     Host(String),
+    Launch,
+    Focus(String),
+    Disabled,
+}
+impl Action {
+    fn new(id: &str, label: &str, key: char, command: ActionCommand) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            key,
+            command,
+        }
+    }
+    fn note(label: &str) -> Self {
+        Self::new("", label, ' ', ActionCommand::Disabled)
+    }
 }
 
 pub fn run(
@@ -29,17 +142,40 @@ pub fn run(
     action: Option<&str>,
     page: usize,
     stay_open: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    options: &MenuOptions,
+) -> Result<()> {
     validate_pane(pane)?;
-    let (title, actions) = actions(kind)?;
-    if let Some(label) = action {
-        let selected = actions
-            .iter()
-            .find(|action| action.label == label)
-            .ok_or("menu action no longer available")?;
-        return execute_action(selected, pane);
+    let paths = Paths::discover()?;
+    let context = Context::read(&paths, pane)?;
+    if options
+        .guard
+        .as_ref()
+        .is_some_and(|guard| guard != &context.guard)
+    {
+        return message(client, "Pane or agent changed. Reopen the menu.");
     }
-    let clients = tmux_output(&[
+    let (title, actions) = actions(kind, options, &context);
+    if let Some(id) = action {
+        let Some(selected) = actions
+            .iter()
+            .find(|a| a.id == id && !matches!(a.command, ActionCommand::Disabled))
+        else {
+            return message(client, "Action no longer available. Reopen the menu.");
+        };
+        // Direct action invocations also require a guard, not just callbacks.
+        if options.guard.is_none() {
+            return Err("menu action requires a pane identity guard".into());
+        }
+        if let ActionCommand::Navigate(next_kind, next) = &selected.command {
+            return run(*next_kind, pane, client, None, 0, stay_open, next);
+        }
+        if let Err(error) = execute_action(selected, &context, client, options) {
+            message(client, &format!("Menu: {error}"))?;
+            return Err(error);
+        }
+        return Ok(());
+    }
+    let clients = tmux(&[
         "list-clients",
         "-F",
         "#{client_name} #{client_width} #{client_height}",
@@ -60,19 +196,20 @@ pub fn run(
     let page = page.min(actions.len().saturating_sub(1) / page_size);
     let start = page * page_size;
     let executable = std::env::current_exe()?;
-    let kind_name = match kind {
-        StatusMenuKind::Host => "host",
-        StatusMenuKind::Tmux => "tmux",
-        StatusMenuKind::Agent => "agent",
-    };
+    let kind_name = kind.to_possible_value().unwrap();
     let base = format!(
-        "{} status-menu {} --pane {} --client {}",
+        "{} status-menu {} --pane {} --client {} {} --guard {}",
         shell_quote(&executable.to_string_lossy()),
-        kind_name,
+        kind_name.get_name(),
         shell_quote(pane),
-        shell_quote(client)
+        shell_quote(client),
+        options.route(),
+        shell_quote(&context.guard)
     );
     let mut command = Command::new("tmux");
+    if let Ok(server) = crate::server::ServerIdentity::discover() {
+        command.args(server.tmux_args());
+    }
     command.args(["display-menu", "-M"]);
     if stay_open {
         command.arg("-O");
@@ -87,227 +224,600 @@ pub fn run(
         "-b",
         "rounded",
         "-T",
-        &format!(" {title} "),
+        &format!(" {} ", menu_label(&title, size.0)),
         "-x",
         "C",
         "-y",
         "C",
     ]);
+    command.arg("--");
     for action in actions.iter().skip(start).take(page_size) {
-        command.args([
-            menu_label(&action.label, size.0),
-            action.key.to_string(),
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!("{base} --action {}", shell_quote(&action.label)))
-            ),
-        ]);
+        if matches!(action.command, ActionCommand::Disabled) {
+            command.args([
+                format!("-{}", menu_label(&action.label, size.0)),
+                String::new(),
+                String::new(),
+            ]);
+        } else {
+            command.args([
+                menu_label(&action.label, size.0),
+                action.key.to_string(),
+                format!(
+                    "run-shell -b {}",
+                    shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
+                ),
+            ]);
+        }
     }
-    if page > 0 {
-        command.args([
-            "Previous page".into(),
-            "[".into(),
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!("{base} --page {}", page - 1))
-            ),
-        ]);
+    for (show, label, key, next) in [
+        (page > 0, "Previous page", "[", page.saturating_sub(1)),
+        (
+            start + page_size < actions.len(),
+            "Next page",
+            "]",
+            page + 1,
+        ),
+    ] {
+        if show {
+            command.args([
+                label.into(),
+                key.into(),
+                format!(
+                    "run-shell -b {}",
+                    shell_quote(&format!("{base} --page {next}"))
+                ),
+            ]);
+        }
     }
-    if start + page_size < actions.len() {
-        command.args([
-            "Next page".into(),
-            "]".into(),
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!("{base} --page {}", page + 1))
-            ),
-        ]);
-    }
-    // Escape already dismisses native menus; render its short name explicitly.
     command.args(["", "× close (Esc)", "", ""]);
-    let status = command.status()?;
-    match status.code() {
-        Some(0 | 2) => Ok(()), // Repeated opening clicks may race with an existing menu.
+    match command.status()?.code() {
+        Some(0 | 2) => Ok(()),
         _ => Err("could not display status menu".into()),
     }
 }
 
-fn menu_label(label: &str, client_width: usize) -> String {
-    // Leave room for the native border and shortcut. Escape tmux formats so
-    // dynamic host names remain labels rather than executable format strings.
-    label
-        .chars()
-        .take(client_width.saturating_sub(10).max(1))
-        .collect::<String>()
-        .replace('#', "##")
+fn nav(id: &str, label: &str, key: char, kind: StatusMenuKind, options: MenuOptions) -> Action {
+    Action::new(id, label, key, ActionCommand::Navigate(kind, options))
 }
-
+fn tmux_action(id: &str, label: &str, key: char, args: &[&str]) -> Action {
+    Action::new(
+        id,
+        label,
+        key,
+        ActionCommand::Tmux(args.iter().map(|v| (*v).into()).collect()),
+    )
+}
 fn actions(
     kind: StatusMenuKind,
-) -> Result<(&'static str, Vec<Action>), Box<dyn std::error::Error>> {
-    Ok(match kind {
-        StatusMenuKind::Tmux => (
-            "tmux",
-            vec![
-                tmux_action("New window", 'c', &["new-window"]),
-                tmux_action(
-                    "Codex Auto",
-                    'x',
-                    &["new-window", "-n", "codex", "exec codex --approve-for-me"],
-                ),
-                tmux_action(
-                    "Claude Auto",
-                    'a',
-                    &[
-                        "new-window",
-                        "-n",
-                        "claude",
-                        "exec claude --permission-mode auto",
-                    ],
-                ),
-                tmux_action(
-                    "Trae Auto",
-                    't',
-                    &[
-                        "new-window",
-                        "-n",
-                        "trae",
-                        "exec traex --permission-mode auto",
-                    ],
-                ),
-                tmux_action(
-                    "OpenCode",
-                    'o',
-                    &["new-window", "-n", "opencode", "exec opencode --auto"],
-                ),
-                tmux_action(
-                    "VS Code",
-                    'v',
-                    &[
-                        "new-window",
-                        "-n",
-                        "code",
-                        "code .; exec ${SHELL:-/bin/sh} -l",
-                    ],
-                ),
-                tmux_action("Split below", '-', &["split-window", "-v"]),
-                tmux_action("Split right", '|', &["split-window", "-h"]),
-                tmux_action("Choose window", 'w', &["choose-tree", "-Zw"]),
-                tmux_action("Choose session", 's', &["choose-tree", "-Zs"]),
-                tmux_action("Detach", 'd', &["detach-client"]),
-            ],
-        ),
-        StatusMenuKind::Agent => (
-            "Agent",
-            vec![
-                agent_action("/side", 's'),
-                agent_action("/btw", 'b'),
-                agent_action("/fork", 'f'),
-            ],
-        ),
-        StatusMenuKind::Host => {
-            let output = Command::new("ssh-connect")
-                .args(["hosts", "list"])
-                .output()?;
-            if !output.status.success() {
-                return Err("ssh-connect hosts list failed".into());
+    options: &MenuOptions,
+    context: &Context,
+) -> (String, Vec<Action>) {
+    let mut actions = vec![];
+    let mut title = match kind {
+        StatusMenuKind::Host => "SSH".into(),
+        StatusMenuKind::Tmux => "tmux".into(),
+        StatusMenuKind::Agent => agent_title(context),
+    };
+    let mut back = View::Root;
+    match options.view {
+        View::Launch => {
+            title = "Launch · choose agent".into();
+            for (tool, key) in [
+                (Tool::Codex, 'x'),
+                (Tool::Claude, 'c'),
+                (Tool::Traex, 't'),
+                (Tool::Opencode, 'o'),
+            ] {
+                if executable(tool.name()) {
+                    actions.push(nav(
+                        tool.name(),
+                        tool.label(),
+                        key,
+                        kind,
+                        MenuOptions {
+                            tool,
+                            preset: Preset::Single,
+                            panes: false,
+                            ..options.at(View::Preset)
+                        },
+                    ));
+                }
             }
-            let actions = String::from_utf8(output.stdout)?
-                .lines()
-                .filter(|host| !host.is_empty())
-                .take(35)
-                .enumerate()
-                .map(|(index, host)| Action {
-                    label: host.to_owned(),
-                    key: "123456789abcdefghijklmnopqrstuvwxyz"
+            if actions.is_empty() {
+                actions.push(Action::note("No coding agents found on PATH"));
+            }
+        }
+        View::Preset => {
+            title = format!("{} · choose preset", options.tool.label());
+            back = View::Launch;
+            for (preset, key) in [
+                (Preset::Single, 's'),
+                (Preset::Team, 't'),
+                (Preset::TeamBudget, 'b'),
+            ] {
+                if preset == Preset::Single || executable("agent-team") {
+                    actions.push(nav(
+                        preset.name(),
+                        preset.label(),
+                        key,
+                        kind,
+                        MenuOptions {
+                            preset,
+                            panes: false,
+                            ..options.at(if preset == Preset::Single {
+                                View::Ready
+                            } else {
+                                View::Presentation
+                            })
+                        },
+                    ));
+                }
+            }
+            if !executable("agent-team") {
+                actions.push(Action::note("Install agent-team to enable Team"));
+            }
+        }
+        View::Presentation => {
+            title = format!("{} · {}", options.tool.label(), options.preset.label());
+            back = View::Preset;
+            actions.push(nav(
+                "native",
+                "Native subagents (default)",
+                'n',
+                kind,
+                MenuOptions {
+                    panes: false,
+                    ..options.at(View::Ready)
+                },
+            ));
+            actions.push(nav(
+                "panes",
+                "Interactive tmux panes",
+                't',
+                kind,
+                MenuOptions {
+                    panes: true,
+                    ..options.at(View::Ready)
+                },
+            ));
+        }
+        View::Ready => {
+            title = format!(
+                "Launch {} · {}",
+                options.tool.label(),
+                options.preset.label()
+            );
+            back = if options.preset == Preset::Single {
+                View::Preset
+            } else {
+                View::Presentation
+            };
+            actions.push(Action::note(&context.cwd));
+            actions.push(Action::note(if options.preset == Preset::Single {
+                "Interactive session · new window"
+            } else if options.panes {
+                "Interactive team · one tmux window"
+            } else {
+                "Native subagents · new window"
+            }));
+            actions.push(Action::note("Permissions: existing CLI / team config"));
+            if executable(options.tool.name())
+                && (options.preset == Preset::Single || executable("agent-team"))
+            {
+                actions.push(Action::new("start", "Start", 's', ActionCommand::Launch));
+            } else {
+                actions.push(Action::note("Required CLI is no longer available"));
+            }
+        }
+        View::Panes => {
+            title = "Panes & layout".into();
+            actions.extend([
+                tmux_action("below", "Split below", '-', &["split-window", "-v"]),
+                tmux_action("right", "Split right", '|', &["split-window", "-h"]),
+                tmux_action("zoom", "Zoom / unzoom", 'z', &["resize-pane", "-Z"]),
+                tmux_action(
+                    "layout",
+                    "Main vertical (prefix Alt+4)",
+                    '4',
+                    &["select-layout", "main-vertical"],
+                ),
+                tmux_action("tiled", "Tile panes", 't', &["select-layout", "tiled"]),
+            ]);
+        }
+        View::Switch => {
+            title = "Switch".into();
+            actions.extend([
+                tmux_action("windows", "Choose window", 'w', &["choose-tree", "-Zw"]),
+                tmux_action("sessions", "Choose session", 's', &["choose-tree", "-Zs"]),
+            ]);
+        }
+        View::Team => {
+            title = format!("Team · {}", context.role.as_deref().unwrap_or("members"));
+            for (index, member) in context.team.iter().enumerate().take(35) {
+                let label = format!(
+                    "{}{}",
+                    if member.pane == context.pane {
+                        "Current: "
+                    } else {
+                        "Go to "
+                    },
+                    member.label
+                );
+                actions.push(Action::new(
+                    &format!("member:{}", member.pane),
+                    &label,
+                    "123456789abcdefghijklmnopqrstuvwxyz"
                         .chars()
                         .nth(index)
                         .unwrap(),
-                    command: ActionCommand::Host(host.to_owned()),
-                })
-                .collect();
-            ("SSH", actions)
-        }
-    })
-}
-
-fn tmux_action(label: &str, key: char, args: &[&str]) -> Action {
-    Action {
-        label: label.into(),
-        key,
-        command: ActionCommand::Tmux(args.iter().map(|v| (*v).into()).collect()),
-    }
-}
-
-fn agent_action(label: &str, key: char) -> Action {
-    Action {
-        label: label.into(),
-        key,
-        command: ActionCommand::Agent(label.into()),
-    }
-}
-
-fn execute_action(action: &Action, pane: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let path = tmux_output(&["display-message", "-p", "-t", pane, "#{pane_current_path}"])?;
-    let status = match &action.command {
-        ActionCommand::Tmux(args) => {
-            let mut command = Command::new("tmux");
-            if matches!(
-                args.first().map(String::as_str),
-                Some("new-window" | "split-window")
-            ) {
-                command.arg(&args[0]);
-                command.args(["-c", path.trim()]);
-                command.args(&args[1..]);
-            } else {
-                command.args(args);
+                    ActionCommand::Focus(member.pane.clone()),
+                ));
             }
-            command.status()?
+            if !context.team.is_empty() {
+                actions.push(tmux_action(
+                    "layout",
+                    "Restore team layout (Alt+4)",
+                    'L',
+                    &["select-layout", "main-vertical"],
+                ));
+            }
         }
-        ActionCommand::Agent(text) => Command::new("tmux")
-            .args(["send-keys", "-t", pane, "-l", &agent_input(text)])
-            .status()?,
-        ActionCommand::Host(host) => Command::new("tmux")
-            .args([
+        View::More => {
+            actions.extend(agent_commands(context, true));
+        }
+        View::Root => match kind {
+            StatusMenuKind::Tmux => {
+                actions.extend([
+                    nav(
+                        "launch",
+                        "Launch agent...",
+                        'a',
+                        kind,
+                        options.at(View::Launch),
+                    ),
+                    tmux_action("new", "New window", 'c', &["new-window"]),
+                    nav(
+                        "panes",
+                        "Panes & layout...",
+                        'p',
+                        kind,
+                        options.at(View::Panes),
+                    ),
+                    nav(
+                        "switch",
+                        "Switch window / session...",
+                        'w',
+                        kind,
+                        options.at(View::Switch),
+                    ),
+                ]);
+                if executable("code") {
+                    actions.push(tmux_action(
+                        "editor",
+                        "Open project in VS Code",
+                        'v',
+                        &[
+                            "new-window",
+                            "-n",
+                            "code",
+                            "code .; exec ${SHELL:-/bin/sh} -l",
+                        ],
+                    ));
+                }
+                actions.push(tmux_action(
+                    "detach",
+                    "Detach this client",
+                    'd',
+                    &["detach-client"],
+                ));
+            }
+            StatusMenuKind::Agent => {
+                actions.extend(agent_commands(context, false));
+                if !agent_commands(context, true).is_empty() {
+                    actions.push(nav(
+                        "more",
+                        "More commands...",
+                        'm',
+                        kind,
+                        options.at(View::More),
+                    ));
+                }
+                if !context.team.is_empty() {
+                    actions.push(nav(
+                        "team",
+                        "Team members & progress...",
+                        't',
+                        kind,
+                        options.at(View::Team),
+                    ));
+                }
+                actions.push(Action::new(
+                    "focus",
+                    "Focus this pane",
+                    'g',
+                    ActionCommand::Focus(context.pane.clone()),
+                ));
+                actions.push(nav("refresh", "Refresh", 'r', kind, options.clone()));
+                actions.push(nav(
+                    "launch",
+                    "Launch agent...",
+                    'a',
+                    kind,
+                    options.at(View::Launch),
+                ));
+            }
+            StatusMenuKind::Host => {
+                if let Ok(output) = Command::new("ssh-connect").args(["hosts", "list"]).output() {
+                    if output.status.success() {
+                        for (index, host) in String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .filter(|h| !h.is_empty())
+                            .take(35)
+                            .enumerate()
+                        {
+                            actions.push(Action::new(
+                                &format!("host:{host}"),
+                                host,
+                                "123456789abcdefghijklmnopqrstuvwxyz"
+                                    .chars()
+                                    .nth(index)
+                                    .unwrap(),
+                                ActionCommand::Host(host.into()),
+                            ));
+                        }
+                    }
+                }
+                if actions.is_empty() {
+                    actions.push(Action::note("No SSH hosts available"));
+                }
+            }
+        },
+    }
+    if options.view != View::Root {
+        actions.push(nav("back", "Back", 'B', kind, options.at(back)));
+    }
+    (title, actions)
+}
+
+fn agent_title(context: &Context) -> String {
+    let Some(agent) = &context.agent else {
+        return format!("No foreground agent · {}", context.pane);
+    };
+    let name = match agent.kind {
+        AgentKind::Codex => "Codex",
+        AgentKind::Claude => "Claude",
+        AgentKind::Trae => "Trae",
+        AgentKind::Opencode => "OpenCode",
+    };
+    let state = match context.state {
+        BaseState::Idle => "idle",
+        BaseState::Working => "working",
+        BaseState::Blocked => "needs input",
+        BaseState::Unknown => "state unknown",
+    };
+    format!(
+        "{name} · {state} · {}{}",
+        context.pane,
+        context
+            .role
+            .as_ref()
+            .map(|r| format!(" · {r}"))
+            .unwrap_or_default()
+    )
+}
+
+// Provider-specific, conservative built-ins. No generic /side or /fork fallback.
+// Busy-safe Codex commands follow SlashCommand::available_during_task.
+fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
+    match kind {
+        AgentKind::Codex => &[
+            ("/side", 's', true, false),
+            ("/btw", 'b', true, false),
+            ("/fork", 'f', false, false),
+            ("/status", 'i', true, false),
+            ("/diff", 'd', true, true),
+            ("/model", 'm', true, true),
+            ("/permissions", 'p', true, true),
+            ("/compact", 'c', false, true),
+        ],
+        AgentKind::Claude => &[
+            ("/btw", 'b', true, false),
+            ("/status", 'i', false, false),
+            ("/compact", 'c', false, false),
+            ("/model", 'm', false, true),
+            ("/permissions", 'p', false, true),
+            ("/resume", 'r', false, true),
+            ("/help", 'h', false, true),
+        ],
+        // Trae command availability varies across distributions. Let its own
+        // help enumerate version-specific commands rather than guessing them.
+        AgentKind::Trae => &[("/help", 'h', false, false)],
+        AgentKind::Opencode => &[
+            ("/models", 'm', false, true),
+            ("/sessions", 's', false, false),
+            ("/compact", 'c', false, false),
+            ("/help", 'h', false, false),
+            ("/details", 'd', false, true),
+            ("/thinking", 't', false, true),
+        ],
+    }
+}
+fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
+    let Some(agent) = &context.agent else {
+        return vec![];
+    };
+    if !context.input_available || matches!(context.state, BaseState::Blocked | BaseState::Unknown)
+    {
+        return if more {
+            vec![]
+        } else {
+            vec![Action::note("Return to the agent prompt, then Refresh")]
+        };
+    }
+    let mut actions: Vec<_> = catalog(agent.kind)
+        .iter()
+        .filter(|(_, _, busy, extra)| *extra == more && (context.state == BaseState::Idle || *busy))
+        .map(|(command, key, _, _)| {
+            Action::new(
+                command,
+                command,
+                *key,
+                ActionCommand::Agent((*command).into()),
+            )
+        })
+        .collect();
+    if !more {
+        actions.insert(
+            0,
+            Action::note("Prefill only · press Enter in agent to send"),
+        );
+    }
+    actions
+}
+
+fn launch_argv(options: &MenuOptions) -> Vec<String> {
+    if options.preset == Preset::Single {
+        return vec![options.tool.name().into()];
+    }
+    let mut args = vec!["agent-team".into(), options.tool.name().into()];
+    if options.preset == Preset::TeamBudget {
+        args.push("--team-budget".into());
+    }
+    if options.panes {
+        args.push("--tmux".into());
+    }
+    args
+}
+fn execute_action(
+    action: &Action,
+    context: &Context,
+    client: &str,
+    options: &MenuOptions,
+) -> Result<()> {
+    match &action.command {
+        ActionCommand::Tmux(args) => {
+            if args[0] == "select-layout" {
+                // Use the same sidebar-preserving path as prefix Alt+4.
+                let output = Command::new("workbench-layout")
+                    .args([&args[1], &context.pane])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr)
+                        .trim()
+                        .to_string()
+                        .into());
+                }
+                return Ok(());
+            }
+            let mut full = vec![args[0].clone()];
+            if args[0] == "detach-client" {
+                full.extend(["-t".into(), client.into()]);
+            } else if args[0] == "new-window" {
+                full.extend([
+                    "-t".into(),
+                    context.session.clone(),
+                    "-c".into(),
+                    context.cwd.clone(),
+                ]);
+            } else {
+                full.extend(["-t".into(), context.pane.clone()]);
+                if args[0] == "split-window" {
+                    full.extend(["-c".into(), context.cwd.clone()]);
+                }
+            }
+            full.extend_from_slice(&args[1..]);
+            tmux(&full.iter().map(String::as_str).collect::<Vec<_>>())?;
+        }
+        ActionCommand::Agent(text) => {
+            tmux(&["send-keys", "-t", &context.pane, "-l", &format!("{text} ")])?;
+        }
+        ActionCommand::Host(host) => {
+            tmux(&[
                 "new-window",
+                "-t",
+                &context.session,
                 "-c",
-                path.trim(),
+                &context.cwd,
                 "-n",
                 host,
                 &format!("exec ssh-connect connect {}", shell_quote(host)),
-            ])
-            .status()?,
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("menu action failed: {}", action.label).into())
+            ])?;
+        }
+        ActionCommand::Launch => {
+            let args = launch_argv(options);
+            if options.panes && options.preset != Preset::Single {
+                // agent-team owns creation of its entire interactive team window.
+                // Never create an intermediate launcher pane or mix team modes.
+                let output = Command::new(&args[0])
+                    .args(&args[1..])
+                    .env_remove("AGENT_TEAM_DIR")
+                    .env_remove("AGENT_TEAM_ROLE")
+                    .env("TMUX_PANE", &context.pane)
+                    .current_dir(&context.cwd)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr)
+                        .trim()
+                        .to_string()
+                        .into());
+                }
+            } else {
+                let command = format!(
+                    "exec env -u AGENT_TEAM_DIR -u AGENT_TEAM_ROLE {}",
+                    args.iter()
+                        .map(|a| shell_quote(a))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                tmux(&[
+                    "new-window",
+                    "-t",
+                    &context.session,
+                    "-c",
+                    &context.cwd,
+                    "-n",
+                    options.tool.name(),
+                    &command,
+                ])?;
+            }
+        }
+        ActionCommand::Focus(pane) => {
+            tmux(&["switch-client", "-c", client, "-t", &context.session])?;
+            tmux(&["select-window", "-t", &context.window])?;
+            tmux(&["select-pane", "-t", pane])?;
+        }
+        ActionCommand::Navigate(..) | ActionCommand::Disabled => unreachable!(),
     }
+    Ok(())
 }
-
-fn agent_input(command: &str) -> String {
-    format!("{command} ")
+fn message(client: &str, text: &str) -> Result<()> {
+    tmux(&[
+        "display-message",
+        "-c",
+        client,
+        "--",
+        &text.replace('#', "##"),
+    ])?;
+    Ok(())
 }
-
-fn tmux_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("tmux").args(args).output()?;
-    if !output.status.success() {
-        return Err("tmux command failed".into());
-    }
-    Ok(String::from_utf8(output.stdout)?)
+fn menu_label(label: &str, width: usize) -> String {
+    label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(width.saturating_sub(10).max(1))
+        .collect::<String>()
+        .replace('#', "##")
 }
-
-fn validate_pane(pane: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_pane(pane: &str) -> Result<()> {
     if pane
         .strip_prefix('%')
-        .is_some_and(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+        .is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
     {
         Ok(())
     } else {
         Err("invalid pane target".into())
     }
 }
-
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -315,20 +825,135 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::{model::ProcessFingerprint, process::AgentProcess};
+    fn context(kind: Option<AgentKind>, state: BaseState) -> Context {
+        Context {
+            pane: "%1".into(),
+            session: "$1".into(),
+            window: "@1".into(),
+            cwd: "/tmp".into(),
+            guard: "test".into(),
+            agent: kind.map(|kind| AgentProcess {
+                kind,
+                fingerprint: ProcessFingerprint {
+                    pid: 42,
+                    started_at_ticks: 1,
+                    executable: "agent".into(),
+                },
+            }),
+            state,
+            input_available: true,
+            team: vec![],
+            role: None,
+        }
+    }
     #[test]
-    fn pane_targets_are_strict() {
+    fn shell_and_approval_never_get_slash_commands() {
+        for ctx in [
+            context(None, BaseState::Idle),
+            context(Some(AgentKind::Codex), BaseState::Blocked),
+            context(Some(AgentKind::Codex), BaseState::Unknown),
+        ] {
+            for more in [false, true] {
+                assert!(
+                    !agent_commands(&ctx, more)
+                        .iter()
+                        .any(|a| matches!(a.command, ActionCommand::Agent(_)))
+                );
+            }
+        }
+    }
+    #[test]
+    fn busy_codex_can_ask_side_question_but_cannot_fork() {
+        let cmds = agent_commands(&context(Some(AgentKind::Codex), BaseState::Working), false);
+        assert!(cmds.iter().any(|a| a.id == "/btw"));
+        assert!(!cmds.iter().any(|a| a.id == "/fork"));
+    }
+    #[test]
+    fn catalogs_are_provider_specific() {
+        for kind in [AgentKind::Claude, AgentKind::Trae, AgentKind::Opencode] {
+            assert!(
+                !catalog(kind)
+                    .iter()
+                    .any(|(cmd, _, _, _)| *cmd == "/side" || *cmd == "/fork")
+            );
+        }
+        assert!(
+            catalog(AgentKind::Opencode)
+                .iter()
+                .any(|(cmd, _, _, _)| *cmd == "/models")
+        );
+    }
+    #[test]
+    fn launch_combinations_are_explicit_and_do_not_override_permissions() {
+        for tool in [Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode] {
+            for preset in [Preset::Single, Preset::Team, Preset::TeamBudget] {
+                for panes in [false, true] {
+                    let args = launch_argv(&MenuOptions {
+                        tool,
+                        preset,
+                        panes,
+                        ..Default::default()
+                    });
+                    assert_eq!(
+                        args.contains(&"--tmux".into()),
+                        panes && preset != Preset::Single
+                    );
+                    assert_eq!(
+                        args.contains(&"--team-budget".into()),
+                        preset == Preset::TeamBudget
+                    );
+                    assert!(
+                        args.iter()
+                            .all(|a| !a.contains("approve") && !a.contains("permission"))
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn all_views_have_unique_shortcuts() {
+        for kind in [StatusMenuKind::Tmux, StatusMenuKind::Agent] {
+            for agent in [
+                AgentKind::Codex,
+                AgentKind::Claude,
+                AgentKind::Trae,
+                AgentKind::Opencode,
+            ] {
+                for view in [
+                    View::Root,
+                    View::Panes,
+                    View::Switch,
+                    View::Launch,
+                    View::Preset,
+                    View::Presentation,
+                    View::Ready,
+                    View::More,
+                    View::Team,
+                ] {
+                    let (_, actions) = actions(
+                        kind,
+                        &MenuOptions {
+                            view,
+                            ..Default::default()
+                        },
+                        &context(Some(agent), BaseState::Idle),
+                    );
+                    let mut seen = std::collections::HashSet::new();
+                    for a in actions {
+                        if !matches!(a.command, ActionCommand::Disabled) {
+                            assert!(seen.insert(a.key), "{kind:?} {agent:?} {view:?}: {}", a.key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn targets_and_labels_are_not_shell_or_tmux_code() {
         assert!(validate_pane("%12").is_ok());
         assert!(validate_pane("%12;kill-server").is_err());
-    }
-
-    #[test]
-    fn shell_quotes_hosts() {
         assert_eq!(shell_quote("dev'box"), "'dev'\\''box'");
-    }
-
-    #[test]
-    fn agent_shortcuts_prefill_without_submitting() {
-        assert_eq!(agent_input("/side"), "/side ");
+        assert_eq!(menu_label("a#{host}\nb", 80), "a##{host}b");
     }
 }

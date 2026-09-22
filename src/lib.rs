@@ -9,6 +9,7 @@ pub mod hooks;
 pub mod ipc;
 pub mod layout;
 pub mod manifest;
+mod menu_context;
 pub mod model;
 pub mod notification;
 pub mod notification_pipeline;

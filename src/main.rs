@@ -61,6 +61,8 @@ enum Command {
         action: Option<String>,
         #[arg(long, default_value_t = 0)]
         page: usize,
+        #[command(flatten)]
+        options: tmux_agent_workbench::status_menu::MenuOptions,
     },
     Pick {
         #[command(subcommand)]
@@ -1194,6 +1196,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             client,
             action,
             page,
+            options,
         } => {
             let stay_open = !client_uses_termux_input(&paths, &client);
             tmux_agent_workbench::status_menu::run(
@@ -1203,6 +1206,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 action.as_deref(),
                 page,
                 stay_open,
+                &options,
             )?;
         }
         Command::Pick { target } => {

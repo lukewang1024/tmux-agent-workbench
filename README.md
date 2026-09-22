@@ -304,6 +304,34 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
+The tmux menu groups actions into **Launch agent**, **New window**, **Panes &
+layout**, **Switch window / session**, the installed editor, and **Detach**.
+Launch walks through installed CLI → Single / Team / Team Budget → native
+subagents or interactive tmux panes → Start, with Back at every step. The
+review screen shows the source directory and permission policy. Team entries
+require [agent-team](https://github.com/lukewang1024/agent-team) on PATH;
+model combinations and permissions remain in that CLI's configuration.
+Workbench adds no approval-bypass flags. Single and native Team open one new
+window; pane Team lets `agent-team` create its own window, with no launcher
+pane left behind. Presentation is chosen at launch and never mixed mid-session.
+
+The Agent menu belongs to the pane from which it was opened. It identifies the
+live foreground CLI from its process ancestry and offers provider-specific
+commands, with less frequent commands under **More**. Shells, background or
+noninteractive agents, approval prompts, unknown states, and tmux copy mode do
+not receive slash commands. Working agents get only documented busy-safe
+shortcuts. Commands **prefill without Enter** and do not erase an existing
+draft; review the input in the CLI before submitting. Replacing the process
+invalidates an open menu's callbacks. **Refresh** rechecks status.
+
+For pane teams, **Team members & progress** shows roles and member-reported
+status from `agent-team`, lets you focus any live member, and restores the
+main-vertical layout (`prefix Alt+4`). Native subagents remain managed inside
+the coding CLI. Both the statusbar and `prefix M-a` / `prefix M-t` use the same
+menu implementation, including touch behavior and small-screen pagination.
+See [menu design and validation](docs/menus.md) for the interaction map and
+capability boundaries.
+
 Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
 use native menus that select the row at the next click's coordinates, including
 on touch screens without hover events. The opening release is consumed before

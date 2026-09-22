@@ -156,7 +156,7 @@ bind_pane @workbench-key-pane-up-arrow @workbench-_bound-pane-up-arrow Up "selec
 bind_pane @workbench-key-pane-right-arrow @workbench-_bound-pane-right-arrow Right "select pane right with responsive zoom" -R
 
 bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open agent command menu" \
-  run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}'"
+  run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}' '#{pane_id}'"
 bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
   run-shell -b "$CURRENT_DIR/bin/workbench-status-popup tmux '#{client_name}' '#{pane_id}'"
 
