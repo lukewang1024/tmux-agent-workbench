@@ -16,15 +16,16 @@ statusbar tmux / prefix M-t
 
 statusbar Agent / prefix M-a
   actual foreground CLI + state + source pane + team role
-  common commands (prefill, no Enter)
+  frequent task commands: goal / btw / plan / compact (where supported)
+  installed grill-me / handoff skills (prefill, no Enter)
   More commands
   Team members & progress (pane teams only)
     lead / workers + reported status → focus member
     restore main-vertical layout
-  Focus this pane / Refresh / Launch agent
+  Launch agent
 ```
 
-Each submenu has **Back** (`B`). Escape and outside clicks dismiss it. On
+Each submenu keeps **Back** (`B`) beside **Close** in the footer on every page. Escape and outside clicks dismiss it. On
 short terminals, `[` and `]` change pages. The source pane stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
 carry a hash of the pane/process identity and rebuild their available actions
@@ -42,15 +43,25 @@ before executing; changed processes or unavailable actions show a message.
   model request, clear a draft, submit Enter, or answer an approval themselves.
 - Codex's busy-safe subset follows the local upstream
   `codex-rs/tui/src/slash_command.rs::available_during_task`; `/fork` and
-  `/compact` require idle. Common shortcuts include `/side`, `/btw`, `/status`.
+  `/compact` require idle. The main menu prioritizes `/goal`, `/btw`, `/plan`, and `/compact`.
+  Session branching, diff, status, model and permission controls live in More. Codex `/side` is an alias
+  of `/btw`, so the menu shows only `/btw`.
 - Claude's catalog follows its [interactive-mode documentation](https://code.claude.com/docs/en/interactive-mode)
   and [command reference](https://code.claude.com/docs/en/commands).
   OpenCode uses its [TUI reference](https://opencode.ai/docs/tui/), including
   `/models` rather than Codex's `/model`. These are conservative built-ins,
   not a discovery mechanism for installed plugins or custom slash commands.
-- Trae distributions vary; the default entry is `/help` so that its own CLI
-  supplies the version-specific commands. Unrecognized CLIs get no guessed
-  slash-command catalog.
+- TraeX 0.205.1's embedded command descriptions distinguish `/btw` (one-shot,
+  no tools) from `/side` (an ephemeral fork). The main menu exposes `/goal`,
+  `/btw`, `/plan`, `/compact`; the distinct `/side` action lives in More.
+  Unrecognized CLIs get no guessed slash-command catalog.
+- `grill-me` and `handoff` are pinned when a `SKILL.md` exists in the active
+  tool's project or global skill directories. Project discovery stops at the
+  worktree root. Codex/TraeX prefill `$name`, Claude prefills `/name`, and
+  OpenCode prefills a request to use the named skill. Skills appear at idle,
+  never execute on menu selection, and retain the CLI's loading/permission
+  checks. This is filesystem discovery, not an inventory of enabled plugins
+  or per-session skill overrides.
 - Team presets call the public `agent-team TOOL [--team-budget] [--tmux]`
   interface. Workbench owns no model configuration or team execution policy.
   All launches are interactive; permissions inherit the CLI/team configuration.

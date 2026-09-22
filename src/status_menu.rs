@@ -196,8 +196,16 @@ pub fn run(
             })?
         })
         .ok_or("Workbench client disappeared")?;
-    let page_size = size.1.saturating_sub(7).max(1);
-    let page = page.min(actions.len().saturating_sub(1) / page_size);
+    let back = actions.iter().find(|action| action.id == "back");
+    let items: Vec<_> = actions
+        .iter()
+        .filter(|action| action.id != "back")
+        .collect();
+    let page_size = size
+        .1
+        .saturating_sub(if back.is_some() { 8 } else { 7 })
+        .max(1);
+    let page = page.min(items.len().saturating_sub(1) / page_size);
     let start = page * page_size;
     let executable = std::env::current_exe()?;
     let kind_name = kind.to_possible_value().unwrap();
@@ -235,32 +243,14 @@ pub fn run(
         "C",
     ]);
     command.arg("--");
-    for action in actions.iter().skip(start).take(page_size) {
-        if matches!(action.command, ActionCommand::Disabled) {
-            command.args([
-                format!("-{}", menu_label(&action.label, size.0)),
-                String::new(),
-                String::new(),
-            ]);
-        } else {
-            command.args([
-                menu_label(&action.label, size.0),
-                action.key.to_string(),
-                format!(
-                    "run-shell -b {}",
-                    shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
-                ),
-            ]);
-        }
+    for action in items.iter().skip(start).take(page_size) {
+        render_action(&mut command, action, &base, size.0);
     }
+    // Navigation stays in the footer on every page, alongside Close.
+    command.arg("");
     for (show, label, key, next) in [
         (page > 0, "Previous page", "[", page.saturating_sub(1)),
-        (
-            start + page_size < actions.len(),
-            "Next page",
-            "]",
-            page + 1,
-        ),
+        (start + page_size < items.len(), "Next page", "]", page + 1),
     ] {
         if show {
             command.args([
@@ -273,10 +263,32 @@ pub fn run(
             ]);
         }
     }
-    command.args(["", "× close (Esc)", "", ""]);
+    if let Some(back) = back {
+        render_action(&mut command, back, &base, size.0);
+    }
+    command.args(["× close (Esc)", "", ""]);
     match command.status()?.code() {
         Some(0 | 2) => Ok(()),
         _ => Err("could not display status menu".into()),
+    }
+}
+
+fn render_action(command: &mut Command, action: &Action, base: &str, width: usize) {
+    if matches!(action.command, ActionCommand::Disabled) {
+        command.args([
+            format!("-{}", menu_label(&action.label, width)),
+            String::new(),
+            String::new(),
+        ]);
+    } else {
+        command.args([
+            menu_label(&action.label, width),
+            action.key.to_string(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
+            ),
+        ]);
     }
 }
 
@@ -517,6 +529,20 @@ fn actions(
             }
             StatusMenuKind::Agent => {
                 actions.extend(agent_commands(context, false));
+                if context.input_available && context.state == BaseState::Idle {
+                    if let Some(agent) = &context.agent {
+                        for (name, key, input) in
+                            crate::menu_skills::shortcuts(agent.kind, &context.cwd)
+                        {
+                            actions.push(Action::new(
+                                &format!("skill:{name}"),
+                                &format!("{name} · Skill"),
+                                key,
+                                ActionCommand::Agent(input),
+                            ));
+                        }
+                    }
+                }
                 if !agent_commands(context, true).is_empty() {
                     actions.push(nav(
                         "more",
@@ -535,13 +561,6 @@ fn actions(
                         options.at(View::Team),
                     ));
                 }
-                actions.push(Action::new(
-                    "focus",
-                    "Focus this pane",
-                    'g',
-                    ActionCommand::Focus(context.pane.clone()),
-                ));
-                actions.push(nav("refresh", "Refresh", 'r', kind, options.clone()));
                 actions.push(nav(
                     "launch",
                     "Launch agent...",
@@ -615,37 +634,47 @@ fn agent_title(context: &Context) -> String {
 fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
     match kind {
         AgentKind::Codex => &[
-            ("/side", 's', true, false),
+            ("/goal", 'g', true, false),
             ("/btw", 'b', true, false),
-            ("/fork", 'f', false, false),
-            ("/status", 'i', true, false),
+            ("/plan", 'p', false, false),
+            ("/compact", 'c', false, false),
+            ("/fork", 'f', false, true),
             ("/diff", 'd', true, true),
+            ("/status", 'i', true, true),
             ("/model", 'm', true, true),
             ("/permissions", 'p', true, true),
-            ("/compact", 'c', false, true),
         ],
         AgentKind::Claude => &[
             ("/btw", 'b', true, false),
-            ("/status", 'i', false, false),
+            ("/plan", 'p', false, false),
             ("/compact", 'c', false, false),
+            ("/status", 'i', false, true),
             ("/model", 'm', false, true),
             ("/permissions", 'p', false, true),
             ("/resume", 'r', false, true),
             ("/help", 'h', false, true),
         ],
-        // Trae command availability varies across distributions. Let its own
-        // help enumerate version-specific commands rather than guessing them.
-        AgentKind::Trae => &[("/help", 'h', false, false)],
+        // TraeX distinguishes a tool-free /btw answer from a /side thread.
+        // Keep the common quick question in front and the separate thread in More.
+        AgentKind::Trae => &[
+            ("/goal", 'g', false, false),
+            ("/btw", 'b', true, false),
+            ("/plan", 'p', false, false),
+            ("/compact", 'c', false, false),
+            ("/side", 's', false, true),
+            ("/help", 'h', false, true),
+        ],
         AgentKind::Opencode => &[
-            ("/models", 'm', false, true),
             ("/sessions", 's', false, false),
             ("/compact", 'c', false, false),
-            ("/help", 'h', false, false),
+            ("/models", 'm', false, true),
+            ("/help", 'h', false, true),
             ("/details", 'd', false, true),
             ("/thinking", 't', false, true),
         ],
     }
 }
+
 fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
     let Some(agent) = &context.agent else {
         return vec![];
@@ -655,7 +684,7 @@ fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
         return if more {
             vec![]
         } else {
-            vec![Action::note("Return to the agent prompt, then Refresh")]
+            vec![Action::note("Return to the agent prompt, then reopen")]
         };
     }
     let mut actions: Vec<_> = catalog(agent.kind)
@@ -871,11 +900,13 @@ mod tests {
     fn busy_codex_can_ask_side_question_but_cannot_fork() {
         let cmds = agent_commands(&context(Some(AgentKind::Codex), BaseState::Working), false);
         assert!(cmds.iter().any(|a| a.id == "/btw"));
+        assert!(cmds.iter().any(|a| a.id == "/goal"));
+        assert!(!cmds.iter().any(|a| a.id == "/plan" || a.id == "/compact"));
         assert!(!cmds.iter().any(|a| a.id == "/fork"));
     }
     #[test]
     fn catalogs_are_provider_specific() {
-        for kind in [AgentKind::Claude, AgentKind::Trae, AgentKind::Opencode] {
+        for kind in [AgentKind::Claude, AgentKind::Opencode] {
             assert!(
                 !catalog(kind)
                     .iter()

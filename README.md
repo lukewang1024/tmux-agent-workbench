@@ -317,12 +317,14 @@ pane left behind. Presentation is chosen at launch and never mixed mid-session.
 
 The Agent menu belongs to the pane from which it was opened. It identifies the
 live foreground CLI from its process ancestry and offers provider-specific
-commands, with less frequent commands under **More**. Shells, background or
+commands: goal, side question, planning and compaction where supported.
+Installed `grill-me` and `handoff` skills are pinned alongside them. Session
+branching, status and configuration commands live under **More**. Shells, background or
 noninteractive agents, approval prompts, unknown states, and tmux copy mode do
 not receive slash commands. Working agents get only documented busy-safe
 shortcuts. Commands **prefill without Enter** and do not erase an existing
 draft; review the input in the CLI before submitting. Replacing the process
-invalidates an open menu's callbacks. **Refresh** rechecks status.
+invalidates an open menu's callbacks. Reopening the menu rechecks status.
 
 For pane teams, **Team members & progress** shows roles and member-reported
 status from `agent-team`, lets you focus any live member, and restores the
