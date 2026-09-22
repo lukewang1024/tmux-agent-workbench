@@ -36,6 +36,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     shutil.copyfile(shutil.which('cat'), shim / 'codex')
     (shim / 'codex').chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
+    project = root / 'project'
+    for name in ('grill-me', 'handoff'):
+        skill = project / '.agents/skills' / name
+        skill.mkdir(parents=True)
+        (skill / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: Menu fixture\n---\n')
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
 
@@ -136,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     termux = None
     daemon_started = False
     try:
-        tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '/bin/sh')
+        tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '-c', str(project), '/bin/sh')
         tmux('set-option', '-g', 'default-shell', '/bin/sh')
         tmux('set-option', '-g', 'mouse', 'on')
         tmux('set-option', '-g', 'status', 'off')
@@ -289,15 +294,31 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
-        os.write(master, b's')
+        assert b'/side' not in rendered
+        assert b'Focus this pane' not in rendered and b'Refresh' not in rendered
+        assert b'/btw' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
+        os.write(master, b'b')
         menu.wait(timeout=3)
         drain(0.3)
-        assert '/side' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
-        assert '/side' not in tmux('capture-pane', '-p', '-t', other)
+        assert '/btw' in tmux('capture-pane', '-p', '-t', pane), tmux('capture-pane', '-p', '-t', pane)
+        assert '/btw' not in tmux('capture-pane', '-p', '-t', other)
         tmux('kill-window', '-t', other)
         drain()
         print('PASS agent action targets source pane after active window changes')
+        for key, expected in [(b'q', '$grill-me'), (b'h', '$handoff')]:
+            tmux('send-keys', '-t', pane, 'C-u')
+            drain()
+            menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu)
+            assert b'/goal' in rendered and b'grill-me' in rendered and b'handoff' in rendered
+            assert b'/fork' not in rendered and b'/status' not in rendered
+            os.write(master, key)
+            menu.wait(timeout=3)
+            drain(0.3)
+            assert expected in tmux('capture-pane', '-p', '-t', pane)
+        tmux('send-keys', '-t', pane, 'C-u')
+        print('PASS goal and installed pinned skills on main menu; skills prefill only')
         menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
@@ -315,19 +336,19 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         tmux('respawn-pane', '-k', '-t', pane, '/bin/sh')
-        os.write(master, b's')
+        os.write(master, b'b')
         menu.wait(timeout=3)
         drain(0.4)
-        assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
+        assert '/btw' not in tmux('capture-pane', '-p', '-t', pane)
         menu = subprocess.Popen([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' not in rendered and b'No foreground agent' in rendered
+        assert b'/btw' not in rendered and b'No foreground agent' in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain()
         missing = subprocess.run([core, 'status-menu', 'agent', '--pane', '%999999', '--client', client,
-                                  '--guard', 'stale', '--action', '/side'], env=env, capture_output=True)
+                                  '--guard', 'stale', '--action', '/btw'], env=env, capture_output=True)
         assert missing.returncode == 0, missing.stderr
         assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
         print('PASS stale/missing targets rejected without an output pager')
@@ -394,7 +415,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
+        assert b'/btw' not in rendered and b'Return to the agent prompt' in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
@@ -403,7 +424,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' not in rendered
+        assert b'/btw' not in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         tmux('send-keys', '-t', pane, '-X', 'cancel')
@@ -461,6 +482,25 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         wait_for_text(menu)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 10, 30, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        drain(0.3)
+        menu = subprocess.Popen([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                                 '--view', 'preset'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        _, back_y = item_position(rendered, 'Back')
+        _, close_y = item_position(rendered, 'close')
+        assert close_y == back_y + 1, (back_y, close_y)
+        os.write(master, b']')
+        rendered = wait_for_text(client_process)
+        _, back_y = item_position(rendered, 'Back')
+        _, close_y = item_position(rendered, 'close')
+        assert close_y == back_y + 1
+        os.write(master, b'B')
+        wait_for_text(client_process, b'choose agen')
+        os.write(master, b'\x1b')
+        drain()
+        print('PASS Back stays beside Close across submenu pages')
         print('PASS narrow client with paginated actions')
         write_frame(termux, {'type': 'goodbye', 'version': 2})
         termux.wait(timeout=3)
