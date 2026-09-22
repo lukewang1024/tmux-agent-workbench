@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod layout;
 pub mod manifest;
 mod menu_context;
+mod menu_launch;
 mod menu_skills;
 pub mod model;
 pub mod notification;
