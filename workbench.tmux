@@ -182,6 +182,25 @@ if [ -n "$ATTENTION_BIN" ]; then
   # layout captured by the layout controller.
   tmux set-option -g @resurrect-hook-post-save-layout \
     "'$CURRENT_DIR/bin/workbench-resurrect-save-hook'"
+  # Keep the session-less relaunch feature available without requiring a
+  # second TPM plugin. The restore hook still requires an exact user voucher.
+  if [ -z "$(tmux show-option -gqv @assistant-resurrect-relaunch 2>/dev/null || true)" ]; then
+    tmux set-option -g @assistant-resurrect-relaunch on
+  fi
+  # Respect explicit continuum settings from the user's tmux.conf.
+  if [ -z "$(tmux show-option -gqv @continuum-save-interval 2>/dev/null || true)" ]; then
+    tmux set-option -g @continuum-save-interval 5
+  fi
+  if [ -z "$(tmux show-option -gqv @continuum-restore 2>/dev/null || true)" ]; then
+    tmux set-option -g @continuum-restore on
+  fi
+  # Workbench owns the composed assistant/session persistence hook. The
+  # assistant-resurrect implementation is vendored here, and Workbench's
+  # native lifecycle hook identity is merged into its compatible sidecar.
+  tmux set-option -g @resurrect-hook-post-save-all \
+    "'$CURRENT_DIR/bin/workbench-resurrect-save-all'"
+  tmux set-option -g @resurrect-hook-post-restore-all \
+    "'$CURRENT_DIR/bin/workbench-resurrect-restore-all'"
   expected_version="$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$CURRENT_DIR/Cargo.toml" | head -1)"
   installed_version="$($ATTENTION_BIN --version 2>/dev/null | awk '{print $2}')"
   if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then

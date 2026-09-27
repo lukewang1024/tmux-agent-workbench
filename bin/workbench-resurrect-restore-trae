@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+wb_tmux() {
+	if [ -n "${TMUX_AGENT_WORKBENCH_TMUX_SOCKET:-}" ]; then
+		tmux -S "$TMUX_AGENT_WORKBENCH_TMUX_SOCKET" "$@"
+	else
+		tmux "$@"
+	fi
+}
+
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+resurrect_dir=$(wb_tmux show-option -gqv @resurrect-dir 2>/dev/null || true)
+[ -n "$resurrect_dir" ] || resurrect_dir="$data_home/tmux/resurrect"
+host_name=$(hostname 2>/dev/null || true)
+resurrect_dir=$(printf '%s\n' "$resurrect_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host_name,g; s,~,$HOME,g")
+input="$resurrect_dir/workbench-trae-sessions.json"
+
+[ -f "$input" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+sleep 2
+
+entries=$(mktemp "${TMPDIR:-/tmp}/workbench-trae-entries.XXXXXX")
+trap 'rm -f "$entries"' EXIT HUP INT TERM
+jq -c '.[]' "$input" >"$entries" 2>/dev/null || exit 0
+
+while IFS= read -r entry; do
+	session_id=$(printf '%s\n' "$entry" | jq -r '.session_id // empty')
+	session_name=$(printf '%s\n' "$entry" | jq -r '.session_name // empty')
+	window_index=$(printf '%s\n' "$entry" | jq -r '.window_index // empty')
+	pane_index=$(printf '%s\n' "$entry" | jq -r '.pane_index // empty')
+	case "$session_id" in
+	''|*[!A-Za-z0-9._:/+=-]*) continue ;;
+	esac
+	[ -n "$session_name" ] && [ -n "$window_index" ] && [ -n "$pane_index" ] || continue
+
+	separator=$(printf '\t')
+	pane_id=$(wb_tmux list-panes -a -F "#{session_name}${separator}#{window_index}${separator}#{pane_index}${separator}#{pane_id}" 2>/dev/null |
+		awk -F "$separator" -v session="$session_name" -v window="$window_index" -v pane="$pane_index" \
+			'$1 == session && $2 == window && $3 == pane { print $4; exit }')
+	[ -n "$pane_id" ] || continue
+
+	client_wait=0
+	while [ "$(wb_tmux list-clients -t "$pane_id" 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ] && [ "$client_wait" -lt 50 ]; do
+		sleep 0.1
+		client_wait=$((client_wait + 1))
+	done
+
+	pane_cmd=$(wb_tmux display-message -t "$pane_id" -p '#{pane_current_command}' 2>/dev/null || true)
+	pane_cmd=${pane_cmd#-}
+	case "$pane_cmd" in
+	trae|traex|trae-cli|traecode)
+		continue
+		;;
+	bash|zsh|fish|sh|dash|ksh|tcsh|csh|nu)
+		;;
+	*)
+		continue
+		;;
+	esac
+	wb_tmux send-keys -t "$pane_id" "command traex --resume $session_id" C-m
+done <"$entries"

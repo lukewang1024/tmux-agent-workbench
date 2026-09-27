@@ -21,6 +21,6 @@ Validation:
 - `cargo test --lib` covers JSON framing and batching, process identity and exit
   removal, thread exclusion, and visibility including zoom and unfocused panes.
 - `sh tests/integration-tmux.sh` exercises the existing tmux integration contract.
-- `python3 tests/sidebar-refresh.py target/release/tmux-agent-workbench` measures
+- `python tests/sidebar-refresh.py target/release/tmux-agent-workbench` measures
   snapshot requests in an isolated detached session, then attaches a control-mode
   client and verifies that the sidebar resumes foreground refresh.

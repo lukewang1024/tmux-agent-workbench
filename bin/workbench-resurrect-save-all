@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+assistant_hook="$script_dir/../vendor/tmux-assistant-resurrect/scripts/save-assistant-sessions.sh"
+
+# Workbench owns the complete assistant-resurrect chain. Keep the upstream
+# schema and detector implementation vendored here, then append Workbench's
+# TraeX pane/session sidecar for the native agent that the upstream plugin did
+# not know about.
+bash "$assistant_hook" || true
+"$script_dir/workbench-resurrect-merge-hooks" || true
+"$script_dir/workbench-resurrect-save-trae" || true

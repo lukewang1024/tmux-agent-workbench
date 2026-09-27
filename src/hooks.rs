@@ -440,7 +440,15 @@ fn install_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
             true,
         ),
         HookTarget::Traex => {
-            merge_json_hooks(&home()?.join(".trae/cli/hooks.json"), "trae", false, true)
+            let paths = trae_hook_paths()?;
+            merge_json_hooks(&paths[0], "trae", false, true)?;
+            // Older Trae CLI releases read the legacy path. Keep an existing
+            // legacy config compatible while making ~/.trae/hooks.json the
+            // canonical path used by current TraeCode CLI releases.
+            if paths[1].exists() {
+                merge_json_hooks(&paths[1], "trae", false, true)?;
+            }
+            Ok(())
         }
         HookTarget::Codex => merge_codex(&codex_home()?.join("config.toml"), false),
         HookTarget::Opencode => {
@@ -458,7 +466,13 @@ fn remove_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
             false,
         ),
         HookTarget::Traex => {
-            merge_json_hooks(&home()?.join(".trae/cli/hooks.json"), "trae", true, false)
+            let paths = trae_hook_paths()?;
+            for path in paths {
+                if path.exists() {
+                    merge_json_hooks(&path, "trae", true, false)?;
+                }
+            }
+            Ok(())
         }
         HookTarget::Codex => merge_codex(&codex_home()?.join("config.toml"), true),
         HookTarget::Opencode => {
@@ -477,10 +491,7 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
             home()?.join(".claude/settings.json"),
             format!("hook ingest claude"),
         ),
-        HookTarget::Traex => (
-            home()?.join(".trae/cli/hooks.json"),
-            format!("hook ingest trae"),
-        ),
+        HookTarget::Traex => (trae_hook_path()?, format!("hook ingest trae")),
         HookTarget::Codex => (
             codex_home()?.join("config.toml"),
             "hook ingest codex".into(),
@@ -539,6 +550,23 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
         1..=8 => "ok".into(),
         _ => "duplicate Workbench entries".into(),
     })
+}
+
+fn trae_hook_paths() -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
+    let home = home()?;
+    Ok([
+        home.join(".trae/hooks.json"),
+        home.join(".trae/cli/hooks.json"),
+    ])
+}
+
+fn trae_hook_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let paths = trae_hook_paths()?;
+    if paths[0].exists() || !paths[1].exists() {
+        Ok(paths[0].clone())
+    } else {
+        Ok(paths[1].clone())
+    }
 }
 
 const EVENTS: [(&str, &str); 5] = [

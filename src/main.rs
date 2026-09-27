@@ -841,7 +841,19 @@ fn client_attach_pty(
         "client.bind",
         serde_json::json!({"token": token, "attachment": tty}),
     )?;
+    // Resolve the tmux server explicitly. In a test or helper process the
+    // inherited TMUX value may describe an attached client, while the
+    // Workbench socket option is the authoritative server identity. Letting
+    // `tmux attach-session` infer its target can switch or detach the current
+    // PTY, which makes the next popup observe a vanished client.
+    let server = ServerIdentity::discover()?;
     let mut command = ProcessCommand::new("tmux");
+    command.args(server.tmux_args());
+    // `attach-pty` may be invoked from a helper launched inside another tmux
+    // client. Clear the inherited client context so tmux creates an actual
+    // client on this PTY instead of treating `attach-session` as a
+    // switch-client operation on the parent client.
+    command.env_remove("TMUX").env_remove("TMUX_PANE");
     command.arg("attach-session");
     if let Some(session) = session {
         command.args(["-t", session]);

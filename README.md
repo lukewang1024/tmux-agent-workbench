@@ -367,12 +367,20 @@ the version-1 matcher and state semantics.
 ```sh
 tmux-agent-workbench daemon ensure|status|stop
 tmux-agent-workbench snapshot --json
+tmux-agent-workbench resurrect save|restore
 tmux-agent-workbench agent explain %3 [--show-content]
 tmux-agent-workbench metadata report --pane %3 --label build --ttl-ms 5000
 tmux-agent-workbench config check
 tmux-agent-workbench reload
 tmux-agent-workbench doctor
 ```
+
+`resurrect save|restore` is the all-in-one assistant session layer for this
+plugin. It composes with `tmux-resurrect` and `tmux-continuum`, preserves the
+existing `assistant-sessions.json` data, restores Claude, Codex, OpenCode,
+Copilot, Pi, Oh My Pi, and Grok sessions, and uses Workbench's native hooks for
+Claude, Codex, OpenCode, and TraeX. No separate assistant-resurrect TPM entry
+is needed.
 
 Like Herdr, Workbench renders one state per Agent pane. Claude `/btw` and Codex
 `/side` are classified from whichever thread is currently in the foreground;

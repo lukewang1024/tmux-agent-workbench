@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Quota protocol, caching, and menu regression checks without live credentials."""
 import json
 import os

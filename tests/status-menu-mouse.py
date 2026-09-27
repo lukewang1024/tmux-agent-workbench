@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Check real menu mouse dismissal and shortcuts through a tmux client PTY."""
 import fcntl
 import json
@@ -32,9 +32,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     ssh = shim / 'ssh-connect'
     ssh.write_text('#!/bin/sh\nprintf "%s\\n" dev-host test-host\n')
     ssh.chmod(0o755)
-    # macOS system binaries carry restricted BSD flags; copy bytes only.
-    shutil.copyfile(shutil.which('cat'), shim / 'codex')
-    (shim / 'codex').chmod(0o755)
+    # Keep launch fixtures long-lived without calling any model API. The
+    # Node-based fixture below is used when process identity must be detected.
+    codex = shim / 'codex'
+    codex.write_text('#!/bin/sh\nexec node "$0.js" "$@"\n')
+    codex.chmod(0o755)
+    codex_js = shim / 'codex.js'
+    codex_js.write_text('setInterval(() => {}, 1000000);\n')
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     project = root / 'project'
     for name in ('grill-me', 'handoff'):
@@ -122,7 +126,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             if needle in output:
                 return output
             if proc.poll() is not None:
-                raise AssertionError(('menu exited before rendering', proc.returncode, proc.stderr.read()))
+                probe = subprocess.run(
+                    ['tmux', '-S', socket, 'list-clients', '-F', '#{client_name} #{client_tty}'],
+                    env=env, text=True, capture_output=True, check=False,
+                )
+                raise AssertionError((
+                    'menu exited before rendering', proc.returncode, proc.stderr.read(),
+                    'tmux probe', probe.returncode, probe.stdout, probe.stderr,
+                ))
         raise AssertionError(('menu did not render', output))
 
     def write_frame(proc, message):
@@ -167,6 +178,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     daemon_started = False
     try:
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '-c', str(project), '/bin/sh')
+        # Keep the fixture server alive while the PTY client is being attached
+        # and while popup processes briefly detach/reconnect. Without these
+        # explicit lifecycle settings, tmux can reap the temporary server in
+        # the gap between two asynchronous menu actions, making the following
+        # action fail with "no server running" instead of testing the menu.
+        tmux('set-option', '-g', 'exit-empty', 'off')
+        tmux('set-option', '-g', 'exit-unattached', 'off')
         tmux('set-option', '-g', 'default-shell', '/bin/sh')
         tmux('set-option', '-g', 'mouse', 'on')
         tmux('set-option', '-g', 'status', 'off')
@@ -224,6 +242,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         tmux('set-option', '-g', 'status-right', '#[range=user|wb_tmux]MENU#[range=]')
         drain()
         before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        original_window = before[0]
         os.write(master, b'\x1b[<0;78;30M\x1b[<0;78;30m')
         rendered = wait_for_text(client_process)
         assert tmux('list-windows', '-F', '#{window_id}').splitlines() == before
@@ -246,7 +265,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             tmux('capture-pane', '-p', '-t', pane),
             tmux('list-clients', '-F', '#{client_name} #{client_tty}'),
         )
-        tmux('kill-window', '-t', next(window for window in after if window not in before))
+        created = next(window for window in after if window not in before)
+        # Killing the window selected by the attached PTY can terminate that
+        # client on some tmux/macOS combinations. Move it back first so the
+        # temporary window cleanup cannot race the next menu invocation.
+        tmux('switch-client', '-c', client, '-t', original_window)
+        tmux('kill-window', '-t', created)
         assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
         # A normal window-tab click also must not leave an output pager behind.
         other = tmux('new-window', '-d', '-P', '-F', '#{window_id}', '-n', 'touch-target')
@@ -259,6 +283,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         drain(0.3)
         assert tmux('display-message', '-p', '#{window_id}') == other
         assert set(tmux('list-panes', '-s', '-F', '#{pane_in_mode}').splitlines()) == {'0'}
+        tmux('switch-client', '-c', client, '-t', original_window)
         tmux('kill-window', '-t', other)
         tmux('set-option', '-g', 'status', 'off')
         drain(0.3)
@@ -284,9 +309,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             tmux('display-message', '-p', '-c', client, '#{client_tty}'),
         )
         # A real foreground process identity is required: a shell must not
-        # receive slash commands. A copied cat binary gives this fixture an
-        # executable named codex without calling any model API.
-        tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
+        # receive slash commands. Node's wrapper detection recognizes the
+        # codex.js argument while the process remains alive for the test.
+        tmux('respawn-pane', '-k', '-t', pane, shutil.which('node'), str(codex_js))
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         drain(0.3)
         # Touch sends a press/release without any preceding hover/motion.
@@ -411,7 +436,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             if len(after) > len(before): break
         assert len(after) == len(before) + 1
         launched = next(w for w in after if w not in before)
-        wait_for_pane_command(launched, 'codex')
+        wait_for_pane_command(launched, 'node')
         assert tmux('display-message', '-p', '-t', launched, '#{pane_current_path}') == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
         tmux('kill-window', '-t', launched)
         drain()
@@ -436,10 +461,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
             if len(after) > len(before): break
         assert len(after) == len(before) + 1
         budget_window = next(w for w in after if w not in before)
-        wait_for_pane_command(budget_window, 'codex')
+        wait_for_pane_command(budget_window, 'node')
         pid = tmux('display-message', '-p', '-t', budget_window, '#{pane_pid}')
         argv = subprocess.check_output(['ps', '-o', 'args=', '-p', pid], text=True)
-        assert 'codex -u' in argv, argv
+        assert '-u' in argv and 'codex.js' in argv, argv
         tmux('kill-window', '-t', budget_window)
         (config_dir / 'launch.toml').unlink()
         drain()

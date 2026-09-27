@@ -1,6 +1,6 @@
 """Exercise the real attach CLI with two PTYs and a local fake SSH transport.
 
-Run after cargo build: python3 tests/client-terminals.py
+Run after cargo build: python tests/client-terminals.py
 No remote host, live tmux server, or phone is used.
 """
 import json

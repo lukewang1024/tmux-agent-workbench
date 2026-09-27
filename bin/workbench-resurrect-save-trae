@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+# Persist Trae's pane-scoped session IDs from the canonical Workbench snapshot.
+# Trae's SessionStart hook is the authority that supplies the ID; do not make
+# tmux-assistant-resurrect (a third-party plugin) responsible for this.
+
+wb_tmux() {
+	if [ -n "${TMUX_AGENT_WORKBENCH_TMUX_SOCKET:-}" ]; then
+		tmux -S "$TMUX_AGENT_WORKBENCH_TMUX_SOCKET" "$@"
+	else
+		tmux "$@"
+	fi
+}
+
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+trae_home=${TRAE_HOME:-$HOME/.trae}
+resurrect_dir=$(wb_tmux show-option -gqv @resurrect-dir 2>/dev/null || true)
+[ -n "$resurrect_dir" ] || resurrect_dir="$data_home/tmux/resurrect"
+host_name=$(hostname 2>/dev/null || true)
+resurrect_dir=$(printf '%s\n' "$resurrect_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host_name,g; s,~,$HOME,g")
+output="$resurrect_dir/workbench-trae-sessions.json"
+
+mkdir -p "$resurrect_dir"
+umask 077
+temporary=$(mktemp "$output.tmp.XXXXXX") || exit 0
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+
+workbench_cli="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/tmux-agent-workbench-cli"
+if [ -x "$workbench_cli" ] && command -v jq >/dev/null 2>&1; then
+	peer_dir="$trae_home/cli/session-peers"
+	peers='[]'
+	if [ -d "$peer_dir" ]; then
+		peers=$(find "$peer_dir" -type f -name '*.json' -exec jq -c . {} \; 2>/dev/null | jq -s . 2>/dev/null || printf '%s\n' '[]')
+	fi
+	if "$workbench_cli" snapshot --json 2>/dev/null |
+		jq -c --argjson peers "$peers" '[.agents[]?
+			| select(.kind == "trae" or .kind == "traex")
+			| select((.target.session_name // "") != ""
+				and (.target.window_index | type) == "number"
+				and (.target.pane_index | type) == "number")
+			| . as $agent
+			| (first($peers[]
+				| select((.pid // -1) == ($agent.process.pid // -2))
+				| .threadId, null)) as $peer_session_id
+			| select((($agent.hook_session_id // $peer_session_id) // "") != "")
+			| {session_id: (($agent.hook_session_id // $peer_session_id)),
+				session_name: .target.session_name,
+				window_index: .target.window_index,
+				pane_index: .target.pane_index}]' >"$temporary"; then
+		mv "$temporary" "$output"
+		exit 0
+	fi
+fi
+
+printf '%s\n' '[]' >"$temporary"
+mv "$temporary" "$output"
