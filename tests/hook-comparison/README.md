@@ -10,7 +10,7 @@
 
 ```sh
 cargo fetch --locked
-python3 tests/compare-hook-recovery.py --baseline 95cda17 --repeats 10
+python tests/compare-hook-recovery.py --baseline 95cda17 --repeats 10
 ```
 
 脚本以指定提交为基线，只将 `HOOK_FILES` 列出的 8 个文件相对基线的当前差异应用到修复后快照。

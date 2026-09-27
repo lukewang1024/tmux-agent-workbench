@@ -3,8 +3,9 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo"
-python3 -B -m unittest discover -s tests -p test_release_prepare.py
-python3 -B -m unittest discover -s tests -p test_botmux.py
+python_runner="$repo/tests/python.sh"
+"$python_runner" -B -m unittest discover -s tests -p test_release_prepare.py
+"$python_runner" -B -m unittest discover -s tests -p test_botmux.py
 cargo fmt --check
 cargo test --locked
 sh tests/integration-tmux.sh

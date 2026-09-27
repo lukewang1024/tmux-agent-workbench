@@ -33,6 +33,7 @@ workflow: new [--prompt] add done promote inspect run prune projects rebuild
 agents:   agent start|list|goto|next|profiles|handoff
 clients:  attach, client serve|status|setup
 ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [compact|standard|full|cpu]
+tmux:     resurrect save|restore
 system:   status, doctor, config, hooks, daemon
 EOF
 }
@@ -108,6 +109,14 @@ case $command_name in
     esac
     need_core; exec "$core" pick "$@" ;;
   host-metrics) exec sh "$plugin_dir/bin/workbench-host-metrics" "$@" ;;
+  resurrect)
+    [ $# -gt 0 ] || { usage >&2; exit 2; }
+    case $1 in
+      save) shift; exec "$plugin_dir/bin/workbench-resurrect-save-all" "$@" ;;
+      restore) shift; exec "$plugin_dir/bin/workbench-resurrect-restore-all" "$@" ;;
+      *) echo "tmux-agent-workbench resurrect: unknown command: $1" >&2; exit 2 ;;
+    esac
+    ;;
   hook)
     need_core
     hook_state=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench

@@ -2,6 +2,7 @@
 set -eu
 
 repo=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
+python_runner="$repo/tests/python.sh"
 binary=$repo/target/debug/tmux-agent-workbench
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/workbench-v2-test.XXXXXX")
 socket=$test_root/tmux.sock
@@ -81,9 +82,9 @@ if MOCK_POPUP_STATUS=7 \
 fi
 
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
-python3 "$repo/tests/status-menu-mouse.py" "$binary"
+"$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
-python3 "$repo/tests/sidebar-mouse.py" "$binary"
+"$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
 tmux -f "$repo/tests/fixtures/tmux.conf" -S "$socket" \
   new-session -d -s workbench-test -x 140 -y 40
 
@@ -257,7 +258,7 @@ saved_layout=$(grep '^window' "$resurrect_file" | cut -f7)
 # The layout is derived from the current pane geometry, not the cache captured
 # before sidebar creation. Detailed restore/resize coverage lives separately.
 [ -n "$saved_layout" ]
-python3 "$repo/tests/resurrect-layout.py"
+"$python_runner" "$repo/tests/resurrect-layout.py"
 
 # Adding a workspace pane while the sidebar is open invalidates the saved main
 # layout's pane count. Closing remains successful and preserves the new pane.

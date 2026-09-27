@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """First-click navigation must use the row visible before tmux focuses the sidebar."""
 import fcntl
 import os

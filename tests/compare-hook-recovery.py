@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Run identical behavioral fault cases against a commit and the Hook-only patch.
 
 No live daemon, hook configuration, or tmux session is changed. Outputs include
@@ -136,7 +136,7 @@ def main():
               "完整输入、补丁、源码快照、构建日志和每次执行日志均保留在本报告目录。", "",
               f"补丁 SHA-256：`{report['patch_sha256']}`", ""]
     import shlex
-    replay = ["python3", str(output / "runner.py"), "--repo-dir", str(repo), "--baseline", baseline,
+    replay = ["python", str(output / "runner.py"), "--repo-dir", str(repo), "--baseline", baseline,
               "--patch", str(output / "candidate.patch"), "--fixtures", str(output / "harness"),
               "--repeats", str(args.repeats)]
     lines += ["## 原样复跑", "", "```sh", shlex.join(replay), "```", ""]

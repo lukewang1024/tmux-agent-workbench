@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Exercise save hooks and layout restoration on an isolated tmux server."""
 import os
 from pathlib import Path

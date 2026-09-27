@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Verify detached sidebar throttling and recovery using an isolated tmux server."""
 import json
 import os
