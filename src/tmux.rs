@@ -118,28 +118,28 @@ impl Tmux {
         Ok(sidebar_is_visible(output.trim()))
     }
 
-    fn visible_panes(&self) -> Result<HashSet<String>, TmuxError> {
+    fn visible_panes(&self) -> Result<ClientPanes, TmuxError> {
         let output = self.output(&["list-clients", "-F", "#{pane_id}\u{1f}#{client_flags}\u{1f}#{@workbench_overlay_visible}\u{1f}#{@workbench_selected_implies_focused}"])?;
-        Ok(output
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split('\u{1f}');
-                let pane = fields.next()?;
-                let flags = fields.next().unwrap_or_default();
-                let overlay = fields.next().unwrap_or_default();
-                let selected_compat = fields.next().unwrap_or_default();
-                (pane.starts_with('%')
-                    && (flags.split(',').any(|flag| flag == "focused") || selected_compat == "1")
-                    && overlay != "1")
-                    .then(|| pane.to_owned())
-            })
-            .collect())
+        Ok(parse_client_panes(&output))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClientPanes {
+    focused: HashSet<String>,
+    overlays: HashSet<String>,
+}
+
+impl ClientPanes {
+    fn unobscured(&self) -> HashSet<String> {
+        self.focused.difference(&self.overlays).cloned().collect()
     }
 }
 
 impl TmuxSource for Tmux {
     fn panes(&self) -> Result<Vec<Pane>, TmuxError> {
-        let visible = self.visible_panes().unwrap_or_default();
+        let clients = self.visible_panes().unwrap_or_default();
+        let visible = clients.unobscured();
         let format = [
             "#{session_id}",
             "#{session_name}",
@@ -167,22 +167,7 @@ impl TmuxSource for Tmux {
             .filter(|line| !line.is_empty())
             .map(|line| parse_pane(line, &visible))
             .collect::<Result<_, _>>()?;
-        let visible_sessions: HashSet<_> = panes
-            .iter()
-            .filter(|pane| pane.visible)
-            .map(|pane| pane.target.session_id.clone())
-            .collect();
-        let visible_sidebar_windows: HashSet<_> = panes
-            .iter()
-            .filter(|pane| pane.visible && pane.role.as_deref() == Some("sidebar"))
-            .map(|pane| pane.target.window_id.clone())
-            .collect();
-        for pane in &mut panes {
-            pane.session_visible = visible_sessions.contains(&pane.target.session_id);
-            if pane.pane_last && visible_sidebar_windows.contains(&pane.target.window_id) {
-                pane.visible = true;
-            }
-        }
+        apply_client_visibility(&mut panes, &clients);
         panes.retain(|pane| pane.role.as_deref() != Some("sidebar"));
         Ok(panes)
     }
@@ -224,6 +209,67 @@ impl TmuxSource for Tmux {
                 .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok_and(|status| status.success())
+    }
+}
+
+fn parse_client_panes(output: &str) -> ClientPanes {
+    let mut clients = ClientPanes::default();
+    for line in output.lines() {
+        let mut fields = line.split('\u{1f}');
+        let Some(pane) = fields.next() else {
+            continue;
+        };
+        let flags = fields.next().unwrap_or_default();
+        let overlay = fields.next().unwrap_or_default();
+        let selected_compat = fields.next().unwrap_or_default();
+        if !pane.starts_with('%')
+            || (!flags.split(',').any(|flag| flag == "focused") && selected_compat != "1")
+        {
+            continue;
+        }
+        clients.focused.insert(pane.to_owned());
+        if overlay == "1" {
+            clients.overlays.insert(pane.to_owned());
+        }
+    }
+    clients
+}
+
+fn apply_client_visibility(panes: &mut [Pane], clients: &ClientPanes) {
+    let visible_sidebar_windows: HashSet<_> = panes
+        .iter()
+        // An overlay sidebar is intentionally absent from `visible`, but its
+        // focused client still identifies the window whose pane_last target
+        // remains visible underneath it.
+        .filter(|pane| {
+            clients.focused.contains(&pane.target.pane_id)
+                && pane.role.as_deref() == Some("sidebar")
+        })
+        .map(|pane| pane.target.window_id.clone())
+        .collect();
+    for pane in panes.iter_mut() {
+        // pane_active is the authoritative result of a tmux focus change. It
+        // must reach the detector even when the client still carries the
+        // responsive overlay marker; otherwise focusing a done agent from
+        // the sidebar cannot acknowledge its attention.
+        if pane.window_active
+            && pane.pane_active
+            && clients.focused.contains(&pane.target.pane_id)
+            && pane.role.as_deref() != Some("sidebar")
+        {
+            pane.visible = true;
+        }
+        if pane.pane_last && visible_sidebar_windows.contains(&pane.target.window_id) {
+            pane.visible = true;
+        }
+    }
+    let visible_sessions: HashSet<_> = panes
+        .iter()
+        .filter(|pane| pane.visible)
+        .map(|pane| pane.target.session_id.clone())
+        .collect();
+    for pane in panes.iter_mut() {
+        pane.session_visible = visible_sessions.contains(&pane.target.session_id);
     }
 }
 
@@ -341,6 +387,48 @@ mod tests {
         assert!(pane.visible);
         assert_eq!(pane.content_revision, "title:8:9:10");
         assert_eq!(pane.current_path, "/tmp/task");
+    }
+
+    #[test]
+    fn focused_overlay_sidebar_keeps_pane_last_agent_visible() {
+        let clients = parse_client_panes("%8\u{1f}attached,focused,UTF-8\u{1f}1\u{1f}\n");
+        assert_eq!(clients.focused, HashSet::from(["%8".into()]));
+        assert_eq!(clients.unobscured(), HashSet::new());
+
+        let sidebar = parse_pane(
+            "$1\u{1f}task\u{1f}@2\u{1f}1\u{1f}agent\u{1f}%8\u{1f}0\u{1f}123\u{1f}sidebar\u{1f}tmux-agent-workbench\u{1f}sidebar\u{1f}1\u{1f}1\u{1f}0\u{1f}0\u{1f}0\u{1f}0\u{1f}/tmp/task",
+            &clients.unobscured(),
+        )
+        .unwrap();
+        let agent = parse_pane(
+            "$1\u{1f}task\u{1f}@2\u{1f}1\u{1f}agent\u{1f}%4\u{1f}1\u{1f}456\u{1f}title\u{1f}codex\u{1f}\u{1f}1\u{1f}0\u{1f}8\u{1f}9\u{1f}10\u{1f}1\u{1f}/tmp/task",
+            &clients.unobscured(),
+        )
+        .unwrap();
+        let mut panes = vec![sidebar, agent];
+
+        apply_client_visibility(&mut panes, &clients);
+
+        assert!(!panes[0].visible);
+        assert!(panes[1].visible);
+        assert!(panes[1].session_visible);
+    }
+
+    #[test]
+    fn active_pane_is_visible_even_with_responsive_overlay_marker() {
+        let clients = parse_client_panes("%4\u{1f}attached,focused,UTF-8\u{1f}1\u{1f}\n");
+        let mut panes = vec![
+            parse_pane(
+                "$1\u{1f}task\u{1f}@2\u{1f}1\u{1f}agent\u{1f}%4\u{1f}0\u{1f}456\u{1f}title\u{1f}codex\u{1f}\u{1f}1\u{1f}1\u{1f}8\u{1f}9\u{1f}10\u{1f}0\u{1f}/tmp/task",
+                &clients.unobscured(),
+            )
+            .unwrap(),
+        ];
+
+        apply_client_visibility(&mut panes, &clients);
+
+        assert!(panes[0].visible);
+        assert!(panes[0].session_visible);
     }
 
     #[test]

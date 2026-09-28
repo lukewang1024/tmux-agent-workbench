@@ -402,8 +402,14 @@ impl StateMachine {
         if tracked.display_candidate.map(|(state, _)| state) != candidate {
             tracked.display_candidate = candidate.map(|state| (state, observation.observed_at_ms));
         }
-        if observation.state == tracked.snapshot.base_state && observation.strong_visible_signal {
+        // A confirmed screen override is only useful while the current screen
+        // observation still disagrees with the hook state.  Do not let a
+        // stale spinner keep an idle pane displayed as working after the
+        // screen has returned to the canonical state; the matching estimate
+        // may be weak (for example, Codex's title-only idle rule).
+        if observation.state == tracked.snapshot.base_state {
             tracked.confirmed_display = None;
+            tracked.snapshot.rule_id = observation.rule_id.clone();
         }
         tracked.snapshot.display_state = display_for(
             tracked
@@ -1689,6 +1695,35 @@ mod tests {
         assert_eq!(conflict.estimated_state, Some(BaseState::Idle));
         assert_eq!(conflict.hook_health, HookHealth::Conflict);
         assert!(conflict.attention.is_none());
+    }
+
+    #[test]
+    fn weak_matching_screen_state_clears_stale_confirmed_override() {
+        let mut machine = StateMachine::default();
+        let initial = machine.observe_estimate(observation(BaseState::Idle, 0));
+        machine
+            .report_event(
+                &initial.instance_id,
+                &event("stop", "front", AgentEventType::Stop, 10),
+                false,
+            )
+            .unwrap();
+
+        let mut working = observation(BaseState::Working, 100);
+        working.strong_visible_signal = true;
+        machine.observe_estimate(working.clone());
+        working.observed_at_ms = 3_100;
+        assert_eq!(
+            machine.observe_estimate(working).display_state,
+            DisplayState::Working
+        );
+
+        // Codex's title-only idle estimate is intentionally weak, but it must
+        // still revoke an old working override once the hook state is idle.
+        let idle = machine.observe_estimate(observation(BaseState::Idle, 3_200));
+        assert_eq!(idle.base_state, BaseState::Idle);
+        assert_eq!(idle.display_state, DisplayState::Idle);
+        assert_eq!(idle.hook_health, HookHealth::Healthy);
     }
 
     #[test]
