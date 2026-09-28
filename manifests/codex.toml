@@ -9,7 +9,7 @@ state = "working"
 region = "codex_status"
 visible = "working"
 # The approval overlay can set Action Required even while its reviewer is busy.
-matcher = { line_regex = { value = "(?i)^\\s*[•●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\\s*(automatically reviewing (the )?approval|reviewing approval request)([ .…(].*)?$" } }
+matcher = { line_regex = { value = "(?i)^\\s*[•●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\\s*(automatically reviewing (the )?approval|reviewing (?:[0-9]+ )?approval requests?)([ .…(].*)?$" } }
 
 [[rules]]
 id = "codex-queued-question-idle"
@@ -92,6 +92,16 @@ state = "working"
 region = "codex_status"
 visible = "working"
 matcher = { contains = { value = "esc to interrupt" } }
+
+[[rules]]
+id = "codex-working-status"
+priority = 1160
+state = "working"
+region = "codex_status"
+visible = "working"
+# Recent Codex renders the progress line without a leading bullet. The
+# composer remains visible while the turn runs, so it cannot imply idle.
+matcher = { line_regex = { value = "(?i)^\\s*(working|thinking|running|searching|analyzing)\\s*\\((?:[0-9]|esc to interrupt)[^\\n]*\\)\\s*$" } }
 
 [[rules]]
 id = "codex-title-idle"

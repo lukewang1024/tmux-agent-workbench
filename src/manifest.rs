@@ -382,7 +382,7 @@ fn codex_status_content(content: &str) -> String {
         let after_prompt = suffix.split_once('\n').map_or("", |(_, tail)| tail);
         let has_footer = after_prompt.lines().any(|line| {
             let line = line.trim_start();
-            line.starts_with("gpt-") || line.contains("context left")
+            line.to_ascii_lowercase().starts_with("gpt-") || line.contains("context left")
         });
         let only_animation = after_prompt
             .chars()
@@ -404,7 +404,9 @@ fn codex_status_content(content: &str) -> String {
         let trimmed = line.trim_start();
         if trimmed.starts_with(['•', '●']) && trimmed.contains("esc to interrupt") {
             start = offset;
-        } else if trimmed.starts_with('─') && trimmed.contains("Worked for ") {
+        } else if trimmed.starts_with("Worked for ")
+            || (trimmed.starts_with('─') && trimmed.contains("Worked for "))
+        {
             start = offset + line.len();
         }
         offset += line.len();
@@ -673,10 +675,19 @@ matcher = { contains = { value = "approval ready" } }"#;
             "• Automatically reviewing the approval (3s)",
             "Automatically reviewing approval…",
             "• Reviewing approval request (3s • esc to interrupt)",
+            "Reviewing approval request (17m 30s • esc to interrupt)",
+            "Reviewing 2 approval requests (1m 37s • esc to interrupt)",
         ] {
-            let content = format!("Would you like to run the following command?\n{status}");
+            let content = format!(
+                "Would you like to run the following command?\n{status}\n  └ • /bin/zsh -lc 'pwd'\n\n› Ask Codex to do anything\n  GPT-6-Sol high · ~"
+            );
             let result = codex.classify(&content, "Action Required");
             assert_eq!(result.state, BaseState::Working, "{status}");
+            assert_eq!(
+                result.rule_id.as_deref(),
+                Some("codex-automatic-approval-review"),
+                "{status}"
+            );
             assert!(result.strong_visible_signal);
             assert!(result.reason_category.is_none());
         }
@@ -784,6 +795,25 @@ gpt-6-astra medium"
             codex.classify(stale, "Action Required").state,
             BaseState::Working
         );
+    }
+
+    #[test]
+    fn codex_unbulleted_progress_outweighs_idle_composer() {
+        let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
+        let codex = set.get(AgentKind::Codex);
+        let footer = "\n› Ask Codex to do anything\n  GPT-6-Sol high · ~";
+        for status in ["Working (3m 02s)", "Running (12s)"] {
+            let content = format!(
+                "• Queued follow-up inputs\n  ? 1 question\n    shift + ← to answer\n{status}{footer}"
+            );
+            let result = codex.classify(&content, "Action Required | task");
+            assert_eq!(result.state, BaseState::Working, "{status}");
+            assert_eq!(result.rule_id.as_deref(), Some("codex-working-status"));
+        }
+        let completed = format!("Working (3m 02s)\n  Worked for 3m 02s · 5:35 PM{footer}");
+        let result = codex.classify(&completed, "task");
+        assert_eq!(result.state, BaseState::Idle);
+        assert_eq!(result.rule_id.as_deref(), Some("codex-idle-prompt"));
     }
 
     #[test]
