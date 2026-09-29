@@ -109,6 +109,31 @@ done
 
 "$binary" snapshot --json | grep '"schema_version": 1' >/dev/null
 
+# A Codex redraw can replace idle with Working while tmux's cheap pane fields
+# remain identical. The daemon must keep sampling at the idle interval.
+printf '%s\n' 'integration phase: idle redraw'
+tmux -S "$socket" new-session -d -s idle-redraw -x 100 -y 24 \
+  "env WORKBENCH_FIXTURE_TRANSITION=1 WORKBENCH_FIXTURE_SECONDS=10 '$repo/target/debug/examples/codex'"
+redraw_pane=$(tmux -S "$socket" display-message -p -t idle-redraw '#{pane_id}')
+tries=0
+until "$binary" agent explain "$redraw_pane" 2>/dev/null | grep '"base_state": "idle"' >/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 40 ] || exit 1
+  sleep 0.05
+done
+before_revision=$(tmux -S "$socket" display-message -p -t "$redraw_pane" \
+  '#{pane_title}:#{cursor_x}:#{cursor_y}:#{history_size}')
+tries=0
+until "$binary" agent explain "$redraw_pane" 2>/dev/null | grep '"base_state": "working"' >/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 100 ] || exit 1
+  sleep 0.1
+done
+after_revision=$(tmux -S "$socket" display-message -p -t "$redraw_pane" \
+  '#{pane_title}:#{cursor_x}:#{cursor_y}:#{history_size}')
+[ "$before_revision" = "$after_revision" ]
+tmux -S "$socket" kill-session -t idle-redraw
+
 mkdir -p "$XDG_CONFIG_HOME/tmux-agent-workbench"
 printf '%s\n' '[detection]' 'process_interval_ms = 750' > \
   "$XDG_CONFIG_HOME/tmux-agent-workbench/config.toml"

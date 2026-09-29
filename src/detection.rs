@@ -23,7 +23,6 @@ pub struct Detector {
     agents: HashMap<u32, AgentProcess>,
     pane_instances: HashMap<String, String>,
     last_classification: HashMap<String, CachedClassification>,
-    last_capture_revision: HashMap<String, String>,
     next_capture: HashMap<String, Instant>,
     next_process_scan: Instant,
     metadata: HashMap<String, MetadataRecord>,
@@ -71,7 +70,6 @@ impl Detector {
             agents: HashMap::new(),
             pane_instances: HashMap::new(),
             last_classification: HashMap::new(),
-            last_capture_revision: HashMap::new(),
             next_capture: HashMap::new(),
             next_process_scan: Instant::now(),
             metadata: HashMap::new(),
@@ -113,23 +111,10 @@ impl Detector {
                 .next_capture
                 .get(&pane.target.pane_id)
                 .is_none_or(|due| now >= *due);
-            let unchanged_idle = self
-                .last_classification
-                .get(&pane.target.pane_id)
-                .is_some_and(|cached| cached.state == BaseState::Idle)
-                && self
-                    .last_capture_revision
-                    .get(&pane.target.pane_id)
-                    .is_some_and(|revision| revision == &pane.content_revision);
-            // A cached idle frame must not stop confirmation/recovery sampling.
-            let settled_idle = unchanged_idle
-                && self.machine.snapshots().iter().any(|agent| {
-                    agent.target.pane_id == pane.target.pane_id
-                        && !agent.stale
-                        && agent.hook_health != crate::model::HookHealth::Stale
-                        && matches!(agent.display_state, DisplayState::Idle | DisplayState::Done)
-                });
-            if due && !settled_idle {
+            // Codex can redraw its progress line without changing the pane
+            // title, cursor, or history size. Keep sampling settled idle panes
+            // at the configured idle interval so a new turn is noticed.
+            if due {
                 self.capture(&pane, process, config, manifests, now, now_ms);
             } else if let Some(instance) = self.pane_instances.get(&pane.target.pane_id) {
                 self.machine.set_visibility(instance, pane.visible);
@@ -463,7 +448,6 @@ impl Detector {
             self.machine.process_exited(&instance, now_ms);
             self.pane_instances.remove(&pane);
             self.last_classification.remove(&pane);
-            self.last_capture_revision.remove(&pane);
             self.next_capture.remove(&pane);
         }
 
@@ -507,8 +491,6 @@ impl Detector {
             };
             self.publish_observation(pane, process, cached.clone(), now_ms);
             self.last_classification.insert(pane_id.clone(), cached);
-            self.last_capture_revision
-                .insert(pane_id.clone(), pane.content_revision.clone());
             self.next_capture.insert(
                 pane_id,
                 now + Duration::from_millis(config.detection.active_capture_interval_ms),
@@ -546,8 +528,6 @@ impl Detector {
                 };
                 let snapshot = self.publish_observation(pane, process, cached.clone(), now_ms);
                 self.last_classification.insert(pane_id.clone(), cached);
-                self.last_capture_revision
-                    .insert(pane_id.clone(), pane.content_revision.clone());
                 let interval = if snapshot.base_state == BaseState::Working
                     && result.state == BaseState::Idle
                 {
@@ -614,8 +594,6 @@ impl Detector {
         };
         self.publish_observation(pane, process, cached.clone(), now_ms);
         self.last_classification.insert(pane_id.clone(), cached);
-        self.last_capture_revision
-            .insert(pane_id.clone(), pane.content_revision.clone());
         self.next_capture.insert(
             pane_id,
             now + Duration::from_millis(config.detection.active_capture_interval_ms),
