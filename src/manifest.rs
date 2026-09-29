@@ -802,13 +802,22 @@ gpt-6-astra medium"
         let set = ManifestSet::load(Path::new("/does/not/exist")).unwrap();
         let codex = set.get(AgentKind::Codex);
         let footer = "\n› Ask Codex to do anything\n  GPT-6-Sol high · ~";
-        for status in ["Working (3m 02s)", "Running (12s)"] {
+        for status in [
+            "Working (3m 02s)",
+            "Running (12s)",
+            "Working (4m 00s • esc to interrupt) · 2 background terminals running · /ps to view",
+        ] {
             let content = format!(
                 "• Queued follow-up inputs\n  ? 1 question\n    shift + ← to answer\n{status}{footer}"
             );
             let result = codex.classify(&content, "Action Required | task");
             assert_eq!(result.state, BaseState::Working, "{status}");
-            assert_eq!(result.rule_id.as_deref(), Some("codex-working-status"));
+            let expected = if status.contains("esc to interrupt") {
+                "codex-working-interruptible"
+            } else {
+                "codex-working-status"
+            };
+            assert_eq!(result.rule_id.as_deref(), Some(expected));
         }
         let completed = format!("Working (3m 02s)\n  Worked for 3m 02s · 5:35 PM{footer}");
         let result = codex.classify(&completed, "task");
