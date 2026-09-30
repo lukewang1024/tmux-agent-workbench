@@ -5,10 +5,13 @@ use std::process::{Command, Stdio};
 use tmux_agent_workbench::ipc::{Response, read_request, write_response};
 
 fn run_hook(root: &std::path::Path, agent: &str, event: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-agent-workbench"))
+    run_hook_with_tmux(root, agent, event, false);
+}
+
+fn run_hook_with_tmux(root: &std::path::Path, agent: &str, event: &str, stale_tmux: bool) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tmux-agent-workbench"));
+    command
         .args(["hook", "ingest", agent, event])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
         .env_remove("TMUX_AGENT_WORKBENCH_TMUX_SOCKET")
         .env("XDG_RUNTIME_DIR", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
@@ -16,9 +19,15 @@ fn run_hook(root: &std::path::Path, agent: &str, event: &str) {
         .env("XDG_CACHE_HOME", root.join("cache"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    if stale_tmux {
+        command
+            .env("TMUX", "/tmp/vanished-tmux-socket,123,0")
+            .env("TMUX_PANE", "%25");
+    } else {
+        command.env_remove("TMUX").env_remove("TMUX_PANE");
+    }
+    let mut child = command.spawn().unwrap();
     child
         .stdin
         .take()
@@ -53,7 +62,7 @@ fn global_hooks_succeed_without_tmux_or_daemon_for_every_agent() {
 
 #[test]
 fn detached_codex_hook_tolerates_unmatched_pane_and_still_delivers_when_matched() {
-    for matched in [false, true] {
+    for (matched, stale_tmux) in [(false, false), (true, false), (true, true)] {
         let temp = tempfile::tempdir_in("/tmp").unwrap();
         let runtime = temp.path().join("tmux-agent-workbench");
         std::fs::create_dir(&runtime).unwrap();
@@ -70,7 +79,7 @@ fn detached_codex_hook_tolerates_unmatched_pane_and_still_delivers_when_matched(
             };
             write_response(&stream, &response).unwrap();
         });
-        run_hook(temp.path(), "codex", "Stop");
+        run_hook_with_tmux(temp.path(), "codex", "Stop", stale_tmux);
         server.join().unwrap();
     }
 }
