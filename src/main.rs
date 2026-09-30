@@ -1152,18 +1152,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let agent = parse_agent_kind(&agent)?;
             let input = tmux_agent_workbench::hooks::read_stdin()?;
-            match ServerIdentity::discover() {
-                Ok(server) => {
-                    tmux_agent_workbench::hooks::ingest(&paths, &server, agent, &event, &input)?
+            if agent == tmux_agent_workbench::model::AgentKind::Codex {
+                // A shared app-server can outlive its launching pane and serve
+                // several Codex TUIs. Its inherited TMUX_PANE is never an
+                // event's owner; resolve each hook by its session identity.
+                tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?;
+            } else {
+                match ServerIdentity::discover() {
+                    Ok(server) => {
+                        tmux_agent_workbench::hooks::ingest(&paths, &server, agent, &event, &input)?
+                    }
+                    // Global hooks also run in ordinary terminals and desktop apps.
+                    Err(tmux_agent_workbench::server::ServerError::NotInTmux) => {}
+                    Err(error) => return Err(error.into()),
                 }
-                Err(tmux_agent_workbench::server::ServerError::NotInTmux)
-                    if agent == tmux_agent_workbench::model::AgentKind::Codex =>
-                {
-                    tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
-                }
-                // Global hooks also run in ordinary terminals and desktop apps.
-                Err(tmux_agent_workbench::server::ServerError::NotInTmux) => {}
-                Err(error) => return Err(error.into()),
             }
             println!("{{}}");
         }
