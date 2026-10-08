@@ -348,6 +348,10 @@ Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit
 the usage suffix while retaining the Agent Status capsule and focus behavior.
 
+The compact quota row displays the backend-reported plan type alongside the
+remaining quota and reset time. Reset cards show the available count and the
+nearest known expiry. No subscription multiplier is inferred from the plan name.
+
 Usage refreshes in the background every ten minutes while the status bar is
 rendering. Choose **Refresh now** (`r`) in the Usage menu to bypass the cache.
 Codex plan limits come from `account/rateLimits/read` via `codex app-server`,

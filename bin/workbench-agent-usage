@@ -63,7 +63,10 @@ format_limits() {
            elif .window_minutes % 1440 == 0 then ((.window_minutes / 1440 | tostring) + "d")
            elif .window_minutes % 60 == 0 then ((.window_minutes / 60 | tostring) + "h")
            else ((.window_minutes | tostring) + "m") end)
-          + " " + (100 - .used_percent | if . < 0 then 0 else . end | round | tostring) + "%L")
+          + " " + (100 - .used_percent | if . < 0 then 0 else . end | round | tostring) + "%L"
+          + (if (.resets_at | type) == "number" and .resets_at > 0
+             then " · reset " + (.resets_at | strflocaltime("%m-%d %H:%M"))
+             else "" end))
     | unique | join("/")
     | if . == "" then empty
       elif ($limits.plan_type // "") == "" then .
@@ -281,10 +284,43 @@ menu() {
   [ -n "$weekly" ] || weekly=0
   [ -n "$monthly" ] || monthly=0
   [ -n "$limit" ] || limit=—
-  daily_line=$(printf '%-10s %15s' 'Daily' "$daily tokens")
-  weekly_line=$(printf '%-10s %15s' 'Weekly' "$weekly tokens")
-  monthly_line=$(printf '%-10s %15s' 'Monthly' "$monthly tokens")
-  limit_line=$(printf '%-10s %15s' 'Plan limit' "$limit")
+  daily_line=$(printf '%s#[align=right]%s' 'Daily' "$daily tokens")
+  weekly_line=$(printf '%s#[align=right]%s' 'Weekly' "$weekly tokens")
+  monthly_line=$(printf '%s#[align=right]%s' 'Monthly' "$monthly tokens")
+  # Let tmux align values against the actual menu width, including key hints.
+  # Keep each quota window and the reset-card summary to one row.
+  limit_rows=$(printf '%s\n' "$limit" | jq -Rr '
+    def row($label; $value):
+      $label + "#[align=right]" + $value;
+    (endswith(" (stale)")) as $stale
+    | rtrimstr(" (stale)")
+    | split(":") as $parts
+    | (if test("^[^ :]+:") then $parts[0] else null end) as $plan
+    | (if $plan then $plan + " " else "" end) as $tier
+    | (if $plan then ($parts[1:] | join(":")) else . end) as $windows
+    | ($windows | split("/")[]
+       | . as $window
+       | (capture("^(?<period>[0-9]+[dhm]) (?<left>[0-9]+)%L(?: · reset (?<reset>.*))?$") // null) as $quota
+       | if $quota then ($quota
+         | row(($tier + .period + " " + .left + "%L" + (if $stale then " (stale)" else "" end));
+               (if .reset then "↻ " + .reset else "↻ —" end)))
+         else row("Plan limit"; ($window + (if $stale then " (stale)" else "" end))) end)
+  ')
+
+  reset_rows=
+  if [ "$agent" = codex ]; then
+    reset_rows=$(jq -r '
+      .payload.reset_credits // empty
+      | ([.credits[]? | select(.status == "available") | .expiresAt
+          | select(type == "number")] | min) as $expiry
+      | "Cards ×" + (.availableCount | tostring) + "#[align=right]" +
+        (if $expiry then "exp " + ($expiry | strflocaltime("%m-%d %H:%M"))
+         elif .availableCount == 0 then "—"
+         elif .credits == null then "expiry unknown"
+         elif any(.credits[]?; .status == "available" and .expiresAt == null) then "no expiry"
+         else "expiry unknown" end)
+    ' "$state_dir/codex-limits.json" 2>/dev/null)
+  fi
 
   codex_mark=' '; claude_mark=' '; trae_mark=' '; opencode_mark=' '
   case $agent in
@@ -306,12 +342,24 @@ menu() {
   set -- tmux display-menu -M
   [ "$mouse_mode" = touch ] || set -- "$@" -O
   set -- "$@" -C 0 -c "$client" -b rounded -T " Usage · $name " -x C -y C
-  menu_status=0
-  "$@" \
+  set -- "$@" \
     "#{?#{==:1,1},-,}$daily_line" '' '' \
     "#{?#{==:1,1},-,}$weekly_line" '' '' \
-    "#{?#{==:1,1},-,}$monthly_line" '' '' \
-    "#{?#{==:1,1},-,}$limit_line" '' '' \
+    "#{?#{==:1,1},-,}$monthly_line" '' '' ''
+  while IFS= read -r limit_row; do
+    [ -n "$limit_row" ] && set -- "$@" "#{?#{==:1,1},-,}$limit_row" '' ''
+  done <<EOF
+$limit_rows
+EOF
+  if [ -n "$reset_rows" ]; then
+    while IFS= read -r reset_row; do
+      [ -n "$reset_row" ] && set -- "$@" "#{?#{==:1,1},-,}$reset_row" '' ''
+    done <<EOF
+$reset_rows
+EOF
+  fi
+  menu_status=0
+  "$@" \
     '' \
     'Refresh now' r "run-shell -b 'workbench-agent-usage refresh-menu $client'" \
     '' \
