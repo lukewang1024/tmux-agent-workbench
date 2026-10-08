@@ -66,7 +66,10 @@ def query():
                                               'resets_at': window.get('resetsAt')}
                     if not any(k in normalized for k in ('primary', 'secondary')):
                         raise RuntimeError('No valid quota windows returned')
-                    return {'updated_at': int(time.time()), 'payload': {'rate_limits': normalized}}
+                    return {'updated_at': int(time.time()), 'payload': {
+                        'rate_limits': normalized,
+                        'reset_credits': result.get('rateLimitResetCredits'),
+                    }}
         raise RuntimeError('Codex quota request timed out')
     finally:
         selector.close()
