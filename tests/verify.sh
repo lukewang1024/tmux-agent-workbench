@@ -6,6 +6,7 @@ cd "$repo"
 python_runner="$repo/tests/python.sh"
 "$python_runner" -B -m unittest discover -s tests -p test_release_prepare.py
 "$python_runner" -B -m unittest discover -s tests -p test_botmux.py
+"$python_runner" -B -m unittest discover -s tests -p test_daemon_fixture.py
 cargo fmt --check
 cargo test --locked
 sh tests/integration-tmux.sh

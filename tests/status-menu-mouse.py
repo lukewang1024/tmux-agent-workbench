@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """Check real menu mouse dismissal and shortcuts through a tmux client PTY."""
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -16,9 +17,11 @@ import termios
 import time
 import uuid
 
+from daemon_fixture import running_daemon
+
 repo = Path(__file__).resolve().parents[1]
 core = str(Path(sys.argv[1]).resolve())
-with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
+with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() as processes:
     root = Path(root)
     socket = str(root / 'tmux.sock')
     env = dict(os.environ, TERM='xterm-256color', TMUX_AGENT_WORKBENCH_BIN=core,
@@ -175,7 +178,6 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
     client_process = None
     menu = None
     termux = None
-    daemon_started = False
     try:
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'audit', '-x', '80', '-y', '30', '-c', str(project), '/bin/sh')
         # Keep the fixture server alive while the PTY client is being attached
@@ -291,9 +293,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         print('PASS status opening release and subsequent mouse action')
         # Register this PTY as a Termux client so following checks use the
         # same no-hover menu path as a real phone attachment.
-        subprocess.run([core, 'daemon', 'ensure'], env=env, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        daemon_started = True
+        processes.enter_context(running_daemon(core, env))
         termux = register_termux()
         mouse_mode = 'mouse'
         for _ in range(40):
@@ -616,8 +616,5 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root:
         if termux is not None and termux.poll() is None:
             termux.terminate()
             termux.wait(timeout=3)
-        if daemon_started:
-            subprocess.run([core, 'daemon', 'stop'], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.close(master)
         os.close(slave)
