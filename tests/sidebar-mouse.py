@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """First-click navigation must use the row visible before tmux focuses the sidebar."""
+from contextlib import ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -13,12 +14,14 @@ import tempfile
 import termios
 import time
 
+from daemon_fixture import running_daemon
+
 core = str(Path(sys.argv[1]).resolve())
 fixture = str(Path(__file__).resolve().parents[1] / 'target/debug/examples/codex')
 
 
 def check(height, target):
-    with tempfile.TemporaryDirectory(prefix='wb-sidebar-mouse-') as root:
+    with tempfile.TemporaryDirectory(prefix='wb-sidebar-mouse-') as root, ExitStack() as processes:
         socket = root + '/tmux.sock'
         env = dict(os.environ, TERM='xterm-256color',
                    TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,
@@ -63,7 +66,7 @@ def check(height, target):
                      shlex.quote(fixture))
             main = tmux('display-message', '-p', '-t', 'z-source', '#{pane_id}')
             target_pane = tmux('display-message', '-p', '-t', target, '#{pane_id}')
-            subprocess.check_call([core, 'daemon', 'ensure'], env=env, stdout=subprocess.DEVNULL)
+            processes.enter_context(running_daemon(core, env))
             sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
                            '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
             tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
@@ -96,12 +99,10 @@ def check(height, target):
                                       screen())) from None
             print(f'PASS: first click focuses {target} at height {height}')
         finally:
-            subprocess.run([core, 'daemon', 'stop'], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if client is not None:
                 client.terminate()
                 client.wait(timeout=5)
-            subprocess.run(['tmux', '-S', socket, 'kill-server'],
+            subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             os.close(master)
             os.close(slave)

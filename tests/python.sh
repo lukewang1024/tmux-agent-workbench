@@ -34,4 +34,5 @@ done
 	exit 1
 }
 
-exec "$python_bin" "$@"
+# Test helpers must not leave bytecode caches in the checkout.
+exec "$python_bin" -B "$@"
