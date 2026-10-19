@@ -24,6 +24,12 @@ mkdir -p "$HOME" "$test_root/bin"
 test -x "$test_root/bin/tmux-agent-workbench"
 "$test_root/bin/tmux-agent-workbench" --version | grep 'tmux-agent-workbench' >/dev/null
 test -L "$test_root/bin/mux-agent"
+# Agent instructions stay owned by the plugin and are readable before tmux starts.
+"$test_root/bin/tmux-agent-workbench" conventions > "$test_root/conventions.md"
+cmp "$repo/agent-conventions/AGENTS.snippet.md" "$test_root/conventions.md"
+if "$test_root/bin/tmux-agent-workbench" conventions unexpected >/dev/null 2>&1; then
+  exit 1
+fi
 "$test_root/bin/wb" config check >/dev/null
 
 # A second run must be idempotent and must not create backup files.

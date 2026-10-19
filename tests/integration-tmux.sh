@@ -85,6 +85,7 @@ cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbenc
 "$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
+"$python_runner" "$repo/tests/sidebar-naming.py" "$binary"
 tmux -f "$repo/tests/fixtures/tmux.conf" -S "$socket" \
   new-session -d -s workbench-test -x 140 -y 40
 
@@ -161,6 +162,14 @@ rm "$XDG_CONFIG_HOME/tmux-agent-workbench/manifests/codex.toml"
 tmux -S "$socket" set-option -g @workbench-_bound-agent a
 tmux -S "$socket" bind-key -N 'user broadcast' a display-message broadcast
 tmux -S "$socket" run-shell "bash '$repo/workbench.tmux'"
+[ "$(tmux -S "$socket" show-option -gwv automatic-rename)" = off ]
+# The plugin owns the default and an explicit opt-in survives reloading it.
+tmux -S "$socket" set-option -g @workbench-window-automatic-rename on
+tmux -S "$socket" run-shell "bash '$repo/workbench.tmux'"
+[ "$(tmux -S "$socket" show-option -gwv automatic-rename)" = on ]
+tmux -S "$socket" set-option -gu @workbench-window-automatic-rename
+tmux -S "$socket" run-shell "bash '$repo/workbench.tmux'"
+[ "$(tmux -S "$socket" show-option -gwv automatic-rename)" = off ]
 sleep 1
 tmux -S "$socket" show-hooks -g client-resized | grep 'client-resized\[920\].*workbench-responsive-maintain' >/dev/null
 tmux -S "$socket" show-hooks -g client-session-changed | grep 'client-session-changed\[920\].*workbench-responsive-maintain' >/dev/null

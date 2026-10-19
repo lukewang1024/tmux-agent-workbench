@@ -27,6 +27,16 @@ if [ -z "$(tmux show-option -gqv @workbench-responsive-zoom 2>/dev/null || true)
   tmux set-option -g @workbench-responsive-zoom on
 fi
 
+# Task names are assigned by agents once, not derived from terminal status/title.
+# Users who prefer tmux's automatic names can opt in through this plugin option.
+window_automatic_rename="$(tmux show-option -gqv @workbench-window-automatic-rename 2>/dev/null || true)"
+case $window_automatic_rename in
+  on|off) ;;
+  *) window_automatic_rename=off
+     tmux set-option -g @workbench-window-automatic-rename off ;;
+esac
+tmux set-window-option -g automatic-rename "$window_automatic_rename"
+
 . "$CURRENT_DIR/lib/bind-tracked.sh"
 
 # Prepend this plugin's bin/ to the global PATH so anything tmux spawns from

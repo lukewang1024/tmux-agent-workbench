@@ -295,7 +295,8 @@ fn create(
     let position = option(server, "@sidebar_position")?;
     let executable = std::env::current_exe()?.display().to_string();
     let width_string = width.to_string();
-    let mut args = vec!["split-window", "-h", "-f"];
+    configure_window_name(server, window)?;
+    let mut args = vec!["split-window", "-d", "-h", "-f"];
     if position.trim() != "right" {
         args.push("-b");
     }
@@ -314,7 +315,6 @@ fn create(
     debug(&format!("split returned pane={pane:?}"));
     if valid_target(&pane, '%') {
         restore_main_column_ratios(server, window_width, width, &main_columns)?;
-        freeze_window_name(server, window)?;
         tmux(
             server,
             &["set-option", "-p", "-t", &pane, "@pane_role", "sidebar"],
@@ -433,6 +433,9 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
     validate_target(window, '@')?;
     if old_sidebar_loaded(server) {
         return Ok(());
+    }
+    if !sidebar_panes(server, window)?.is_empty() {
+        configure_window_name(server, window)?;
     }
     let mut zoomed_pane = if display(server, window, "#{window_zoomed_flag}")?.trim() == "1" {
         let pane = display(server, window, "#{pane_id}")?;
@@ -632,13 +635,24 @@ fn window_has_client(
     Ok(output.lines().any(|visible| visible == window))
 }
 
-fn freeze_window_name(
+// Keep tmux's normal naming for workspace panes. While the sidebar is focused,
+// retain the last window name instead of exposing the sidebar executable.
+fn configure_window_name(
     server: &ServerIdentity,
     window: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let saved = display(server, window, "#{@workbench_saved_automatic_rename}")?;
+    let saved = display(server, window, "#{@workbench_saved_rename_format}")?;
     if saved.trim().is_empty() {
-        let automatic = display(server, window, "#{automatic-rename}")?;
+        let format = tmux(
+            server,
+            &[
+                "show-option",
+                "-wAv",
+                "-t",
+                window,
+                "automatic-rename-format",
+            ],
+        )?;
         tmux(
             server,
             &[
@@ -646,19 +660,53 @@ fn freeze_window_name(
                 "-w",
                 "-t",
                 window,
-                "@workbench_saved_automatic_rename",
-                if matches!(automatic.trim(), "1" | "on") {
-                    "on"
-                } else {
-                    "off"
-                },
+                "@workbench_saved_rename_format",
+                format.trim_end(),
             ],
         )?;
     }
     tmux(
         server,
-        &["set-option", "-w", "-t", window, "automatic-rename", "off"],
+        &[
+            "set-option",
+            "-w",
+            "-t",
+            window,
+            "automatic-rename-format",
+            "#{?#{==:#{@pane_role},sidebar},#{window_name},#{E:@workbench_saved_rename_format}}",
+        ],
     )?;
+    // Migrate windows frozen by older versions of the sidebar.
+    let automatic = display(server, window, "#{@workbench_saved_automatic_rename}")?;
+    if !automatic.trim().is_empty() {
+        // Plugin policy takes precedence over the old freeze/restore behavior.
+        let policy = option(server, "@workbench-window-automatic-rename")?;
+        let automatic = match policy.trim() {
+            "on" | "off" => policy.trim(),
+            _ => automatic.trim(),
+        };
+        tmux(
+            server,
+            &[
+                "set-option",
+                "-w",
+                "-t",
+                window,
+                "automatic-rename",
+                automatic,
+            ],
+        )?;
+        tmux(
+            server,
+            &[
+                "set-option",
+                "-wu",
+                "-t",
+                window,
+                "@workbench_saved_automatic_rename",
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -667,6 +715,7 @@ fn close_sidebar(
     window: &str,
     pane: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    configure_window_name(server, window)?;
     tmux(server, &["kill-pane", "-t", pane])?;
     let layout = display(server, window, "#{@workbench_main_layout}")?;
     if !layout.trim().is_empty() {
@@ -680,8 +729,8 @@ fn close_sidebar(
             &["set-option", "-wu", "-t", window, "@workbench_main_layout"],
         );
     }
-    let automatic = display(server, window, "#{@workbench_saved_automatic_rename}")?;
-    if !automatic.trim().is_empty() {
+    let format = display(server, window, "#{@workbench_saved_rename_format}")?;
+    if !format.trim().is_empty() {
         tmux(
             server,
             &[
@@ -689,20 +738,20 @@ fn close_sidebar(
                 "-w",
                 "-t",
                 window,
-                "automatic-rename",
-                automatic.trim(),
+                "automatic-rename-format",
+                format.trim_end(),
             ],
         )?;
-        let _ = tmux(
+        tmux(
             server,
             &[
                 "set-option",
                 "-wu",
                 "-t",
                 window,
-                "@workbench_saved_automatic_rename",
+                "@workbench_saved_rename_format",
             ],
-        );
+        )?;
     }
     Ok(())
 }
