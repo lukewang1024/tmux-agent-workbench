@@ -142,6 +142,14 @@ struct ClientAttachmentParams {
     endpoint_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientRememberParams {
+    attachment: String,
+    pane: String,
+    session: String,
+}
+
 pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> {
     let lock_path = paths.lock_for_server(&server.key);
     let lock = open_lock(&lock_path)?;
@@ -464,7 +472,7 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
         .args([
             "list-clients",
             "-F",
-            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{pane_id}\u{1f}#{@workbench_overlay_visible}",
+            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{pane_id}\u{1f}#{@workbench_overlay_visible}\u{1f}#{session_id}",
         ])
         .output()
     {
@@ -473,7 +481,7 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
     };
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let fields: Vec<_> = line.split('\u{1f}').collect();
-        if fields.len() != 4 {
+        if fields.len() != 5 {
             continue;
         }
         let focus = if fields[1].split(',').any(|flag| flag == "focused") {
@@ -481,12 +489,22 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
         } else {
             FocusState::Unknown
         };
-        let target = state
-            .snapshot
-            .agents
-            .iter()
-            .find(|agent| agent.target.pane_id == fields[2])
-            .map(|agent| agent.target.clone());
+        let resume_keys = state.clients.resume_keys_for_attachment(fields[0]);
+        let target = if resume_keys.is_empty() {
+            state
+                .snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.target.pane_id == fields[2])
+                .map(|agent| agent.target.clone())
+        } else {
+            crate::attachment::pane_target_in_session(&server, fields[2], fields[4])
+        };
+        if let Some(target) = &target {
+            for key in resume_keys {
+                crate::attachment::remember(&server, &key, target);
+            }
+        }
         state
             .clients
             .update_attachment_focus(fields[0], focus, fields[3] == "1", target, now_ms);
@@ -769,6 +787,7 @@ fn handle(
                     .arg("-S")
                     .arg(&server.socket_path)
                     .args(["detach-client", "-t", &attachment])
+                    .stderr(std::process::Stdio::null())
                     .status();
             }
             Ok(json!({"endpoint_id": endpoint_id, "attachment_token": attachment_token, "heartbeat_seconds": 15}))
@@ -776,7 +795,23 @@ fn handle(
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
             let endpoint_id = state.clients.bind(&params.token, params.attachment, now_unix_ms())?;
-            Ok(json!({"endpoint_id": endpoint_id, "bound": true}))
+            let resume_target = state.clients.resume_key(&endpoint_id)
+                .and_then(|key| crate::attachment::recalled(server, &key));
+            Ok(json!({"endpoint_id": endpoint_id, "bound": true, "resume_target": resume_target}))
+        }),
+        "client.remember" => parse_params::<ClientRememberParams>(request.params).and_then(|params| {
+            // A client can detach without an associated session/pane (or after
+            // that target has closed). This is a lifecycle no-op, not a failed
+            // command: preserve existing history and never infer another pane.
+            let Some(target) = crate::attachment::pane_target_in_session(server, &params.pane, &params.session) else {
+                return Ok(json!({"remembered": false, "reason": "detach_target_unavailable"}));
+            };
+            crate::attachment::remember(server, crate::attachment::LAST, &target);
+            let state = state.read().expect("state poisoned");
+            for key in state.clients.resume_keys_for_attachment(&params.attachment) {
+                crate::attachment::remember(server, &key, &target);
+            }
+            Ok(json!({"remembered": true}))
         }),
         "client.attachment" => parse_params::<ClientAttachmentParams>(request.params).and_then(|params| {
             let state = state.read().expect("state poisoned");

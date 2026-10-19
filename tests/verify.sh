@@ -9,6 +9,8 @@ python_runner="$repo/tests/python.sh"
 "$python_runner" -B -m unittest discover -s tests -p test_daemon_fixture.py
 cargo fmt --check
 cargo test --locked
+"$python_runner" tests/client-resume.py target/debug/tmux-agent-workbench
+"$python_runner" tests/client-window-resize.py target/debug/tmux-agent-workbench
 sh tests/integration-tmux.sh
 sh tests/relay-pairing.sh
 sh tests/install.sh

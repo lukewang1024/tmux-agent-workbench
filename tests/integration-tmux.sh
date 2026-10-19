@@ -163,6 +163,8 @@ tmux -S "$socket" bind-key -N 'user broadcast' a display-message broadcast
 tmux -S "$socket" run-shell "bash '$repo/workbench.tmux'"
 sleep 1
 tmux -S "$socket" show-hooks -g client-resized | grep 'client-resized\[920\].*workbench-responsive-maintain' >/dev/null
+tmux -S "$socket" show-hooks -g client-session-changed | grep 'client-session-changed\[920\].*workbench-responsive-maintain' >/dev/null
+tmux -S "$socket" show-hooks -g session-window-changed | grep 'session-window-changed\[920\].*workbench-responsive-maintain' >/dev/null
 if tmux -S "$socket" show-hooks -g client-resized | grep 'client-resized\[930\]' >/dev/null; then
   exit 1
 fi

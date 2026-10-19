@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod checkpoint;
 pub mod client;
 pub mod client_protocol;

@@ -66,12 +66,12 @@ pub fn maintain_responsive_focus(
     let Some(client) = client else {
         return Ok(());
     };
-    let client_width = tmux(
-        &server,
-        &["display-message", "-p", "-c", client, "#{client_width}"],
-    )?
-    .trim()
-    .parse::<u16>()?;
+    let Some(width) =
+        crate::tmux::Tmux::new(server.clone()).client_format(client, "#{client_width}")?
+    else {
+        return Ok(());
+    };
+    let client_width = width.parse::<u16>()?;
     let sidebar_width = option_u16(&server, "@sidebar_width", 26);
     let main_min_width = option_u16(&server, "@sidebar_main_min_width", 80);
     let threshold = sidebar_width
@@ -463,7 +463,60 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
     }
     let result = maintain_layout(server, window);
     let restore_result = restore_zoom(server, window, zoomed_pane.as_deref());
-    result.and(restore_result)
+    result.and(restore_result)?;
+    reconcile_window_geometry(server, window)
+}
+
+fn reconcile_window_geometry(
+    server: &ServerIdentity,
+    window: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // A resize racing sidebar removal can leave tmux's window dimensions
+    // updated while its layout tree and pane PTYs still retain the old size.
+    // SIGWINCH cannot fix that: the application would read the stale PTY size.
+    let geometry = display(
+        server,
+        window,
+        "#{window_width}x#{window_height}|#{window_visible_layout}",
+    )?;
+    let Some((size, layout)) = geometry.trim().split_once('|') else {
+        return Ok(());
+    };
+    if layout.split(',').nth(1) == Some(size) {
+        return Ok(());
+    }
+    let Some((width, height)) = size.split_once('x') else {
+        return Ok(());
+    };
+    let policy = tmux(
+        server,
+        &["show-options", "-wqv", "-t", window, "window-size"],
+    )?;
+    // Reapply the actual size, without a synthetic intermediate size. tmux
+    // switches to manual sizing here, so restore the original local policy
+    // (or inheritance) immediately after the resize, including on failure.
+    let resized = tmux(
+        server,
+        &["resize-window", "-t", window, "-x", width, "-y", height],
+    );
+    let restored = if policy.trim().is_empty() {
+        tmux(server, &["set-option", "-wu", "-t", window, "window-size"])
+    } else {
+        tmux(
+            server,
+            &[
+                "set-option",
+                "-w",
+                "-t",
+                window,
+                "window-size",
+                policy.trim(),
+            ],
+        )
+    };
+    resized?;
+    restored?;
+    Ok(())
 }
 
 fn maintain_layout(

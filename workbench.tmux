@@ -234,12 +234,14 @@ if [ -n "$ATTENTION_BIN" ]; then
   fi
   tmux set-hook -g 'client-attached[920]' \
     "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
+  tmux set-hook -g 'client-detached[920]' \
+    "run-shell -b \"\\\"$ATTENTION_BIN\\\" client remember --attachment '#{hook_client}' --pane '#{hook_pane}' --session '#{hook_session}' >/dev/null 2>&1\""
   tmux set-hook -g 'client-resized[920]' \
     "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
   tmux set-hook -g 'client-session-changed[920]' \
-    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
   tmux set-hook -g 'session-window-changed[920]' \
-    "run-shell '\"$ATTENTION_BIN\" sidebar-control maintain \"#{window_id}\"'"
+    "run-shell -b '$CURRENT_DIR/bin/workbench-responsive-maintain \"$ATTENTION_BIN\" \"#{client_name}\"'"
   tmux set-hook -g 'window-resized[920]' \
     "run-shell -b '\"$ATTENTION_BIN\" sidebar-control maintain \"#{hook_window}\"'"
   tmux set-hook -g 'after-kill-pane[920]' \
@@ -249,6 +251,12 @@ if [ -n "$ATTENTION_BIN" ]; then
   tmux set-hook -gu 'after-resize-pane[920]' 2>/dev/null || true
   tmux bind-key -T root MouseDragEnd1Border run-shell -b \
     "\"$ATTENTION_BIN\" sidebar-control remember \"#{mouse_pane}\""
+  case "$(tmux show-hooks -g client-detached 2>/dev/null)" in
+    *'client-detached[930]'*'@last-detached-pane'*)
+      tmux set-hook -gu 'client-detached[930]' 2>/dev/null || true
+      tmux set-option -gu @last-detached-pane 2>/dev/null || true
+      ;;
+  esac
   tmux set-hook -gu 'client-attached[930]' 2>/dev/null || true
   tmux set-hook -gu 'client-resized[930]' 2>/dev/null || true
 

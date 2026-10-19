@@ -126,6 +126,20 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ClientCommand {
+    #[command(hide = true)]
+    Remember {
+        #[arg(long)]
+        attachment: String,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        session: String,
+    },
+    #[command(hide = true)]
+    Refresh {
+        #[arg(long)]
+        client: String,
+    },
     Serve,
     Status,
     Setup {
@@ -646,9 +660,43 @@ fn client_attach(
         validate_safe_name(value, "event target")?;
     }
     let Some(host) = ssh_host else {
+        // Local/plain-SSH attachment has no authenticated terminal identity.
+        // Use server-local fallback history only when no target was requested.
+        let server = ServerIdentity::discover().ok().or_else(|| {
+            let result = ProcessCommand::new("tmux")
+                .args(["display-message", "-p", "#{socket_path}"])
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            result
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&result.stdout).trim().to_owned())
+                .and_then(|socket| ServerIdentity::from_socket(socket.into()).ok())
+        });
+        let restored = if session.is_none() {
+            server.as_ref().and_then(|server| {
+                tmux_agent_workbench::attachment::recalled(
+                    server,
+                    tmux_agent_workbench::attachment::LAST,
+                )
+                .and_then(|target| tmux_agent_workbench::attachment::restore(server, &target))
+            })
+        } else {
+            None
+        };
         let mut command = ProcessCommand::new("tmux");
-        command.arg("attach-session");
-        if let Some(session) = session {
+        if let Some(server) = &server {
+            command.args(server.tmux_args());
+        }
+        command.env_remove("TMUX").env_remove("TMUX_PANE");
+        let has_session = server.is_some() || session.is_some();
+        command.arg(if has_session {
+            "attach-session"
+        } else {
+            "new-session"
+        });
+        if let Some(session) = session.or(restored.as_deref()) {
             command.args(["-t", session]);
         }
         return command
@@ -836,7 +884,7 @@ fn client_attach_pty(
     let tty = std::env::var("SSH_TTY")
         .or_else(|_| std::env::var("TTY"))
         .unwrap_or_else(|_| "unknown".into());
-    ipc_call(
+    let binding = ipc_call(
         paths,
         "client.bind",
         serde_json::json!({"token": token, "attachment": tty}),
@@ -854,8 +902,17 @@ fn client_attach_pty(
     // client on this PTY instead of treating `attach-session` as a
     // switch-client operation on the parent client.
     command.env_remove("TMUX").env_remove("TMUX_PANE");
+    let restored = if session.is_none() {
+        binding
+            .get("resume_target")
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .and_then(|target| tmux_agent_workbench::attachment::restore(&server, &target))
+    } else {
+        None
+    };
     command.arg("attach-session");
-    if let Some(session) = session {
+    if let Some(session) = session.or(restored.as_deref()) {
         command.args(["-t", session]);
     }
     let status = command.status()?;
@@ -871,29 +928,8 @@ fn current_target_for_pane(
 ) -> Result<tmux_agent_workbench::model::TmuxTarget, Box<dyn std::error::Error>> {
     validate_target(pane_id, '%')?;
     let server = ServerIdentity::discover()?;
-    let format = "#{session_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_index}";
-    let output = ProcessCommand::new("tmux")
-        .arg("-S")
-        .arg(&server.socket_path)
-        .args(["display-message", "-p", "-t", pane_id, format])
-        .output()?;
-    if !output.status.success() {
-        return Err("pane is not live".into());
-    }
-    let value = String::from_utf8(output.stdout)?;
-    let fields: Vec<_> = value.trim().split('\u{1f}').collect();
-    if fields.len() != 7 {
-        return Err("invalid tmux target response".into());
-    }
-    Ok(tmux_agent_workbench::model::TmuxTarget {
-        session_id: fields[0].into(),
-        session_name: fields[1].into(),
-        window_id: fields[2].into(),
-        window_index: fields[3].parse()?,
-        window_name: fields[4].into(),
-        pane_id: fields[5].into(),
-        pane_index: fields[6].parse()?,
-    })
+    tmux_agent_workbench::attachment::pane_target(&server, pane_id)
+        .ok_or_else(|| "pane is not live".into())
 }
 
 fn device_id(paths: &Paths) -> Result<String, Box<dyn std::error::Error>> {
@@ -1083,6 +1119,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
         Command::Client { command } => match command {
+            ClientCommand::Remember {
+                attachment,
+                pane,
+                session,
+            } => {
+                ensure_daemon_quiet(&paths)?;
+                ipc_call(
+                    &paths,
+                    "client.remember",
+                    serde_json::json!({"attachment": attachment, "pane": pane, "session": session}),
+                )?;
+            }
+            ClientCommand::Refresh { client } => {
+                tmux_agent_workbench::attachment::refresh(&ServerIdentity::discover()?, &client);
+            }
             ClientCommand::Serve => client_serve(&paths)?,
             ClientCommand::Status => client_status(&paths)?,
             ClientCommand::Setup { platform } => client_setup(&paths, platform.as_deref())?,
@@ -1665,15 +1716,9 @@ fn tmux_format_for_client(
     client: &str,
     format: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = ProcessCommand::new("tmux")
-        .arg("-S")
-        .arg(&server.socket_path)
-        .args(["display-message", "-p", "-c", client, format])
-        .output()?;
-    if !output.status.success() {
-        return Err("tmux client expired".into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    tmux_agent_workbench::tmux::Tmux::new(server.clone())
+        .client_format(client, format)?
+        .ok_or_else(|| "tmux client expired".into())
 }
 
 fn should_restore_source_window(source_window: &str, target_window: &str) -> bool {
@@ -1756,16 +1801,14 @@ fn ipc_call(
 }
 
 fn client_uses_termux_input(paths: &Paths, client: &str) -> bool {
-    let Ok(output) = ProcessCommand::new("tmux")
-        .args(["display-message", "-p", "-c", client, "#{client_tty}"])
-        .output()
+    let Ok(server) = ServerIdentity::discover() else {
+        return false;
+    };
+    let Ok(Some(tty)) =
+        tmux_agent_workbench::tmux::Tmux::new(server).client_format(client, "#{client_tty}")
     else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let tty = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if tty.is_empty() {
         return false;
     }
