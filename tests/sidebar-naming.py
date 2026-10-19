@@ -26,6 +26,15 @@ with tempfile.TemporaryDirectory(prefix='workbench-naming-') as root:
             stream.write('\x1b]2;' + value + '\x07')
             stream.flush()
 
+    def wait_command(pane, expected):
+        # On macOS a freshly forked pane can still report its parent's "tmux"
+        # name before exec. Select it only once the intended process is ready.
+        for _ in range(80):
+            if tmux('display-message', '-p', '-t', pane, '#{pane_current_command}') == expected:
+                return
+            time.sleep(.05)
+        raise AssertionError(('pane process did not start', pane, expected))
+
     def wait_name(expected):
         for _ in range(80):
             if tmux('display-message', '-p', '-t', window, '#{window_name}') == expected:
@@ -36,6 +45,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-naming-') as root:
     try:
         main = tmux('-f', '/dev/null', 'new-session', '-d', '-x', '160', '-y', '40',
                     '-P', '-F', '#{pane_id}', 'sleep', '120')
+        wait_command(main, 'sleep')
         window = tmux('display-message', '-p', '-t', main, '#{window_id}')
         tmux('set-option', '-w', '-t', window, 'automatic-rename', 'on')
         core('sidebar-control', 'toggle', window)
@@ -47,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-naming-') as root:
         time.sleep(1)
         wait_name('sleep')
         other = tmux('split-window', '-d', '-t', main, '-P', '-F', '#{pane_id}', 'tail', '-f', '/dev/null')
+        wait_command(other, 'tail')
         tmux('select-pane', '-t', other)
         wait_name('tail')
         tmux('select-pane', '-t', main)
