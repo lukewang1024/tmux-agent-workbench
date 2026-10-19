@@ -482,7 +482,22 @@ fn reconcile_window_geometry(
     let Some((size, layout)) = geometry.trim().split_once('|') else {
         return Ok(());
     };
-    if layout.split(',').nth(1) == Some(size) {
+    let layout_size = if layout.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(layout)?;
+        value.get("L").and_then(|root| {
+            Some(format!(
+                "{}x{}",
+                root.get("w")?.as_u64()?,
+                root.get("h")?.as_u64()?
+            ))
+        })
+    } else {
+        layout.split(',').nth(1).map(str::to_owned)
+    };
+    if layout_size
+        .as_deref()
+        .is_none_or(|layout_size| layout_size == size)
+    {
         return Ok(());
     }
     let Some((width, height)) = size.split_once('x') else {
