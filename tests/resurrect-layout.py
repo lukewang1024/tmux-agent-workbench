@@ -4,12 +4,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 repo = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="wb-resurrect-") as root:
     socket = str(Path(root) / "tmux.sock")
     env = dict(os.environ, TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket)
+    env["TMUX_AGENT_WORKBENCH_BIN"] = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1 else str(repo / "target/debug/tmux-agent-workbench")
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
 
@@ -22,7 +24,13 @@ with tempfile.TemporaryDirectory(prefix="wb-resurrect-") as root:
         return tmux("split-window", "-d", "-t", target, "-P", "-F", "#{pane_id}", *args)
 
     def layout(target):
-        return tmux("display-message", "-p", "-t", target, "#{window_layout}")
+        # Compare geometry in a version-independent format; select-layout below
+        # independently verifies that tmux accepts the saved legacy checksum.
+        raw = tmux("display-message", "-p", "-t", target, "#{window_layout}")
+        path = Path(root) / "normalize.txt"
+        path.write_text("window\taudit\t0\t:name\t0\t:-\t" + raw + "\toff\n")
+        return subprocess.check_output([env["TMUX_AGENT_WORKBENCH_BIN"],
+            "normalize-resurrect-layout", str(path)], env=env, text=True).split("\t")[6]
 
     def snapshot(target, name):
         panes = tmux("list-panes", "-t", target, "-F",
@@ -91,6 +99,15 @@ with tempfile.TemporaryDirectory(prefix="wb-resurrect-") as root:
         sidebar = split(main, "-h", "-l", "26")
         tmux("set-option", "-p", "-t", sidebar, "@pane_role", "sidebar")
         snapshot(main, "right-sidebar-single-main-pane")
+        # A failed conversion must leave the original snapshot intact.
+        path = Path(root) / "invalid.txt"
+        invalid = 'window\taudit\t0\t:name\t0\t:-\t{"V":2,"L":{}}\toff\n'
+        path.write_text(invalid)
+        result = subprocess.run([str(repo / "bin/workbench-resurrect-save-hook"), str(path)],
+                                env=env, capture_output=True, text=True)
+        assert result.returncode != 0
+        assert path.read_text() == invalid
+        print("PASS invalid snapshot preserved")
     finally:
         subprocess.run(["tmux", "-S", socket, "kill-server"], env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -34,7 +34,7 @@ agents:   agent start|list|goto|next|profiles|handoff
 clients:  attach, client serve|status|setup
 ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [compact|standard|full|cpu]
 tmux:     resurrect save|restore
-system:   status, doctor, config, hooks, daemon
+system:   conventions, status, doctor, config, hooks, daemon
 EOF
 }
 
@@ -62,6 +62,10 @@ command_name=$1
 shift
 export WB_SHIM_CALL=1
 case $command_name in
+  conventions)
+    [ $# -eq 0 ] || { usage >&2; exit 2; }
+    cat "$plugin_dir/agent-conventions/AGENTS.snippet.md"
+    ;;
   new) if [ "${1:-}" = --prompt ]; then shift; exec "$plugin_dir/git/bin/wb-new-prompt" "$@"; fi
       run_and_reconcile "$plugin_dir/git/bin/wb-new" "$@" ;;
   add) run_and_reconcile "$plugin_dir/git/bin/wb-add" "$@" ;;

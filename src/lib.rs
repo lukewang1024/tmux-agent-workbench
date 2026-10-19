@@ -20,6 +20,7 @@ pub mod paths;
 pub mod picker;
 pub mod process;
 pub mod relay;
+pub mod resurrect;
 pub mod semantic;
 pub mod server;
 pub mod sidebar;

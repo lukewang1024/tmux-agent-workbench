@@ -8,6 +8,7 @@ trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 panes_file=$tmp_dir/panes
 output_file=$tmp_dir/output
+normalized_file=$tmp_dir/normalized
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 tab=$(printf '\t')
 
@@ -20,7 +21,11 @@ fi
 t list-panes -a -f '#{==:#{@pane_role},sidebar}' \
   -F "#{session_name}${tab}#{window_index}${tab}#{pane_index}${tab}#{pane_id}" > "$panes_file"
 
+# tmux 3.8 emits versioned JSON. Keep the pruning parser and saved layouts
+# compatible with older tmux/resurrect versions through the Workbench core.
+"$script_dir/tmux-agent-workbench-cli" normalize-resurrect-layout "$save_file" > "$normalized_file"
+
 awk -F '\t' -v OFS='\t' -f "$script_dir/../lib/resurrect-layout.awk" \
-  "$panes_file" "$save_file" > "$output_file"
+  "$panes_file" "$normalized_file" > "$output_file"
 
 mv "$output_file" "$save_file"

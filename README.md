@@ -380,7 +380,10 @@ tmux-agent-workbench doctor
 ```
 
 `resurrect save|restore` is the all-in-one assistant session layer for this
-plugin. It composes with `tmux-resurrect` and `tmux-continuum`, preserves the
+plugin. Snapshot saving accepts both legacy tmux layouts and tmux 3.8 JSON
+layouts, removes ephemeral sidebars, and writes a legacy layout that tmux can
+restore across versions. Invalid conversions leave the original snapshot intact.
+It composes with `tmux-resurrect` and `tmux-continuum`, preserves the
 existing `assistant-sessions.json` data, restores Claude, Codex, OpenCode,
 Copilot, Pi, Oh My Pi, and Grok sessions, and uses Workbench's native hooks for
 Claude, Codex, OpenCode, and TraeX. No separate assistant-resurrect TPM entry
@@ -746,21 +749,38 @@ names and legacy compatibility aliases are not the public API.
 
 _(For `AGENTS.md` / `CLAUDE.md` — how a coding agent uses this autonomously.)_
 
-For a coding agent to use any of this autonomously — folding a repo it just
-started touching into the current inspection windows, or calling `tmux-agent-workbench add`
-when a task turns out to need another repo — it has to be told the
-convention exists. A tmux plugin has no reach into `~/.claude`, `~/.codex`,
-`~/.config/opencode`, or your repo's own `AGENTS.md`/`CLAUDE.md`; it cannot
-install itself into an agent's instructions. That's a real limitation, not
-an oversight — nothing here writes to those files for you.
+Workbench owns the agent conventions in
+[`agent-conventions/AGENTS.snippet.md`](agent-conventions/AGENTS.snippet.md).
+The installed public command prints that file without requiring a running tmux
+server or daemon:
 
-[`agent-conventions/AGENTS.snippet.md`](agent-conventions/AGENTS.snippet.md)
-is the text meant to close that gap. Copy its contents into your own
-`AGENTS.md` / `CLAUDE.md` (repo-level or global, wherever your agent reads
-project conventions from) so it knows to call `tmux-agent-workbench inspect` / `tmux-agent-workbench add` when
-its work crosses into another repo, and how each of the three supported
-agents (Claude Code, Codex, opencode) should separately grow its own
-*write* scope once the window exists.
+```sh
+tmux-agent-workbench conventions
+```
+
+Keep only this reference in your global `AGENTS.md` / `CLAUDE.md`:
+
+> Before operating tmux windows, agents, workspaces, or persistent dev servers,
+> run `tmux-agent-workbench conventions` and follow its instructions.
+
+The installer exposes the command but does not edit your agent instruction files.
+The conventions cover stable task names, one agent per ordinary window,
+workspace membership, and dev-server task panes. Updating Workbench updates the
+rules without copying them into each tool's configuration.
+
+### Stable task names
+
+The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
+assigns a short semantic name to its verified window, then keeps it stable as
+commands, titles, status, and pane focus change. Sidebars do not supply names.
+Prefer one task and one agent per ordinary window; existing workbench-managed
+window names and explicitly requested team layouts remain intact.
+
+To opt into tmux's automatic names, set this before loading the plugin:
+
+```tmux
+set -g @workbench-window-automatic-rename on
+```
 
 ### Task pane reuse and cleanup
 

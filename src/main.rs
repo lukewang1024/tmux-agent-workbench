@@ -46,6 +46,10 @@ enum Command {
     },
     Sidebar,
     #[command(hide = true)]
+    NormalizeResurrectLayout {
+        path: std::path::PathBuf,
+    },
+    #[command(hide = true)]
     MenuMouseMode {
         #[arg(long)]
         client: String,
@@ -1118,6 +1122,14 @@ fn termux_external_apps_enabled(path: &std::path::Path) -> bool {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
+        Command::NormalizeResurrectLayout { path } => {
+            let input = std::fs::read_to_string(path)?;
+            print!(
+                "{}",
+                tmux_agent_workbench::resurrect::normalize_snapshot(&input)?
+            );
+        }
+
         Command::Client { command } => match command {
             ClientCommand::Remember {
                 attachment,
