@@ -27,6 +27,10 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
     def tmux(*args):
         return subprocess.check_output(['tmux', '-S', socket, *args], env=env, text=True).strip()
 
+    def client_value(client, fmt):
+        rows = tmux('list-clients', '-F', '#{client_name}\x1f' + fmt)
+        return next(value for name, value in (row.split('\x1f', 1) for row in rows.splitlines()) if name == client)
+
     def wait_for(probe, description):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -68,11 +72,14 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
         if pid == 0:
             os.execvpe(core, args, dict(env, SSH_TTY=os.ttyname(0)))
         client = wait_for(lambda: tmux('list-clients', '-f', '#{session_attached}', '-F', '#{client_name}'), 'client did not attach')
+        observed_key = '@workbench-attachment-' + hashlib.sha256(client.encode()).hexdigest()
+        wait_for(lambda: json.loads(tmux('show-options', '-gqv', observed_key) or '{}').get('pane_id') == client_value(client, '#{pane_id}'),
+                 'live attachment target was not observed')
         return pid, master, client, channel
 
     def disconnect(connection, terminal=None):
         pid, master, client, channel = connection
-        expected = tmux('display-message', '-p', '-c', client, '#{pane_id}')
+        expected = client_value(client, '#{pane_id}')
         tmux('detach-client', '-t', client)
         os.waitpid(pid, 0)
         os.close(master)
@@ -110,11 +117,11 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
             disconnect(connect(terminal_a, 'alpha'), terminal_a)
             disconnect(connect(terminal_b, 'beta'), terminal_b)
             connection = connect(terminal_a)
-            assert tmux('display-message', '-p', '-c', connection[2], '#{session_name} #{pane_id}') == 'alpha ' + alpha, (tmux('display-message', '-p', '-c', connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', key(terminal_a)))
+            assert client_value(connection[2], '#{session_name} #{pane_id}') == 'alpha ' + alpha, (client_value(connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', key(terminal_a)))
             disconnect(connection, terminal_a)
             print('PASS reconnect restores its own terminal, not sibling terminal history')
             connection = connect(terminal_a, 'beta')
-            assert tmux('display-message', '-p', '-c', connection[2], '#{pane_id}') == beta, (tmux('display-message', '-p', '-c', connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
+            assert client_value(connection[2], '#{pane_id}') == beta, (client_value(connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
             disconnect(connection, terminal_a)
             print('PASS explicit session overrides saved terminal target')
             saved = tmux('show-options', '-gqv', '@workbench-resume-last')
@@ -126,12 +133,12 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
             print('PASS targetless detach preserves existing shared and terminal histories')
             wait_for(lambda: tmux('show-options', '-gqv', '@workbench-resume-last'), 'shared fallback not saved')
             connection = connect()
-            assert tmux('display-message', '-p', '-c', connection[2], '#{pane_id}') == beta, (tmux('display-message', '-p', '-c', connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
+            assert client_value(connection[2], '#{pane_id}') == beta, (client_value(connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
             disconnect(connection)
             print('PASS plain SSH uses shared fallback without claiming a terminal identity')
         with running_daemon(core, env):
             connection = connect(terminal_a)
-            assert tmux('display-message', '-p', '-c', connection[2], '#{pane_id}') == beta, (tmux('display-message', '-p', '-c', connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
+            assert client_value(connection[2], '#{pane_id}') == beta, (client_value(connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
             disconnect(connection, terminal_a)
             print('PASS terminal history survives daemon restart')
         before = tmux('list-sessions', '-F', '#{session_id}')

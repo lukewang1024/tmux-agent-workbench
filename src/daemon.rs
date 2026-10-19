@@ -490,6 +490,15 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
             FocusState::Unknown
         };
         let resume_keys = state.clients.resume_keys_for_attachment(fields[0]);
+        if let Some(target) =
+            crate::attachment::pane_target_in_session(&server, fields[2], fields[4])
+        {
+            crate::attachment::remember(
+                &server,
+                &crate::attachment::attachment_key(fields[0]),
+                &target,
+            );
+        }
         let target = if resume_keys.is_empty() {
             state
                 .snapshot
@@ -794,6 +803,7 @@ fn handle(
         }),
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
+            crate::attachment::forget(server, &crate::attachment::attachment_key(&params.attachment));
             let endpoint_id = state.clients.bind(&params.token, params.attachment, now_unix_ms())?;
             let resume_target = state.clients.resume_key(&endpoint_id)
                 .and_then(|key| crate::attachment::recalled(server, &key));
@@ -803,7 +813,19 @@ fn handle(
             // A client can detach without an associated session/pane (or after
             // that target has closed). This is a lifecycle no-op, not a failed
             // command: preserve existing history and never infer another pane.
-            let Some(target) = crate::attachment::pane_target_in_session(server, &params.pane, &params.session) else {
+            // tmux 3.7 detaches the client before expanding hook_pane and
+            // hook_session. Use only that attachment's last live observation;
+            // the server's implicit/default pane may belong to another client.
+            let key = crate::attachment::attachment_key(&params.attachment);
+            let target = crate::attachment::pane_target_in_session(server, &params.pane, &params.session)
+                .or_else(|| {
+                    (params.pane.is_empty() && params.session.is_empty())
+                        .then(|| crate::attachment::recalled(server, &key))
+                        .flatten()
+                        .and_then(|target| crate::attachment::pane_target_in_session(server, &target.pane_id, &target.session_id))
+                });
+            crate::attachment::forget(server, &key);
+            let Some(target) = target else {
                 return Ok(json!({"remembered": false, "reason": "detach_target_unavailable"}));
             };
             crate::attachment::remember(server, crate::attachment::LAST, &target);

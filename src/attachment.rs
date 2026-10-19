@@ -9,6 +9,17 @@ use crate::{model::TmuxTarget, server::ServerIdentity};
 
 pub const LAST: &str = "@workbench-resume-last";
 
+pub fn attachment_key(attachment: &str) -> String {
+    format!(
+        "@workbench-attachment-{:x}",
+        Sha256::digest(attachment.as_bytes())
+    )
+}
+
+pub fn forget(server: &ServerIdentity, key: &str) {
+    let _ = output(server, &["set-option", "-gu", key]);
+}
+
 pub fn terminal_key(device: &str, terminal: Option<&str>) -> Option<String> {
     terminal.map(|terminal| {
         let hash = Sha256::digest(format!("{device}\0{terminal}").as_bytes());
@@ -145,6 +156,19 @@ pub fn restore(server: &ServerIdentity, target: &TmuxTarget) -> Option<String> {
 /// Request a redraw only after responsive layout has settled. This does not
 /// change the terminal dimensions and is an optional compatibility workaround.
 pub fn refresh(server: &ServerIdentity, client: &str) {
+    let tmux = crate::tmux::Tmux::new(server.clone());
+    if let Some(value) = tmux
+        .client_format(client, "#{pane_id} #{session_id}")
+        .ok()
+        .flatten()
+    {
+        let mut fields = value.split_whitespace();
+        if let (Some(pane), Some(session)) = (fields.next(), fields.next()) {
+            if let Some(target) = pane_target_in_session(server, pane, session) {
+                remember(server, &attachment_key(client), &target);
+            }
+        }
+    }
     if output(
         server,
         &["show-options", "-gqv", "@workbench-attach-refresh"],
@@ -154,7 +178,6 @@ pub fn refresh(server: &ServerIdentity, client: &str) {
     {
         return;
     }
-    let tmux = crate::tmux::Tmux::new(server.clone());
     let Some(before) = tmux
         .client_format(client, "#{pane_id} #{pane_pid}")
         .ok()
