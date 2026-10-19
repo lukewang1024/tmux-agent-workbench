@@ -421,9 +421,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS stale/missing targets rejected without an output pager')
 
         # Follow the complete Single launch path through real submenus.
+        drain(0.3)
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        # A preceding menu can leave a pending redraw containing "close".
+        # Wait for this menu's own action before sending its first shortcut.
+        wait_for_text(menu, b'Launch agent...')
         for key, expected in [(b'a', b'choose agent'), (b'x', b'choose preset'), (b's', b'Permissions:')]:
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -536,7 +539,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        wait_for_text(menu, b'Team members & progress...')
         os.write(master, b't')
         rendered = wait_for_text(client_process, b'worker_a')
         assert b'lead' in rendered and b'ready' in rendered

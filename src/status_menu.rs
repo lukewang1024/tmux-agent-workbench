@@ -236,9 +236,13 @@ pub fn run(
         shell_quote(&context.guard)
     );
     let mut command = Command::new("tmux");
-    if let Ok(server) = crate::server::ServerIdentity::discover() {
-        command.args(server.tmux_args());
-    }
+    let server = crate::server::ServerIdentity::discover()?;
+    command.args(server.tmux_args());
+    // The source pane remains the action target, but a native menu needs a
+    // pane visible to the destination client to obtain its drawing screen.
+    let display_pane = crate::tmux::Tmux::new(server)
+        .client_format(client, "#{pane_id}")?
+        .ok_or("Workbench client disappeared")?;
     command.args(["display-menu", "-M"]);
     if stay_open {
         command.arg("-O");
@@ -249,7 +253,7 @@ pub fn run(
         "-c",
         client,
         "-t",
-        pane,
+        &display_pane,
         "-b",
         "rounded",
         "-T",
