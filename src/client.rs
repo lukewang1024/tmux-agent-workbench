@@ -111,6 +111,21 @@ impl ClientRegistry {
         if bind.used || now_ms > bind.expires_ms {
             return Err("expired or used attachment token".into());
         }
+        // PTY names are reusable transport addresses, not terminal identities.
+        // A later bind must retire stale associations before a detach hook can
+        // attribute this tty's last pane to another terminal's history.
+        for (id, old) in &mut self.endpoints {
+            if id != &bind.endpoint_id {
+                if old.previous_attachment.as_deref() == Some(&attachment) {
+                    old.previous_attachment = None;
+                }
+                if old.attachment.as_deref() == Some(&attachment) {
+                    old.attachment = None;
+                    old.active_target = None;
+                    old.focus = FocusState::Unknown;
+                }
+            }
+        }
         let endpoint = self
             .endpoints
             .get_mut(&bind.endpoint_id)
@@ -171,6 +186,27 @@ impl ClientRegistry {
         self.bind_tokens
             .retain(|_, token| !replaced_ids.contains(&token.endpoint_id));
         attachments
+    }
+
+    pub fn resume_key(&self, endpoint_id: &str) -> Option<String> {
+        let endpoint = self.endpoints.get(endpoint_id)?;
+        crate::attachment::terminal_key(&endpoint.device_id, endpoint.terminal_id.as_deref())
+    }
+
+    pub fn resume_keys_for_attachment(&self, attachment: &str) -> Vec<String> {
+        self.endpoints
+            .values()
+            .filter(|endpoint| {
+                endpoint.attachment.as_deref() == Some(attachment)
+                    || endpoint.previous_attachment.as_deref() == Some(attachment)
+            })
+            .filter_map(|endpoint| {
+                crate::attachment::terminal_key(
+                    &endpoint.device_id,
+                    endpoint.terminal_id.as_deref(),
+                )
+            })
+            .collect()
     }
 
     pub fn attachment(&self, endpoint_id: &str) -> Result<Option<&str>, String> {
@@ -396,6 +432,74 @@ mod tests {
                 .bind(&old, "tty".into(), ATTACHMENT_TOKEN_TTL_MS + 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn resume_identity_is_retained_on_detach_without_crossing_terminal_boundaries() {
+        let mut registry = ClientRegistry::default();
+        let (a, token_a) = registry.register_terminal(
+            "phone".into(),
+            Some("a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
+        let (b, token_b) = registry.register_terminal(
+            "phone".into(),
+            Some("b".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
+        registry.bind(&token_a, "/dev/pts/1".into(), 1).unwrap();
+        registry.bind(&token_b, "/dev/pts/2".into(), 1).unwrap();
+        assert_ne!(registry.resume_key(&a), registry.resume_key(&b));
+        assert_eq!(
+            registry.resume_keys_for_attachment("/dev/pts/1"),
+            vec![registry.resume_key(&a).unwrap()]
+        );
+        registry.detach(&a, 2).unwrap();
+        assert_eq!(
+            registry.resume_keys_for_attachment("/dev/pts/1"),
+            vec![registry.resume_key(&a).unwrap()]
+        );
+        assert!(
+            registry
+                .resume_keys_for_attachment("/dev/pts/missing")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reused_pty_cannot_overwrite_another_terminals_history_or_detach_it() {
+        let mut registry = ClientRegistry::default();
+        let (a, token_a) = registry.register_terminal(
+            "phone".into(),
+            Some("a".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            0,
+        );
+        registry.bind(&token_a, "/dev/pts/1".into(), 1).unwrap();
+        registry.detach(&a, 2).unwrap();
+        let (b, token_b) = registry.register_terminal(
+            "phone".into(),
+            Some("b".into()),
+            "phone".into(),
+            "termux".into(),
+            vec![],
+            3,
+        );
+        registry.bind(&token_b, "/dev/pts/1".into(), 4).unwrap();
+        assert_eq!(
+            registry.resume_keys_for_attachment("/dev/pts/1"),
+            vec![registry.resume_key(&b).unwrap()]
+        );
+        assert!(registry.replace_terminal("phone", Some("a")).is_empty());
+        assert_eq!(registry.attachment(&b).unwrap(), Some("/dev/pts/1"));
     }
 
     #[test]

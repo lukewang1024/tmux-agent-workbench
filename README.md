@@ -469,6 +469,28 @@ event's exact session, window, and pane. Closing the SSH attachment removes the
 endpoint. No listening port, reverse tunnel, or third-party push provider is
 required.
 
+Reconnects restore the last session, window, and pane for that device and
+terminal. An explicit `--session` takes precedence. History lives in the target
+tmux server, survives Workbench daemon restarts, and expires with that server;
+closed panes fall back to their window, then session. Plain SSH can invoke
+`tmux-agent-workbench client attach` on the server: without a client identity,
+it uses the server's last detached target as a shared fallback. With no sessions,
+the local entrypoint creates one.
+
+After responsive sidebar/zoom maintenance settles, Workbench refreshes the
+client and sends one `SIGWINCH` to the active pane's foreground process group.
+The same maintenance runs when the client switches sessions or windows.
+If the window's recorded size and layout geometry disagree, maintenance reapplies
+the recorded size and restores the original window sizing policy, so pane PTYs
+receive the actual dimensions before the foreground process is notified.
+This optional compatibility notification does not change terminal dimensions;
+disable it with `set -g @workbench-attach-refresh off`. A signal being delivered
+does not prove that an application's stale-rendering bug has been fixed.
+
+Clients attached to the same tmux session share window selection and pane
+dimensions. With `window-size latest`, the most recently active client determines
+the window size; desktop navigation can therefore move and resize a phone's view.
+
 Each local terminal has its own identity and attachment. Multiple Termux tabs
 on the same phone can connect simultaneously. Reconnecting from the same
 terminal replaces only that terminal's old remote client. A local terminal

@@ -122,6 +122,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 return text.index(label) + 2, row + 1
         raise AssertionError(('Menu item position missing', label, screen))
 
+    def open_menu(*args, **kwargs):
+        # Drain the previous screen before launching, so its Close footer
+        # cannot satisfy the new menu readiness check.
+        drain()
+        return subprocess.Popen(*args, **kwargs)
+
     def wait_for_text(proc, needle=b'close'):
         output = b''
         for _ in range(40):
@@ -208,7 +214,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 args = ([str(repo / 'bin/workbench-agent-usage'), 'menu', client] if kind == 'usage'
                         else [str(repo / 'bin/workbench-host-metrics-menu'), client, pane] if kind == 'metrics'
                         else [str(repo / 'bin/workbench-status-popup'), kind, client, pane])
-                menu = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
@@ -315,7 +321,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         drain(0.3)
         # Touch sends a press/release without any preceding hover/motion.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         x, y = item_position(rendered, '/side')
@@ -325,7 +331,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         wait_for_pane_text('/side', pane)
         tmux('send-keys', '-t', pane, 'C-u')
         print('PASS touch selects action without hover')
-        menu = subprocess.Popen([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-host-metrics-menu'), client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         x, y = item_position(rendered, 'Standard')
@@ -341,7 +347,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         other = tmux('new-window', '-P', '-F', '#{window_id}', '-n', 'unrelated-shell', '/bin/sh')
         drain()
         # A native Agent action still prefills the source pane without Enter.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'/btw' not in rendered
@@ -358,7 +364,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for key, expected in [(b'q', '$grill-me'), (b'h', '$handoff')]:
             tmux('send-keys', '-t', pane, 'C-u')
             drain()
-            menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+            menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu)
             assert b'/goal' in rendered and b'grill-me' in rendered and b'handoff' in rendered
@@ -374,7 +380,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             snapshot = json.loads(subprocess.check_output([core, 'snapshot', '--json'], env=env))
             if any(a['target']['pane_id'] == pane and a['base_state'] == 'working' for a in snapshot['agents']): break
             drain(0.05)
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'working' in rendered and b'grill-me' in rendered and b'handoff' in rendered
@@ -386,7 +392,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('send-keys', '-t', pane, 'C-u')
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         print('PASS working Codex retains skill shortcuts and uses /side')
-        menu = subprocess.Popen([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
+        menu = open_menu([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         x, y = item_position(rendered, 'Claude Code')
@@ -399,7 +405,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain(0.6)
         print('PASS usage touch action')
         # Stale callbacks must not type into a replacement shell.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         tmux('respawn-pane', '-k', '-t', pane, '/bin/sh')
@@ -407,7 +413,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         drain(0.4)
         assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
-        menu = subprocess.Popen([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'/side' not in rendered and b'No foreground agent' in rendered
@@ -421,9 +427,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS stale/missing targets rejected without an output pager')
 
         # Follow the complete Single launch path through real submenus.
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+        drain(0.3)
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        # A preceding menu can leave a pending redraw containing "close".
+        # Wait for this menu's own action before sending its first shortcut.
+        wait_for_text(menu, b'Launch agent...')
         for key, expected in [(b'a', b'choose agent'), (b'x', b'choose preset'), (b's', b'Permissions:')]:
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -446,7 +455,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # cat's -u is a harmless fixture argument proving that the configured
         # budget arguments are passed to a single interactive CLI, not a team.
         (config_dir / 'launch.toml').write_text("[single_budget]\ncodex = ['-u']\n")
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         for key, heading in [(b'a', b'choose agent'), (b'x', b'Single Budget'), (b'b', b'Permissions:')]:
@@ -482,7 +491,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
         for preset, presentation, expected in [(b't', b'n', ['codex']), (b'T', b't', ['codex', '--team-budget', '--tmux'])]:
-            menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+            menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu)
             for key, heading in [(b'a', b'choose agent'), (b'x', b'choose preset'), (preset, b'Native subagents'), (presentation, b'Permissions:')]:
@@ -508,7 +517,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
         tmux('select-pane', '-t', pane, '-T', 'Action Required')
         drain(0.2)
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
@@ -517,7 +526,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         tmux('copy-mode', '-t', pane)
         drain()
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'/side' not in rendered
@@ -534,9 +543,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         (state_dir / 'state.json').write_text(json.dumps({'id': 'menu-test', 'window': window, 'socket': socket,
             'members': {'lead': {'pane': pane, 'status': 'running'}, 'worker_a': {'pane': worker, 'status': 'ready'}}}))
         drain()
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        wait_for_text(menu, b'Team members & progress...')
         os.write(master, b't')
         rendered = wait_for_text(client_process, b'worker_a')
         assert b'lead' in rendered and b'ready' in rendered
@@ -552,7 +561,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain(0.3)
         assert tmux('display-message', '-p', '-t', sidebar, '#{pane_width}') == '18'
         tmux('kill-pane', '-t', sidebar)
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         os.write(master, b't')
@@ -573,7 +582,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         import signal
         client_process.send_signal(signal.SIGWINCH)
         drain(0.3)
-        menu = subprocess.Popen([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu)
         os.write(master, b'\x1b')
@@ -581,7 +590,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 10, 30, 0, 0))
         client_process.send_signal(signal.SIGWINCH)
         drain(0.3)
-        menu = subprocess.Popen([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+        menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'preset'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         _, back_y = item_position(rendered, '← Back')

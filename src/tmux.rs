@@ -60,6 +60,18 @@ impl Tmux {
         Self { server }
     }
 
+    /// `display-message -c` selects a message destination, not a pane context.
+    /// Evaluate client-relative formats inside list-clients, then match exactly.
+    pub fn client_format(&self, name: &str, format: &str) -> Result<Option<String>, TmuxError> {
+        let format = format!("#{{client_name}}{FIELD_SEPARATOR}{format}");
+        let rows = self.output(&["list-clients", "-F", &format])?;
+        Ok(rows
+            .lines()
+            .filter_map(|row| row.split_once(FIELD_SEPARATOR))
+            .find(|(client, _)| *client == name)
+            .map(|(_, value)| value.to_owned()))
+    }
+
     fn output(&self, args: &[&str]) -> Result<String, TmuxError> {
         let output = Command::new("tmux")
             .arg("-S")
