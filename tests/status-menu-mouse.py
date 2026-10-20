@@ -8,6 +8,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -41,7 +42,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     codex.write_text('#!/bin/sh\nexec node "$0.js" "$@"\n')
     codex.chmod(0o755)
     codex_js = shim / 'codex.js'
-    codex_js.write_text('setInterval(() => {}, 1000000);\n')
+    codex_js.write_text('process.stdout.write("interactive-ready\\n"); setInterval(() => {}, 1000000);\n')
+    reject_scene = root / 'reject-scene'
+    team_cli = shim / 'agent-team'
+    team_cli.write_text('#!/bin/sh\ncase " $* " in *" --check "*) if [ -f ' + shlex.quote(str(reject_scene)) + ' ]; then echo "Configured model is unavailable" >&2; exit 1; fi; exit 0 ;; esac\nexec ' + shlex.quote(str(codex)) + ' "$@"\n')
+    team_cli.chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     project = root / 'project'
     for name in ('grill-me', 'handoff'):
@@ -318,6 +323,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # receive slash commands. Node's wrapper detection recognizes the
         # codex.js argument while the process remains alive for the test.
         tmux('respawn-pane', '-k', '-t', pane, shutil.which('node'), str(codex_js))
+        wait_for_pane_command(pane, 'node')
+        wait_for_pane_text('interactive-ready', pane)
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         drain(0.3)
         # Touch sends a press/release without any preceding hover/motion.
@@ -433,7 +440,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # A preceding menu can leave a pending redraw containing "close".
         # Wait for this menu's own action before sending its first shortcut.
         wait_for_text(menu, b'Launch agent...')
-        for key, expected in [(b'a', b'choose agent'), (b'x', b'choose preset'), (b's', b'Permissions:')]:
+        for key, expected in [(b'a', b'choose agent'), (b'x', '选择场景'.encode()), (b'd', b'choose preset'), (b's', b'Permissions:')]:
             os.write(master, key)
             wait_for_text(client_process, expected)
             drain(0.15)
@@ -452,49 +459,36 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS Single launch wizard preserves source cwd')
         config_dir = Path(env['XDG_CONFIG_HOME']) / 'tmux-agent-workbench'
         config_dir.mkdir(parents=True, exist_ok=True)
-        # cat's -u is a harmless fixture argument proving that the configured
-        # budget arguments are passed to a single interactive CLI, not a team.
-        (config_dir / 'launch.toml').write_text("[single_budget]\ncodex = ['-u']\n")
-        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
-        for key, heading in [(b'a', b'choose agent'), (b'x', b'Single Budget'), (b'b', b'Permissions:')]:
-            os.write(master, key)
-            wait_for_text(client_process, heading)
-            drain(0.15)
-        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        reject_scene.touch()
+        menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                          '--view', 'ready', '--scene', 'hard'], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Permissions:')
+        before = tmux('list-windows', '-F', '#{window_id}')
         os.write(master, b's')
-        for _ in range(40):
-            drain(0.05)
-            after = tmux('list-windows', '-F', '#{window_id}').splitlines()
-            if len(after) > len(before): break
-        assert len(after) == len(before) + 1
-        budget_window = next(w for w in after if w not in before)
-        wait_for_pane_command(budget_window, 'node')
-        pid = tmux('display-message', '-p', '-t', budget_window, '#{pane_pid}')
-        argv = subprocess.check_output(['ps', '-o', 'args=', '-p', pid], text=True)
-        assert '-u' in argv and 'codex.js' in argv, argv
-        tmux('kill-window', '-t', budget_window)
-        (config_dir / 'launch.toml').unlink()
+        menu.wait(timeout=3)
+        wait_for_text(client_process, b'Configured model is unavailable')
+        assert tmux('list-windows', '-F', '#{window_id}') == before
+        reject_scene.unlink()
         drain()
-        print('PASS Single Budget uses configured arguments and exactly one window')
+        print('PASS unavailable scene reports an error without opening a window')
 
         # Record launches at the public agent-team boundary, without paid API
         # calls. The pane backend creates its own window; no launcher survives.
         trace = root / 'team-launch.txt'
         team_cli = shim / 'agent-team'
-        team_cli.write_text('#!/bin/sh\nset -eu\n' +
+        team_cli.write_text('#!/bin/sh\nset -eu\ncase " $* " in *" --check "*) exit 0 ;; esac\n' +
             'printf "%s\\n" "$PWD" "$@" > ' + shlex.quote(str(trace)) + '\n' +
             'case " $* " in *" --tmux "*)\n' +
             'session=$(tmux display-message -p -t "$TMUX_PANE" "#{session_id}")\n' +
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
-        for preset, presentation, expected in [(b't', b'n', ['codex']), (b'T', b't', ['codex', '--team-budget', '--tmux'])]:
+        for scene, preset, presentation, expected in [(b'd', b't', b'n', ['start', 'codex', '--scene', 'daily', '--team']), (b'b', b't', b't', ['start', 'codex', '--scene', 'batch', '--team', '--tmux'])]:
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu)
-            for key, heading in [(b'a', b'choose agent'), (b'x', b'choose preset'), (preset, b'Native subagents'), (presentation, b'Permissions:')]:
+            for key, heading in [(b'a', b'choose agent'), (b'x', '选择场景'.encode()), (scene, b'choose preset'), (preset, b'Native subagents'), (presentation, b'Permissions:')]:
                 os.write(master, key)
                 wait_for_text(client_process, heading)
                 drain(0.15)
@@ -512,7 +506,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             tmux('kill-window', '-t', next(w for w in after if w not in before))
             trace.unlink()
             drain()
-        print('PASS native Team and tmux Team Budget launch exactly one window')
+        print('PASS daily native Team and batch tmux Team launch exactly one window')
 
         tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
         tmux('select-pane', '-t', pane, '-T', 'Action Required')
@@ -591,7 +585,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         client_process.send_signal(signal.SIGWINCH)
         drain(0.3)
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                                 '--view', 'preset'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                 '--view', 'preset', '--tool', 'claude'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         _, back_y = item_position(rendered, '← Back')
         back_key_x, _ = item_position(rendered, '(B)')
@@ -600,7 +594,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         _, close_y = item_position(rendered, 'close')
         assert close_y == back_y + 1, (back_y, close_y)
         os.write(master, b']')
-        rendered = wait_for_text(client_process)
+        # tmux can redraw only changed cells; retain the previous frame's footer.
+        rendered += wait_for_text(client_process)
         _, back_y = item_position(rendered, '← Back')
         back_key_x, _ = item_position(rendered, '(B)')
         close_key_x, _ = item_position(rendered, '(esc)')

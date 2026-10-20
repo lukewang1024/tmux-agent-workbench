@@ -306,13 +306,20 @@ dotfiles command rather than duplicated in Workbench.
 
 The tmux menu groups actions into **Launch agent**, **New window**, **Panes &
 layout**, **Switch window / session**, the installed editor, and **Detach**.
-Launch walks through installed CLI → Single / Single Budget / Team / Team Budget → native
-subagents or interactive tmux panes → Start, with Back at every step. The
-review screen shows the source directory and permission policy. Team entries
-require [agent-team](https://github.com/lukewang1024/agent-team) on PATH;
-model combinations and permissions remain in that CLI's configuration.
-Single Budget defaults to Codex Luna High; per-tool arguments can be configured
-in `~/.config/tmux-agent-workbench/launch.toml` (see the menu design guide).
+Codex launch walks through Agent → Scene (daily / hard / batch) → Single /
+Team → native subagents or interactive tmux panes → Start. The review screen
+includes temporary adjustments: 快速交互 selects Astra low for this launch;
+it does not add a scene. Back is available at every step. Model, effort and
+scene-wide Fast policy are resolved by [agent-team](https://github.com/lukewang1024/agent-team),
+which must be on PATH for Codex scene launches. Workbench does not duplicate
+model configuration. Other agents retain their existing launch presets.
+
+```sh
+agent start codex --scene daily
+agent start codex --scene hard --team
+agent start codex --scene batch --team --tmux
+```
+
 Workbench adds no approval-bypass flags. Single and native Team open one new
 window; pane Team lets `agent-team` create its own window, with no launcher
 pane left behind. Presentation is chosen at launch and never mixed mid-session.
