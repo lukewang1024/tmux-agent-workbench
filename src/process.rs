@@ -10,6 +10,7 @@ use crate::model::{AgentKind, ProcessFingerprint};
 pub struct AgentProcess {
     pub kind: AgentKind,
     pub fingerprint: ProcessFingerprint,
+    pub resume_session_id: Option<String>,
 }
 
 /// Noninteractive jobs may still contribute status, but cannot accept TUI commands.
@@ -154,6 +155,9 @@ fn find_agents(
                 root.as_u32(),
                 AgentProcess {
                     kind,
+                    resume_session_id: (kind == AgentKind::Codex)
+                        .then(|| explicit_codex_resume(process.cmd()))
+                        .flatten(),
                     fingerprint: ProcessFingerprint {
                         pid: process.pid().as_u32(),
                         started_at_ticks: process.start_time(),
@@ -167,6 +171,16 @@ fn find_agents(
             )
         })
         .collect()
+}
+
+fn explicit_codex_resume(args: &[std::ffi::OsString]) -> Option<String> {
+    let pair = args.get(args.len().checked_sub(2)?..)?;
+    if pair[0] != "resume" {
+        return None;
+    }
+    let id = pair[1].to_str()?;
+    uuid::Uuid::parse_str(id).ok()?;
+    Some(id.to_ascii_lowercase())
 }
 
 fn nearest_root(system: &System, mut pid: Pid, roots: &HashSet<Pid>) -> Option<(Pid, usize)> {
@@ -234,6 +248,20 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_resume_requires_an_explicit_uuid_target() {
+        let id = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7";
+        for (args, expected) in [
+            (vec!["codex", "--yolo", "resume", id], Some(id)),
+            (vec!["codex", "resume", "--last"], None),
+            (vec!["codex", "resume", "not-a-thread"], None),
+            (vec!["codex", "--yolo"], None),
+        ] {
+            let args: Vec<_> = args.into_iter().map(std::ffi::OsString::from).collect();
+            assert_eq!(explicit_codex_resume(&args).as_deref(), expected);
+        }
+    }
 
     #[test]
     fn shared_codex_backend_is_not_a_terminal_owner() {
