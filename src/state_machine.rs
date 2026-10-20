@@ -579,7 +579,19 @@ impl StateMachine {
             _ => {}
         }
         refresh_attention_display(&mut tracked.snapshot);
-        Ok(tracked.snapshot.clone())
+        let snapshot = tracked.snapshot.clone();
+        // A resumed conversation is the same task even when a theme refresh
+        // replaced its process. Only authoritative hooks establish continuity;
+        // pane titles and cached metadata may still describe the old thread.
+        self.agents.retain(|id, previous| {
+            id == instance_id
+                || !previous.snapshot.exited
+                || previous.snapshot.kind != snapshot.kind
+                || previous.snapshot.target.pane_id != snapshot.target.pane_id
+                || previous.snapshot.target.session_id != snapshot.target.session_id
+                || previous.snapshot.hook_session_id != snapshot.hook_session_id
+        });
+        Ok(snapshot)
     }
 
     /// Only a successful capture clears capture health; hooks and cached title
@@ -614,6 +626,23 @@ impl StateMachine {
     }
 
     pub fn process_exited(&mut self, instance_id: &str, now_ms: u64) -> Option<AgentSnapshot> {
+        let old = &self.agents.get(instance_id)?.snapshot;
+        // Handle the reverse ordering too: the replacement may have already
+        // bound its session before the old process disappearance is published.
+        if old.hook_session_id.is_some()
+            && self.agents.iter().any(|(id, tracked)| {
+                id != instance_id
+                    && !tracked.snapshot.exited
+                    && tracked.snapshot.state_source == StateSource::Hook
+                    && tracked.snapshot.kind == old.kind
+                    && tracked.snapshot.target.pane_id == old.target.pane_id
+                    && tracked.snapshot.target.session_id == old.target.session_id
+                    && tracked.snapshot.hook_session_id == old.hook_session_id
+            })
+        {
+            self.agents.remove(instance_id);
+            return None;
+        }
         let pane_id = self
             .agents
             .get(instance_id)?
@@ -1458,6 +1487,79 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert!(snapshots.iter().any(|item| item.exited));
         assert!(snapshots.iter().any(|item| !item.exited));
+    }
+
+    #[test]
+    fn resumed_session_removes_old_process_completion_in_either_order() {
+        for exit_first in [true, false] {
+            let mut machine = StateMachine::default();
+            let old = machine.observe_estimate(observation(BaseState::Idle, 0));
+            machine
+                .report_event(
+                    &old.instance_id,
+                    &event("old-start", "thread", AgentEventType::SessionStart, 10),
+                    false,
+                )
+                .unwrap();
+            if exit_first {
+                machine.process_exited(&old.instance_id, 20).unwrap();
+            }
+            let mut replacement = observation(BaseState::Idle, 30);
+            replacement.process.pid = 101;
+            replacement.process.started_at_ticks = 10;
+            replacement.target.window_name = "Renamed task".into();
+            let new = machine.observe_estimate(replacement);
+            machine
+                .report_event(
+                    &new.instance_id,
+                    &event("resume", "thread", AgentEventType::SessionStart, 40),
+                    false,
+                )
+                .unwrap();
+            if !exit_first {
+                assert!(machine.process_exited(&old.instance_id, 50).is_none());
+            }
+            let snapshots = machine.snapshots();
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].instance_id, new.instance_id);
+            assert!(!snapshots[0].exited);
+            assert!(snapshots[0].attention.is_none());
+        }
+    }
+
+    #[test]
+    fn different_session_or_pane_keeps_old_completion() {
+        for different_pane in [true, false] {
+            let mut machine = StateMachine::default();
+            let old = machine.observe_estimate(observation(BaseState::Idle, 0));
+            machine
+                .report_event(
+                    &old.instance_id,
+                    &event("old-start", "thread", AgentEventType::SessionStart, 10),
+                    false,
+                )
+                .unwrap();
+            machine.process_exited(&old.instance_id, 20).unwrap();
+            let mut replacement = observation(BaseState::Idle, 30);
+            replacement.process.pid = 101;
+            if different_pane {
+                replacement.target.pane_id = "%2".into();
+            }
+            let new = machine.observe_estimate(replacement);
+            let session = if different_pane {
+                "thread"
+            } else {
+                "other-thread"
+            };
+            machine
+                .report_event(
+                    &new.instance_id,
+                    &event("resume", session, AgentEventType::SessionStart, 40),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(machine.snapshots().len(), 2);
+        }
     }
 
     #[test]
