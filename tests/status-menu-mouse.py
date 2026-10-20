@@ -47,6 +47,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     team_cli = shim / 'agent-team'
     team_cli.write_text('#!/bin/sh\ncase " $* " in *" --check "*) if [ -f ' + shlex.quote(str(reject_scene)) + ' ]; then echo "Configured model is unavailable" >&2; exit 1; fi; exit 0 ;; esac\nexec ' + shlex.quote(str(codex)) + ' "$@"\n')
     team_cli.chmod(0o755)
+    # Source selection reopens Usage in a background tmux callback. Track
+    # that callback's completion instead of assuming a fixed sleep closes it.
+    usage_choice_done = root / 'usage-choice-done'
+    usage_wrapper = shim / 'workbench-agent-usage'
+    usage_wrapper.write_text('#!/bin/sh\n' + shlex.quote(str(repo / 'bin/workbench-agent-usage')) +
+                             ' "$@"\nresult=$?\nif [ "${1:-}" = choose ]; then : > ' +
+                             shlex.quote(str(usage_choice_done)) + '; fi\nexit "$result"\n')
+    usage_wrapper.chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     project = root / 'project'
     for name in ('grill-me', 'handoff'):
@@ -86,7 +94,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         deadline = time.monotonic() + 5
         while True:
             actual = tmux('display-message', '-p', '-t', target, '#{pane_current_command}')
-            if actual == expected:
+            if actual in ((expected,) if isinstance(expected, str) else expected):
                 return
             if time.monotonic() >= deadline:
                 raise AssertionError(('launched command did not become ready', target, expected,
@@ -405,11 +413,16 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         x, y = item_position(rendered, 'Claude Code')
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         menu.wait(timeout=3)
-        drain(0.5)
+        # Wait for the reopened menu, then for the callback to finish after
+        # Escape. Otherwise it may open over the next test's native menu.
+        wait_for_text(client_process, 'Usage · Claude Code'.encode())
         assert tmux('show-option', '-gqv', '@workbench-usage-source') == 'claude'
-        # The provider switch reopens Usage; wait for it to settle, then dismiss.
         os.write(master, b'\x1b')
-        drain(0.6)
+        deadline = time.monotonic() + 10
+        while not usage_choice_done.exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError('Usage source callback did not close')
+            drain(0.05)
         print('PASS usage touch action')
         # Stale callbacks must not type into a replacement shell.
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
@@ -420,6 +433,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         drain(0.4)
         assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
+        wait_for_pane_command(pane, ('sh', 'bash', 'dash'))
         menu = open_menu([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)

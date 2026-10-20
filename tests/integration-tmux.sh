@@ -38,7 +38,12 @@ wait_sidebar_state()
       [ "$sidebar_expected" = absent ] && return 0
     fi
     sidebar_tries=$((sidebar_tries + 1))
-    [ "$sidebar_tries" -lt 40 ] || return 1
+    if [ "$sidebar_tries" -ge 100 ]; then
+      printf 'Sidebar state timeout: target=%s expected=%s\n' "$sidebar_target" "$sidebar_expected" >&2
+      tmux -S "$socket" list-clients -F '#{client_name} #{client_width} #{window_id}' >&2 || true
+      tmux -S "$socket" list-panes -t "$sidebar_target" -F '#{pane_id} #{@pane_role} #{window_width} #{@sidebar_user_hidden}' >&2 || true
+      return 1
+    fi
     sleep 0.1
   done
 }
@@ -301,6 +306,17 @@ done
 responsive_client=$(tmux -S "$socket" list-clients -F '#{client_name}' | sed -n '1p')
 tmux -S "$socket" switch-client -c "$responsive_client" -t workbench-test:sidebar-check
 tmux -S "$socket" refresh-client -t "$responsive_client" -C 140x40
+responsive_window=$(tmux -S "$socket" display-message -p -t sidebar-check '#{window_id}')
+tries=0
+while [ "$(tmux -S "$socket" display-message -p -c "$responsive_client" '#{client_width} #{window_id}')" != "140 $responsive_window" ]; do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 100 ]; then
+    printf '%s\n' 'Responsive control client did not reach the requested window and size' >&2
+    tmux -S "$socket" list-clients -F '#{client_name} #{client_width} #{window_id}' >&2 || true
+    exit 1
+  fi
+  sleep 0.1
+done
 tmux -S "$socket" resize-window -t sidebar-check -x 140
 wait_sidebar_state sidebar-check present
 kill "$responsive_client_pid" 2>/dev/null || true
