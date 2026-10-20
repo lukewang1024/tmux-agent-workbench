@@ -23,12 +23,6 @@ fn load_budget(path: &Path, tool: &str) -> Result<Option<Vec<String>>> {
     let args = match config.single_budget.get(tool) {
         Some(args) if args.is_empty() => return Ok(None), // Explicit opt-out.
         Some(args) => args.clone(),
-        None if tool == "codex" => vec![
-            "--model".into(),
-            "gpt-5.6-luna".into(),
-            "-c".into(),
-            "model_reasoning_effort=\"high\"".into(),
-        ],
         None => return Ok(None),
     };
     if args.iter().any(|arg| {
@@ -54,17 +48,7 @@ mod tests {
     fn defaults_overrides_and_opt_out_are_distinct() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("launch.toml");
-        let codex = load_budget(&path, "codex").unwrap().unwrap();
-        assert_eq!(
-            codex,
-            [
-                "codex",
-                "--model",
-                "gpt-5.6-luna",
-                "-c",
-                "model_reasoning_effort=\"high\""
-            ]
-        );
+        assert!(load_budget(&path, "codex").unwrap().is_none());
         assert!(load_budget(&path, "claude").unwrap().is_none());
         std::fs::write(
             &path,

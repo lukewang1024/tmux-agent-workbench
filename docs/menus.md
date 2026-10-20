@@ -4,10 +4,11 @@
 statusbar tmux / prefix M-t
   Launch agent
     Codex / Claude Code / Trae / OpenCode (installed tools only)
-      Single / Single Budget ───────────────────────────────────────┐
-      Team / Team Budget                            │
-        Native subagents (default) / tmux panes ─────┤
-                                                    Start in source directory
+      Codex / Trae: daily / hard / batch → Single / Team
+        Team: Native subagents (default) / tmux panes
+        Review → 临时调整 → 快速交互 (Astra low, one launch only)
+        Start in source directory
+      Other tools: existing Single / Team / optional budget presets
   New window
   Panes & layout → split, zoom, main-vertical, tiled
   Switch → window, session
@@ -62,7 +63,7 @@ before executing; changed processes or unavailable actions show a message.
   never execute on menu selection, and retain the CLI's loading/permission
   checks. This is filesystem discovery, not an inventory of enabled plugins
   or per-session skill overrides.
-- Team presets call the public `agent-team TOOL [--team-budget] [--tmux]`
+- Codex and Trae scenes call `agent-team start TOOL --scene SCENE [--team] [--tmux]`; other tool Team presets call `agent-team TOOL [--team-budget] [--tmux]`
   interface. Workbench owns no model configuration or team execution policy.
   All launches are interactive; permissions inherit the CLI/team configuration.
 - Pane membership is rechecked through tmux's `@agent_team` marker. Roles and
@@ -83,26 +84,16 @@ avoid paid model requests; this validates menu orchestration, not model quality
 or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
 
-## Single Budget
+## Scene launch policy
 
-This preset opens one interactive CLI session, without team instructions or
-worker configuration. The default Codex arguments select `gpt-5.6-luna` with
-`high` reasoning effort. Other CLIs need explicit arguments so the menu does
-not silently label their normal model as a budget model.
+Codex and Trae use only daily, hard and batch scenes, each in Single or Team mode.
+Agent-team owns model, effort and Fast values. Workbench forwards the scene,
+mode and optional `--adjust quick`, with no independent model defaults.
+Single `s` and Team `t` are the mode shortcuts. Scene shortcuts are daily `d`,
+hard `h`, batch `b`. Fast is scene-wide in both native and tmux modes.
 
-Override arguments in `$XDG_CONFIG_HOME/tmux-agent-workbench/launch.toml`
-(default `~/.config/tmux-agent-workbench/launch.toml`):
+Optional Single Budget arguments in `launch.toml` remain available for other
+providers; there is no Codex budget compatibility entry.
 
-```toml
-[single_budget]
-codex = ["--model", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"']
-# Examples: choose model identifiers available to your account/provider.
-# claude = ["--model", "sonnet"]
-# traex = ["--model", "YOUR_BUDGET_MODEL"]
-# opencode = ["--model", "YOUR_PROVIDER/YOUR_BUDGET_MODEL"]
-```
-
-An empty argument array disables that tool's budget preset. Values are argv
-items, never shell snippets. Invalid configurations cannot launch, and known
-noninteractive invocations are rejected. The preset shortcuts are Single `s`,
-Single Budget `b`, Team `t`, Team Budget `T`.
+Trae Single, Team lead and worker use xhigh in every scene. Its batch scene
+uses Luna 5.6; no Fast service tier is applied.

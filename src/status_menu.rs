@@ -19,6 +19,8 @@ pub enum View {
     Panes,
     Switch,
     Launch,
+    Scene,
+    Adjust,
     Preset,
     Presentation,
     Ready,
@@ -90,8 +92,36 @@ impl Preset {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum Scene {
+    #[default]
+    Daily,
+    Hard,
+    Batch,
+}
+impl Scene {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Hard => "hard",
+            Self::Batch => "batch",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Daily => "日常开发 · daily",
+            Self::Hard => "复杂攻坚 · hard",
+            Self::Batch => "批量执行 · batch",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args, Default)]
 pub struct MenuOptions {
+    #[arg(long, value_enum, default_value = "daily")]
+    pub scene: Scene,
+    #[arg(long)]
+    pub quick: bool,
     #[arg(long, value_enum, default_value = "root")]
     pub view: View,
     #[arg(long, value_enum, default_value = "codex")]
@@ -106,10 +136,12 @@ pub struct MenuOptions {
 impl MenuOptions {
     fn route(&self) -> String {
         format!(
-            "--view {} --tool {} --preset {}{}",
+            "--view {} --tool {} --preset {} --scene {}{}{}",
             self.view.to_possible_value().unwrap().get_name(),
             self.tool.name(),
             self.preset.name(),
+            self.scene.name(),
+            if self.quick { " --quick" } else { "" },
             if self.panes { " --panes" } else { "" }
         )
     }
@@ -386,7 +418,11 @@ fn actions(
                             tool,
                             preset: Preset::Single,
                             panes: false,
-                            ..options.at(View::Preset)
+                            ..options.at(if matches!(tool, Tool::Codex | Tool::Traex) {
+                                View::Scene
+                            } else {
+                                View::Preset
+                            })
                         },
                     ));
                 }
@@ -395,15 +431,65 @@ fn actions(
                 actions.push(Action::note("No coding agents found on PATH"));
             }
         }
+        View::Scene => {
+            title = format!("{} · 选择场景", options.tool.label());
+            back = View::Launch;
+            for (scene, key) in [(Scene::Daily, 'd'), (Scene::Hard, 'h'), (Scene::Batch, 'b')] {
+                actions.push(nav(
+                    scene.name(),
+                    scene.label(),
+                    key,
+                    kind,
+                    MenuOptions {
+                        scene,
+                        quick: false,
+                        ..options.at(View::Preset)
+                    },
+                ));
+            }
+        }
+        View::Adjust => {
+            title = "临时调整".into();
+            back = View::Ready;
+            actions.push(nav(
+                "quick",
+                "快速交互 · Astra low",
+                'q',
+                kind,
+                MenuOptions {
+                    quick: true,
+                    ..options.at(View::Ready)
+                },
+            ));
+            actions.push(nav(
+                "reset-adjustment",
+                "使用场景设置",
+                'r',
+                kind,
+                MenuOptions {
+                    quick: false,
+                    ..options.at(View::Ready)
+                },
+            ));
+        }
         View::Preset => {
             title = format!("{} · choose preset", options.tool.label());
-            back = View::Launch;
+            back = if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                View::Scene
+            } else {
+                View::Launch
+            };
             for (preset, key) in [
                 (Preset::Single, 's'),
                 (Preset::SingleBudget, 'b'),
                 (Preset::Team, 't'),
                 (Preset::TeamBudget, 'T'),
             ] {
+                if matches!(options.tool, Tool::Codex | Tool::Traex)
+                    && matches!(preset, Preset::SingleBudget | Preset::TeamBudget)
+                {
+                    continue;
+                }
                 if preset.available(options.tool) {
                     actions.push(nav(
                         preset.name(),
@@ -422,10 +508,12 @@ fn actions(
                     ));
                 }
             }
-            match crate::menu_launch::budget_argv(options.tool.name()) {
-                Ok(None) => actions.push(Action::note("Single Budget: configure launch.toml")),
-                Err(_) => actions.push(Action::note("Single Budget: invalid launch.toml")),
-                Ok(Some(_)) => (),
+            if !matches!(options.tool, Tool::Codex | Tool::Traex) {
+                match crate::menu_launch::budget_argv(options.tool.name()) {
+                    Ok(None) => actions.push(Action::note("Single Budget: configure launch.toml")),
+                    Err(_) => actions.push(Action::note("Single Budget: invalid launch.toml")),
+                    Ok(Some(_)) => (),
+                }
             }
             if !executable("agent-team") {
                 actions.push(Action::note("Install agent-team to enable Team"));
@@ -474,6 +562,16 @@ fn actions(
             } else {
                 "Native subagents · new window"
             }));
+            if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                actions.push(Action::note(options.scene.label()));
+                actions.push(nav(
+                    "adjust",
+                    "临时调整",
+                    'a',
+                    kind,
+                    options.at(View::Adjust),
+                ));
+            }
             actions.push(Action::note("Permissions: existing CLI / team config"));
             if executable(options.tool.name()) && options.preset.available(options.tool) {
                 actions.push(Action::new("start", "Start", 's', ActionCommand::Launch));
@@ -810,6 +908,28 @@ fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
 }
 
 fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
+    if matches!(options.tool, Tool::Codex | Tool::Traex) {
+        if matches!(options.preset, Preset::SingleBudget | Preset::TeamBudget) {
+            return Err("Choose a scene instead of a budget preset".into());
+        }
+        let mut args = vec![
+            "agent-team".into(),
+            "start".into(),
+            options.tool.name().into(),
+            "--scene".into(),
+            options.scene.name().into(),
+        ];
+        if options.preset.is_team() {
+            args.push("--team".into());
+        }
+        if options.panes && options.preset.is_team() {
+            args.push("--tmux".into());
+        }
+        if options.quick {
+            args.extend(["--adjust".into(), "quick".into()]);
+        }
+        return Ok(args);
+    }
     if options.preset == Preset::Single {
         return Ok(vec![options.tool.name().into()]);
     }
@@ -926,6 +1046,21 @@ fn execute_action(
         }
         ActionCommand::Launch => {
             let args = launch_argv(options)?;
+            if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                let output = Command::new(&args[0])
+                    .args(&args[1..])
+                    .arg("--check")
+                    .env_remove("AGENT_TEAM_DIR")
+                    .env_remove("AGENT_TEAM_ROLE")
+                    .current_dir(&context.cwd)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr)
+                        .trim()
+                        .to_string()
+                        .into());
+                }
+            }
             if options.panes && options.preset.is_team() {
                 // agent-team owns creation of its entire interactive team window.
                 // Never create an intermediate launcher pane or mix team modes.
@@ -1077,7 +1212,9 @@ mod tests {
                 Preset::Team,
                 Preset::TeamBudget,
             ] {
-                if preset == Preset::SingleBudget && tool != Tool::Codex {
+                if preset == Preset::SingleBudget
+                    || (matches!(tool, Tool::Codex | Tool::Traex) && preset == Preset::TeamBudget)
+                {
                     continue;
                 }
                 for panes in [false, true] {
@@ -1102,6 +1239,41 @@ mod tests {
         }
     }
     #[test]
+    fn codex_has_three_scenes_two_modes_and_explicit_temporary_adjustment() {
+        for scene in [Scene::Daily, Scene::Hard, Scene::Batch] {
+            for preset in [Preset::Single, Preset::Team] {
+                let args = launch_argv(&MenuOptions {
+                    tool: Tool::Codex,
+                    scene,
+                    preset,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(
+                    &args[..5],
+                    ["agent-team", "start", "codex", "--scene", scene.name()]
+                );
+                assert_eq!(args.contains(&"--team".into()), preset == Preset::Team);
+            }
+        }
+        let args = launch_argv(&MenuOptions {
+            quick: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(&args[args.len() - 2..], ["--adjust", "quick"]);
+        for preset in [Preset::SingleBudget, Preset::TeamBudget] {
+            assert!(
+                launch_argv(&MenuOptions {
+                    preset,
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn all_views_have_unique_shortcuts() {
         for kind in [StatusMenuKind::Tmux, StatusMenuKind::Agent] {
             for agent in [
@@ -1115,6 +1287,8 @@ mod tests {
                     View::Panes,
                     View::Switch,
                     View::Launch,
+                    View::Scene,
+                    View::Adjust,
                     View::Preset,
                     View::Presentation,
                     View::Ready,
