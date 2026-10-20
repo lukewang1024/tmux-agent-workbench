@@ -1,4 +1,9 @@
 fn main() {
+    if let Ok(title) = std::env::var("WORKBENCH_FIXTURE_TITLE") {
+        use std::io::Write;
+        print!("\x1b]2;{title}\x07");
+        std::io::stdout().flush().unwrap();
+    }
     let seconds = std::env::var("WORKBENCH_FIXTURE_SECONDS")
         .ok()
         .and_then(|value| value.parse().ok())

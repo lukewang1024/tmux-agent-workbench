@@ -110,6 +110,54 @@ done
 
 "$binary" snapshot --json | grep '"schema_version": 1' >/dev/null
 
+# Theme refresh resumes an idle thread without a new hook or submitted prompt.
+printf '%s\n' 'integration phase: hookless theme resume'
+"$python_runner" - "$binary" "$socket" "$repo/target/debug/examples/codex" <<'PYTEST'
+import json
+import subprocess
+import sys
+import time
+
+binary, socket, fixture = sys.argv[1:]
+thread = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7"
+title = "codex | Ready | 01a153e9-75cb-7151-99f4-2ab4d..."
+
+def tmux(*args):
+    return subprocess.check_output(["tmux", "-S", socket, *args], text=True).strip()
+
+def wait_agent(pane, previous=None):
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        snapshot = json.loads(subprocess.check_output([binary, "snapshot", "--json"]))
+        agents = [a for a in snapshot["agents"] if a["target"]["pane_id"] == pane]
+        if len(agents) == 1:
+            agent = agents[0]
+            if (not agent["exited"] and agent["base_state"] == "idle"
+                    and agent["state_source"] == "screen"
+                    and agent["instance_id"] != previous):
+                assert not agent.get("attention")
+                assert not agent.get("hook_session_id")
+                return agent["instance_id"]
+        time.sleep(0.1)
+    raise AssertionError(("theme resume left duplicate rows", agents))
+
+tmux("new-session", "-d", "-s", "theme-resume", "env",
+     "WORKBENCH_FIXTURE_SECONDS=90", "WORKBENCH_FIXTURE_TITLE=" + title, fixture)
+try:
+    pane = tmux("display-message", "-p", "-t", "theme-resume", "#{pane_id}")
+    previous = wait_agent(pane)
+    # Let the daemon observe the exited process before resuming the thread.
+    tmux("respawn-pane", "-k", "-t", pane, "sleep 90")
+    time.sleep(1.5)
+    tmux("respawn-pane", "-k", "-t", pane, "env",
+         "WORKBENCH_FIXTURE_SECONDS=90", "WORKBENCH_FIXTURE_TITLE=" + title,
+         fixture, "resume", thread)
+    wait_agent(pane, previous)
+finally:
+    tmux("kill-session", "-t", "theme-resume")
+print("PASS hookless idle resume removes old completion without a prompt")
+PYTEST
+
 # A Codex redraw can replace idle with Working while tmux's cheap pane fields
 # remain identical. The daemon must keep sampling at the idle interval.
 printf '%s\n' 'integration phase: idle redraw'

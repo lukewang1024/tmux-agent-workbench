@@ -1015,6 +1015,7 @@ mod tests {
             cwd: "/tmp".into(),
             guard: "test".into(),
             agent: kind.map(|kind| AgentProcess {
+                resume_session_id: None,
                 kind,
                 fingerprint: ProcessFingerprint {
                     pid: 42,

@@ -629,6 +629,7 @@ impl Detector {
                 .then(|| metadata.and_then(|item| item.reason_hint.clone()))
                 .flatten()
         });
+        let resume_session_id = process.resume_session_id.clone();
         let snapshot = self.machine.observe_estimate(Observation {
             kind,
             target: pane.target.clone(),
@@ -644,6 +645,13 @@ impl Detector {
             hook_session_id: metadata.and_then(|item| item.session_id.clone()),
             observed_at_ms: now_ms,
         });
+        if kind == AgentKind::Codex {
+            self.machine.observe_codex_identity(
+                &snapshot.instance_id,
+                &pane.title,
+                resume_session_id.as_deref(),
+            );
+        }
         if let Some(previous) = self
             .pane_instances
             .insert(pane.target.pane_id.clone(), snapshot.instance_id.clone())
@@ -764,6 +772,38 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hookless_idle_resume_reconciles_through_detector_publication() {
+        let mut detector = routing_detector();
+        let mut pane = detector.panes["%42"].clone();
+        pane.title = "codex | Ready | 01a153e9-75cb-7151-99f4-2ab4d...".into();
+        let cached = || CachedClassification {
+            state: BaseState::Idle,
+            reason_category: None,
+            rule_id: None,
+            evidence: None,
+            strong_visible_signal: false,
+        };
+        let process = detector.agents[&42].clone();
+        let old = detector.publish_observation(&pane, process.clone(), cached(), 10);
+        detector.machine.process_exited(&old.instance_id, 20);
+        detector.pane_instances.remove("%42");
+        let mut resumed = process;
+        resumed.fingerprint.pid = 100;
+        resumed.resume_session_id = Some("01a153e9-75cb-7151-99f4-2ab4d9ffeed7".into());
+        let current = detector.publish_observation(&pane, resumed, cached(), 30);
+        let agents: Vec<_> = detector
+            .machine
+            .snapshots()
+            .into_iter()
+            .filter(|agent| agent.target.pane_id == "%42")
+            .collect();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].instance_id, current.instance_id);
+        assert_eq!(agents[0].state_source, crate::model::StateSource::Screen);
+        assert!(agents[0].attention.is_none());
+    }
+
     fn routing_detector() -> Detector {
         let mut detector =
             Detector::new(ServerIdentity::from_socket("/tmp/routing-test".into()).unwrap());
@@ -801,6 +841,7 @@ mod tests {
                 AgentProcess {
                     kind: AgentKind::Codex,
                     fingerprint: process,
+                    resume_session_id: None,
                 },
             );
             detector.panes.insert(

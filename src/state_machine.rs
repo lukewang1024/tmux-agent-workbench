@@ -35,6 +35,8 @@ pub struct Observation {
 #[derive(Debug, Clone)]
 struct Tracked {
     snapshot: AgentSnapshot,
+    conversation_identity: Option<String>,
+    confirmed_resume: bool,
     automatic_review_attention: Option<AttentionEvent>,
     idle_candidate_since: Option<u64>,
     idle_confirmations: u8,
@@ -197,6 +199,8 @@ impl StateMachine {
                 )
             });
             Tracked {
+                conversation_identity: None,
+                confirmed_resume: false,
                 automatic_review_attention: None,
                 snapshot: AgentSnapshot {
                     instance_id: instance_id.clone(),
@@ -626,6 +630,16 @@ impl StateMachine {
     }
 
     pub fn process_exited(&mut self, instance_id: &str, now_ms: u64) -> Option<AgentSnapshot> {
+        self.retire_resumed_completions();
+        let previous = self.agents.get(instance_id)?;
+        if self
+            .agents
+            .iter()
+            .any(|(id, current)| id != instance_id && resumed_same_conversation(previous, current))
+        {
+            self.agents.remove(instance_id);
+            return None;
+        }
         let old = &self.agents.get(instance_id)?.snapshot;
         // Handle the reverse ordering too: the replacement may have already
         // bound its session before the old process disappearance is published.
@@ -675,6 +689,44 @@ impl StateMachine {
             now_ms,
         ));
         Some(tracked.snapshot.clone())
+    }
+
+    /// Identity evidence does not create lifecycle state or hook authority.
+    /// Require both an explicit resume argument and the attached thread title:
+    /// a new process may temporarily inherit the previous process's title.
+    pub fn observe_codex_identity(&mut self, instance_id: &str, title: &str, resume: Option<&str>) {
+        let Some(identity) = codex_title_identity(title) else {
+            return;
+        };
+        let Some(tracked) = self.agents.get_mut(instance_id) else {
+            return;
+        };
+        tracked.conversation_identity = Some(identity.to_owned());
+        tracked.confirmed_resume = resume.is_some_and(|id| id.starts_with(identity))
+            && tracked
+                .snapshot
+                .hook_session_id
+                .as_deref()
+                .is_none_or(|id| id.starts_with(identity));
+        self.retire_resumed_completions();
+    }
+
+    fn retire_resumed_completions(&mut self) {
+        let obsolete: Vec<_> = self
+            .agents
+            .iter()
+            .filter(|(_, previous)| {
+                previous.snapshot.exited
+                    && self
+                        .agents
+                        .values()
+                        .any(|current| resumed_same_conversation(previous, current))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in obsolete {
+            self.agents.remove(&id);
+        }
     }
 
     pub fn acknowledge(&mut self, event_id: &str) -> bool {
@@ -827,6 +879,48 @@ fn refresh_attention_display(snapshot: &mut AgentSnapshot) {
     } else if snapshot.display_state == DisplayState::Done {
         snapshot.display_state = display_for(snapshot.base_state);
     }
+}
+
+fn codex_title_identity(title: &str) -> Option<&str> {
+    if !title.starts_with("codex | ") {
+        return None;
+    }
+    let id = title
+        .rsplit(" | ")
+        .next()?
+        .trim_end_matches("...")
+        .trim_end_matches('…');
+    // Codex titles retain at least 24 hexadecimal digits of the UUID.
+    if !(29..=36).contains(&id.len())
+        || !id.bytes().enumerate().all(|(i, byte)| {
+            if [8, 13, 18, 23].contains(&i) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+            }
+        })
+    {
+        return None;
+    }
+    Some(id)
+}
+
+fn resumed_same_conversation(previous: &Tracked, current: &Tracked) -> bool {
+    let old_id = previous
+        .snapshot
+        .hook_session_id
+        .as_deref()
+        .or(previous.conversation_identity.as_deref());
+    let new_id = current.conversation_identity.as_deref();
+    previous.snapshot.kind == AgentKind::Codex
+        && current.snapshot.kind == AgentKind::Codex
+        && !current.snapshot.exited
+        && current.confirmed_resume
+        && previous.snapshot.target.pane_id == current.snapshot.target.pane_id
+        && previous.snapshot.target.session_id == current.snapshot.target.session_id
+        && old_id.zip(new_id).is_some_and(|(old, new)| {
+            old.len() >= 29 && new.len() >= 29 && (old.starts_with(new) || new.starts_with(old))
+        })
 }
 
 fn instance_id(pane_id: &str, process: &ProcessFingerprint) -> String {
@@ -1558,6 +1652,51 @@ mod tests {
                     false,
                 )
                 .unwrap();
+            assert_eq!(machine.snapshots().len(), 2);
+        }
+    }
+
+    #[test]
+    fn idle_theme_resume_without_any_hooks_removes_completion_in_either_order() {
+        let session = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7";
+        let title = "codex | Ready | 01a153e9-75cb-7151-99f4-2ab4d...";
+        for exit_first in [true, false] {
+            let mut machine = StateMachine::default();
+            let old = machine.observe_estimate(observation(BaseState::Idle, 0));
+            machine.observe_codex_identity(&old.instance_id, title, None);
+            if exit_first {
+                machine.process_exited(&old.instance_id, 10);
+            }
+            let mut replacement = observation(BaseState::Idle, 20);
+            replacement.process.pid = 101;
+            let new = machine.observe_estimate(replacement);
+            machine.observe_codex_identity(&new.instance_id, title, Some(session));
+            if !exit_first {
+                machine.process_exited(&old.instance_id, 30);
+            }
+            let snapshots = machine.snapshots();
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].instance_id, new.instance_id);
+            assert_eq!(snapshots[0].state_source, StateSource::Screen);
+            assert_eq!(snapshots[0].hook_health, HookHealth::Missing);
+            assert_eq!(snapshots[0].display_state, DisplayState::Idle);
+            assert!(snapshots[0].hook_session_id.is_none());
+            assert!(snapshots[0].attention.is_none());
+        }
+    }
+
+    #[test]
+    fn inherited_title_or_different_resume_does_not_remove_completion() {
+        let title = "codex | Ready | 01a153e9-75cb-7151-99f4-2ab4d...";
+        for resume in [None, Some("01a15764-7cd7-7743-9cbe-59699d1d4d8d")] {
+            let mut machine = StateMachine::default();
+            let old = machine.observe_estimate(observation(BaseState::Idle, 0));
+            machine.observe_codex_identity(&old.instance_id, title, None);
+            machine.process_exited(&old.instance_id, 10);
+            let mut replacement = observation(BaseState::Idle, 20);
+            replacement.process.pid = 101;
+            let new = machine.observe_estimate(replacement);
+            machine.observe_codex_identity(&new.instance_id, title, resume);
             assert_eq!(machine.snapshots().len(), 2);
         }
     }
