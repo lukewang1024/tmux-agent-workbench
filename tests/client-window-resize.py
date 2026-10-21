@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise shared-session window switches from desktop and phone PTYs."""
+from contextlib import ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -12,9 +13,11 @@ import tempfile
 import termios
 import time
 
+from daemon_fixture import running_daemon
+
 repo = Path(__file__).resolve().parents[1]
 core = str(Path(sys.argv[1]).resolve())
-with tempfile.TemporaryDirectory(prefix="wb-client-window-") as root:
+with tempfile.TemporaryDirectory(prefix="wb-client-window-") as root, ExitStack() as resources:
     env = dict(os.environ, TERM="xterm-256color",
                TMUX_AGENT_WORKBENCH_TMUX_SOCKET=root + "/tmux.sock",
                TMUX_AGENT_WORKBENCH_BIN=core)
@@ -53,6 +56,7 @@ with tempfile.TemporaryDirectory(prefix="wb-client-window-") as root:
 
     try:
         tmux("-f", "/dev/null", "new-session", "-d", "-s", "test", "-x", "318", "-y", "76")
+        resources.enter_context(running_daemon(core, env))
         tmux("set-option", "-gw", "window-size", "latest")
         tmux("set-option", "-gw", "aggressive-resize", "on")
         for index in (1, 2, 3):
@@ -78,8 +82,6 @@ with tempfile.TemporaryDirectory(prefix="wb-client-window-") as root:
             settled(index, 63, 30)
         print("PASS phone window switches resize the window and foreground pane together")
     finally:
-        subprocess.run([core, "daemon", "stop"], env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["tmux", "-S", env["TMUX_AGENT_WORKBENCH_TMUX_SOCKET"], "kill-server"],
                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for process, master, slave in clients:
