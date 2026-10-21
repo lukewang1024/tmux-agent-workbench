@@ -58,37 +58,25 @@ impl Tool {
 pub enum Preset {
     #[default]
     Single,
-    SingleBudget,
     Team,
-    TeamBudget,
 }
 impl Preset {
     fn is_team(self) -> bool {
-        matches!(self, Self::Team | Self::TeamBudget)
+        matches!(self, Self::Team)
     }
-    fn available(self, tool: Tool) -> bool {
-        match self {
-            Self::Single => true,
-            Self::SingleBudget => {
-                crate::menu_launch::budget_argv(tool.name()).is_ok_and(|args| args.is_some())
-            }
-            Self::Team | Self::TeamBudget => executable("agent-team"),
-        }
+    fn available(self, _tool: Tool) -> bool {
+        executable("agent-team")
     }
     fn name(self) -> &'static str {
         match self {
             Self::Single => "single",
-            Self::SingleBudget => "single-budget",
             Self::Team => "team",
-            Self::TeamBudget => "team-budget",
         }
     }
     fn label(self) -> &'static str {
         match self {
             Self::Single => "Single",
-            Self::SingleBudget => "Single Budget",
             Self::Team => "Team",
-            Self::TeamBudget => "Team Budget",
         }
     }
 }
@@ -479,17 +467,7 @@ fn actions(
             } else {
                 View::Launch
             };
-            for (preset, key) in [
-                (Preset::Single, 's'),
-                (Preset::SingleBudget, 'b'),
-                (Preset::Team, 't'),
-                (Preset::TeamBudget, 'T'),
-            ] {
-                if matches!(options.tool, Tool::Codex | Tool::Traex)
-                    && matches!(preset, Preset::SingleBudget | Preset::TeamBudget)
-                {
-                    continue;
-                }
+            for (preset, key) in [(Preset::Single, 's'), (Preset::Team, 't')] {
                 if preset.available(options.tool) {
                     actions.push(nav(
                         preset.name(),
@@ -508,15 +486,8 @@ fn actions(
                     ));
                 }
             }
-            if !matches!(options.tool, Tool::Codex | Tool::Traex) {
-                match crate::menu_launch::budget_argv(options.tool.name()) {
-                    Ok(None) => actions.push(Action::note("Single Budget: configure launch.toml")),
-                    Err(_) => actions.push(Action::note("Single Budget: invalid launch.toml")),
-                    Ok(Some(_)) => (),
-                }
-            }
             if !executable("agent-team") {
-                actions.push(Action::note("Install agent-team to enable Team"));
+                actions.push(Action::note("Install agent-team to launch agents"));
             }
         }
         View::Presentation => {
@@ -908,41 +879,22 @@ fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
 }
 
 fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
+    let mut args = vec![
+        "agent-team".into(),
+        "start".into(),
+        options.tool.name().into(),
+    ];
     if matches!(options.tool, Tool::Codex | Tool::Traex) {
-        if matches!(options.preset, Preset::SingleBudget | Preset::TeamBudget) {
-            return Err("Choose a scene instead of a budget preset".into());
-        }
-        let mut args = vec![
-            "agent-team".into(),
-            "start".into(),
-            options.tool.name().into(),
-            "--scene".into(),
-            options.scene.name().into(),
-        ];
-        if options.preset.is_team() {
-            args.push("--team".into());
-        }
-        if options.panes && options.preset.is_team() {
-            args.push("--tmux".into());
-        }
+        args.extend(["--scene".into(), options.scene.name().into()]);
         if options.quick {
             args.extend(["--adjust".into(), "quick".into()]);
         }
-        return Ok(args);
     }
-    if options.preset == Preset::Single {
-        return Ok(vec![options.tool.name().into()]);
-    }
-    if options.preset == Preset::SingleBudget {
-        return crate::menu_launch::budget_argv(options.tool.name())?
-            .ok_or_else(|| "Single Budget is not configured in launch.toml".into());
-    }
-    let mut args = vec!["agent-team".into(), options.tool.name().into()];
-    if options.preset == Preset::TeamBudget {
-        args.push("--team-budget".into());
-    }
-    if options.panes {
-        args.push("--tmux".into());
+    if options.preset.is_team() {
+        args.push("--team".into());
+        if options.panes {
+            args.push("--tmux".into());
+        }
     }
     Ok(args)
 }
@@ -1206,17 +1158,7 @@ mod tests {
     #[test]
     fn launch_combinations_are_explicit_and_do_not_override_permissions() {
         for tool in [Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode] {
-            for preset in [
-                Preset::Single,
-                Preset::SingleBudget,
-                Preset::Team,
-                Preset::TeamBudget,
-            ] {
-                if preset == Preset::SingleBudget
-                    || (matches!(tool, Tool::Codex | Tool::Traex) && preset == Preset::TeamBudget)
-                {
-                    continue;
-                }
+            for preset in [Preset::Single, Preset::Team] {
                 for panes in [false, true] {
                     let args = launch_argv(&MenuOptions {
                         tool,
@@ -1226,10 +1168,6 @@ mod tests {
                     })
                     .unwrap();
                     assert_eq!(args.contains(&"--tmux".into()), panes && preset.is_team());
-                    assert_eq!(
-                        args.contains(&"--team-budget".into()),
-                        preset == Preset::TeamBudget
-                    );
                     assert!(
                         args.iter()
                             .all(|a| !a.contains("approve") && !a.contains("permission"))
@@ -1262,13 +1200,38 @@ mod tests {
         })
         .unwrap();
         assert_eq!(&args[args.len() - 2..], ["--adjust", "quick"]);
-        for preset in [Preset::SingleBudget, Preset::TeamBudget] {
-            assert!(
-                launch_argv(&MenuOptions {
+    }
+
+    #[test]
+    fn simple_tools_have_only_two_modes_and_no_scene_arguments() {
+        for tool in [Tool::Claude, Tool::Opencode] {
+            for preset in [Preset::Single, Preset::Team] {
+                let args = launch_argv(&MenuOptions {
+                    tool,
                     preset,
+                    scene: Scene::Hard,
+                    quick: true,
                     ..Default::default()
                 })
-                .is_err()
+                .unwrap();
+                assert_eq!(&args[..3], ["agent-team", "start", tool.name()]);
+                assert!(!args.iter().any(|arg| {
+                    ["--scene", "--adjust", "--model", "--effort"].contains(&arg.as_str())
+                }));
+            }
+            let (_, menu) = actions(
+                StatusMenuKind::Tmux,
+                &MenuOptions {
+                    tool,
+                    view: View::Preset,
+                    ..Default::default()
+                },
+                &context(None, BaseState::Idle),
+            );
+            assert!(
+                !menu
+                    .iter()
+                    .any(|a| a.label.contains("Budget") || a.label.contains("launch.toml"))
             );
         }
     }

@@ -311,13 +311,18 @@ Team → native subagents or interactive tmux panes → Start. The review screen
 includes temporary adjustments: 快速交互 selects Astra low for this launch;
 it does not add a scene. Back is available at every step. Model, effort and
 scene-wide Fast policy are resolved by [agent-team](https://github.com/lukewang1024/agent-team),
-which must be on PATH for Codex scene launches. Workbench does not duplicate
-model configuration. Other agents retain their existing launch presets.
+which must be on PATH for agent launches. Workbench does not duplicate
+model configuration. Claude and OpenCode go directly from Agent to Single /
+Team, without scenes, budget presets or temporary adjustments. Their defaults
+are preserved; uniform callers may pass scene/adjust/Fast options, which are
+ignored with one notice. Team still offers native or tmux presentation.
 
 ```sh
 agent start codex --scene daily
 agent start codex --scene hard --team
 agent start codex --scene batch --team --tmux
+agent start claude
+agent start opencode --team
 ```
 
 Workbench adds no approval-bypass flags. Single and native Team open one new

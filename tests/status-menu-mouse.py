@@ -43,6 +43,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     codex.chmod(0o755)
     codex_js = shim / 'codex.js'
     codex_js.write_text('process.stdout.write("interactive-ready\\n"); setInterval(() => {}, 1000000);\n')
+    for tool in ('claude', 'opencode'):
+        (shim / tool).symlink_to(codex)
     reject_scene = root / 'reject-scene'
     team_cli = shim / 'agent-team'
     team_cli.write_text('#!/bin/sh\ncase " $* " in *" --check "*) if [ -f ' + shlex.quote(str(reject_scene)) + ' ]; then echo "Configured model is unavailable" >&2; exit 1; fi; exit 0 ;; esac\nexec ' + shlex.quote(str(codex)) + ' "$@"\n')
@@ -522,6 +524,32 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             drain()
         print('PASS daily native Team and batch tmux Team launch exactly one window')
 
+        for tool in ('claude', 'opencode'):
+            for preset, key in (('single', b's'), ('team', b't')):
+                menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                                  '--view', 'preset', '--tool', tool], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rendered = wait_for_text(menu)
+                assert b'Budget' not in rendered and b'launch.toml' not in rendered
+                os.write(master, key)
+                if preset == 'team':
+                    wait_for_text(client_process, b'Native subagents')
+                    os.write(master, b'n')
+                wait_for_text(client_process, b'Permissions:')
+                before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+                os.write(master, b's')
+                for _ in range(60):
+                    drain(0.05)
+                    after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+                    if len(after) > len(before) and trace.exists(): break
+                assert len(after) == len(before) + 1, (tool, preset, before, after)
+                assert trace.read_text().splitlines()[1:] == ['start', tool] + (['--team'] if preset == 'team' else [])
+                tmux('switch-client', '-c', client, '-t', original_window)
+                tmux('kill-window', '-t', next(w for w in after if w not in before))
+                trace.unlink()
+                drain()
+        print('PASS Claude and OpenCode expose only Single/Team and launch with tool defaults')
+
         tmux('respawn-pane', '-k', '-t', pane, str(shim / 'codex'))
         tmux('select-pane', '-t', pane, '-T', 'Action Required')
         drain(0.2)
@@ -599,7 +627,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         client_process.send_signal(signal.SIGWINCH)
         drain(0.3)
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                                 '--view', 'preset', '--tool', 'claude'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                 '--view', 'scene', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         _, back_y = item_position(rendered, '← Back')
         back_key_x, _ = item_position(rendered, '(B)')

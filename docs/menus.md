@@ -8,7 +8,7 @@ statusbar tmux / prefix M-t
         Team: Native subagents (default) / tmux panes
         Review → 临时调整 → 快速交互 (Astra low, one launch only)
         Start in source directory
-      Other tools: existing Single / Team / optional budget presets
+      Claude / OpenCode: Single / Team → native or tmux → Start (tool defaults)
   New window
   Panes & layout → split, zoom, main-vertical, tiled
   Switch → window, session
@@ -63,7 +63,7 @@ before executing; changed processes or unavailable actions show a message.
   never execute on menu selection, and retain the CLI's loading/permission
   checks. This is filesystem discovery, not an inventory of enabled plugins
   or per-session skill overrides.
-- Codex and Trae scenes call `agent-team start TOOL --scene SCENE [--team] [--tmux]`; other tool Team presets call `agent-team TOOL [--team-budget] [--tmux]`
+- Codex and Trae scenes call `agent-team start TOOL --scene SCENE [--team] [--tmux]`; Claude and OpenCode call `agent-team start TOOL [--team] [--tmux]`
   interface. Workbench owns no model configuration or team execution policy.
   All launches are interactive; permissions inherit the CLI/team configuration.
 - Pane membership is rechecked through tmux's `@agent_team` marker. Roles and
@@ -92,8 +92,11 @@ mode and optional `--adjust quick`, with no independent model defaults.
 Single `s` and Team `t` are the mode shortcuts. Scene shortcuts are daily `d`,
 hard `h`, batch `b`. Fast is scene-wide in both native and tmux modes.
 
-Optional Single Budget arguments in `launch.toml` remain available for other
-providers; there is no Codex budget compatibility entry.
+Claude and OpenCode have only Single / Team. No scene, Fast, quick or budget
+selectors are shown, and the menu no longer reads `launch.toml` budget overrides.
+Explicit scene/adjust/Fast options on the unified command are ignored with a
+notice; explicit native CLI model options are preserved. Old standalone
+agent-team budget commands remain available to existing scripts.
 
 Trae Single, Team lead and worker use xhigh in every scene. Its batch scene
 uses Luna 5.6; no Fast service tier is applied.
