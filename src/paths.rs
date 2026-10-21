@@ -11,6 +11,12 @@ pub struct Paths {
     pub runtime_dir: PathBuf,
 }
 
+#[derive(Default)]
+pub(crate) struct DaemonSockets {
+    pub sockets: Vec<PathBuf>,
+    pub permission_error: Option<String>,
+}
+
 impl Paths {
     pub fn discover() -> io::Result<Self> {
         let home =
@@ -25,17 +31,7 @@ impl Paths {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".cache"));
         let uid = unsafe { libc::geteuid() };
-        let preferred_runtime_dir = canonical_runtime_dir(uid);
-        // macOS permits only 104 bytes for sockaddr_un.sun_path. Keep enough
-        // room for `/daemon-<16 hex>.sock`; long per-user TMPDIR values are
-        // common under /var/folders.
-        let runtime_dir = if preferred_runtime_dir.as_os_str().as_encoded_bytes().len() > 70 {
-            PathBuf::from("/tmp").join(format!("tmux-agent-workbench-{}", unsafe {
-                libc::geteuid()
-            }))
-        } else {
-            preferred_runtime_dir
-        };
+        let runtime_dir = bounded_runtime_dir(uid);
         let paths = Self {
             config_dir: config_root.join("tmux-agent-workbench"),
             state_dir: state_root.join("tmux-agent-workbench"),
@@ -64,6 +60,126 @@ impl Paths {
 
     pub fn lock_for_server(&self, server_key: &str) -> PathBuf {
         self.runtime_dir.join(format!("daemon-{server_key}.lock"))
+    }
+
+    /// Tool runners may strip XDG_RUNTIME_DIR as well as TMUX. Recover runtime
+    /// locations from the caller's ancestors and tmux server environment, then
+    /// let the daemon verify the agent identity. Explicit runtime roots remain
+    /// authoritative, including isolated test and client environments.
+    pub fn daemon_sockets(&self) -> Vec<PathBuf> {
+        self.discover_daemon_sockets().sockets
+    }
+
+    pub(crate) fn discover_daemon_sockets(&self) -> DaemonSockets {
+        use std::collections::BTreeSet;
+        use std::process::Command;
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+        let uid = unsafe { libc::geteuid() };
+        let mut discovery = DaemonSockets::default();
+        let mut directories = BTreeSet::from([self.runtime_dir.clone()]);
+        if env::var_os("XDG_RUNTIME_DIR").is_none() && self.runtime_dir == bounded_runtime_dir(uid)
+        {
+            let mut add_root = |root: &Path| {
+                let directory = root.join("tmux-agent-workbench");
+                if root.is_absolute() && owned_directory(&directory, uid) {
+                    directories.insert(directory);
+                }
+            };
+            let mut servers = BTreeSet::new();
+            if let Ok(server) = crate::server::ServerIdentity::discover() {
+                servers.insert(server.socket_path);
+            }
+            let mut system = System::new();
+            let mut pid = Pid::from_u32(std::process::id());
+            for _ in 0..64 {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    ProcessRefreshKind::nothing()
+                        .without_tasks()
+                        .with_environ(UpdateKind::OnlyIfNotSet),
+                );
+                let Some(process) = system.process(pid) else {
+                    break;
+                };
+                for value in process.environ() {
+                    let value = value.to_string_lossy();
+                    if let Some(root) = value.strip_prefix("XDG_RUNTIME_DIR=") {
+                        add_root(Path::new(root));
+                    }
+                    if let Some(tmux) = value.strip_prefix("TMUX=") {
+                        if let Some((socket, _)) = tmux.split_once(',') {
+                            if Path::new(socket).is_absolute() {
+                                servers.insert(PathBuf::from(socket));
+                            }
+                        }
+                    }
+                }
+                let Some(parent) = process.parent() else {
+                    break;
+                };
+                if parent == pid {
+                    break;
+                }
+                pid = parent;
+            }
+            // Discover metadata only; the default server's focused window is
+            // never used to select a naming target.
+            let targets = if servers.is_empty() {
+                vec![None]
+            } else {
+                servers.into_iter().map(Some).collect()
+            };
+            for server in targets {
+                let mut command = Command::new("tmux");
+                command.arg("-u");
+                if let Some(socket) = server {
+                    command.arg("-S").arg(socket);
+                }
+                if let Ok(output) = command
+                    .args(["show-environment", "-g", "XDG_RUNTIME_DIR"])
+                    .env("LC_ALL", "C")
+                    .output()
+                {
+                    if output.status.success() {
+                        let value = String::from_utf8_lossy(&output.stdout);
+                        if let Some(root) = value.trim_end().strip_prefix("XDG_RUNTIME_DIR=") {
+                            add_root(Path::new(root));
+                        }
+                    } else {
+                        let error = String::from_utf8_lossy(&output.stderr);
+                        if permission_denied_message(&error) {
+                            discovery.permission_error = Some(error.trim().into());
+                        }
+                    }
+                }
+            }
+        }
+        let explicit_server = env::var_os("TMUX_AGENT_WORKBENCH_TMUX_SOCKET")
+            .and_then(|socket| crate::server::ServerIdentity::from_socket(socket.into()).ok())
+            .map(|server| format!("daemon-{}.sock", server.key));
+        for directory in directories {
+            if !owned_directory(&directory, uid) {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(directory) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("daemon-")
+                        && name.ends_with(".sock")
+                        && explicit_server
+                            .as_deref()
+                            .is_none_or(|expected| name == expected)
+                    {
+                        discovery.sockets.push(entry.path());
+                    }
+                }
+            }
+        }
+        discovery.sockets.sort();
+        discovery
     }
 
     pub fn log_for_server(&self, server_key: &str) -> PathBuf {
@@ -106,6 +222,21 @@ impl Paths {
         }
         fs::create_dir_all(&self.runtime_dir)?;
         set_mode_0700(&self.runtime_dir)
+    }
+}
+
+pub(crate) fn permission_denied_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("permission denied") || message.contains("operation not permitted")
+}
+
+fn bounded_runtime_dir(uid: u32) -> PathBuf {
+    let preferred = canonical_runtime_dir(uid);
+    // Leave room for `/daemon-<16 hex>.sock` in macOS's 104-byte sun_path.
+    if preferred.as_os_str().as_encoded_bytes().len() > 70 {
+        PathBuf::from("/tmp").join(format!("tmux-agent-workbench-{uid}"))
+    } else {
+        preferred
     }
 }
 

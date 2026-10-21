@@ -881,7 +881,7 @@ fn refresh_attention_display(snapshot: &mut AgentSnapshot) {
     }
 }
 
-fn codex_title_identity(title: &str) -> Option<&str> {
+pub(crate) fn codex_title_identity(title: &str) -> Option<&str> {
     if !title.starts_with("codex | ") {
         return None;
     }

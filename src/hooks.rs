@@ -54,7 +54,7 @@ pub fn ingest(
     agent: AgentKind,
     event_name: &str,
     input: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Value, Box<dyn std::error::Error>> {
     let pane_id = std::env::var("TMUX_PANE").map_err(|_| "TMUX_PANE is unavailable")?;
     let (tmux_session_id, pane_pid) = pane_identity(server, &pane_id)?;
     let payload: Value = if input.iter().all(u8::is_ascii_whitespace) {
@@ -71,16 +71,20 @@ pub fn ingest(
         &payload,
     )?;
     let request = Request::new("agent.event.report", serde_json::to_value(&report)?);
-    if call(
-        &paths.socket_for_server(&server.key),
-        &request,
-        Duration::from_millis(750),
-    )
-    .is_err()
-    {
+    let socket = paths.socket_for_server(&server.key);
+    if call(&socket, &request, Duration::from_millis(750)).is_err() {
         spool(paths, server, &report)?;
+        return Ok(json!({}));
     }
-    Ok(())
+    Ok(crate::task_title::hook_output(
+        paths,
+        &socket,
+        &report.pane_id,
+        agent,
+        &report.session_id,
+        event_name,
+        &payload,
+    ))
 }
 
 pub fn ingest_detached(
@@ -88,7 +92,7 @@ pub fn ingest_detached(
     agent: AgentKind,
     event_name: &str,
     input: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Value, Box<dyn std::error::Error>> {
     let payload: Value = if input.iter().all(u8::is_ascii_whitespace) {
         Value::Null
     } else {
@@ -101,37 +105,49 @@ pub fn ingest_detached(
     let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
     // Global hooks may run outside tmux; an unmatched daemon is a normal no-op.
     let mut accepted = 0_u32;
+    let mut output = json!({});
     let mut rejections = Vec::new();
-    if let Ok(entries) = fs::read_dir(&paths.runtime_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if !name.starts_with("daemon-") || !name.ends_with(".sock") {
-                continue;
-            }
-            match call(&path, &request, Duration::from_millis(750)) {
-                Ok(_) => {
-                    accepted += 1;
-                    break;
+    for path in paths.daemon_sockets() {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.starts_with("daemon-") || !name.ends_with(".sock") {
+            continue;
+        }
+        match call(&path, &request, Duration::from_millis(750)) {
+            Ok(result) => {
+                accepted += 1;
+                if let Some(pane) = result.get("pane_id").and_then(Value::as_str) {
+                    output = crate::task_title::hook_output(
+                        paths,
+                        &path,
+                        pane,
+                        agent,
+                        &report.session_id,
+                        event_name,
+                        &payload,
+                    );
                 }
-                Err(crate::ipc::ClientError::Connect { .. } | crate::ipc::ClientError::Io(_)) => {
-                    let key = name.trim_start_matches("daemon-").trim_end_matches(".sock");
-                    spool_detached(paths, key, &report)?;
-                    accepted += 1;
-                }
-                Err(crate::ipc::ClientError::Remote { .. }) => {}
-                Err(error) => rejections.push(error.to_string()),
+                break;
             }
+            Err(crate::ipc::ClientError::Connect { .. } | crate::ipc::ClientError::Io(_)) => {
+                let key = name.trim_start_matches("daemon-").trim_end_matches(".sock");
+                let mut bound_paths = paths.clone();
+                bound_paths.runtime_dir =
+                    path.parent().ok_or("daemon directory unavailable")?.into();
+                spool_detached(&bound_paths, key, &report)?;
+                accepted += 1;
+            }
+            Err(crate::ipc::ClientError::Remote { .. }) => {}
+            Err(error) => rejections.push(error.to_string()),
         }
     }
     if accepted == 0 && !rejections.is_empty() {
         return Err(format!("no Workbench daemon could associate the Codex hook with a live pane (session={}, pid={:?}): {}",
             report.session_id, report.agent_pid, rejections.join("; ")).into());
     }
-    Ok(())
+    Ok(output)
 }
 
 fn detached_report_from_payload(
@@ -648,7 +664,8 @@ fn merge_codex(path: &Path, remove: bool) -> Result<(), Box<dyn std::error::Erro
         if !remove {
             let mut outer = Table::new();
             if key == "SessionStart" {
-                outer["matcher"] = Item::Value(TomlValue::from("startup|resume|clear"));
+                outer["matcher"] =
+                    Item::Value(TomlValue::from("startup|resume|clear|compact|fork"));
             }
             let mut commands = ArrayOfTables::new();
             let mut command = Table::new();
@@ -817,7 +834,7 @@ mod tests {
         assert_eq!(installed.matches("hook ingest codex").count(), 5);
         assert_eq!(
             installed
-                .matches("matcher = \"startup|resume|clear\"")
+                .matches("matcher = \"startup|resume|clear|compact|fork\"")
                 .count(),
             1
         );

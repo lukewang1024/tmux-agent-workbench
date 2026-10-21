@@ -262,6 +262,7 @@ fn serve_loop(
     let scan_paths = paths.clone();
     let _scanner = thread::spawn(move || {
         let tmux = Tmux::new(scan_server.clone());
+        let mut title_reaper = crate::task_title::TitleReaper::default();
         let mut next_liveness_check = Instant::now();
         while !scan_shutdown.load(Ordering::Relaxed) && scan_server.socket_path.exists() {
             if Instant::now() >= next_liveness_check {
@@ -272,6 +273,8 @@ fn serve_loop(
                 next_liveness_check = Instant::now() + Duration::from_secs(1);
             }
             update_snapshot(&scan_state, &scan_snapshot, &scan_paths, &scan_server.key);
+            let snapshot = scan_snapshot.read().expect("snapshot poisoned").clone();
+            title_reaper.tick(&scan_paths, &scan_server, &snapshot);
             thread::sleep(Duration::from_millis(50));
         }
     });
@@ -298,9 +301,9 @@ fn serve_loop(
                         let started = Instant::now();
                         // A stalled or malformed client is connection-local and
                         // must not hold up snapshots for every other sidebar.
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        let response = match read_request(&stream) {
+                        let request = crate::ipc::prepare_connection(&stream)
+                            .and_then(|()| read_request(&stream));
+                        let response = match request {
                             Ok(request) => handle(
                                 request, &state, &snapshot, &shutdown, &metrics, &paths, &server,
                             ),
