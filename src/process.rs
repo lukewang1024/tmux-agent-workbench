@@ -24,20 +24,76 @@ pub(crate) fn accepts_terminal_input(agent: &AgentProcess) -> bool {
             .without_tasks()
             .with_cmd(UpdateKind::Always),
     );
-    system.process(pid).is_some_and(|process| {
-        !process.cmd().iter().skip(1).any(|arg| {
-            let arg = arg.to_string_lossy();
-            match agent.kind {
-                AgentKind::Codex | AgentKind::Trae => {
-                    matches!(arg.as_ref(), "exec" | "app-server" | "mcp-server")
-                }
-                AgentKind::Claude => {
-                    matches!(arg.as_ref(), "-p" | "--print") || arg.starts_with("--print=")
-                }
-                AgentKind::Opencode => matches!(arg.as_ref(), "run" | "serve" | "web"),
+    system
+        .process(pid)
+        .is_some_and(|process| interactive_command(agent.kind, process.cmd()))
+}
+
+fn interactive_command(kind: AgentKind, args: &[std::ffi::OsString]) -> bool {
+    !args.iter().skip(1).any(|arg| {
+        let arg = arg.to_string_lossy();
+        match kind {
+            AgentKind::Codex | AgentKind::Trae => {
+                matches!(arg.as_ref(), "exec" | "app-server" | "mcp-server")
             }
-        })
+            AgentKind::Claude => {
+                matches!(arg.as_ref(), "-p" | "--print") || arg.starts_with("--print=")
+            }
+            AgentKind::Opencode => matches!(arg.as_ref(), "run" | "serve" | "web"),
+        }
     })
+}
+
+fn foreground_ids(rows: &str) -> HashSet<u32> {
+    rows.lines()
+        .filter_map(|row| {
+            let fields: Vec<_> = row.split_whitespace().collect();
+            if fields.len() != 4 || fields[1] != fields[2] || fields[3].contains(['T', 'Z']) {
+                return None;
+            }
+            let group: u32 = fields[1].parse().ok()?;
+            if group == 0 {
+                return None;
+            }
+            fields[0].parse().ok()
+        })
+        .collect()
+}
+
+impl ProcessTree {
+    /// Reuse the detector's existing process inventory. One batched foreground
+    /// query replaces per-menu discovery; status formats read pane-local flags.
+    pub(crate) fn interactive_foreground_roots(
+        &self,
+        agents: &HashMap<u32, AgentProcess>,
+    ) -> HashSet<u32> {
+        if agents.is_empty() {
+            return HashSet::new();
+        }
+        let pids = agents
+            .values()
+            .map(|agent| agent.fingerprint.pid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let rows = std::process::Command::new("ps")
+            .args(["-o", "pid=,pgid=,tpgid=,stat=", "-p", &pids])
+            .output();
+        let foreground = rows
+            .ok()
+            .map(|output| foreground_ids(&String::from_utf8_lossy(&output.stdout)))
+            .unwrap_or_default();
+        agents
+            .iter()
+            .filter_map(|(root, agent)| {
+                (foreground.contains(&agent.fingerprint.pid)
+                    && self
+                        .system
+                        .process(Pid::from_u32(agent.fingerprint.pid))
+                        .is_some_and(|process| interactive_command(agent.kind, process.cmd())))
+                .then_some(*root)
+            })
+            .collect()
+    }
 }
 
 pub trait ProcessSource {
@@ -272,6 +328,35 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn foreground_filter_excludes_background_suspended_and_defunct_jobs() {
+        let rows = "10 10 10 S+\n11 11 10 S\n12 12 12 T\n13 13 13 Z\n14 0 0 S\ninvalid";
+        assert_eq!(
+            super::foreground_ids(rows),
+            std::collections::HashSet::from([10])
+        );
+    }
+    #[test]
+    fn command_filter_excludes_noninteractive_agents() {
+        for (kind, args) in [
+            (crate::model::AgentKind::Codex, vec!["codex", "exec"]),
+            (
+                crate::model::AgentKind::Claude,
+                vec!["claude", "--print=hi"],
+            ),
+            (crate::model::AgentKind::Opencode, vec!["opencode", "serve"]),
+        ] {
+            let args = args
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            assert!(!super::interactive_command(kind, &args));
+        }
+        assert!(super::interactive_command(
+            crate::model::AgentKind::Codex,
+            &["codex".into()]
+        ));
+    }
     use super::*;
 
     #[test]

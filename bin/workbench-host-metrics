@@ -9,6 +9,7 @@ mkdir -p "$metrics_cache" || exit 1
 mode=${1:-full}
 case "$mode" in compact|standard|full|cpu) ;; *) exit 2 ;; esac
 now=$(date +%s)
+os=$(uname -s)
 # Atomic directory lock prevents simultaneous status clients racing snapshots.
 if [ -r "$metrics_cache/lock/pid" ]; then
   lock_pid=$(cat "$metrics_cache/lock/pid" 2>/dev/null)
@@ -20,13 +21,28 @@ if [ -r "$metrics_cache/lock/pid" ]; then
        fi ;;
   esac
 fi
+# A process killed between mkdir and writing pid leaves an ownerless lock.
+# Give a new owner time to publish its PID; remove only an old, empty directory.
+# rmdir fails safely if a concurrent owner has populated it in the meantime.
+if [ -d "$metrics_cache/lock" ] && [ ! -e "$metrics_cache/lock/pid" ]; then
+  case "$os" in
+    Darwin) lock_time=$(stat -f %m "$metrics_cache/lock" 2>/dev/null) ;;
+    *) lock_time=$(stat -c %Y "$metrics_cache/lock" 2>/dev/null) ;;
+  esac
+  case "$lock_time" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$((now - lock_time))" -gt 5 ]; then
+         rmdir "$metrics_cache/lock" 2>/dev/null || true
+       fi ;;
+  esac
+fi
 if ! mkdir "$metrics_cache/lock" 2>/dev/null; then
   cat "$metrics_cache/$mode" 2>/dev/null
   exit 0
 fi
-printf '%s\n' "$$" > "$metrics_cache/lock/pid"
 trap 'rm -f "$metrics_cache/lock/pid"; rmdir "$metrics_cache/lock" 2>/dev/null' 0
 trap 'exit 1' HUP INT TERM
+printf '%s\n' "$$" > "$metrics_cache/lock/pid"
 previous_time=$(cat "$metrics_cache/time" 2>/dev/null)
 case "$previous_time" in ''|*[!0-9]*) previous_time=0 ;; esac
 if [ "$((now - previous_time))" -ge 0 ] && [ "$((now - previous_time))" -lt 2 ]; then
@@ -35,7 +51,7 @@ if [ "$((now - previous_time))" -ge 0 ] && [ "$((now - previous_time))" -lt 2 ];
 fi
 cpu=-- mem=-- disk=-- rx='' tx='' iface='' total='' idle='' sampled_rx='' sampled_tx=''
 proc_root=${TMUX_METRICS_PROC_ROOT:-/proc}
-case "$(uname -s)" in
+case "$os" in
   Darwin)
     cpu=$(top -l 1 -n 0 2>/dev/null | awk '/CPU usage:/ {gsub(/%/, "", $(NF-1)); printf "%.0f%%", 100-$(NF-1); exit}')
     mem=$(vm_stat 2>/dev/null | awk -v total="$(sysctl -n hw.memsize 2>/dev/null)" '

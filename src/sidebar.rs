@@ -1740,6 +1740,8 @@ fn show_menu(
     for (label, key, command) in items {
         args.extend([(*label).to_owned(), (*key).to_owned(), command.clone()]);
     }
+    args.push(String::new());
+    args.extend(crate::menu_footer::close_item(true));
     if popup_mode() {
         let mut command_args: Vec<OsString> = server
             .tmux_args()

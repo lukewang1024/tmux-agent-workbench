@@ -412,6 +412,9 @@ impl Detector {
         let agents = self
             .processes
             .agents_for_roots(&roots, &manifests.aliases());
+        let interactive = self.processes.interactive_foreground_roots(&agents);
+        // Presentation must not block detection if a pane disappears mid-update.
+        let _ = self.tmux.publish_agent_actions(&panes, &interactive);
         for pane in &panes {
             let Some(agent) = agents.get(&pane.root_pid) else {
                 continue;

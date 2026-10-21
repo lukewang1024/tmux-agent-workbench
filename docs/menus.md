@@ -4,11 +4,11 @@
 statusbar tmux / prefix M-t
   Launch agent
     Codex / Claude Code / Trae / OpenCode (installed tools only)
-      Codex / Trae: daily / hard / batch → Single / Team
-        Team: Native subagents (default) / tmux panes
-        Review → 临时调整 → 快速交互 (Astra low, one launch only)
-        Start in source directory
-      Claude / OpenCode: Single / Team → native or tmux → Start (tool defaults)
+      One configuration panel (choices update in place)
+        Codex / Trae: scene + Single/Team + Native/tmux (Team only)
+        Claude / OpenCode: Single/Team + Native/tmux (Team only)
+        Actual model / thinking / Fast preview; inline launch errors
+        Enter: launch in source directory; Backspace: agents; Esc: close
   New window
   Panes & layout → split, zoom, main-vertical, tiled
   Switch → window, session
@@ -26,11 +26,34 @@ statusbar Agent / prefix M-a
   Launch agent
 ```
 
-Each submenu keeps **← Back** (`B`) beside **× close** (`esc`) with right-aligned shortcuts in the footer on every page. Escape and outside clicks dismiss it. On
-short terminals, `[` and `]` change pages. The source pane stays fixed across
+All native menus use a shared footer. Submenus keep **← Back** (`Backspace`)
+beside **× close** (`Esc`) with right-aligned shortcuts on every page. Key hints
+use lowercase `enter`, `back`, and `esc`. Root menus only show Close; Backspace
+also closes them without an extra hint. Escape and outside clicks always dismiss
+the entire menu. On short terminals, `[` and `]` change pages. The source pane
+stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
-carry a hash of the pane/process identity and rebuild their available actions
-before executing; changed processes or unavailable actions show a message.
+carry a hash of the target identity and rebuild their available actions before
+executing. Window and launch menus check the pane, session and directory using
+tmux metadata only. Agent commands additionally discover and verify the live
+foreground process; changed targets or unavailable actions show a message.
+Launch previews read local agent-team JSON settings directly, with no process
+scan, Python startup, model lookup or cache warmup. Launch-time validation stays
+in agent-team.
+
+On tmux 3.8+, pointer and touch menus execute an item only on mouse release.
+Holding a click never opens the next menu early, including configuration
+changes and Back, so the same release cannot dismiss or activate that menu.
+Older tmux keeps its pointer press-selection workaround because it mistakes
+hover motion for a release; held-click navigation requires tmux 3.8+.
+
+Known limitation, confirmed on tmux 3.8: clicking a disabled information row,
+separator, title or border can still close the native menu. This is deferred;
+Workbench does not require a patched tmux. Restoring `-O` would reintroduce
+press-selection and the held-click submenu bug. Making information rows
+selectable and reopening the menu would add keyboard stops and leave border
+clicks unresolved. A complete Workbench-side solution would need a different
+menu input implementation, with outside-click and keyboard behavior preserved.
 
 ## Capability boundaries
 
@@ -88,9 +111,14 @@ filtering, launch argument combinations, quoting, and unique shortcuts.
 
 Codex and Trae use only daily, hard and batch scenes, each in Single or Team mode.
 Agent-team owns model, effort and Fast values. Workbench forwards the scene,
-mode and optional `--adjust quick`, with no independent model defaults.
+mode, with no independent model defaults or temporary adjustment selector.
 Single `s` and Team `t` are the mode shortcuts. Scene shortcuts are daily `d`,
-hard `h`, batch `b`. Fast is scene-wide in both native and tmux modes.
+hard `h`, batch `b`; Native `n` and tmux `m` only appear in Team mode. All choices
+stay in the same panel, and Enter launches with the current selection. Launch
+is pinned with Back/Close even on short terminals. Launch and configuration errors
+stay immediately above Launch on every page, survive pagination, and clear when
+a choice changes or the panel is left. Fast is scene-wide in both
+native and tmux modes, and is previewed from the actual agent-team config.
 
 Claude and OpenCode have only Single / Team. No scene, Fast, quick or budget
 selectors are shown, and the menu no longer reads `launch.toml` budget overrides.
@@ -100,3 +128,40 @@ agent-team budget commands remain available to existing scripts.
 
 Trae Single, Team lead and worker use xhigh in every scene. Its batch scene
 uses Luna 5.6; no Fast service tier is applied.
+
+## Language and contextual controls
+
+The launch panel follows the system display language: Chinese for `zh` variants,
+English otherwise. On macOS it uses the first preferred system language, not
+the input source or shell locale. Other systems use `LC_ALL`, `LC_MESSAGES`,
+`LANG` and `LANGUAGE`, with English for C/POSIX. Tool names, model identifiers
+and external diagnostics keep their original spelling.
+`TMUX_AGENT_WORKBENCH_LANGUAGE=en|zh` explicitly overrides the display language
+for a remote terminal or tests; one open menu retains its language across callbacks.
+
+Agent startup, exit and suspension are refreshed by the existing detector.
+The session label is the persistent Sidebar toggle. Wide clients toggle its
+pane; narrow clients open the Agents panel. Session colours follow keyboard
+mode: normal accent, prefix blue, OFF red.
+
+The left group runs Session/Sidebar → tmux, then a gap before window
+labels. CPU, Host and Agent status with usage stay on the right, whose outer
+edge is flat. The theme's time/date/battery modules have independent opt-in
+switches and stay visible in both densities when enabled. Clicking Session
+toggles Sidebar. Prefix remains available through the keyboard. The
+Agent status body opens commands for the current interactive foreground agent.
+From a shell pane it focuses the most recently used agent in the same window
+and opens its commands; without a remembered target, multiple agents are offered
+in a single chooser. The target is checked again before opening commands, and
+later callbacks stay bound to that pane. Usage has its own independent hit area.
+Windows with no interactive agent hide the entire status/usage item.
+
+Window demand now chooses density rather than a single client-width cutoff:
+fixed controls compact first, then window names shorten, then tabs keep only
+indices. The left cap adds no extra blank cells before the tabs. Sidebar visibility
+does not affect the session label’s colours.
+
+The theme compiles an ordered item list into native tmux formats. Visibility is
+resolved before choosing each boundary from the previous visible background.
+Separators and outer caps carry no mouse range; blank status areas do nothing.
+Only actual window-tab ranges switch windows.

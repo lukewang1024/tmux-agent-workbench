@@ -1,3 +1,4 @@
+use crate::ui_language::text as tr;
 use crate::{
     menu_context::{Context, Result, executable, tmux},
     model::{AgentKind, BaseState},
@@ -19,11 +20,8 @@ pub enum View {
     Panes,
     Switch,
     Launch,
-    Scene,
-    Adjust,
-    Preset,
-    Presentation,
-    Ready,
+    Configure,
+    AgentTarget,
     More,
     Team,
     Botmux,
@@ -75,8 +73,8 @@ impl Preset {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Single => "Single",
-            Self::Team => "Team",
+            Self::Single => tr("Single", "单人 · Single"),
+            Self::Team => tr("Team", "团队 · Team"),
         }
     }
 }
@@ -97,9 +95,9 @@ impl Scene {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Daily => "日常开发 · daily",
-            Self::Hard => "复杂攻坚 · hard",
-            Self::Batch => "批量执行 · batch",
+            Self::Daily => tr("Daily development · daily", "日常开发 · daily"),
+            Self::Hard => tr("Complex tasks · hard", "复杂攻坚 · hard"),
+            Self::Batch => tr("Batch work · batch", "批量执行 · batch"),
         }
     }
 }
@@ -108,8 +106,8 @@ impl Scene {
 pub struct MenuOptions {
     #[arg(long, value_enum, default_value = "daily")]
     pub scene: Scene,
-    #[arg(long)]
-    pub quick: bool,
+    #[arg(long, hide = true, value_parser = decode_launch_error)]
+    pub launch_error: Option<String>,
     #[arg(long, value_enum, default_value = "root")]
     pub view: View,
     #[arg(long, value_enum, default_value = "codex")]
@@ -120,25 +118,62 @@ pub struct MenuOptions {
     pub panes: bool,
     #[arg(long)]
     pub guard: Option<String>,
+    #[arg(long, value_parser = ["mouse", "touch", "release"])]
+    pub input_mode: Option<String>,
+    #[arg(long, value_parser = ["en", "zh"])]
+    pub language: Option<String>,
+    #[arg(long)]
+    pub focus_agent: bool,
 }
 impl MenuOptions {
     fn route(&self) -> String {
         format!(
-            "--view {} --tool {} --preset {} --scene {}{}{}",
+            "--view {} --tool {} --preset {} --scene {}{}{} --language {}{}",
             self.view.to_possible_value().unwrap().get_name(),
             self.tool.name(),
             self.preset.name(),
             self.scene.name(),
-            if self.quick { " --quick" } else { "" },
-            if self.panes { " --panes" } else { "" }
+            if self.panes { " --panes" } else { "" },
+            self.input_mode
+                .as_ref()
+                .map(|mode| format!(" --input-mode {mode}"))
+                .unwrap_or_default(),
+            self.language
+                .as_deref()
+                .unwrap_or(crate::ui_language::name()),
+            self.launch_error
+                .as_ref()
+                .map(|error| format!(" --launch-error={}", encode_launch_error(error)))
+                .unwrap_or_default()
         )
     }
+
     fn at(&self, view: View) -> Self {
         Self {
             view,
+            launch_error: (view == View::Configure)
+                .then(|| self.launch_error.clone())
+                .flatten(),
             ..self.clone()
         }
     }
+}
+
+// Callbacks pass through tmux format expansion as well as the shell. Keep
+// external diagnostics opaque in that path; quoting alone does not protect #{}.
+fn encode_launch_error(error: &str) -> String {
+    error.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_launch_error(value: &str) -> std::result::Result<String, String> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid encoded launch error".into());
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).unwrap())
+        .collect();
+    String::from_utf8(bytes).map_err(|_| "launch error is not UTF-8".into())
 }
 #[derive(Debug)]
 struct Action {
@@ -156,6 +191,7 @@ enum ActionCommand {
     Botmux(String),
     Launch,
     Focus(String),
+    AgentTarget(String),
     Disabled,
 }
 impl Action {
@@ -172,6 +208,139 @@ impl Action {
     }
 }
 
+fn launch_context(kind: StatusMenuKind, view: View) -> bool {
+    kind == StatusMenuKind::Tmux
+        || matches!(view, View::Launch | View::Configure | View::AgentTarget)
+}
+
+fn agent_targets(window: &str) -> Result<Vec<(String, bool)>> {
+    Ok(tmux(&[
+        "list-panes",
+        "-t",
+        window,
+        "-F",
+        "#{pane_id}|#{@workbench_agent_actions}|#{pane_last}",
+    ])?
+    .lines()
+    .filter_map(|line| {
+        let fields = line.split('|').collect::<Vec<_>>();
+        (fields.len() == 3 && fields[1] == "1").then(|| (fields[0].to_string(), fields[2] == "1"))
+    })
+    .collect())
+}
+
+fn open_agent_status(
+    pane: &str,
+    client: &str,
+    stay_open: bool,
+    options: &MenuOptions,
+) -> Result<()> {
+    // The active pane wins even before the detector publishes its next tick.
+    let direct = Context::read(&Paths::discover()?, pane)?;
+    if direct.agent.is_some() {
+        return show_agent_menu(&direct, client, stay_open, options);
+    }
+    let context = Context::read_launch(pane)?;
+    let targets = agent_targets(&context.window)?;
+    let remembered = tmux(&[
+        "show-option",
+        "-wqv",
+        "-t",
+        &context.window,
+        "@workbench_last_agent_pane",
+    ])?;
+    let selected = targets
+        .iter()
+        .find(|(target, _)| target == pane)
+        .or_else(|| targets.iter().find(|(target, _)| target == &remembered))
+        .or_else(|| targets.iter().find(|(_, last)| *last))
+        .or_else(|| (targets.len() == 1).then(|| &targets[0]));
+    if let Some((target, _)) = selected {
+        return focus_agent_menu(target, &context.window, client, stay_open, options);
+    }
+    if targets.is_empty() {
+        return message(
+            client,
+            tr(
+                "No interactive agent in this window",
+                "当前窗口没有可交互的 agent",
+            ),
+        );
+    }
+    let next = MenuOptions {
+        view: View::AgentTarget,
+        focus_agent: false,
+        guard: Some(context.guard.clone()),
+        ..options.clone()
+    };
+    run_with_context(
+        StatusMenuKind::Agent,
+        pane,
+        client,
+        None,
+        0,
+        stay_open,
+        &next,
+        &context,
+    )
+}
+
+fn focus_agent_menu(
+    pane: &str,
+    window: &str,
+    client: &str,
+    stay_open: bool,
+    options: &MenuOptions,
+) -> Result<()> {
+    validate_pane(pane)?;
+    let context = Context::read(&Paths::discover()?, pane)?;
+    if context.window != window || context.agent.is_none() {
+        return message(
+            client,
+            tr(
+                "Agent changed. Reopen the menu.",
+                "Agent 已变化，请重新打开菜单。",
+            ),
+        );
+    }
+    show_agent_menu(&context, client, stay_open, options)
+}
+
+fn show_agent_menu(
+    context: &Context,
+    client: &str,
+    stay_open: bool,
+    options: &MenuOptions,
+) -> Result<()> {
+    let pane = &context.pane;
+    let window = &context.window;
+    tmux(&["select-pane", "-t", pane])?;
+    tmux(&[
+        "set-option",
+        "-wq",
+        "-t",
+        window,
+        "@workbench_last_agent_pane",
+        pane,
+    ])?;
+    let next = MenuOptions {
+        view: View::Root,
+        focus_agent: false,
+        guard: Some(context.guard.clone()),
+        ..options.clone()
+    };
+    run_with_context(
+        StatusMenuKind::Agent,
+        pane,
+        client,
+        None,
+        0,
+        stay_open,
+        &next,
+        &context,
+    )
+}
+
 pub fn run(
     kind: StatusMenuKind,
     pane: &str,
@@ -181,12 +350,36 @@ pub fn run(
     stay_open: bool,
     options: &MenuOptions,
 ) -> Result<()> {
+    crate::ui_language::set_language(options.language.as_deref());
     validate_pane(pane)?;
+    if kind == StatusMenuKind::Agent && options.focus_agent && action.is_none() {
+        return open_agent_status(pane, client, stay_open, options);
+    }
     let paths = Paths::discover()?;
-    let context = match Context::read(&paths, pane) {
+    let context = match if launch_context(kind, options.view) {
+        Context::read_launch(pane)
+    } else {
+        Context::read(&paths, pane)
+    } {
         Ok(context) => context,
         Err(error) => return message(client, &format!("Menu unavailable: {error}")),
     };
+    run_with_context(
+        kind, pane, client, action, page, stay_open, options, &context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_context(
+    kind: StatusMenuKind,
+    pane: &str,
+    client: &str,
+    action: Option<&str>,
+    page: usize,
+    stay_open: bool,
+    options: &MenuOptions,
+    context: &Context,
+) -> Result<()> {
     if options
         .guard
         .as_ref()
@@ -194,7 +387,7 @@ pub fn run(
     {
         return message(client, "Pane or agent changed. Reopen the menu.");
     }
-    let (title, actions) = actions(kind, options, &context);
+    let (title, mut actions) = actions(kind, options, context);
     if let Some(id) = action {
         let Some(selected) = actions
             .iter()
@@ -207,14 +400,68 @@ pub fn run(
             return Err("menu action requires a pane identity guard".into());
         }
         if let ActionCommand::Navigate(next_kind, next) = &selected.command {
-            return run(*next_kind, pane, client, None, 0, stay_open, next);
+            if launch_context(kind, options.view) != launch_context(*next_kind, next.view) {
+                // Validate the old scope above before entering the new one.
+                let paths = Paths::discover()?;
+                let context = if launch_context(*next_kind, next.view) {
+                    Context::read_launch(pane)?
+                } else {
+                    Context::read(&paths, pane)?
+                };
+                let next = MenuOptions {
+                    guard: Some(context.guard.clone()),
+                    ..next.clone()
+                };
+                return run_with_context(
+                    *next_kind, pane, client, None, 0, stay_open, &next, &context,
+                );
+            }
+            return run_with_context(*next_kind, pane, client, None, 0, stay_open, next, context);
         }
-        if let Err(error) = execute_action(selected, &context, client, options) {
+        if let ActionCommand::AgentTarget(target) = &selected.command {
+            return focus_agent_menu(target, &context.window, client, stay_open, options);
+        }
+        if let Err(error) = execute_action(selected, context, client, options) {
             // This is an interactive callback: report the failure in the
             // client's status line instead of leaving a run-shell output pager.
+            if matches!(selected.command, ActionCommand::Launch) {
+                let next = MenuOptions {
+                    view: View::Configure,
+                    launch_error: Some(error.to_string()),
+                    ..options.clone()
+                };
+                return run(kind, pane, client, None, 0, stay_open, &next);
+            }
             return message(client, &format!("Menu: {error}"));
         }
         return Ok(());
+    }
+    if options.view == View::Configure {
+        let index = actions
+            .iter()
+            .position(|action| action.id == "summary")
+            .expect("launch summary slot");
+        let summary = match launch_summary(options) {
+            Ok(lines) => lines
+                .into_iter()
+                .map(|line| Action::note(&line))
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                if let Some(start) = actions.iter_mut().find(|action| action.id == "start") {
+                    start.command = ActionCommand::Disabled;
+                }
+                actions.retain(|action| action.id != "launch-error");
+                actions.push(Action {
+                    id: "launch-error".into(),
+                    ..Action::note(&format!(
+                        "{}: {error}",
+                        tr("Configuration unavailable", "配置不可用")
+                    ))
+                });
+                vec![]
+            }
+        };
+        actions.splice(index..=index, summary);
     }
     let clients = tmux(&[
         "list-clients",
@@ -233,15 +480,12 @@ pub fn run(
             })?
         })
         .ok_or("Workbench client disappeared")?;
-    let back = actions.iter().find(|action| action.id == "back");
+    let footer = MenuFooter::new(&actions);
     let items: Vec<_> = actions
         .iter()
-        .filter(|action| action.id != "back")
+        .filter(|action| !matches!(action.id.as_str(), "back" | "start" | "launch-error"))
         .collect();
-    let page_size = size
-        .1
-        .saturating_sub(if back.is_some() { 8 } else { 7 })
-        .max(1);
+    let page_size = size.1.saturating_sub(footer.reserved_rows()).max(1);
     let page = page.min(items.len().saturating_sub(1) / page_size);
     let start = page * page_size;
     let executable = std::env::current_exe()?;
@@ -264,6 +508,8 @@ pub fn run(
         .client_format(client, "#{pane_id}")?
         .ok_or("Workbench client disappeared")?;
     command.args(["display-menu", "-M"]);
+    // -O selects on press and can send the same click's release to a new menu.
+    // Keep it only for old tmux pointer clients whose hover handling needs it.
     if stay_open {
         command.arg("-O");
     }
@@ -287,61 +533,67 @@ pub fn run(
     for action in items.iter().skip(start).take(page_size) {
         render_action(&mut command, action, &base, size.0);
     }
-    // Navigation stays in the footer on every page, alongside Close.
-    command.arg("");
-    for (show, label, key, next) in [
-        (page > 0, "Previous page", "[", page.saturating_sub(1)),
-        (start + page_size < items.len(), "Next page", "]", page + 1),
-    ] {
-        if show {
-            command.args([
-                label.into(),
-                key.into(),
-                format!(
-                    "run-shell -b {}",
-                    shell_quote(&format!("{base} --page {next}"))
-                ),
-            ]);
-        }
-    }
-    if let Some(back) = back {
-        render_action(&mut command, back, &base, size.0);
-    }
-    // Escape already dismisses menus. Pad its custom label to the same column
-    // as native key labels; inline styles trigger tmux's byte-length truncation
-    // on narrow clients even when the visible label fits.
-    let mut footer_width = ratatui::text::Line::from(format!(
-        " {} ",
-        menu_label(&title, size.0).replace("##", "#")
-    ))
-    .width();
-    let menu_args: Vec<_> = command
-        .get_args()
-        .skip_while(|arg| *arg != "--")
-        .skip(1)
-        .collect();
-    let mut index = 0;
-    while index < menu_args.len() {
-        let label = menu_args[index].to_string_lossy();
-        if label.is_empty() {
-            index += 1;
-            continue;
-        }
-        let key = menu_args[index + 1].to_string_lossy();
-        let label = label.strip_prefix('-').unwrap_or(&label).replace("##", "#");
-        let width = ratatui::text::Line::from(label).width()
-            + if key.is_empty() { 0 } else { key.len() + 3 };
-        footer_width = footer_width.max(width);
-        index += 3;
-    }
-    let close = format!(
-        "× close{}(esc)",
-        " ".repeat(footer_width.saturating_sub(12).max(1))
+    footer.render(
+        &mut command,
+        &base,
+        size.0,
+        page,
+        start + page_size < items.len(),
     );
-    command.args([close.as_str(), "", ""]);
     match command.status()?.code() {
         Some(0 | 2) => Ok(()),
         _ => Err("could not display status menu".into()),
+    }
+}
+
+struct MenuFooter<'a> {
+    back: Option<&'a Action>,
+    launch: Option<&'a Action>,
+    error: Option<&'a Action>,
+}
+
+impl<'a> MenuFooter<'a> {
+    fn new(actions: &'a [Action]) -> Self {
+        Self {
+            back: actions.iter().find(|action| action.id == "back"),
+            launch: actions.iter().find(|action| action.id == "start"),
+            error: actions.iter().find(|action| action.id == "launch-error"),
+        }
+    }
+
+    fn reserved_rows(&self) -> usize {
+        // Borders, separator, pagination and Close, plus the optional rows.
+        7 + usize::from(self.back.is_some())
+            + usize::from(self.launch.is_some())
+            + usize::from(self.error.is_some())
+    }
+
+    fn render(&self, command: &mut Command, base: &str, width: usize, page: usize, has_next: bool) {
+        command.arg("");
+        for (show, label, key, next) in [
+            (
+                page > 0,
+                tr("Previous page", "上一页"),
+                "[",
+                page.saturating_sub(1),
+            ),
+            (has_next, tr("Next page", "下一页"), "]", page + 1),
+        ] {
+            if show {
+                command.args([
+                    label.into(),
+                    key.into(),
+                    format!(
+                        "run-shell -b {}",
+                        shell_quote(&format!("{base} --page {next}"))
+                    ),
+                ]);
+            }
+        }
+        for action in [self.error, self.launch, self.back].into_iter().flatten() {
+            render_action(command, action, base, width);
+        }
+        command.args(crate::menu_footer::close_item(self.back.is_none()));
     }
 }
 
@@ -354,8 +606,8 @@ fn render_action(command: &mut Command, action: &Action, base: &str, width: usiz
         ]);
     } else {
         command.args([
-            menu_label(&action.label, width),
-            action.key.to_string(),
+            crate::menu_footer::item_label(&menu_label(&action.label, width), action.key),
+            crate::menu_footer::key_name(action.key),
             format!(
                 "run-shell -b {}",
                 shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
@@ -388,8 +640,21 @@ fn actions(
     };
     let mut back = View::Root;
     match options.view {
+        View::AgentTarget => {
+            title = tr("Choose agent", "选择 agent").into();
+            if let Ok(targets) = agent_targets(&context.window) {
+                for (index, (pane, _)) in targets.iter().take(9).enumerate() {
+                    actions.push(Action::new(
+                        &format!("target:{pane}"),
+                        &format!("Agent {pane}"),
+                        char::from_digit((index + 1) as u32, 10).unwrap(),
+                        ActionCommand::AgentTarget(pane.clone()),
+                    ));
+                }
+            }
+        }
         View::Launch => {
-            title = "Launch · choose agent".into();
+            title = tr("Launch · choose agent", "启动 · 选择 agent").into();
             for (tool, key) in [
                 (Tool::Codex, 'x'),
                 (Tool::Claude, 'c'),
@@ -406,148 +671,95 @@ fn actions(
                             tool,
                             preset: Preset::Single,
                             panes: false,
-                            ..options.at(if matches!(tool, Tool::Codex | Tool::Traex) {
-                                View::Scene
-                            } else {
-                                View::Preset
-                            })
+                            scene: Scene::Daily,
+                            launch_error: None,
+                            ..options.at(View::Configure)
                         },
                     ));
                 }
             }
             if actions.is_empty() {
-                actions.push(Action::note("No coding agents found on PATH"));
+                actions.push(Action::note(tr(
+                    "No coding agents found on PATH",
+                    "PATH 中未找到 coding agent",
+                )));
             }
         }
-        View::Scene => {
-            title = format!("{} · 选择场景", options.tool.label());
+        View::Configure => {
+            title = format!("{} {}", tr("Launch", "启动"), options.tool.label());
             back = View::Launch;
-            for (scene, key) in [(Scene::Daily, 'd'), (Scene::Hard, 'h'), (Scene::Batch, 'b')] {
-                actions.push(nav(
-                    scene.name(),
-                    scene.label(),
-                    key,
-                    kind,
-                    MenuOptions {
-                        scene,
-                        quick: false,
-                        ..options.at(View::Preset)
-                    },
-                ));
-            }
-        }
-        View::Adjust => {
-            title = "临时调整".into();
-            back = View::Ready;
-            actions.push(nav(
-                "quick",
-                "快速交互 · Astra low",
-                'q',
-                kind,
-                MenuOptions {
-                    quick: true,
-                    ..options.at(View::Ready)
-                },
-            ));
-            actions.push(nav(
-                "reset-adjustment",
-                "使用场景设置",
-                'r',
-                kind,
-                MenuOptions {
-                    quick: false,
-                    ..options.at(View::Ready)
-                },
-            ));
-        }
-        View::Preset => {
-            title = format!("{} · choose preset", options.tool.label());
-            back = if matches!(options.tool, Tool::Codex | Tool::Traex) {
-                View::Scene
-            } else {
-                View::Launch
-            };
-            for (preset, key) in [(Preset::Single, 's'), (Preset::Team, 't')] {
-                if preset.available(options.tool) {
+            actions.push(Action::note(&context.cwd));
+            if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                actions.push(Action::note(tr("Scene", "场景")));
+                for (scene, key) in [(Scene::Daily, 'd'), (Scene::Hard, 'h'), (Scene::Batch, 'b')] {
                     actions.push(nav(
-                        preset.name(),
-                        preset.label(),
+                        scene.name(),
+                        &choice_label(scene.label(), options.scene == scene),
                         key,
                         kind,
                         MenuOptions {
-                            preset,
-                            panes: false,
-                            ..options.at(if !preset.is_team() {
-                                View::Ready
-                            } else {
-                                View::Presentation
-                            })
+                            scene,
+                            launch_error: None,
+                            ..options.at(View::Configure)
                         },
                     ));
                 }
             }
-            if !executable("agent-team") {
-                actions.push(Action::note("Install agent-team to launch agents"));
-            }
-        }
-        View::Presentation => {
-            title = format!("{} · {}", options.tool.label(), options.preset.label());
-            back = View::Preset;
-            actions.push(nav(
-                "native",
-                "Native subagents (default)",
-                'n',
-                kind,
-                MenuOptions {
-                    panes: false,
-                    ..options.at(View::Ready)
-                },
-            ));
-            actions.push(nav(
-                "panes",
-                "Interactive tmux panes",
-                't',
-                kind,
-                MenuOptions {
-                    panes: true,
-                    ..options.at(View::Ready)
-                },
-            ));
-        }
-        View::Ready => {
-            title = format!(
-                "Launch {} · {}",
-                options.tool.label(),
-                options.preset.label()
-            );
-            back = if !options.preset.is_team() {
-                View::Preset
-            } else {
-                View::Presentation
-            };
-            actions.push(Action::note(&context.cwd));
-            actions.push(Action::note(if !options.preset.is_team() {
-                "Interactive session · new window"
-            } else if options.panes {
-                "Interactive team · one tmux window"
-            } else {
-                "Native subagents · new window"
-            }));
-            if matches!(options.tool, Tool::Codex | Tool::Traex) {
-                actions.push(Action::note(options.scene.label()));
+            actions.push(Action::note(tr("Mode", "模式")));
+            for (preset, key) in [(Preset::Single, 's'), (Preset::Team, 't')] {
                 actions.push(nav(
-                    "adjust",
-                    "临时调整",
-                    'a',
+                    preset.name(),
+                    &choice_label(preset.label(), options.preset == preset),
+                    key,
                     kind,
-                    options.at(View::Adjust),
+                    MenuOptions {
+                        preset,
+                        launch_error: None,
+                        ..options.at(View::Configure)
+                    },
                 ));
             }
-            actions.push(Action::note("Permissions: existing CLI / team config"));
+            if options.preset.is_team() {
+                actions.push(Action::note(tr("Collaboration", "协作方式")));
+                for (panes, key, label) in [
+                    (false, 'n', tr("Native subagents", "原生子代理")),
+                    (true, 'm', tr("tmux panes", "tmux 窗格")),
+                ] {
+                    actions.push(nav(
+                        if panes { "panes" } else { "native" },
+                        &choice_label(label, options.panes == panes),
+                        key,
+                        kind,
+                        MenuOptions {
+                            panes,
+                            launch_error: None,
+                            ..options.at(View::Configure)
+                        },
+                    ));
+                }
+            }
+            actions.push(Action {
+                id: "summary".into(),
+                ..Action::note("")
+            });
+            if let Some(error) = &options.launch_error {
+                actions.push(Action {
+                    id: "launch-error".into(),
+                    ..Action::note(&format!("{}: {error}", tr("Launch failed", "启动失败")))
+                });
+            }
             if executable(options.tool.name()) && options.preset.available(options.tool) {
-                actions.push(Action::new("start", "Start", 's', ActionCommand::Launch));
+                actions.push(Action::new(
+                    "start",
+                    tr("▶ Launch", "▶ 启动"),
+                    '\r',
+                    ActionCommand::Launch,
+                ));
             } else {
-                actions.push(Action::note("Required CLI is no longer available"));
+                actions.push(Action::note(tr(
+                    "Required CLI / agent-team is unavailable",
+                    "所需 CLI / agent-team 不可用",
+                )));
             }
         }
         View::Panes => {
@@ -647,7 +859,7 @@ fn actions(
                 actions.extend([
                     nav(
                         "launch",
-                        "Launch agent...",
+                        tr("Launch agent...", "启动 agent..."),
                         'a',
                         kind,
                         options.at(View::Launch),
@@ -767,7 +979,13 @@ fn actions(
         ));
     }
     if options.view != View::Root {
-        actions.push(nav("back", "← Back", 'B', kind, options.at(back)));
+        actions.push(nav(
+            "back",
+            crate::menu_footer::back_label(),
+            crate::menu_footer::BACK_KEY,
+            kind,
+            options.at(back),
+        ));
     }
     (title, actions)
 }
@@ -878,6 +1096,129 @@ fn agent_commands(context: &Context, more: bool) -> Vec<Action> {
     actions
 }
 
+fn choice_label(label: &str, selected: bool) -> String {
+    format!("{} {label}", if selected { "●" } else { "○" })
+}
+
+// Preview only the fields shown in the panel from the launcher's local JSON.
+// No CLI startup, process discovery, model catalog lookup, or cache on this path.
+// The launcher remains responsible for validation and the actual launch plan.
+fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
+    let launcher = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("agent-team"))
+        .find(|path| path.is_file())
+        .and_then(|path| path.canonicalize().ok());
+    let config = launcher
+        .as_ref()
+        .and_then(|path| path.parent())
+        .and_then(|dir| dir.parent())
+        .map(|root| root.join("config/teams.json"));
+    let Some(config) = config.filter(|path| path.is_file()) else {
+        return Ok(vec![
+            tr(
+                "Model settings resolved at launch",
+                "模型配置将在启动时解析",
+            )
+            .into(),
+        ]);
+    };
+    let defaults: serde_json::Value = serde_json::from_slice(&std::fs::read(config)?)?;
+    let paths = Paths::discover()?;
+    let personal_path = paths
+        .config_dir
+        .parent()
+        .unwrap()
+        .join("agent-team/config.json");
+    let personal: serde_json::Value = match std::fs::read(personal_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    let tool = options.tool.name();
+    let team = options.preset.is_team();
+    let scene_tool = matches!(options.tool, Tool::Codex | Tool::Traex);
+    if !scene_tool && !team {
+        return summary_lines(&serde_json::json!({}), false);
+    }
+    let (base, extra) = if scene_tool {
+        (
+            &defaults[tool]["scenes"][options.scene.name()],
+            &personal[tool]["scenes"][options.scene.name()],
+        )
+    } else {
+        (&defaults[tool]["team"], &personal[tool]["team"])
+    };
+    let mut config = base
+        .as_object()
+        .ok_or("agent-team configuration is missing")?
+        .clone();
+    // All displayed fields are scalars, so a shallow overlay matches the
+    // launcher's recursive merge without reproducing its launch machinery.
+    if let Some(extra) = extra.as_object() {
+        config.extend(extra.clone());
+    }
+    if scene_tool && team {
+        for (lead, single) in [("lead_model", "model"), ("lead_effort", "effort")] {
+            if let Some(value) = config.get(lead).cloned() {
+                config.insert(single.into(), value);
+            }
+        }
+    }
+    summary_lines(&serde_json::Value::Object(config), team)
+}
+
+fn summary_lines(config: &serde_json::Value, team: bool) -> Result<Vec<String>> {
+    let model = config.get("model").and_then(|value| value.as_str());
+    if model.is_none()
+        && ["effort", "worker_model", "worker_effort"]
+            .iter()
+            .all(|key| config.get(key).and_then(|value| value.as_str()).is_none())
+    {
+        return Ok(vec![
+            tr(
+                "Model / thinking: tool defaults",
+                "模型 / thinking: 工具默认配置",
+            )
+            .into(),
+        ]);
+    }
+    let model = model.unwrap_or(tr("tool default", "工具默认"));
+    let effort = config
+        .get("effort")
+        .and_then(|value| value.as_str())
+        .unwrap_or("default");
+    let mut lines = vec![format!(
+        "{}: {model} · {effort}",
+        if team {
+            tr("Lead", "主代理")
+        } else {
+            tr("Single", "单人")
+        }
+    )];
+    if team {
+        let worker = config
+            .get("worker_model")
+            .and_then(|value| value.as_str())
+            .unwrap_or(model);
+        let effort = config
+            .get("worker_effort")
+            .and_then(|value| value.as_str())
+            .unwrap_or(effort);
+        lines.push(format!("{}: {worker} · {effort}", tr("Worker", "子代理")));
+    }
+    if let Some(fast) = config.get("fast").and_then(|value| value.as_bool()) {
+        lines.push(format!(
+            "Fast: {}",
+            if fast {
+                tr("on", "开启")
+            } else {
+                tr("off", "关闭")
+            }
+        ));
+    }
+    Ok(lines)
+}
+
 fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
     let mut args = vec![
         "agent-team".into(),
@@ -886,9 +1227,6 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
     ];
     if matches!(options.tool, Tool::Codex | Tool::Traex) {
         args.extend(["--scene".into(), options.scene.name().into()]);
-        if options.quick {
-            args.extend(["--adjust".into(), "quick".into()]);
-        }
     }
     if options.preset.is_team() {
         args.push("--team".into());
@@ -1054,7 +1392,9 @@ fn execute_action(
             tmux(&["select-window", "-t", &context.window])?;
             tmux(&["select-pane", "-t", pane])?;
         }
-        ActionCommand::Navigate(..) | ActionCommand::Disabled => unreachable!(),
+        ActionCommand::Navigate(..) | ActionCommand::AgentTarget(..) | ActionCommand::Disabled => {
+            unreachable!()
+        }
     }
     Ok(())
 }
@@ -1177,7 +1517,7 @@ mod tests {
         }
     }
     #[test]
-    fn codex_has_three_scenes_two_modes_and_explicit_temporary_adjustment() {
+    fn codex_has_three_scenes_two_modes_without_adjustments() {
         for scene in [Scene::Daily, Scene::Hard, Scene::Batch] {
             for preset in [Preset::Single, Preset::Team] {
                 let args = launch_argv(&MenuOptions {
@@ -1194,12 +1534,6 @@ mod tests {
                 assert_eq!(args.contains(&"--team".into()), preset == Preset::Team);
             }
         }
-        let args = launch_argv(&MenuOptions {
-            quick: true,
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(&args[args.len() - 2..], ["--adjust", "quick"]);
     }
 
     #[test]
@@ -1210,7 +1544,6 @@ mod tests {
                     tool,
                     preset,
                     scene: Scene::Hard,
-                    quick: true,
                     ..Default::default()
                 })
                 .unwrap();
@@ -1223,7 +1556,7 @@ mod tests {
                 StatusMenuKind::Tmux,
                 &MenuOptions {
                     tool,
-                    view: View::Preset,
+                    view: View::Configure,
                     ..Default::default()
                 },
                 &context(None, BaseState::Idle),
@@ -1234,6 +1567,74 @@ mod tests {
                     .any(|a| a.label.contains("Budget") || a.label.contains("launch.toml"))
             );
         }
+    }
+
+    #[test]
+    fn launch_choices_stay_in_the_same_panel_and_clear_errors() {
+        for preset in [Preset::Single, Preset::Team] {
+            let (_, choices) = actions(
+                StatusMenuKind::Tmux,
+                &MenuOptions {
+                    view: View::Configure,
+                    preset,
+                    launch_error: Some("unavailable".into()),
+                    ..Default::default()
+                },
+                &context(None, BaseState::Idle),
+            );
+            for action in &choices {
+                if let ActionCommand::Navigate(_, next) = &action.command {
+                    if action.id != "back" {
+                        assert_eq!(next.view, View::Configure);
+                        assert!(next.launch_error.is_none());
+                    }
+                }
+            }
+            assert_eq!(choices.iter().any(|a| a.id == "panes"), preset.is_team());
+            assert!(
+                !choices
+                    .iter()
+                    .any(|a| a.label.contains("临时") || a.label.contains("快速"))
+            );
+        }
+        let summary = summary_lines(&serde_json::json!({"model":"lead", "effort":"high", "worker_model":"worker", "worker_effort":"max", "fast":false}), true).unwrap();
+        assert_eq!(
+            summary,
+            [
+                tr("Lead: lead · high", "主代理: lead · high"),
+                tr("Worker: worker · max", "子代理: worker · max"),
+                tr("Fast: off", "Fast: 关闭")
+            ]
+        );
+        let route = MenuOptions {
+            launch_error: Some("untrusted #{pane_id} ' text".into()),
+            ..Default::default()
+        }
+        .route();
+        assert!(!route.contains("untrusted"));
+        let encoded = route.split(" --launch-error=").nth(1).unwrap();
+        assert_eq!(
+            decode_launch_error(encoded).unwrap(),
+            "untrusted #{pane_id} ' text"
+        );
+        assert!(decode_launch_error("f").is_err());
+        assert!(decode_launch_error("zz").is_err());
+        assert!(decode_launch_error("ff").is_err());
+        assert_eq!(
+            decode_launch_error(&encode_launch_error("模型不可用")),
+            Ok("模型不可用".into())
+        );
+        assert_eq!(
+            summary_lines(
+                &serde_json::json!({"worker_model":"custom", "worker_effort":"max"}),
+                true
+            )
+            .unwrap(),
+            [
+                tr("Lead: tool default · default", "主代理: 工具默认 · default"),
+                tr("Worker: custom · max", "子代理: custom · max")
+            ]
+        );
     }
 
     #[test]
@@ -1250,11 +1651,8 @@ mod tests {
                     View::Panes,
                     View::Switch,
                     View::Launch,
-                    View::Scene,
-                    View::Adjust,
-                    View::Preset,
-                    View::Presentation,
-                    View::Ready,
+                    View::Configure,
+                    View::AgentTarget,
                     View::More,
                     View::Team,
                     View::Botmux,
@@ -1267,9 +1665,10 @@ mod tests {
                         },
                         &context(Some(agent), BaseState::Idle),
                     );
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = std::collections::HashSet::from(['\x1b', '[', ']']);
                     for a in actions {
                         if !matches!(a.command, ActionCommand::Disabled) {
+                            assert_eq!(a.key == crate::menu_footer::BACK_KEY, a.id == "back");
                             assert!(seen.insert(a.key), "{kind:?} {agent:?} {view:?}: {}", a.key);
                         }
                     }

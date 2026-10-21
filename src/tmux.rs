@@ -72,6 +72,66 @@ impl Tmux {
             .map(|(_, value)| value.to_owned()))
     }
 
+    pub(crate) fn publish_agent_actions(
+        &self,
+        panes: &[Pane],
+        roots: &HashSet<u32>,
+    ) -> Result<(), TmuxError> {
+        if panes.is_empty() {
+            return Ok(());
+        }
+        let mut args = Vec::<String>::new();
+        for pane in panes {
+            if !args.is_empty() {
+                args.push(";".into());
+            }
+            args.extend([
+                "set-option".into(),
+                "-pq".into(),
+                "-t".into(),
+                pane.target.pane_id.clone(),
+                "@workbench_agent_actions".into(),
+                if roots.contains(&pane.root_pid) {
+                    "1"
+                } else {
+                    "0"
+                }
+                .into(),
+            ]);
+        }
+        let mut windows = std::collections::BTreeMap::<&str, bool>::new();
+        for pane in panes {
+            *windows.entry(&pane.target.window_id).or_default() |= roots.contains(&pane.root_pid);
+        }
+        for (window, has_agent) in windows {
+            args.extend([
+                ";".into(),
+                "set-option".into(),
+                "-wq".into(),
+                "-t".into(),
+                window.into(),
+                "@workbench_window_has_agent".into(),
+                if has_agent { "1" } else { "0" }.into(),
+            ]);
+        }
+        for pane in panes
+            .iter()
+            .filter(|pane| pane.pane_active && roots.contains(&pane.root_pid))
+        {
+            args.extend([
+                ";".into(),
+                "set-option".into(),
+                "-wq".into(),
+                "-t".into(),
+                pane.target.window_id.clone(),
+                "@workbench_last_agent_pane".into(),
+                pane.target.pane_id.clone(),
+            ]);
+        }
+        self.output(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        Ok(())
+    }
+
     fn output(&self, args: &[&str]) -> Result<String, TmuxError> {
         let output = Command::new("tmux")
             .arg("-S")
