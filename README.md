@@ -783,10 +783,60 @@ rules without copying them into each tool's configuration.
 ### Stable task names
 
 The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
-assigns a short semantic name to its verified window, then keeps it stable as
-commands, titles, status, and pane focus change. Sidebars do not supply names.
-Prefer one task and one agent per ordinary window; existing workbench-managed
-window names and explicitly requested team layouts remain intact.
+assigns a short semantic name through Workbench:
+
+```sh
+tmux-agent-workbench title set 'Repair cursor rendering'
+tmux-agent-workbench title status
+```
+
+The command resolves the calling agent through process ancestry and verifies
+the resulting name in tmux. If ancestry is hidden, use the verified `--pane`
+and `--session-id` supplied by the lifecycle hook. It never follows the focused
+client or guesses from a working directory. A live Workbench daemon is needed
+to verify the process/session binding.
+
+A tool sandbox can deny local Unix socket access even with the correct pane and
+session. The command reports that permission error separately from an identity
+mismatch. Choose execution permissions before the first invocation, using the
+session's current sandbox and approval policy. If it blocks local sockets and
+approvals are allowed, request approved execution of the exact title command
+immediately. Do not use a failed naming attempt as a permission probe. If sockets
+are already allowed, run normally; if approval is forbidden or unavailable while
+sockets are blocked, skip naming and continue the task. Recreating a pane does
+not grant socket access, and naming does not require changing the session's
+sandbox or network policy.
+
+Codex and Claude lifecycle hooks remind the model only while an ordinary
+window has a default shell/process name. `SessionStart` and `UserPromptSubmit`
+provide short context; `Stop` requests at most one naming continuation after
+a submitted task. The continuation budget is stored with the tmux window, so
+resume, compaction, duplicate hooks, and daemon restarts cannot reset it.
+Issued naming bindings remain attached to the CLI process when auxiliary
+sessions report hooks from that same process. The visible Codex thread identity
+can verify an issued binding even if the detector's latest hook session changed;
+an auxiliary session cannot take over naming or reset the repair budget.
+If identity, tmux, or the naming lock is unavailable, the hook lets work proceed.
+This improves execution reliability; the model still chooses the semantic name.
+
+The first live interactive agent owns a shared window's name. Other agents,
+sidebars, status updates and focus changes cannot replace it. Existing
+meaningful names, manual edits, workbench task sessions, and repository
+inspection windows are preserved. The helper deliberately does not replace
+an existing task name; an explicitly requested repurpose can use tmux's normal
+rename command. Prefer one task and one agent per ordinary window; explicitly
+requested team layouts remain intact.
+
+When the naming owner's CLI exits, the daemon restores the pre-rename name and
+the window's previous `automatic-rename` override (including inheritance), then
+unsets the task-title ownership record. A completed response (`Stop`) is not an
+exit. Cleanup checks the real process identity, so it also handles forced
+termination, a closed owner pane with a surviving window, and exits that happened
+while the daemon was offline. A verified same-task resume in the same pane keeps
+ownership until its final exit. Manual title and automatic-naming changes made
+after the task rename are preserved; other agents cannot release the owner's
+title. Older records without saved option metadata can still restore their
+original name.
 
 To opt into tmux's automatic names, set this before loading the plugin:
 

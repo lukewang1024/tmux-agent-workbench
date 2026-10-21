@@ -80,6 +80,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Set or inspect the stable task title of the verified calling agent.
+    Title {
+        #[command(subcommand)]
+        command: TitleCommand,
+    },
     Metadata {
         #[command(subcommand)]
         command: MetadataCommand,
@@ -201,6 +206,23 @@ enum AgentCommand {
         pane: String,
         #[arg(long)]
         show_content: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TitleCommand {
+    Set {
+        title: String,
+        #[arg(long)]
+        pane: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    Status {
+        #[arg(long)]
+        pane: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
     },
 }
 
@@ -1215,22 +1237,41 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let agent = parse_agent_kind(&agent)?;
             let input = tmux_agent_workbench::hooks::read_stdin()?;
-            if agent == tmux_agent_workbench::model::AgentKind::Codex {
+            let output = if agent == tmux_agent_workbench::model::AgentKind::Codex {
                 // A shared app-server can outlive its launching pane and serve
                 // several Codex TUIs. Its inherited TMUX_PANE is never an
                 // event's owner; resolve each hook by its session identity.
-                tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?;
+                tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
             } else {
                 match ServerIdentity::discover() {
                     Ok(server) => {
                         tmux_agent_workbench::hooks::ingest(&paths, &server, agent, &event, &input)?
                     }
                     // Global hooks also run in ordinary terminals and desktop apps.
-                    Err(tmux_agent_workbench::server::ServerError::NotInTmux) => {}
+                    Err(tmux_agent_workbench::server::ServerError::NotInTmux) => {
+                        serde_json::json!({})
+                    }
                     Err(error) => return Err(error.into()),
                 }
-            }
-            println!("{{}}");
+            };
+            println!("{}", output);
+        }
+        Command::Title { command } => {
+            let (pane, session, title) = match &command {
+                TitleCommand::Set {
+                    title,
+                    pane,
+                    session_id,
+                } => (pane, session_id, Some(title.as_str())),
+                TitleCommand::Status { pane, session_id } => (pane, session_id, None),
+            };
+            let result = tmux_agent_workbench::task_title::for_caller(
+                &paths,
+                pane.as_deref(),
+                session.as_deref(),
+                title,
+            )?;
+            println!("{}", result);
         }
         Command::Config {
             command: ConfigCommand::Check,

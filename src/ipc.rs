@@ -135,6 +135,14 @@ pub fn write_response(mut stream: &UnixStream, response: &Response) -> Result<()
     write_message(&mut stream, response)
 }
 
+pub(crate) fn prepare_connection(stream: &UnixStream) -> io::Result<()> {
+    // macOS inherits O_NONBLOCK from the listener. Worker threads use blocking
+    // framed I/O; otherwise a response can stop after the socket's first buffer.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))
+}
+
 // Serialize once: serde's small writes must not each become a socket syscall.
 fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(message).map_err(io::Error::other)?;
@@ -147,6 +155,34 @@ fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::Resul
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn accepted_nonblocking_socket_delivers_a_complete_large_response() {
+        use std::os::fd::AsRawFd;
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = root.path().join("ipc.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let client = std::thread::spawn(move || {
+            call(
+                &socket,
+                &Request::new("snapshot.get", Value::Null),
+                Duration::from_secs(5),
+            )
+            .unwrap()
+        });
+        let (stream, _) = listener.accept().unwrap();
+        // Exercise the inherited macOS mode on every CI platform.
+        stream.set_nonblocking(true).unwrap();
+        prepare_connection(&stream).unwrap();
+        assert_eq!(
+            unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
+            0
+        );
+        let request = read_request(&stream).unwrap();
+        let response = serde_json::json!({"snapshot": "x".repeat(128 * 1024)});
+        write_response(&stream, &Response::success(request.id, response.clone())).unwrap();
+        assert_eq!(client.join().unwrap(), response);
+    }
 
     #[test]
     fn large_message_is_batched_and_keeps_newline_framing() {

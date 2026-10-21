@@ -13,13 +13,39 @@ Do not rearrange existing panes or agents merely to enforce this preference.
 
 For an ordinary agent window, once the task is clear, assign a short, meaningful
 window name from the task (roughly 2–4 words or 6–12 Chinese characters) using
-`tmux rename-window -t <verified-window-id> <task-name>`. Resolve the owning
-window from the agent's verified pane/session identity; do not assume the human's
-currently selected window belongs to this agent. Keep that name stable through
+`tmux-agent-workbench title set '<task-name>'`. Workbench resolves the calling
+agent through process ancestry. When a tool sandbox hides ancestry, use the
+verified `--pane` and `--session-id` supplied by the lifecycle hook; never use
+the human's currently selected window. `title status` explains the owner,
+current title, and whether the one-time naming repair has been used.
+Choose execution permissions **before the first invocation**, using the current
+session's sandbox and approval policy. The command needs local Unix-socket access.
+When the sandbox blocks these sockets and approval is allowed, request approved
+execution of this exact title command immediately; do not first run a restricted
+attempt as a permission probe. In Codex `exec_command`, use
+`sandbox_permissions="require_escalated"` with a naming-specific justification
+only when the current tool schema and approval policy allow it. When socket access
+is already permitted, run normally. When socket access is blocked and approval is
+forbidden or unavailable, skip naming and continue the task. Keep the current pane
+and its sandbox/network policy; opening another pane does not grant socket access.
+Keep that name stable through
 status, title, command, and pane-focus changes. Do not derive it from pane titles,
 process names, model names, or session IDs. Preserve an existing meaningful name
 unless the user asks to rename it or clearly repurposes the window for a new task.
 Workbench-managed agent/repository/task windows retain their prescribed names.
+
+For supported lifecycle hooks, an unnamed ordinary window gets a short naming
+reminder on session start and prompt submission. If it is still unnamed when
+the first task ends, Workbench requests one naming continuation. This repair
+budget survives resume, compaction, and daemon restarts. Missing identity or
+unavailable tmux must not prevent the actual task from proceeding. In a shared
+window, the first live interactive agent owns its title; other agents preserve
+it. Existing meaningful names and manual changes always take precedence.
+When the naming owner's CLI actually exits, the daemon restores the previous
+window name and automatic-naming options, then clears its ownership marker.
+A finished response is not an exit. Manual edits are preserved, and a verified
+same-task resume in the same pane keeps ownership until its final exit. Agents
+do not need to undo their title in a Stop hook or on every completed response.
 
 ## tmux task/window model — folding another repo into the task
 

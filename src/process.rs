@@ -76,6 +76,31 @@ impl ProcessSource for ProcessTree {
                 .with_exe(UpdateKind::OnlyIfNotSet)
                 .with_cmd(UpdateKind::OnlyIfNotSet),
         );
+        // A pane shell can exec its agent without changing PID/start time.
+        // Refresh command identity only inside tracked pane trees; unrelated
+        // system processes retain the cheaper cached identity path.
+        let root_ids = roots
+            .iter()
+            .copied()
+            .map(Pid::from_u32)
+            .collect::<HashSet<_>>();
+        let related = self
+            .system
+            .processes()
+            .keys()
+            .copied()
+            .filter(|pid| nearest_root(&self.system, *pid, &root_ids).is_some())
+            .collect::<Vec<_>>();
+        if !related.is_empty() {
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&related),
+                true,
+                ProcessRefreshKind::nothing()
+                    .without_tasks()
+                    .with_exe(UpdateKind::Always)
+                    .with_cmd(UpdateKind::Always),
+            );
+        }
         find_agents(&self.system, roots, aliases)
     }
 }
@@ -248,6 +273,39 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_exec_refreshes_identity_without_a_new_pid() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read ready; exec sleep 30"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let aliases = HashMap::from([("sleep".into(), AgentKind::Claude)]);
+        let mut tree = ProcessTree::default();
+        let before = tree.agents_for_roots(&[child.id()], &aliases);
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let found = loop {
+            if tree
+                .agents_for_roots(&[child.id()], &aliases)
+                .contains_key(&child.id())
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(before.is_empty());
+        assert!(found, "cached shell identity survived exec into an agent");
+    }
 
     #[test]
     fn theme_resume_requires_an_explicit_uuid_target() {
