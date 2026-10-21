@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod layout;
 pub mod manifest;
 mod menu_context;
+pub mod menu_footer;
 mod menu_skills;
 pub mod model;
 pub mod notification;
@@ -28,6 +29,7 @@ pub mod status_menu;
 pub mod task_title;
 pub mod terminal;
 pub mod tmux;
+mod ui_language;
 pub mod workspace;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -6,7 +6,12 @@ pane=${2:-}
 case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
 case $pane in '%'|''|%*[!0-9]*) exit 2 ;; %*) ;; *) exit 2 ;; esac
 
-script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+script_dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 mode=$(tmux show-option -gqv @workbench-host-metrics-mode 2>/dev/null || true)
 case $mode in compact|standard|full) ;; *) mode=compact ;; esac
 
@@ -20,15 +25,13 @@ case $mode in
 esac
 
 mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
-set -- tmux display-menu -M
-[ "$mouse_mode" = touch ] || set -- "$@" -O
+set -- "$script_dir/tmux-agent-workbench-cli" display-menu -- -M
+[ "$mouse_mode" != mouse ] || set -- "$@" -O
 set -- "$@" -C 0 -c "$client" -t "$pane" -b rounded \
   -T '#[align=centre] 󰻠 Resources ' \
   "$compact_line" c "run-shell -b '$script_dir/workbench-host-metrics-mode compact'" \
   "$standard_line" s "run-shell -b '$script_dir/workbench-host-metrics-mode standard'" \
   "$full_line" f "run-shell -b '$script_dir/workbench-host-metrics-mode full'" \
   '' \
-  '  Open btop' b 'display-popup -E -b rounded -T " btop " -w 90% -h 90% "exec btop"' \
-  '' \
-  '× close (Esc)' '' ''
+  '  Open btop' b 'display-popup -E -b rounded -T " btop " -w 90% -h 90% "exec btop"'
 exec "$@"

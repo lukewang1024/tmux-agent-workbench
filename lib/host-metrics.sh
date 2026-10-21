@@ -15,7 +15,9 @@ done
 
 if [ "$(tmux show-option -gqv @workbench-host-metrics)" = off ]; then
   tmux set-option -g @adaptive_cpu ''
+  tmux set-option -g @adaptive_cpu_compact ''
 else
+  tmux set-option -g @adaptive_cpu_compact "#(sh '$CURRENT_DIR/bin/workbench-host-metrics' cpu)"
   tmux set-option -g @adaptive_cpu \
     "#(sh '$CURRENT_DIR/bin/workbench-host-metrics-status')"
 fi

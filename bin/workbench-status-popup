@@ -4,6 +4,8 @@ set -eu
 kind=${1:-}
 client=${2:-}
 pane=${3:-}
+focus=${4:-}
+case $focus in ''|--focus-agent) ;; *) exit 2 ;; esac
 case $kind in host|tmux|agent) ;; *) exit 2 ;; esac
 case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
 case $pane in '%'|''|%*[!0-9]*) exit 2 ;; %*) ;; *) exit 2 ;; esac
@@ -19,4 +21,7 @@ core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench
 [ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
 
 # Status bindings run after release, then the native menu handles the next click.
+if [ "$focus" = --focus-agent ]; then
+  exec "$core" status-menu "$kind" --pane "$pane" --client "$client" --focus-agent
+fi
 exec "$core" status-menu "$kind" --pane "$pane" --client "$client"

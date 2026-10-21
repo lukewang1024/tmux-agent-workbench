@@ -55,6 +55,11 @@ enum Command {
         client: String,
     },
     #[command(hide = true)]
+    DisplayMenu {
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    #[command(hide = true)]
     StatusMenu {
         kind: tmux_agent_workbench::status_menu::StatusMenuKind,
         #[arg(long)]
@@ -1298,15 +1303,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let server = ServerIdentity::discover()?;
             tmux_agent_workbench::sidebar::run(&paths, &server)?;
         }
+        Command::DisplayMenu { args } => tmux_agent_workbench::menu_footer::display(&args)?,
         Command::MenuMouseMode { client } => {
-            println!(
-                "{}",
-                if client_uses_termux_input(&paths, &client) {
-                    "touch"
-                } else {
-                    "mouse"
-                }
-            );
+            println!("{}", menu_input_mode(&paths, &client, None));
         }
         Command::StatusMenu {
             kind,
@@ -1314,9 +1313,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             client,
             action,
             page,
-            options,
+            mut options,
         } => {
-            let stay_open = !client_uses_termux_input(&paths, &client);
+            // Input mode stays fixed for one menu interaction; callbacks need
+            // no daemon snapshot request just to rediscover the same client.
+            let input_mode = menu_input_mode(&paths, &client, options.input_mode.as_deref());
+            let stay_open = input_mode == "mouse";
+            options.input_mode = Some(input_mode.into());
             tmux_agent_workbench::status_menu::run(
                 kind,
                 &pane,
@@ -1853,6 +1856,48 @@ fn ipc_call(
     )?)
 }
 
+fn menu_input_mode(paths: &Paths, client: &str, requested: Option<&str>) -> &'static str {
+    match requested {
+        Some("touch") => return "touch",
+        Some("release") => return "release",
+        _ => {}
+    }
+    // tmux 3.8 distinguishes hover from a real release. Select on release so
+    // a held click cannot open a child menu and then dismiss it on mouse-up.
+    let version = ServerIdentity::discover().ok().and_then(|server| {
+        tmux_agent_workbench::tmux::Tmux::new(server)
+            .client_format(client, "#{version}")
+            .ok()
+            .flatten()
+    });
+    if version.as_deref().is_some_and(tmux_has_release_menus) {
+        return "release";
+    }
+    // Older native menus treat unpressed motion as a release. Preserve their
+    // pointer workaround; Termux taps have no hover and can still use release.
+    if requested != Some("mouse") && client_uses_termux_input(paths, client) {
+        "touch"
+    } else {
+        "mouse"
+    }
+}
+
+fn tmux_has_release_menus(version: &str) -> bool {
+    let version = version
+        .trim()
+        .strip_prefix("next-")
+        .unwrap_or(version.trim());
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    let minor = minor
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("");
+    matches!((major.parse::<u32>(), minor.parse::<u32>()),
+        (Ok(major), Ok(minor)) if (major, minor) >= (3, 8))
+}
+
 fn client_uses_termux_input(paths: &Paths, client: &str) -> bool {
     let Ok(server) = ServerIdentity::discover() else {
         return false;
@@ -2004,6 +2049,16 @@ fn running_executable_matches(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_menus_require_hover_safe_tmux() {
+        for version in ["3.6", "3.7c", "unknown", ""] {
+            assert!(!tmux_has_release_menus(version), "{version}");
+        }
+        for version in ["3.8", "3.8a", "3.10", "4.0", "next-3.9"] {
+            assert!(tmux_has_release_menus(version), "{version}");
+        }
+    }
 
     #[test]
     fn simultaneous_first_connections_share_one_complete_device_identity() {

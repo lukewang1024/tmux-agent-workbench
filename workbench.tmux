@@ -56,9 +56,10 @@ esac
 # load first and survive every later theme repaint.
 tmux set-option -g @adaptive_context_state '#{@workbench_window_state}'
 tmux set-option -g @adaptive_context_label '#{@workbench_window_label}'
-tmux set-option -g @adaptive_context_range_open '#[range=user|wb_usage]'
+tmux set-option -g @adaptive_context_visible '#{==:#{@workbench_window_has_agent},1}'
+tmux set-option -g @adaptive_context_range_open '#[range=user|wb_agent]'
 tmux set-option -g @adaptive_context_range_close '#[range=]'
-tmux set-option -g @adaptive_session_range_open '#[range=user|wb_prefix]'
+tmux set-option -g @adaptive_session_range_open '#[range=user|wb_sidebar]'
 tmux set-option -g @adaptive_session_range_close '#[range=]'
 tmux set-option -g @adaptive_host_icon '󰍹'
 tmux set-option -g @adaptive_host_range_open '#[range=user|wb_host]'
@@ -66,12 +67,19 @@ tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_cpu_range_open '#[range=user|wb_cpu]'
 tmux set-option -g @adaptive_cpu_range_close '#[range=]'
 . "$CURRENT_DIR/lib/host-metrics.sh"
+# Stable controls precede host metrics; agent commands live in the status pill.
 tmux set-option -g @adaptive_action_1_icon ''
 tmux set-option -g @adaptive_action_1_range wb_tmux
-tmux set-option -g @adaptive_action_2_icon '󰚩'
-tmux set-option -g @adaptive_action_2_range wb_agent
-tmux set-option -g @adaptive_action_3_icon ''
-tmux set-option -g @adaptive_action_3_range wb_sidebar
+tmux set-option -g @adaptive_action_1_visible 1
+tmux set-option -g @adaptive_action_2_icon ''
+tmux set-option -g @adaptive_action_2_range wb_sidebar
+tmux set-option -g @adaptive_action_2_visible 0
+tmux set-option -g @adaptive_action_3_icon ''
+tmux set-option -g @adaptive_action_3_range ''
+tmux set-option -g @adaptive_action_3_visible 0
+tmux set-option -g @adaptive_usage ''
+tmux set-option -g @adaptive_usage_range_open '#[range=user|wb_usage]'
+tmux set-option -g @adaptive_usage_range_close '#[range=]'
 usage_enabled="$(tmux show-option -gqv @workbench-usage 2>/dev/null || true)"
 if [ "$usage_enabled" != off ]; then
   old_usage_source="$(tmux show-option -gqv @agent_usage_source 2>/dev/null || true)"
@@ -83,15 +91,15 @@ if [ "$usage_enabled" != off ]; then
   tmux set-option -g @adaptive_context_suffix \
     "#($CURRENT_DIR/bin/workbench-agent-usage badge #{client_width})"
 else
-  tmux set-option -gu @adaptive_context_suffix 2>/dev/null || true
+  tmux set-option -g @adaptive_context_suffix ''
 fi
 tmux set-option -s command-alias[920] \
   "wb-tmux-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[921] \
-  "wb-agent-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}'\""
+  "wb-agent-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}' --focus-agent\""
 tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'\""
-tmux set-option -s command-alias[923] 'wb-other-status=select-window -t ='
-status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
+tmux set-option -s command-alias[923] "wb-other-status=if-shell -F '#{==:#{mouse_status_range},window}' 'select-window -t =' ''"
+status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'wb-sidebar-status' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
@@ -105,16 +113,25 @@ tmux set-option -s command-alias[927] \
 # Open after release. Native menus then receive a complete subsequent click,
 # including its coordinates, without depending on hover events (touch screens).
 # Empty branches must emit nothing: display-message -p enters the output pager.
-# Session enters the prefix table on press and keeps it on release.
-tmux bind-key -T root MouseDown1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' ''
+# Unbound mouse motion (including pane borders) must not consume prefix.
+# Bound prefix commands retain their normal behaviour; Escape cancels.
+# Copy root mouse actions so clicks cancel prefix and keep their original
+# action and mouse coordinates (send-keys -K loses the mouse event).
+tmux bind-key -T root MouseDown3Status if-shell -F '#{==:0,1}' '' ''
+tmux list-keys -T root | sed -En \
+  '/ -T root +(Mouse|Wheel)/ { s/ -T root / -T prefix /; s/( -T prefix +[^ ]* +)/\1switch-client -T root \\; /; p; }' | tmux source-file -
+# tmux reports motion through Any but does not accept MouseMove* bindings.
+# Event-local mouse formats cover panes, borders and status (including column
+# zero); they are empty for keyboard events, which keep the normal root reset.
+tmux bind-key -T prefix Any if-shell -F \
+  '#{||:#{!=:#{mouse_pane},},#{!=:#{mouse_status_line},}}' \
+  'switch-client -T prefix' ''
+tmux bind-key -T prefix Escape switch-client -T root
+# Route on release so each click toggles the sidebar exactly once.
+tmux bind-key -T root MouseDown1Status if-shell -F '#{==:0,1}' '' ''
 tmux bind-key -T prefix MouseDown1Status switch-client -T prefix
 tmux bind-key -T root MouseUp1Status wb-status-route
-tmux bind-key -T prefix MouseUp1Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_prefix}' 'switch-client -T prefix' wb-status-route
-tmux bind-key -T root MouseDown3Status if-shell -F \
-  '#{==:#{mouse_status_range},wb_usage}' \
-  "run-shell -b '$CURRENT_DIR/bin/workbench-agent-usage focus'" ''
+tmux bind-key -T prefix MouseUp1Status 'switch-client -T root ; wb-status-route'
 
 # If the optional theme loaded first, ask it to consume the newly registered
 # context values once. Future theme repaints read the same retained options.

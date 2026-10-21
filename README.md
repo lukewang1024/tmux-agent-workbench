@@ -280,13 +280,14 @@ detection in Workbench while allowing a theme to render a lightweight current-
 window badge without polling or screen scraping.
 
 When `tmux-adaptive-theme` is present, the plugin registers those values through
-the theme's generic `@adaptive_context_*` interface. Workbench owns the complete
-Agent Status behavior: left-click opens a persistent usage menu, right-click
-focuses the active Agent, and the status suffix shows the selected provider's
-remaining-limit battery plus today's token total. Codex, Claude Code, Trae, and
-OpenCode can be selected in the menu. Token totals come from local `ccusage`
-data and are cached under `$XDG_STATE_HOME/tmux-agent-workbench/usage`.
-Below the theme's compact-width threshold the complete usage suffix is hidden.
+the theme's generic `@adaptive_context_*` interface. Agent Status opens the active agent's command menu. From a shell pane, it
+focuses the most recently used interactive agent in the same window first;
+without a remembered target, multiple agents appear in a single chooser.
+The usage suffix has a separate click target for its usage menu. Windows
+without an interactive agent hide this capsule. Separators and empty status
+space have no click action. Usage shows the selected provider's remaining
+quota and token totals from the local cached usage data; its existing compact-
+width policy remains unchanged.
 
 Host metrics are enabled by default in the adaptive theme Host capsule. The
 resource capsule starts in Compact mode (CPU and memory); clicking it opens a
@@ -295,9 +296,11 @@ owns sampling, caching, width defaults and the menu action. Set
 `@workbench-host-metrics off` to disable them. See [host metrics](docs/host-metrics.md)
 for mode selection, platform support and the standalone CLI.
 
-Three status actions share the Host capsule immediately before Agent Status:
-tmux and Agent open the same menus as `M-t` and `M-a`, while Sidebar performs
-the same responsive toggle as `Tab`. Workbench owns their ranges and behavior;
+Session/Sidebar and tmux controls form the left group, followed by a gap
+and window labels. CPU, Host and Agent status remain on the right, with a flat
+outer edge. tmux and Agent status open the same menus as `M-t` and `M-a`, while
+the session label performs the same responsive Sidebar toggle as `Tab`.
+Prefix remains available through the keyboard. Workbench owns their ranges and behavior;
 the adaptive theme owns their placement, separators, and colors.
 The Host segment is a separate clickable range: it launches the existing
 `ssh-connect` effective inventory as a tmux menu; choosing a Host opens a new
@@ -306,16 +309,20 @@ dotfiles command rather than duplicated in Workbench.
 
 The tmux menu groups actions into **Launch agent**, **New window**, **Panes &
 layout**, **Switch window / session**, the installed editor, and **Detach**.
-Codex launch walks through Agent → Scene (daily / hard / batch) → Single /
-Team → native subagents or interactive tmux panes → Start. The review screen
-includes temporary adjustments: 快速交互 selects Astra low for this launch;
-it does not add a scene. Back is available at every step. Model, effort and
-scene-wide Fast policy are resolved by [agent-team](https://github.com/lukewang1024/agent-team),
-which must be on PATH for agent launches. Workbench does not duplicate
-model configuration. Claude and OpenCode go directly from Agent to Single /
-Team, without scenes, budget presets or temporary adjustments. Their defaults
-are preserved; uniform callers may pass scene/adjust/Fast options, which are
-ignored with one notice. Team still offers native or tmux presentation.
+Selecting an agent opens one configuration panel. Codex and Trae expose scene,
+Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
+show only Single/Team and collaboration choices. Clicking a choice refreshes
+this same panel. There is no temporary adjustment or separate review step.
+All native menus share a footer: Escape closes the menu, and Backspace returns
+one level when a parent exists or closes a root menu without an extra hint.
+The launch panel keeps Launch visible on every
+page; Enter launches. Shortcuts: `d/h/b` for scenes,
+`s/t` for mode and `n/m` for Native/tmux.
+
+The panel reads the actual model, effort and Fast preview from
+[agent-team](https://github.com/lukewang1024/agent-team) without making a model
+request. Errors appear inside the panel and preserve its selections. Workbench
+does not duplicate model configuration; agent-team must be on PATH.
 
 ```sh
 agent start codex --scene daily
@@ -351,10 +358,13 @@ capability boundaries.
 Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
 use native menus that select the row at the next click's coordinates, including
 on touch screens without hover events. The opening release is consumed before
-the menu appears. Pointer clients can move into a menu without dismissing it;
-Termux clients keep release-based touch selection. Escape or clicking outside
-dismisses the menu; keyboard shortcuts and arrow-key navigation remain
-available.
+the menu appears. On tmux 3.8+, both pointer and touch clients select on release,
+so a held click cannot open a submenu and then dismiss it on mouse-up. Hover
+only highlights items. Older tmux keeps its pointer press-selection workaround
+for its hover bug; reliable held-click navigation requires tmux 3.8+.
+Termux clients keep release-based touch selection on older versions too.
+Escape or clicking outside dismisses the menu; keyboard shortcuts and arrow-key
+navigation remain available.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

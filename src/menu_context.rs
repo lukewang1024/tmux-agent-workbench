@@ -52,6 +52,35 @@ pub(crate) fn tmux(args: &[&str]) -> Result<String> {
 }
 
 impl Context {
+    /// Window/launch menus target a pane and working directory, not an agent.
+    /// Read only tmux's pane identity; agent discovery belongs to agent actions.
+    pub fn read_launch(pane: &str) -> Result<Self> {
+        let info = tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_id}\n#{pane_pid}\n#{session_id}\n#{window_id}\n#{pane_current_path}\n#{pane_dead}",
+        ])?;
+        let lines: Vec<_> = info.split('\n').collect();
+        if lines.len() != 6 || lines[0] != pane || lines[5] != "0" {
+            return Err("pane disappeared".into());
+        }
+        let _: u32 = lines[1].parse()?;
+        Ok(Self {
+            pane: pane.into(),
+            session: lines[2].into(),
+            window: lines[3].into(),
+            cwd: lines[4].into(),
+            guard: format!("{:x}", Sha256::digest(format!("launch:{info}"))),
+            agent: None,
+            state: BaseState::Unknown,
+            input_available: false,
+            team: vec![],
+            role: None,
+        })
+    }
+
     pub fn read(paths: &Paths, pane: &str) -> Result<Self> {
         let info = tmux(&[
             "display-message",

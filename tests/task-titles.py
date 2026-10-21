@@ -135,7 +135,13 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             # do not grant Unix socket access. Diagnose both daemon discovery
             # and tmux verification, without changing the agent's permissions.
             if sys.platform == 'darwin' and shutil.which('codex'):
+                # The installed CLI may differ from the user's configuration
+                # schema. Sandbox verification must not load personal settings.
+                codex_config = Path(root, 'codex-config')
+                codex_config.mkdir()
+                sandbox_env = dict(detached_env, CODEX_HOME=str(codex_config))
                 sandbox_help = subprocess.run(['codex', 'sandbox', '--help'],
+                                              env=sandbox_env,
                                               capture_output=True, text=True)
                 if '--allow-unix-socket' in sandbox_help.stdout:
                     def sandbox_title(agent, allowed=None, run_env=None):
@@ -146,7 +152,8 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                                                      '--pane', agent['pane'],
                                                      '--session-id', agent['session_id'],
                                                      'Approved sandbox title'],
-                                              env=run_env or detached_env,
+                                              env=dict(run_env or detached_env,
+                                                       CODEX_HOME=str(codex_config)),
                                               capture_output=True, text=True, timeout=15)
 
                     # The hook's verified binding works on the first approved
