@@ -34,12 +34,13 @@ exec_claude()
 {
   for arg do
     case $arg in
-      --permission-mode|--permission-mode=*|--dangerously-skip-permissions)
-        exec claude "$@"
+      --) break ;;
+      --team|--permission-mode|--permission-mode=*|--dangerously-skip-permissions)
+        exec agent-team start claude "$@"
         ;;
     esac
   done
-  exec claude --permission-mode auto "$@"
+  exec agent-team start claude --permission-mode auto "$@"
 }
 
 exec_trae()
@@ -58,12 +59,13 @@ exec_opencode()
 {
   for arg do
     case $arg in
-      --auto)
-        exec opencode "$@"
+      --) break ;;
+      --team|--auto)
+        exec agent-team start opencode "$@"
         ;;
     esac
   done
-  exec opencode --auto "$@"
+  exec agent-team start opencode --auto "$@"
 }
 
 # Mark this tmux session as a task workbench. This is the single flag that opts
