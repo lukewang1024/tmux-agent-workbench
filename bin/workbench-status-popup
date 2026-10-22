@@ -16,8 +16,8 @@ while [ -h "$self" ]; do
   case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
 plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
-core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
-[ -x "$core" ] || core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core
+. "$plugin_dir/lib/resolve-core.sh"
+core=$(workbench_core_path "$plugin_dir") || core=
 [ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
 
 # Status bindings run after release, then the native menu handles the next click.

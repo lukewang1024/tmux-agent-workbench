@@ -9,9 +9,9 @@ while [ -h "$self" ]; do
     *) self=$(dirname "$self")/$target ;;
   esac
 done
-plugin_dir=$(CDPATH= cd -- "$(dirname "$self")/.." && pwd -P)
-core=${TMUX_AGENT_WORKBENCH_BIN:-$plugin_dir/target/release/tmux-agent-workbench}
-[ -x "$core" ] || core=$(command -v tmux-agent-workbench 2>/dev/null || true)
+plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
+. "$plugin_dir/lib/resolve-core.sh"
+core=$(workbench_core_path "$plugin_dir") || core=
 [ -n "$core" ] || { tmux display-message "Workbench binary unavailable"; exit 1; }
 
 # tmux run-shell does not guarantee that TMUX is present in the child
