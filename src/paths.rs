@@ -251,6 +251,12 @@ fn canonical_runtime_dir(uid: u32) -> PathBuf {
     {
         return root.join("tmux-agent-workbench");
     }
+    // Tool runners can drop XDG_RUNTIME_DIR while tmux retains the original
+    // value. Recover it before choosing a fallback, not just when scanning for
+    // title owners: ordinary IPC calls must not start a second daemon either.
+    if let Some(runtime) = tmux_runtime_dir(uid) {
+        return runtime;
+    }
     #[cfg(target_os = "linux")]
     {
         let standard = PathBuf::from(format!("/run/user/{uid}"));
@@ -259,6 +265,31 @@ fn canonical_runtime_dir(uid: u32) -> PathBuf {
         }
     }
     env::temp_dir().join(format!("tmux-agent-workbench-{uid}"))
+}
+
+fn tmux_runtime_dir(uid: u32) -> Option<PathBuf> {
+    use crate::server::{ServerError, ServerIdentity};
+    let mut command = std::process::Command::new("tmux");
+    command.arg("-u");
+    match ServerIdentity::discover() {
+        Ok(server) => {
+            command.args(server.tmux_args());
+        }
+        Err(ServerError::NotInTmux) => {}
+        Err(_) => return None,
+    }
+    // Read server metadata only; never use the focused pane as an identity.
+    let output = command
+        .args(["show-environment", "-g", "XDG_RUNTIME_DIR"])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout);
+    let root = PathBuf::from(value.trim_end().strip_prefix("XDG_RUNTIME_DIR=")?);
+    (root.is_absolute() && owned_directory(&root, uid)).then(|| root.join("tmux-agent-workbench"))
 }
 
 fn owned_directory(path: &Path, uid: u32) -> bool {

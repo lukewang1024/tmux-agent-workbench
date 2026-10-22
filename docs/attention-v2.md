@@ -65,8 +65,9 @@ Paths:
 - manifest overrides:
   `$XDG_CONFIG_HOME/tmux-agent-workbench/manifests/<agent>.toml`
 - logs/state: `$XDG_STATE_HOME/tmux-agent-workbench/`
-- socket/lock: `$XDG_RUNTIME_DIR/tmux-agent-workbench/`, falling back to a
-  user-isolated mode-0700 temporary directory
+- socket/lock: `$XDG_RUNTIME_DIR/tmux-agent-workbench/`; when the caller omits
+  `XDG_RUNTIME_DIR`, recover the tmux server's value before the standard Linux
+  user runtime or a user-isolated mode-0700 temporary directory
 - read-only OpenPeon packs: `~/.openpeon/packs/`, configurable
 
 `config check` rejects unknown keys and invalid values. Reload parses and

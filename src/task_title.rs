@@ -553,11 +553,31 @@ pub fn for_caller(
             .is_some_and(|process| pids.contains(&process.pid));
         (explicit || ancestor) && pane.is_none_or(|pane| agent.target.pane_id == pane)
     });
+    // Prefer the current runtime when an older daemon is still discoverable.
+    candidates.sort_by_key(|(socket, _, _)| socket.parent() != Some(paths.runtime_dir.as_path()));
     let mut verified = Vec::new();
+    let mut identities = Vec::new();
     let mut reason = None;
     for (socket, snapshot, agent) in candidates {
         match foreground_agent(&snapshot, &agent, session, false) {
-            Ok(agent) => verified.push((socket, snapshot, agent)),
+            Ok(agent) => {
+                // Several daemons can observe one caller. Collapse only exact
+                // verified identities, including the server and full process
+                // fingerprint; separate servers, sessions and reused PIDs must
+                // remain ambiguous rather than choosing an arbitrary owner.
+                let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+                    .map_err(|error| error.to_string())?;
+                let identity = (
+                    server.key,
+                    agent.kind,
+                    agent.target.window_id.clone(),
+                    Owner::of(&agent)?,
+                );
+                if !identities.contains(&identity) {
+                    identities.push(identity);
+                    verified.push((socket, snapshot, agent));
+                }
+            }
             Err(error) => reason = Some(error),
         }
     }
