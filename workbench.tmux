@@ -190,16 +190,8 @@ bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell
 # dispatcher, so the plugin must resolve the internal Rust core explicitly.
-ATTENTION_BIN="${TMUX_AGENT_WORKBENCH_BIN:-}"
-if [ -n "$ATTENTION_BIN" ] && [ ! -x "$ATTENTION_BIN" ]; then
-  ATTENTION_BIN=""
-fi
-# Match the public CLI: an installed release wins over stale checkout builds.
-if [ -z "$ATTENTION_BIN" ] && [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core" ]; then
-  ATTENTION_BIN="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-core"
-elif [ -z "$ATTENTION_BIN" ] && [ -x "$CURRENT_DIR/target/release/tmux-agent-workbench" ]; then
-  ATTENTION_BIN="$CURRENT_DIR/target/release/tmux-agent-workbench"
-fi
+. "$CURRENT_DIR/lib/resolve-core.sh"
+ATTENTION_BIN=$(workbench_core_path "$CURRENT_DIR") || ATTENTION_BIN=
 
 if [ -n "$ATTENTION_BIN" ]; then
   tmux set-option -g @workbench_attention_bin "$ATTENTION_BIN"
