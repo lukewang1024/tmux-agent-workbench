@@ -808,6 +808,11 @@ and `--session-id` supplied by the lifecycle hook. It never follows the focused
 client or guesses from a working directory. A live Workbench daemon is needed
 to verify the process/session binding.
 
+When a tool runner drops `XDG_RUNTIME_DIR`, Workbench recovers the runtime from
+the tmux server before opening or starting its daemon. If older daemons remain
+in other runtime directories, identical verified caller records count once;
+different servers, sessions and process fingerprints remain distinct.
+
 A tool sandbox can deny local Unix socket access even with the correct pane and
 session. The command reports that permission error separately from an identity
 mismatch. Choose execution permissions before the first invocation, using the

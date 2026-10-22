@@ -118,6 +118,42 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             recovered = core('title', 'status', '--pane', repair['pane'], '--session-id', repair['session_id'],
                              run_env=stripped_env)
             assert json.loads(recovered.stdout)['status'] == 'pending'
+
+            # An earlier tool runner can have started a second daemon after
+            # dropping XDG_RUNTIME_DIR. Both daemons observe the same CLI and
+            # durable title binding; that is one caller, not two owners.
+            legacy_env = dict(env, XDG_RUNTIME_DIR=root+'/legacy', XDG_STATE_HOME=root+'/legacy-state')
+            with running_daemon(binary, legacy_env):
+                deadline = time.monotonic() + 5
+                while True:
+                    legacy = json.loads(core('snapshot', '--json', run_env=legacy_env).stdout)
+                    if any(agent['target']['pane_id'] == repair['pane'] and not agent['exited']
+                           for agent in legacy['agents']):
+                        break
+                    assert time.monotonic() < deadline, 'legacy daemon did not observe the caller'
+                    time.sleep(.05)
+                # The parent retains the old runtime while the tool's own
+                # environment is stripped, matching shared execution backends.
+                duplicate = subprocess.run(
+                    [sys.executable, '-c',
+                     'import os, subprocess, sys; env=dict(os.environ); '
+                     'env.pop("XDG_RUNTIME_DIR", None); env.pop("TMUX", None); '
+                     'sys.exit(subprocess.run(sys.argv[1:], env=env).returncode)',
+                     binary, 'title', 'status', '--pane', repair['pane'],
+                     '--session-id', repair['session_id']],
+                    env=legacy_env, text=True, capture_output=True, timeout=15)
+                assert duplicate.returncode == 0, duplicate.stderr
+                assert json.loads(duplicate.stdout)['status'] == 'pending'
+
+                # Ordinary calls with a stripped runtime must use the same
+                # daemon as tmux, instead of creating another runtime socket.
+                primary_pid = json.loads(core('daemon', 'status').stdout)['pid']
+                recovered_pid = json.loads(core('daemon', 'status', run_env=stripped_env).stdout)['pid']
+                assert recovered_pid == primary_pid
+                core('daemon', 'ensure', run_env=stripped_env)
+                assert json.loads(core('daemon', 'status', run_env=stripped_env).stdout)['pid'] == primary_pid
+                assert json.loads(core('daemon', 'status', run_env=legacy_env).stdout)['pid'] != primary_pid
+            print('PASS stripped runtime reuses tmux daemon; duplicate daemons remain one verified caller')
             assert hook(repair, 'PostToolUse') == {}, 'no repeated tool-result reminder'
             assert hook(repair, 'Stop', stop_hook_active=True) == {}
             window_id = tmux('display-message', '-p', '-t', repair['pane'], '#{window_id}')[1:]

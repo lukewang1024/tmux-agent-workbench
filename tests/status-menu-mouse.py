@@ -859,15 +859,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain(0.3)
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu, b'(enter)')
-        for _ in range(2):
+        rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
+        for next_page in (b'Scene', b'Daily development'):
             # Check the native footer's output order directly. Replaying a
             # resized terminal into an 80-column mouse-coordinate model can
             # erase valid rows when tmux scrolls the source pane underneath.
             assert re.search(rb'\(enter\).*?\(back\).*?close.*?\(esc\)', rendered, re.S), rendered
             os.write(master, b']')
+            # A redraw of the old page can still contain Close. Wait for the
+            # next page's own content before sending another navigation key.
             # Native menus can redraw only changed cells.
-            rendered += wait_for_text(client_process)
+            rendered += wait_for_text(client_process, next_page)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agen')
         os.write(master, b'\x1b')
