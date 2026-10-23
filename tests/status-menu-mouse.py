@@ -144,11 +144,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                       actual, tmux('capture-pane', '-p', '-t', target)))
             drain(0.05)
 
-    def item_position(output, label="close"):
-        # Track the native menu's cursor writes to click the rendered Close row.
+    def screen_rows(output):
+        # Project cursor writes and erases onto the current terminal screen.
+        columns, rows = os.get_terminal_size(slave)
         screen = {}
         x = y = 0
-        tokens = re.findall(r'\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]', output.decode(errors='replace'))
+        tokens = re.findall(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]|[^\x1b]', output.decode(errors='replace'))
         for token in tokens:
             if token.startswith('\x1b['):
                 command = token[-1]
@@ -166,17 +167,30 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 elif command == 'D': x -= amount
                 elif command == 'A': y -= amount
                 elif command == 'B': y += amount
-                elif command == 'J' and numbers[0] == 2: screen.clear()
+                elif command in ('J', 'K'):
+                    mode = numbers[0]
+                    for col, row in list(screen):
+                        if command == 'J':
+                            erase = mode == 2 or (mode == 0 and (row, col) >= (y, x)) or (mode == 1 and (row, col) <= (y, x))
+                        else:
+                            erase = row == y and (mode == 2 or (mode == 0 and col >= x) or (mode == 1 and col <= x))
+                        if erase:
+                            del screen[col, row]
+            elif token.startswith('\x1b'):
+                continue
             elif token == '\r': x = 0
             elif token == '\n': y += 1
             elif token.isprintable():
                 screen[x, y] = token
                 x += 1
-        for row in range(30):
-            text = ''.join(screen.get((col, row), ' ') for col in range(80))
+        return [''.join(screen.get((col, row), ' ') for col in range(columns)) for row in range(rows)]
+
+    def item_position(output, label="close"):
+        rows = screen_rows(output)
+        for row, text in enumerate(rows):
             if label in text:
                 return text.index(label) + 2, row + 1
-        raise AssertionError(('Menu item position missing', label, screen))
+        raise AssertionError(('Menu item position missing', label, rows))
 
     def open_menu(*args, **kwargs):
         # Drain the previous screen before launching, so its Close footer
@@ -184,11 +198,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         return subprocess.Popen(*args, **kwargs)
 
-    def wait_for_text(proc, needle=b'close', *additional):
+    def wait_for_text(proc, needle=b'close', *additional, current_screen=False, absent=()):
         output = b''
         for _ in range(40):
             output += drain(0.05)
-            if all(text in output for text in (needle, *additional)):
+            visible = '\n'.join(screen_rows(output)).encode() if current_screen else output
+            if all(text in visible for text in (needle, *additional)) and not any(text in visible for text in absent):
                 return output
             if proc.poll() is not None:
                 probe = subprocess.run(
@@ -199,7 +214,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     'menu exited before rendering', proc.returncode, proc.stderr.read(),
                     'tmux probe', probe.returncode, probe.stdout, probe.stderr,
                 ))
-        raise AssertionError(('menu did not render', output))
+        raise AssertionError(('menu did not render', visible))
 
     def write_frame(proc, message):
         payload = json.dumps(message, separators=(',', ':')).encode()
@@ -696,12 +711,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             rendered = wait_for_text(client_process, b'Configured model is unavailable', b'(enter)')
         assert b'(enter)' in rendered
         # A new selection clears the old launch failure and stays on this panel.
-        # Finish the previous redraw and wait for the newly selected scene;
-        # its unselected label may still be buffered from the previous page.
+        # Check the current screen; the PTY may still contain older redraws
+        # with the error even after the newly selected scene has replaced it.
         drain()
         os.write(master, b'd')
-        rendered = wait_for_text(client_process, '● Daily development'.encode(), b'(enter)')
-        assert b'Configured model is unavailable' not in rendered, rendered
+        wait_for_text(client_process, '● Daily development'.encode(), b'(enter)',
+                      current_screen=True, absent=(b'Configured model is unavailable',))
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agent')
         os.write(master, b'\x1b')

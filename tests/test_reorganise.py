@@ -36,6 +36,8 @@ class ReorganiseTmuxTests(unittest.TestCase):
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TERM"] = "xterm"
+        # A delayed shell prompt must not change a test placeholder's identity.
+        tmux_env["PS1"] = ""
         self.tmux_env = tmux_env
         self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "alpha", "-n", "源✨", "sleep", "600")
         self.tmux("new-window", "-d", "-t", "alpha:", "-n", "shell 🐚", "sleep", "600")
