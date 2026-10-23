@@ -4,6 +4,15 @@ Workbench owns these conventions. Read them with `tmux-agent-workbench conventio
 before operating tmux windows, agents, workspaces, or persistent dev servers.
 Global agent instructions need only point to that command; keep the rules here.
 
+## Reorganising existing agents
+
+For a request to classify agents and move their windows into sessions, use the
+bundled `reorganise-agents` skill. It delegates the operation to one native
+subagent using the configured `batch` worker model and effort. The skill owns
+classification guidance; `tmux-agent-workbench reorganise` owns snapshots,
+validated whole-window moves, verification, and layout restoration. Preserve
+the caller's execution permissions and pass along any scratchpad preference.
+
 ## Stable task names for ordinary tmux agent windows
 
 Prefer one task and one agent per window. Do not start independent agents in

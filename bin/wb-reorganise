@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
+python_bin=${PYTHON:-python3}
+exec "$python_bin" -B "$dir/lib/reorganise.py" "$@"

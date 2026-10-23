@@ -23,6 +23,7 @@ tmux workspace workflow (distinct from the distributed `workbench` CLI)
 
 workflow: new [--prompt] add done promote inspect run prune projects rebuild
 agents:   agent start|list|goto|next|profiles|handoff
+layout:   reorganise batch-worker|snapshot|apply|restore
 titles:   title set <task-name> | title status
 clients:  attach, client serve|status|setup
 ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [compact|standard|full|cpu]
@@ -67,6 +68,7 @@ case $command_name in
   inspect) exec "$plugin_dir/bin/wb-inspect" "$@" ;;
   prune) exec "$plugin_dir/bin/wb-prune" "$@" ;;
   run) exec "$plugin_dir/bin/wb-run" "$@" ;;
+  reorganise|reorganize) exec "$plugin_dir/bin/wb-reorganise" "$@" ;;
   agent)
     [ $# -gt 0 ] || { usage >&2; exit 2; }
     agent_command=$1
