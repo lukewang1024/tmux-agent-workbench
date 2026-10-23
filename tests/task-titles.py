@@ -88,6 +88,19 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
     def name(agent):
         return tmux('display-message', '-p', '-t', agent['pane'], '#{window_name}')
 
+    def wait_name(agent, expected):
+        # Hooks may spool accepted reports while the daemon is busy. Observe
+        # the eventual title instead of treating the hook's reply as a redraw.
+        deadline = time.monotonic() + 8
+        while True:
+            actual = name(agent)
+            if actual == expected:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(('thread title did not sync', expected, actual,
+                                      agent, json.loads(core('snapshot', '--json').stdout)))
+            time.sleep(.05)
+
     def thread_title(agent):
         tty = tmux('display-message', '-p', '-t', agent['pane'], '#{pane_tty}')
         with open(tty, 'w') as stream:
@@ -364,9 +377,9 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             # Thread-name is shared by the sidebar and automatically owned title.
             named = spawn()
             assert hook(named, 'SessionStart', thread_name='Readable thread') == {}
-            assert name(named) == 'Readable thread'
+            wait_name(named, 'Readable thread')
             assert hook(named, 'UserPromptSubmit', thread_name='Renamed thread') == {}
-            assert name(named) == 'Renamed thread'
+            wait_name(named, 'Renamed thread')
             tracked = wait_agent(named['pane'])
             assert tracked['thread_name'] == 'Renamed thread'
             assert tracked['label'] == 'Renamed thread'
@@ -394,9 +407,9 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             tmux('set-option', '-w', '-t', task['pane'], '@workbench_task_root', root + '/tasks/planned')
             tmux('set-option', '-w', '-t', task['pane'], '@workbench_task_name', 'Planned task')
             assert hook(task, 'SessionStart', thread_name='Actual thread topic') == {}
-            assert name(task) == 'Actual thread topic'
+            wait_name(task, 'Actual thread topic')
             assert hook(task, 'UserPromptSubmit', thread_name='Updated thread topic') == {}
-            assert name(task) == 'Updated thread topic'
+            wait_name(task, 'Updated thread topic')
 
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], capture_output=True)

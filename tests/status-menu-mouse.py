@@ -198,12 +198,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         return subprocess.Popen(*args, **kwargs)
 
-    def wait_for_text(proc, needle=b'close', *additional, current_screen=False, absent=()):
+    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=()):
         output = b''
         for _ in range(40):
             output += drain(0.05)
             visible = '\n'.join(screen_rows(output)).encode() if current_screen else output
-            if all(text in visible for text in (needle, *additional)) and not any(text in visible for text in absent):
+            # Native menu content precedes its Close footer. A matching heading
+            # alone can arrive before later rows, especially on slower clients.
+            if all(text in visible for text in (needle, *additional, b'(esc)')) and not any(text in visible for text in absent):
                 return output
             if proc.poll() is not None:
                 probe = subprocess.run(
@@ -800,9 +802,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                           '--view', 'configure', '--language', 'zh'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu, '日常开发'.encode())
+        rendered = wait_for_text(menu, '日常开发'.encode(), '模式'.encode(), '启动'.encode(),
+                                 absent=(b'Daily development',))
         assert '模式'.encode() in rendered and '启动'.encode() in rendered
-        assert b'Daily development' not in rendered
+        assert b'Daily development' not in '\n'.join(screen_rows(rendered)).encode()
         os.write(master, b't')
         rendered = wait_for_text(client_process, '主代理'.encode())
         assert '协作方式'.encode() in rendered and '原生子代理'.encode() in rendered
