@@ -467,6 +467,9 @@ done
 # Interactive Workbench focus is a viewport transition as well as a target
 # change. A narrow client must enter responsive zoom even when the destination
 # was previously wide and unzoomed.
+# Keep a real second work pane: responsive maintenance removes the sidebar,
+# and tmux cannot zoom a window that contains only one remaining pane.
+tmux -S "$socket" split-window -d -t "$agent_pane"
 focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
   sort -n | sed -n '1s/^[0-9][0-9]* //p')
 # Disable the resize-driven path so this assertion proves focus itself owns the

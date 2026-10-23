@@ -40,17 +40,23 @@ client_session=$(tmux display-message -p -c "$client" '#{client_session}') || {
 }
 window=$(tmux display-message -p -t "$client_session:" '#{window_id}') || exit 1
 source_pane=$(tmux display-message -p -t "$window" '#{pane_id}') || exit 1
-client_width=$(tmux list-clients -F '#{client_name} #{client_width}' | \
-  awk -v target="$client" '$1 == target { print $2; found = 1; exit } END { if (!found) exit 1 }') || {
+viewport_width=$(tmux list-clients -F '#{client_name} #{window_id} #{client_width}' | \
+  awk -v target="$client" -v window="$window" '
+    $1 == target && $2 == window { found = 1 }
+    $2 == window { if (width == "" || $3 < width) width = $3 }
+    END { if (found) print width; else exit 1 }
+  ') || {
   tmux display-message -c "$client" 'Workbench client disappeared'
   exit 1
 }
+window_width=$(tmux display-message -p -t "$window" '#{window_width}') || exit 1
 sidebar_width=$(tmux show-option -gqv @sidebar_width)
 main_width=$(tmux show-option -gqv @sidebar_main_min_width)
 sidebar_width=${sidebar_width:-26}
 main_width=${main_width:-80}
 
-if [ "$client_width" -ge $((sidebar_width + main_width)) ]; then
+threshold=$((sidebar_width + main_width + 1))
+if [ "$viewport_width" -ge "$threshold" ] && [ "$window_width" -ge "$threshold" ]; then
   exec "$core" sidebar-control toggle "$window"
 fi
 

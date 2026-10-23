@@ -32,12 +32,19 @@ cat > "$fixture/bin/tmux" <<'SH'
 #!/bin/sh
 case "$*" in
   'set-option -g @workbench_attention_bin '*) printf '%s\n' "$4" > "$CORE_SELECTION_LOG" ;;
+  'list-clients -F #{client_name} #{window_id} #{client_width}')
+    printf '/dev/pts/8 @1 %s\n' "${MOCK_CLIENT_WIDTH:-160}"
+    if [ -n "${MOCK_OTHER_CLIENT_WIDTH:-}" ]; then
+      printf '/dev/pts/9 %s %s\n' "${MOCK_OTHER_CLIENT_WINDOW:-@1}" "$MOCK_OTHER_CLIENT_WIDTH"
+    fi
+    ;;
   *'#{socket_path}'*) printf '%s\n' /tmp/core-selection.sock ;;
   *'#{client_session}'*) printf '%s\n' test-session ;;
+  *'#{window_width}'*) printf '%s\n' "${MOCK_WINDOW_WIDTH:-160}" ;;
   *'#{window_id}'*) printf '%s\n' @1 ;;
   *'#{pane_id}'*) printf '%s\n' %1 ;;
-  'list-clients -F #{client_name} #{client_width}') printf '/dev/pts/8 %s\n' "${MOCK_CLIENT_WIDTH:-160}" ;;
   'display-popup '*)
+    : > "$CORE_SELECTION_LOG.popup"
     for popup_command do :; done
     sh -c "$popup_command"
     ;;
@@ -69,6 +76,32 @@ check() {
   [ "$(cat "$CORE_SELECTION_LOG.args")" = 'sidebar-control toggle @1' ]
   actual=$(MOCK_CLIENT_WIDTH=80 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
   [ "$actual" = "$1" ] || { echo 'wrong sidebar popup core' >&2; exit 1; }
+  # The divider needs one column too: 26 + 80 must still use a popup,
+  # while 26 + 80 + 1 is the first width that can hold a drawer.
+  rm -f "$CORE_SELECTION_LOG.popup"
+  actual=$(MOCK_CLIENT_WIDTH=106 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
+  [ "$actual" = "$1" ] && [ -f "$CORE_SELECTION_LOG.popup" ] || {
+    echo 'sidebar threshold omitted the divider column' >&2; exit 1;
+  }
+  rm -f "$CORE_SELECTION_LOG.popup"
+  actual=$(MOCK_CLIENT_WIDTH=107 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
+  [ "$actual" = "$1" ] && [ ! -f "$CORE_SELECTION_LOG.popup" ] || {
+    echo 'wide sidebar unexpectedly opened a popup' >&2; exit 1;
+  }
+  actual=$(MOCK_OTHER_CLIENT_WIDTH=80 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
+  [ "$actual" = "$1" ] && [ -f "$CORE_SELECTION_LOG.popup" ] || {
+    echo 'shared narrow viewport did not open a popup for the wide client' >&2; exit 1;
+  }
+  rm -f "$CORE_SELECTION_LOG.popup"
+  actual=$(MOCK_OTHER_CLIENT_WIDTH=80 MOCK_OTHER_CLIENT_WINDOW=@2 \
+    "$plugin/bin/wb-responsive" @1 /dev/pts/8)
+  [ "$actual" = "$1" ] && [ ! -f "$CORE_SELECTION_LOG.popup" ] || {
+    echo 'client viewing another window affected sidebar presentation' >&2; exit 1;
+  }
+  actual=$(MOCK_WINDOW_WIDTH=80 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
+  [ "$actual" = "$1" ] && [ -f "$CORE_SELECTION_LOG.popup" ] || {
+    echo 'constrained window did not open a popup for the wide client' >&2; exit 1;
+  }
 }
 check 'tmux-agent-workbench 2.0.0-beta.14' "$installed"
 export TMUX_AGENT_WORKBENCH_BIN="$fixture/override"
