@@ -336,15 +336,15 @@ class TaskWindows(unittest.TestCase):
             self.assertEqual(self.windows(), ['first', 'parallel task'])
             self.assertEqual(self.pane('first'), original)
         finally:
-            self.tmux('detach-client', '-t', client_name, check=False)
-            client.terminate()
+            # macOS may block a detached client flushing its final redraw.
+            # Release the terminal before waiting for that client to exit.
+            os.close(master)
+            os.close(slave)
             try:
-                client.wait(timeout=2)
+                client.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 client.kill()
                 client.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
 
 
 if __name__ == '__main__':
