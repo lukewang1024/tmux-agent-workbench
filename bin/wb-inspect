@@ -1,115 +1,71 @@
 #!/bin/sh
-# tmux-agent-workbench inspect — add (or focus) a per-repo inspection window in the current tmux
-# session: three panes stacked even-vertical, cwd = the repo in all of them —
-# a git TUI on top (tig by default; WORKBENCH_GIT_TOOL=lazygit to swap it), an
-# empty scratchpad shell in the middle (lands here), an editor on the bottom
-# ($VISUAL/$EDITOR if set, else nvim falling back to vim).
-#
-# This is the single, agent-agnostic entry point for bringing a repo into a task
-# session under the window-per-role model. A task == one session with one agent
-# window; each repo the task touches gets its own full-screen inspection window,
-# created lazily. Two callers:
-#
-#   - the prefix+G picker (tmux-agent-workbench pick repo): manual — pick a repo, --focus to it.
-#   - the coding agent itself, per the AGENTS.md / CLAUDE.md convention, when its
-#     work reaches into another repo. There is no reliable cross-agent signal for
-#     "the agent just gained a directory" (Claude's /add-dir fires no hook; codex
-#     and opencode have none either), so we invert control: the agent announces a
-#     scope change by running this command. Created detached by default so the
-#     window appears without stealing focus.
-#
-# Growing the agent's own write scope is the agent's job, not this command's
-# (claude: /add-dir; codex: reads by default, relaunch with --add-dir to write;
-# opencode: references / external_directory). See tmux-agent-workbench agent start --managed.
-#
-# The window-per-role model is opt-in per session: only sessions launched as a
-# task workbench (marked with @workbench_task by tmux-agent-workbench agent start --managed) get inspection
-# windows. In any other session — a bare agent in an ad-hoc session, or the
-# human's everyday session — this no-ops, so the agent-driven convention never
-# appends surprise windows where they don't belong. Pass --force to override
-# (the manual prefix+G picker does, since an explicit human pick is always
-# honoured and is one way to turn an ordinary session into a workbench).
-#
-# usage: tmux-agent-workbench inspect <repo-path> [--focus] [--force]
-#        WORKBENCH_SESSION=<name> tmux-agent-workbench inspect ...   # target a session other
-#          than the caller's current one — e.g. a just-created, not-yet-attached
-#          session (used by tmux-agent-workbench add). Skips the "am I inside tmux" requirement
-#          too, since the caller doesn't need to be attached to what it's
-#          naming explicitly.
+# Open a temporary tool. Closing it leaves no inspection window behind.
+# Context variables are assigned by the sourced task-context helpers.
+# shellcheck disable=SC2154
 set -eu
-
-# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
-# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
 self=$0
 while [ -h "$self" ]; do
   target=$(readlink "$self")
-  case $target in
-    /*) self=$target ;;
-    *) self=$(dirname "$self")/$target ;;
-  esac
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
-dir=$(cd "$(dirname "$self")" && pwd -P)
-
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 . "$dir/../lib/resolve-tools.sh"
-
-[ $# -ge 1 ] || { echo "usage: tmux-agent-workbench inspect <repo-path> [--focus] [--force]" >&2; exit 2; }
+. "$dir/../lib/resolve-session.sh"
+. "$dir/../lib/task-context.sh"
+usage() {
+  echo 'usage: tmux-agent-workbench inspect <path> [--git|--editor|--shell] [--pane]' >&2
+}
+case ${1:-} in -h|--help) usage; exit 0 ;; esac
+[ $# -ge 1 ] || { usage; exit 2; }
 path=$1; shift
-focus=0
-force=0
-for a in "$@"; do
-  case $a in
-    --focus) focus=1 ;;
-    --force) force=1 ;;
-    *) echo "tmux-agent-workbench inspect: unknown arg: $a" >&2; exit 2 ;;
+mode=git
+pane_mode=0
+for arg do
+  case $arg in
+    --git) mode=git ;;
+    --editor) mode=editor ;;
+    --shell) mode=shell ;;
+    --pane) pane_mode=1 ;;
+    --focus|--force) : ;; # compatibility; an explicit tool request is always honoured
+    *) echo "tmux-agent-workbench inspect: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
-
-. "$dir/../lib/resolve-session.sh"
-sess=$(workbench_resolve_session) || exit 1
-
-# Gate on the workbench marker unless forced. exit 0 (not an error): the agent
-# calls this speculatively per the AGENTS.md convention, and a non-workbench
-# session is a normal, expected state — not a failure to retry or report.
-if [ "$force" = 0 ] && [ "$(tmux show-option -t "$sess" -qv @workbench_task)" != 1 ]; then
-  echo "tmux-agent-workbench inspect: not a task workbench session (no @workbench_task); skipping — pass --force to override" >&2
-  exit 0
+path=$(CDPATH='' cd "$path" && pwd -P) || exit 1
+caller=$(workbench_resolve_pane) || exit 1
+session=$(tmux display-message -p -t "$caller" '#{session_id}')
+if [ -n "$(tmux show-option -qv -t "$session" @workbench_workspace_root)" ] || \
+   [ -n "$(tmux show-option -wqv -t "$caller" @workbench_task_root)" ]; then
+  workbench_task_context
+  path=$(workbench_task_repo "$path") || exit 1
+  session=$wb_session
+  [ -z "$wb_window" ] || caller=$(tmux list-panes -t "$wb_window" -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | head -1)
 fi
-path=$(cd "$path" 2>/dev/null && pwd -P) || { echo "tmux-agent-workbench inspect: no such dir: $path" >&2; exit 1; }
-
-. "$dir/../lib/project-window.sh"
-path=$(workbench_project_root "$path") || exit 1
-workbench_prune_windows
-
-name=$(basename "$path" | tr ' .:/' '____')   # tmux-safe window name
-
-# Idempotent: if the inspection window already exists, don't rebuild it — just
-# optionally focus it. Keeps re-adds (agent + human racing on the same repo) safe.
-if tmux list-windows -t "$sess" -F '#W' | grep -qxF "$name"; then
-  [ "$focus" = 1 ] && tmux select-window -t "$sess:$name"
-  exit 0
+# Used by the sourced proxy-inheritance helper.
+# shellcheck disable=SC2034
+wb_session=$session
+workbench_inherit_proxies
+case $mode in
+  git) command_string=$(resolve_git_tool) ;;
+  editor) command_string=$(resolve_editor) ;;
+  shell) command_string=${SHELL:-/bin/sh} ;;
+esac
+if [ "$pane_mode" = 0 ]; then
+  set -- display-popup -t "$caller" -E -w 90% -h 90% -d "$path" -e "PATH=$PATH"
+  [ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT"
+  if [ -n "${wb_task:-}" ]; then
+    set -- "$@" -e "WORKBENCH_SESSION=$wb_session" -e "WORKBENCH_TASK=$wb_task" -e "WORKBENCH_FEATURE=$wb_direction"
+  fi
+  exec tmux "$@" "$command_string"
 fi
-
-# git tool on top (WORKBENCH_GIT_TOOL=lazygit to swap it), empty scratchpad in
-# the middle (lands here), editor on the bottom ($VISUAL/$EDITOR, else nvim/vim).
-git_tool=$(resolve_git_tool)
-editor=$(resolve_editor)
-
-# Build detached: three panes stacked even-vertical, cwd = the repo in all.
-# Keep pane ids so an auto-created sidebar cannot change which pane receives
-# the next split or which panes get the git tool, scratchpad, and editor.
-git_pane=$(tmux new-window -d -t "$sess:" -n "$name" -c "$path" -P -F '#{pane_id}')
-# Pin the window name to the repo. Without this, automatic-rename (on by default)
-# retitles the window after the focused pane's command, so it flips between the
-# git tool / shell / editor as you move between panes — the window's identity is
-# the repo, not whatever happens to be focused, so lock it.
-tmux set-window-option -t "$sess:$name" automatic-rename off
-tmux set-window-option -t "$sess:$name" @workbench_project_root "$path"
-scratch_pane=$(tmux split-window -v -t "$git_pane" -c "$path" -P -F '#{pane_id}')
-editor_pane=$(tmux split-window -v -t "$scratch_pane" -c "$path" -P -F '#{pane_id}')
-"$dir/workbench-layout" even-vertical "$git_pane"
-tmux send-keys -t "$git_pane" "$git_tool" Enter
-tmux send-keys -t "$editor_pane" "$editor" Enter
-tmux select-pane -Z -t "$scratch_pane"       # land in the scratchpad, not tig
-
-[ "$focus" = 1 ] && tmux select-window -t "$sess:$name"
-exit 0
+ready=workbench-tool-$$
+set -- split-window -d -v -t "$caller" -c "$path" \
+  -e "PATH=$PATH" -e "WORKBENCH_TOOL_COMMAND=$command_string" -e "WORKBENCH_TOOL_READY=$ready" -P -F '#{pane_id}'
+if [ -n "${wb_task:-}" ]; then
+  set -- "$@" -e "WORKBENCH_SESSION=$wb_session" -e "WORKBENCH_TASK=$wb_task" -e "WORKBENCH_FEATURE=$wb_direction"
+fi
+pane=$(tmux "$@" \
+  'tmux wait-for "$WORKBENCH_TOOL_READY"; exec /bin/sh -c "$WORKBENCH_TOOL_COMMAND"')
+tmux set-option -p -t "$pane" @pane_role tool
+tmux set-option -p -t "$pane" remain-on-exit off
+tmux wait-for -S "$ready"
+printf '%s\n' "$pane"

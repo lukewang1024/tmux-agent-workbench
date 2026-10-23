@@ -25,7 +25,7 @@ mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || pr
 set -- "$script_dir/tmux-agent-workbench-cli" display-menu -- -M
 [ "$mouse_mode" != mouse ] || set -- "$@" -O
 set -- "$@" -C 0 -c "$client" -t "$pane" \
-  -T '#[align=centre] 󰍹 SSH '
+  -T '#[align=centre] 󰍹 #H · SSH '
 found=0
 keys=123456789abcdefghijklmnopqrstuvwxyz
 index=1

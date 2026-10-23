@@ -571,6 +571,7 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
                 attention_seq,
                 seen_seq,
                 hook_session_id,
+                thread_name: agent.thread_name.clone(),
                 delivered_event_ids: delivered_event_ids.clone(),
                 pending: pending.clone(),
                 recent_endpoint: recent_endpoint.clone(),

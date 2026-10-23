@@ -2,6 +2,27 @@
 # Resolve the caller, never the currently focused client. Agent tool runners
 # may remove TMUX/TMUX_PANE; outside a PID sandbox, ancestry still identifies
 # the owning pane. Inside a PID sandbox callers must provide an explicit target.
+workbench_resolve_pane() (
+  wb_panes=$(tmux list-panes -a -F '#{pane_id} #{pane_pid}') || exit 1
+  if [ -n "${TMUX_PANE:-}" ]; then
+    wb_target=$(printf '%s\n' "$wb_panes" | awk -v pane="$TMUX_PANE" '$1 == pane { print $1 }')
+  else
+    wb_pid=$$
+    wb_target=
+    while [ "$wb_pid" -gt 1 ] 2>/dev/null; do
+      wb_target=$(printf '%s\n' "$wb_panes" | awk -v pid="$wb_pid" '$2 == pid { print $1 }')
+      [ -z "$wb_target" ] || break
+      wb_pid=$(ps -o ppid= -p "$wb_pid" 2>/dev/null | tr -d ' ') || break
+      case $wb_pid in ''|*[!0-9]*) break ;; esac
+    done
+  fi
+  [ -n "$wb_target" ] && [ "$(printf '%s\n' "$wb_target" | wc -l)" -eq 1 ] || {
+    echo 'workbench: cannot uniquely locate the calling pane; set TMUX_PANE explicitly.' >&2
+    exit 1
+  }
+  printf '%s\n' "$wb_target"
+)
+
 workbench_resolve_session() (
   wb_sessions=$(tmux list-sessions -F '#{session_id} #{session_name}') || {
     echo 'workbench: cannot connect to tmux; check socket access/sandbox permissions (this does not mean the session is not a workbench).' >&2

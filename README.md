@@ -16,30 +16,37 @@ persists prompt text by default. See the durable
 
 ## What it is / why
 
-An agentic coding task rarely stays inside one repo. It starts in `web-app`,
-then needs to check `shared-schemas`, then needs a throwaway branch of `api-service` to test
-against — and the human running it needs a durable place to *watch* all of
-that happen, not just a scrollback of agent output. A plain terminal tab
-doesn't hold that shape. tmux does, if something wires up the convention:
+A direction often has several tasks in flight. Workbench gives each task a
+place to run and keeps their code changes independent:
 
-- **one tmux session = one task**, with one window dedicated to the agent
-  driving it;
-- every other repo the task touches gets its own **inspection window** (git
-  TUI + scratchpad + editor), so a human can look at what the agent is doing
-  to that repo without leaving tmux;
-- optionally, every repo folded into a task is its own **git worktree** on
-  its own branch, so a multi-repo task never touches your main checkouts.
+- **One session groups a direction or larger goal.**
+- **One window is one task**, with its own agent, conversation, and progress.
+- **Each coding task owns isolated worktrees and branches.** Multiple tasks
+  may use the same repository, but never the same writable checkout.
+- Git tools, editors, shells, and services open on demand within the task.
+  Temporary tools close on exit; there is no prebuilt inspection layout.
 
-This repo is two independently loadable layers that implement that:
+For example:
 
-- **Layer 1** (`workbench.tmux` + `bin/`) — repo-agnostic. Just the
-  session/window model and the inspection-window mechanic. No opinion about
-  git worktrees, no opinion about where your repos live.
-- **Layer 2** (`git/workbench-git.tmux` + `git/bin/`) — opinionated. Adds
-  git-worktree-backed multi-repo workspaces on top of layer 1, assuming a
-  `~/Code` (persistent checkouts) + `~/Workspace` (per-task worktrees)
-  convention. Opt out of this layer entirely with `@workbench-disable-git 1`
-  if you only want layer 1.
+```sh
+tmux-agent-workbench new --task formulas word-experience bear-web-x
+tmux-agent-workbench task new image-layout bear-web-x
+```
+
+This creates two task windows in `word-experience`, with independent checkouts
+under `~/Workspace/word-experience/tasks/formulas/` and `tasks/image-layout/`.
+Tasks can start without repositories, and one task can span multiple repos.
+Shared machine/environment maintenance is an explicit exception to checkout
+isolation, rather than the default for parallel coding work.
+
+The repo has two layers:
+
+- **Layer 1** (`workbench.tmux` + `bin/`) tracks agents, supplies navigation,
+  temporary tools, and supporting service panes.
+- **Layer 2** (`git/workbench-git.tmux` + `git/bin/`) creates workspace sessions,
+  task windows, and isolated worktrees using `~/Code` as the source-checkout
+  pool and `~/Workspace` for task directories. Disable its tmux bindings with
+  `@workbench-disable-git 1`.
 
 Both layers live in one repo and load from a single `@tpm_plugins` entry —
 see [Install](#install).
@@ -49,12 +56,10 @@ see [Install](#install).
 - **tmux >= 3.6 for interactive status/sidebar menus** (core requires >= 3.2), **git**, and the shipped `tmux-agent-workbench` binary —
   hard requirements. The installer downloads a matching macOS/Linux
   x86_64/aarch64 release, then falls back to a local Cargo build.
-- **tig** or **lazygit** (or any git TUI) — launched in the top pane of every
-  inspection window. Defaults to `tig`; set `@workbench-git-tool` to change
-  it. Soft dependency: if the configured tool isn't installed, that one pane
-  just fails to launch, nothing else breaks.
-- **nvim** or **vim** — launched in the bottom pane of every inspection
-  window. Uses `$VISUAL`/`$EDITOR` if set, else `nvim`, else `vim`.
+- **tig** or **lazygit** — used only when opening a temporary Git tool.
+  Defaults to `tig`; set `@workbench-git-tool` to change it.
+- **nvim** or **vim** — used only for an explicitly opened editor. Uses
+  `$VISUAL`/`$EDITOR`, otherwise `nvim`, then `vim`.
 - **fzf-tmux** — hard requirement for the inspect, session, and Agent pickers.
   Other daemon/sidebar behavior remains available if it is missing, and
   `tmux-agent-workbench doctor` reports the dependency clearly.
@@ -124,10 +129,10 @@ plugin loads when their option is explicitly set.
 | Action | Option | Default | Runs |
 |---|---|---|---|
 | Pick/start a tmuxinator project | `@workbench-key-project` | unbound | Project picker |
-| Open the inspect picker (fzf) | `@workbench-key-inspect` | unbound | Inspection picker |
+| Open a temporary Git tool | `@workbench-key-inspect` | unbound | Task repository picker |
 | Regenerate the tmuxinator pool | `@workbench-key-regen` | unbound | `tmux-agent-workbench projects rebuild` |
 | Prompt for a new workspace | `@workbench-key-new` | unbound | Workspace name prompt |
-| Promote current pane's repo to a new task | `@workbench-key-promote` | unbound | Promote current pane |
+| New isolated task in this workspace | `@workbench-key-task` | unbound | Task name popup |
 | Toggle current-window Agent sidebar | `@workbench-key-sidebar` | `Tab` | Rust sidebar |
 | Toggle all Agent sidebars | `@workbench-key-sidebar-all` | unbound | Rust sidebar |
 | Pick any session by attention | `@workbench-key-session` | unbound | session picker |
@@ -135,7 +140,8 @@ plugin loads when their option is explicitly set.
 | Jump to next unseen attention | `@workbench-key-attention` | unbound | attention queue |
 
 The Agent sidebar/session/Agent/attention actions belong to layer 1 and do not
-depend on the git-worktree layer. Regenerate/new/promote require layer 2. Their
+depend on the git-worktree layer. Regenerate/new/task require layer 2. The old `@workbench-key-promote` option
+also opens the task-name popup for compatibility. Their
 global options remain available for users who prefer direct prefix shortcuts;
 the default avoids claiming memorable tmux keys for infrequent operations.
 
@@ -157,7 +163,7 @@ To rebind, set the option **before** the plugin loads (add it above
 set -g @workbench-key-inspect 'g'
 set -g @workbench-key-regen 'M-r'
 set -g @workbench-key-new 'n'
-set -g @workbench-key-promote 'M-p'
+set -g @workbench-key-task 'M-p'
 ```
 
 Then `prefix+I` (or `tmux source-file ~/.tmux.conf` followed by re-running
@@ -173,9 +179,9 @@ don't, the underlying scripts fall back to their own built-in default, so
 | Option | Bridged env var | Default | Effect |
 |---|---|---|---|
 | `@workbench-agent` | `WORKBENCH_AGENT` | `claude` | Which CLI `tmux-agent-workbench agent start --managed` execs: `claude`, `codex`, `trae`, or `opencode`. |
-| `@workbench-git-tool` | `WORKBENCH_GIT_TOOL` | `tig` | Git TUI launched in the top pane of every inspection window (e.g. `lazygit`). |
+| `@workbench-git-tool` | `WORKBENCH_GIT_TOOL` | `tig` | Git TUI opened on demand in a temporary popup (e.g. `lazygit`). |
 | `@workbench-code-root` | `WORKBENCH_CODE_ROOT` | `~/Code` | Root of your persistent repo checkouts. Layer 2 looks here to resolve a short repo name (`tmux-agent-workbench add web-app`) to its main checkout. |
-| `@workbench-workspace-root` | `WORKBENCH_WORKSPACE_ROOT` | `~/Workspace` | Root under which `tmux-agent-workbench new` creates one directory per workspace; each level-1 directory is pickable, with immediate child git worktrees as inspection windows (or the directory itself for a standalone checkout). |
+| `@workbench-workspace-root` | `WORKBENCH_WORKSPACE_ROOT` | `~/Workspace` | Workspace directions; task checkouts live at `<direction>/tasks/<task>/<repo>`. Legacy workspaces reopen as one existing task. |
 | `@workbench-disable-git` | — (checked directly, not bridged) | unset | Set to `1` to skip loading layer 2 (`git/workbench-git.tmux`) entirely. |
 
 ```tmux
@@ -245,12 +251,11 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 `@workbench-key-agent`, and `@workbench-key-attention` before the plugin loads.
 
 The sidebar shows all sessions and all detected agents from the current tmux
-server in separate sections. Sessions occupy the upper half by default. A
-midpoint action row keeps `new` on the left and `menu` on the right, with Agents
-below it in the lower half. When the available terminal height cannot show all
-rows, the order adapts to Agents, the action row, then Sessions so live Agent
-state remains visible on short terminals such as phone clients. One blank row
-separates the action row from both sections. Help remains available from `?`
+server in separate sections. A pinned top row keeps `new` on the left and
+`menu` on the right. Agents always appear above Sessions, on every screen size.
+Session groups in Agents follow one another without blank rows. A single blank
+row separates Agents from Sessions. Both sections use one continuous scrolling
+list, without rebuilding or sorting it on resize. Help remains available from `?`
 without taking space in the mouse action row. Session and Agent targets use
 two-line cards so the full card is easier to click. The label at the right of
 the Agents header toggles between `grouped`
@@ -259,18 +264,26 @@ working, seen idle, unknown); the choice is remembered and synchronized across
 all running sidebar instances. Press `d` to toggle a more detailed view with
 Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
-opens session/agent actions. The footer opens the tmuxinator-project picker and
+opens session/agent actions. The top row opens the tmuxinator-project picker and
 the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
 `Ctrl-D` close the popup; the footer and global menu also expose a mouse-driven
 close action. Those exit keys are popup-only and do not terminate a persistent
 sidebar pane. Activating a session or Agent with Enter or a left click also
 closes the popup after the navigation succeeds.
 
+Agent cards show the agent thread-name on the first line, falling back to the
+tmux window title before a name is available.
+The second line shows task progress (when available), workspace session name,
+status, and agent type. Grouped mode shows the session name once above its
+agents; prioritized mode keeps it on each agent card, so
+parallel tasks within one direction remain distinguishable. Both lines are
+clickable, and long Chinese titles truncate to their actual terminal width.
+
 With focus in the sidebar, press `?` for the complete centered shortcut card.
-The everyday keys are plain letters: `i` inspects a repo, `d` toggles details,
+The everyday keys are plain letters: `i` opens a temporary Git tool, `d` toggles details,
 `n` jumps to attention, and `s`/`a` open pickers. Heavier mutating actions use
-uppercase: `N` picks/starts a tmuxinator project, `W` creates a workspace, `P`
-promotes the selected repo, and `R` rebuilds generated projects. `m` opens the
+uppercase: `N` picks/starts a tmuxinator project, `W` creates a workspace, `T`
+creates a task in the selected session, and `R` rebuilds generated projects. `m` opens the
 row menu. The global menu exposes the
 same management actions for mouse use.
 
@@ -337,6 +350,10 @@ agent start opencode --team
 Workbench adds no approval-bypass flags. Single and native Team open one new
 window; pane Team lets `agent-team` create its own window, with no launcher
 pane left behind. Presentation is chosen at launch and never mixed mid-session.
+
+The Agent menu includes **Usage summary** (`u`) to open plan limits and token
+usage, including when the narrow status bar hides the usage badge.
+The Host menu shows the current machine's hostname above its SSH destinations.
 
 The Agent menu belongs to the pane from which it was opened. It identifies the
 live foreground CLI from its process ancestry and offers provider-specific
@@ -581,53 +598,29 @@ to this public API and are retained for compatibility through 2.1.
 
 ### Layer 1 — repo-agnostic (`bin/`)
 
-- **`tmux-agent-workbench agent start --managed`** — launches the task's coding agent (`$WORKBENCH_AGENT`:
-  `claude` / `codex` / `trae` / `opencode`) in the current directory, and stamps the
-  session with `@workbench_task 1`. It also stamps the agent pane with
-  `@workbench_agent` and `@workbench_profile`, allowing handoffs to recover
-  launch identity even when an agent tool runner sanitizes child-process
-  environment variables. The session marker is the single flag that
-  opts a session into the window-per-role model — a bare `claude` started
-  in some other session stays unmarked and `tmux-agent-workbench inspect` no-ops there. Codex
-  task workbenches always launch in YOLO mode so routine approvals do not
-  interrupt the task driver; an explicitly supplied equivalent flag is kept
-  without adding a duplicate.
-- **`tmux-agent-workbench inspect <repo-path> [--focus] [--force]`** — adds (or focuses) a
-  repo as an inspection window in the current (or `$WORKBENCH_SESSION`)
-  task session: three panes, even-vertical, cwd = the repo in all of them —
-  git tool on top, empty scratchpad shell in the middle (lands here),
-  editor on the bottom. Idempotent (re-running just focuses the existing
-  window). Self-gates on `@workbench_task` unless `--force` is given — the
-  agent can call it unconditionally without checking session type first.
-  This is also the command the coding agent itself is meant to call, per the
-  [agent conventions](#agent-conventions) below, the moment its work reaches
-  into another repo. Workbench v2's own responsive sidebar is added after the
-  inspection layout is built and stays outside workspace-pane layout changes.
-- **`tmux-agent-workbench pick repo`** (optional `@workbench-key-inspect` binding) — fzf-tmux picker over your directory
-  universe (zoxide history + the generated tmuxinator pool + a live `fd`
-  search), then opens the pick as a focused inspection window via
-  `tmux-agent-workbench inspect --focus --force`. The manual counterpart to the agent-driven
-  `tmux-agent-workbench inspect` call.
-- **`tmux-agent-workbench run [--name <label>] <repo-path> -- <argv...>`** — appends a
-  detached pane to that repo's inspection window for a dev server or another
-  long-running task. It creates the inspection window first when necessary,
-  tags the new pane with `@pane_role=task`, `@workbench_task_name`,
-  `@workbench_task_command`, and `@workbench_project_root`, starts the command,
-  then reapplies `even-vertical` through Workbench's layout controller, keeping
-  the sidebar as a full-height side column while only workspace panes are
-  re-laid out. The pane id is printed so callers can capture logs or remove it
-  later. Long tasks are added on demand; the default inspection layout remains
-  git/shell/editor only.
-  The legacy `mux-run-task` form remains as an every-invocation-warning shim
-  through 2.1. Use `--shell '<command>'` only when shell syntax is required.
-  `run`, `inspect`, and automatic session detection in `add` share a resolver:
-  an explicit `WORKBENCH_SESSION` takes priority, followed by `TMUX_PANE`,
-  the session ID in `TMUX`, and the caller's process ancestry when those
-  variables are absent. They never guess from the currently focused client.
-  If a PID sandbox also hides ancestry, set `WORKBENCH_SESSION` to the intended
-  session name or ID. Socket permission errors require access to the tmux
-  socket through the agent's permission mechanism; they do not mean that the
-  session is not a workbench and are not a reason to launch a background server.
+- **`tmux-agent-workbench agent start --managed`** — launches the current task's
+  agent (`$WORKBENCH_AGENT`: `claude`, `codex`, `trae`, or `opencode`). New task
+  windows launch this automatically. Agent/profile pane metadata supports handoff.
+- **`tmux-agent-workbench inspect <path> [--git|--editor|--shell] [--pane]`** — opens
+  one temporary tool, in a popup by default or a supporting pane with `--pane`.
+  It creates no window and no fixed layout. Exit the tool to close it. Legacy
+  `--focus`/`--force` flags are accepted without recreating inspection windows.
+- **`tmux-agent-workbench pick repo [--git|--editor|--shell]`** — selects a directory
+  for a temporary tool. Within a task it lists that task's checkouts; elsewhere
+  it uses directory history and configured project roots. It does not add repos
+  or send commands to another agent.
+- **`tmux-agent-workbench run [--name <label>] <own-checkout> -- <argv...>`** — opens
+  a persistent service in a supporting pane of the owning task's window.
+  `--shell '<command>'` supports shell syntax. Repeating a name replaces that
+  task's service, while another task's same-named service remains independent.
+  The pane closes on command exit. One-shot agent commands use execution tools.
+  Configured proxy variables are passed into actual tmux-launched processes in
+  both uppercase and lowercase forms.
+- `add`, `run`, and temporary tools target the calling pane's task. For a caller
+  without pane ancestry, provide verified `TMUX_PANE`, or set
+  `WORKBENCH_SESSION` and `WORKBENCH_TASK` explicitly. With multiple tasks, a
+  session alone is ambiguous. Another task's worktree is never selected merely
+  because it shares a Git common directory.
 - **`tmux-agent-workbench agent handoff --target <profile> < summary`** — hands the current task to a
   fresh coding-agent profile in a detached right-hand pane, using the target
   CLI's initial-prompt interface rather than terminal keystroke injection. It
@@ -684,88 +677,43 @@ Migration records live under `$XDG_STATE_HOME/tmux-agent-workbench/reorganise`.
 The worker instructions and plan format are maintained in the
 [skill](skills/reorganise-agents/SKILL.md).
 
-### Layer 2 — opinionated git-worktree workspaces (`git/bin/`)
+### Layer 2 — isolated task worktrees (`git/bin/`)
 
-- **`tmux-agent-workbench new <feature> [repo[:branch] ...]`** — starts a new task: creates
-  `$WORKBENCH_WORKSPACE_ROOT/<feature>`, a same-named tmux session marked
-  as a task workbench, and its agent window. Repos are optional — a
-  workspace can start empty ("what does this task even touch?") and grow
-  later. Any repos given up front are handed to `tmux-agent-workbench add` one at a time.
-  Idempotent: re-running against an existing workspace just folds in more
-  repos (or re-attaches).
-- **`tmux-agent-workbench new --prompt`** (optional `@workbench-key-new` binding) — `tmux command-prompt` front end for
-  `tmux-agent-workbench new`: type `feature` alone, or `feature repo[:branch] ...`, in one go.
-- **`tmux-agent-workbench add [--base <remote-branch>] <repo>[:<branch>]`** — folds a repo into an *already-running*
-  workspace: creates its worktree under
-  `$WORKBENCH_WORKSPACE_ROOT/<feature>/<repo>` if it doesn't exist yet
-  (branch defaults to the workspace's own name). It fetches `origin` first;
-  a missing local requirement branch is created from `origin/<remote-branch>`
-  when `--base` is given, otherwise from the updated `origin/HEAD`. The target
-  and base branches are independent: `tmux-agent-workbench add --base release/word
-  roadster:feature-x` creates local `feature-x` from `origin/release/word`.
-  The new requirement branch starts without an upstream, so its first push
-  cannot accidentally target the remote base branch.
-  It never infers the base from a same-named remote branch or falls back to
-  the main checkout's current HEAD. Existing worktrees must
-  belong to the resolved mother repo and already be on the requested branch.
-  It then adds the repo as an inspection window via `tmux-agent-workbench inspect`. This is the "discovered mid-task"
-  primitive — call it the moment a task turns out to need a repo that
-  wasn't known about at `tmux-agent-workbench new` time. Usable by a human at the prompt or
-  by a coding agent's own shell tool. Idempotent: an existing worktree is
-  initialized again and focused, not recreated.
-
-  A repository can opt into local worktree initialization by providing an
-  executable regular file at `<main-checkout>/.workbench/worktree-init`.
-  `tmux-agent-workbench add` runs this trusted main-checkout script after the worktree exists and
-  before adding its inspection window, on every invocation. The script runs
-  with the worktree as its current directory and receives
-  `WORKBENCH_INIT_PROTOCOL=1`, `WORKBENCH_MAIN_CHECKOUT`,
-  `WORKBENCH_WORKTREE`, `WORKBENCH_WORKSPACE`, `WORKBENCH_FEATURE`,
-  `WORKBENCH_REPO`, and `WORKBENCH_BRANCH`. It must be non-interactive and
-  idempotent. A non-zero exit stops `tmux-agent-workbench add` while preserving the worktree for
-  a later repair; missing initializers are a no-op. Symlink initializers are
-  refused.
-- **`tmux-agent-workbench done [--force] <feature>`** — tears a workspace down: kills its
-  tmux session if running, then `git worktree remove` per member repo
-  (each repo's main checkout under `$WORKBENCH_CODE_ROOT` is never
-  touched). Default policy is safe-clean: a dirty worktree is left in
-  place and reported rather than discarded; `--force` discards it anyway
-  (`git worktree remove --force`). Regenerates the tmuxinator pool
-  afterward so the stale config disappears with it.
-- **`tmux-agent-workbench promote [feature]`** (prefix+M-T) — spins whatever the *current
-  pane* is doing into its own brand-new dedicated task. Unlike `tmux-agent-workbench new`, the
-  pane itself moves there (`tmux break-pane`) rather than a disconnected
-  blank pane appearing elsewhere — a coding agent already mid-task in that
-  pane keeps running, uninterrupted, now living in the new session's `agent`
-  window. A repo isn't required — a task can start from anywhere: if the
-  pane is inside one, that repo is folded in (new worktree and branch;
-  `feature` defaults to its short name); if it isn't, the task still starts
-  with no repo attached (grow it later with `tmux-agent-workbench add`), and if you didn't
-  pass `feature` either, this *asks* for a name rather than guessing one off
-  the bare directory name. Refuses cleanly (leaving the source pane/session
-  untouched) if `feature` is already a session name. The *source* session is
-  expected to disappear once its only pane moves out — that's normal tmux
-  behavior, not a bug, and is the point: you don't end up straddling two
-  places. If tmux-agent-sidebar is installed with auto-create on, the new
-  `agent` window gets one explicitly here — `tmux break-pane` doesn't fire
-  the `after-new-window` hook that every other window in this system relies
-  on for that, so without this it would be the one place that never got a
-  sidebar automatically.
-- **`tmux-agent-workbench projects rebuild [code_root] [workspace_root]`** (prefix+M-g) —
-  regenerates the persistent tmuxinator pool under
-  `~/.config/tmuxinator/` from actual git-worktree state: one config per
-  `$WORKBENCH_CODE_ROOT` repo/pool-slot, and one config for every level-1
-  `$WORKBENCH_WORKSPACE_ROOT` directory. Workspace configs are pre-seeded
-  with an inspection window for each immediate child git worktree, or for the
-  directory itself when it is a standalone checkout; empty task directories
-  get an agent-only config. Positional args win over
-  `$WORKBENCH_CODE_ROOT`/`$WORKBENCH_WORKSPACE_ROOT`, which win over the
-  `~/Code` / `~/Workspace` hardcoded defaults. This script only ever writes
-  YAML — it never invokes the `tmuxinator` binary itself (see
-  [Requirements](#requirements)). `tmux-agent-workbench add`, `tmux-agent-workbench done`, and the prefix+M-g
-  binding all call it so the pool stays in sync with reality; manual
-  exclusions persist across re-runs via
-  `~/.config/tmuxinator/.genignore`.
+- **`new [--detach] [--task <name>] <direction> [repo[:branch] ...]`** creates or
+  reopens a workspace session and its first task. The initial task defaults to
+  the direction name. Repositories are optional. `new --prompt` opens the
+  workspace-name prompt.
+- **`task new [--detach] <name> [repo[:branch] ...]`** creates or reopens an
+  independent task in the current workspace. It starts with one agent pane.
+  `task new --prompt` opens a task-name popup; repositories can be added later.
+- **`task list`** lists task names, owning windows (or `closed`), and paths.
+- **`add [--base <remote-branch>] <repo>[:<branch>]`** creates a checkout at
+  `<workspace>/tasks/<task>/<repo>`. Branches default to `task/<direction>/<task>`;
+  an explicit `repo:branch` overrides that name. It fetches origin and creates
+  missing branches from the requested remote base, or refreshed `origin/HEAD`.
+  A checked-out branch cannot be reused by another task. Existing checkouts
+  must belong to the requested repo and branch. Adding a repo opens no tool
+  and does not change the selected window.
+- Repositories can supply an executable `<main-checkout>/.workbench/worktree-init`.
+  It runs from the task checkout on each `add`, with `WORKBENCH_INIT_PROTOCOL=1`,
+  `WORKBENCH_MAIN_CHECKOUT`, `WORKBENCH_WORKTREE`, `WORKBENCH_WORKSPACE`,
+  `WORKBENCH_FEATURE`, `WORKBENCH_TASK`, `WORKBENCH_TASK_ROOT`, `WORKBENCH_REPO`,
+  and `WORKBENCH_BRANCH`. Symlink initializers are refused; a failed initializer
+  retains the checkout for repair.
+- **`task done [--force] <name>`** removes that task's checkouts and window.
+  Uncommitted changes or scratch files retain the task. **`done [--force]
+  <direction>`** closes the whole workspace, retaining unfinished tasks.
+  `--force` discards worktree changes only; main checkouts and unrelated files
+  are preserved. Closing the last task window may end the tmux session; the
+  direction can be reopened later.
+- **`projects rebuild [code_root] [workspace_root]`** generates tmuxinator configs
+  from workspace/task directories. New workspaces restore one agent window per
+  task. Existing workspace layouts reopen as one legacy task without moving
+  their repos. Code-pool entries create an isolated first task instead of
+  launching an agent in the shared source checkout. Temporary tools and service
+  panes are not pre-created. Handmade configs and `.genignore` are preserved.
+- **`promote` is retired.** Moving a running agent's pane cannot change its
+  checkout or remembered paths. Use `task new` to start isolated work instead.
 
 ## Cold-start PATH caveat
 
@@ -807,6 +755,12 @@ workspace membership, and dev-server task panes. Updating Workbench updates the
 rules without copying them into each tool's configuration.
 
 ### Stable task names
+
+When a hook supplies a thread-name, Workbench uses that same name for the agent
+card and the owned tmux window. Renaming a thread updates both. Manually renamed
+windows remain protected. Task directories and IDs remain stable when labels
+change. Codex task progress is read from its configured terminal-title item;
+without an explicit progress value the sidebar omits it.
 
 The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
 assigns a short semantic name through Workbench:
@@ -852,7 +806,7 @@ This improves execution reliability; the model still chooses the semantic name.
 
 The first live interactive agent owns a shared window's name. Other agents,
 sidebars, status updates and focus changes cannot replace it. Existing
-meaningful names, manual edits, workbench task sessions, and repository
+meaningful names, manual edits, managed task windows, and legacy repository
 inspection windows are preserved. The helper deliberately does not replace
 an existing task name; an explicitly requested repurpose can use tmux's normal
 rename command. Prefer one task and one agent per ordinary window; explicitly
@@ -875,24 +829,17 @@ To opt into tmux's automatic names, set this before loading the plugin:
 set -g @workbench-window-automatic-rename on
 ```
 
-### Task pane reuse and cleanup
+### Service panes and legacy cleanup
 
-`tmux-agent-workbench run --name dev <repo> -- npm run dev` uses `dev` as a
-stable task slot in that repository's window. Repeating it replaces the running
-process or retained result in the same pane. Use stable names (`dev`, `build`,
-`test`); different names deliberately allow concurrent tasks. The latest task's
-output remains visible after exit, including commands that finish immediately.
+`run --name dev <own-checkout> -- npm run dev` uses `dev` as a service slot in
+that task's window. Repeating it replaces the service in the same pane;
+other tasks' services are independent. Stop it with `tmux kill-pane -t <id>`
+when finished. The pane also closes automatically when the process exits.
 
-In workspace sessions, paths are mapped to a direct member by Git common-directory
-identity. A temporary worktree uses that member's inspection window but retains
-its own working directory for the command. Unregistered repositories require
-`tmux-agent-workbench add` first.
-
-`inspect` and `run` opportunistically remove inspection windows with missing root
-directories, excluding those with live task or agent panes. For immediate cleanup
-after deleting worktrees, run `tmux-agent-workbench prune` in the target session.
-`tmux-agent-workbench prune --dead-tasks` additionally discards all retained dead
-task panes. Existing worktrees and unmarked windows are preserved.
+The `prune` command remains available to clean obsolete inspection windows
+from older installations. `prune --dead-tasks` also removes retained dead
+service panes from those installations. It does not delete task worktrees or
+unmarked windows. New workflows do not create inspection windows.
 
 ### Botmux (optional)
 

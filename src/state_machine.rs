@@ -105,6 +105,10 @@ impl StateMachine {
         tracked.seen_seq = checkpoint.seen_seq;
         tracked.active_hook_session_id = checkpoint.hook_session_id.clone();
         tracked.snapshot.hook_session_id = checkpoint.hook_session_id.clone();
+        tracked.snapshot.thread_name = checkpoint.thread_name.clone();
+        if let Some(name) = &tracked.snapshot.thread_name {
+            tracked.snapshot.label = name.clone();
+        }
         tracked.last_hook_event_at_ms = checkpoint.last_hook_event_at_ms;
         tracked.seen_event_ids = checkpoint.hook_event_ids.clone();
         if !hook_source {
@@ -206,6 +210,8 @@ impl StateMachine {
                     instance_id: instance_id.clone(),
                     kind: observation.kind,
                     label: observation.label.clone(),
+                    thread_name: None,
+                    task_progress: None,
                     target: observation.target.clone(),
                     process: Some(observation.process.clone()),
                     base_state: observation.state,
@@ -290,7 +296,11 @@ impl StateMachine {
             && (old_state != BaseState::Blocked || reason_changed);
 
         tracked.snapshot.kind = observation.kind;
-        tracked.snapshot.label = observation.label;
+        tracked.snapshot.label = tracked
+            .snapshot
+            .thread_name
+            .clone()
+            .unwrap_or(observation.label);
         tracked.snapshot.target = observation.target;
         tracked.snapshot.process = Some(observation.process);
         tracked.snapshot.visible = observation.visible;
@@ -506,6 +516,10 @@ impl StateMachine {
         // binding. Once bound, non-activating events remain unable to switch
         // the foreground thread.
         if activates || tracked.active_hook_session_id.is_none() {
+            if tracked.active_hook_session_id.as_deref() != Some(&report.session_id) {
+                tracked.snapshot.thread_name = None;
+                tracked.snapshot.task_progress = None;
+            }
             tracked.active_hook_session_id = Some(report.session_id.clone());
         } else if tracked.active_hook_session_id.as_deref() != Some(&report.session_id) {
             return Err("event is not for the active foreground session".into());
@@ -519,6 +533,7 @@ impl StateMachine {
         tracked.snapshot.hook_session_id = Some(report.session_id.clone());
         if let Some(label) = &report.session_label {
             tracked.snapshot.label = label.clone();
+            tracked.snapshot.thread_name = Some(label.clone());
         }
         tracked.snapshot.state_source = StateSource::Hook;
         tracked.snapshot.confidence = StateConfidence::High;
@@ -786,6 +801,16 @@ impl StateMachine {
         values
     }
 
+    pub fn set_task_progress(
+        &mut self,
+        instance: &str,
+        progress: Option<crate::model::TaskProgress>,
+    ) -> Option<AgentSnapshot> {
+        let tracked = self.agents.get_mut(instance)?;
+        tracked.snapshot.task_progress = progress;
+        Some(tracked.snapshot.clone())
+    }
+
     pub fn has_pending_codex_permission(&self, pane_id: &str) -> bool {
         self.agents.values().any(|tracked| {
             tracked.snapshot.target.pane_id == pane_id
@@ -793,6 +818,13 @@ impl StateMachine {
                 && tracked.snapshot.base_state == BaseState::Blocked
                 && !tracked.snapshot.exited
         })
+    }
+
+    pub fn set_thread_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
+        let tracked = self.agents.get_mut(instance)?;
+        tracked.snapshot.label = name.clone();
+        tracked.snapshot.thread_name = Some(name);
+        Some(tracked.snapshot.clone())
     }
 
     pub fn next_attention(&self) -> Option<&AttentionEvent> {
@@ -1773,6 +1805,36 @@ mod tests {
                 _ => None,
             },
         }
+    }
+
+    #[test]
+    fn thread_names_survive_screen_updates_and_reset_on_thread_switch() {
+        let mut machine = StateMachine::default();
+        let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+        let mut named = event("named", "first", AgentEventType::Working, 1);
+        named.session_label = Some("Readable name".into());
+        machine
+            .report_event(&agent.instance_id, &named, false)
+            .unwrap();
+        machine.set_task_progress(
+            &agent.instance_id,
+            Some(crate::model::TaskProgress {
+                completed: 1,
+                total: 3,
+            }),
+        );
+        let mut screen = observation(BaseState::Working, 2);
+        screen.label = "Window fallback".into();
+        let result = machine.observe_estimate(screen);
+        assert_eq!(result.thread_name.as_deref(), Some("Readable name"));
+        assert_eq!(result.label, "Readable name");
+        assert_eq!(result.task_progress.unwrap().completed, 1);
+        let other = event("other", "second", AgentEventType::SessionStart, 3);
+        let result = machine
+            .report_event(&agent.instance_id, &other, false)
+            .unwrap();
+        assert!(result.thread_name.is_none());
+        assert!(result.task_progress.is_none());
     }
 
     #[test]

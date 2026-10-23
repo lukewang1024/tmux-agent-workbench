@@ -1,6 +1,5 @@
-# resolve-tools.sh — shared tool resolution, sourced (not executed) by
-# bin/mux-inspect and git/bin/gen-tmuxinator-configs so the "what git TUI /
-# what editor" logic exists exactly once.
+# shellcheck shell=sh
+# Tool resolution for explicitly opened temporary tools.
 
 resolve_git_tool() {
   printf '%s\n' "${WORKBENCH_GIT_TOOL:-tig}"

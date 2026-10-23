@@ -292,6 +292,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
                 assert b'(back)' not in rendered and b'(BSpace)' not in rendered, (kind, rendered)
+                if kind == 'host':
+                    assert tmux('display-message', '-p', '#{host}').encode() in rendered, rendered
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
                 elif close == 'escape':
@@ -521,6 +523,22 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('send-keys', '-t', pane, 'C-u')
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         print('PASS working Codex retains skill shortcuts and uses /side')
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 50, 0, 0))
+        os.kill(client_process.pid, signal.SIGWINCH)
+        drain(.3)
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu)
+        assert b'Usage summary...' in rendered, rendered
+        os.write(master, b'u')
+        menu.wait(timeout=3)
+        wait_for_text(client_process, 'Usage · OpenCode'.encode())
+        os.write(master, b'\x1b')
+        drain(.7)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
+        os.kill(client_process.pid, signal.SIGWINCH)
+        drain(.3)
+        print('PASS narrow Agent menu opens usage summary')
         menu = open_menu([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)

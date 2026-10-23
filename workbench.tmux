@@ -146,7 +146,7 @@ if ! command -v fzf-tmux >/dev/null 2>&1; then
 fi
 
 bind_tracked "@workbench-key-inspect" "@workbench-_bound-inspect" "" \
-  "add repo as inspection window" run-shell -b "tmux-agent-workbench pick repo"
+  "open temporary Git tool" run-shell -b "TMUX_PANE='#{pane_id}' tmux-agent-workbench pick repo"
 bind_tracked "@workbench-key-project" "@workbench-_bound-project" "" \
   "pick tmuxinator workbench project" run-shell -b "tmux-agent-workbench pick project"
 

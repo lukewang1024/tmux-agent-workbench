@@ -237,15 +237,41 @@ fn report_from_payload(
     })
 }
 
-fn codex_thread_name(session_id: &str) -> Option<String> {
+pub(crate) fn codex_thread_name(session_id: &str) -> Option<String> {
+    #[derive(Default)]
+    struct Index {
+        path: PathBuf,
+        stamp: Option<(SystemTime, u64)>,
+        names: std::collections::HashMap<String, String>,
+    }
+    static INDEX: std::sync::OnceLock<std::sync::Mutex<Index>> = std::sync::OnceLock::new();
     let path = codex_home().ok()?.join("session_index.jsonl");
-    let content = fs::read_to_string(path).ok()?;
-    content.lines().rev().find_map(|line| {
-        let value: Value = serde_json::from_str(line).ok()?;
-        (value.get("id")?.as_str()? == session_id)
-            .then(|| value.get("thread_name")?.as_str().map(str::to_owned))
-            .flatten()
-    })
+    let metadata = fs::metadata(&path).ok()?;
+    let stamp = Some((metadata.modified().ok()?, metadata.len()));
+    let mut index = INDEX.get_or_init(Default::default).lock().ok()?;
+    if index.path != path || index.stamp != stamp {
+        let content = fs::read_to_string(&path).ok()?;
+        index.names.clear();
+        for line in content.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let (Some(id), Some(name)) = (
+                value.get("id").and_then(Value::as_str),
+                value.get("thread_name").and_then(Value::as_str),
+            ) {
+                if !name.trim().is_empty()
+                    && name.chars().count() <= 128
+                    && !name.chars().any(char::is_control)
+                {
+                    index.names.insert(id.to_owned(), name.to_owned());
+                }
+            }
+        }
+        index.path = path;
+        index.stamp = stamp;
+    }
+    index.names.get(session_id).cloned()
 }
 
 fn map_event(name: &str) -> Result<AgentEventType, String> {

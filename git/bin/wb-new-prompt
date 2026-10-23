@@ -1,39 +1,29 @@
 #!/bin/sh
-# tmux-agent-workbench new --prompt — tmux prefix+N entry point: prompt for the whole `tmux-agent-workbench new`
-# argument line in one go, then hand off. Kept out of tmux.conf entirely (same
-# rationale as sesh-connect) so the %1-in-quotes substitution never has to
-# fight tmux.conf's own quoting layer.
-#
-# usage: type "feature" alone, or "feature repo[:branch] repo[:branch] ..."
-#        at the prompt — repos are optional, fold more in later with tmux-agent-workbench add.
+# Read a workspace name as data in a temporary popup.
 set -eu
-# Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
-# script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
-
-usage() {
-  cat <<'EOF'
-usage: tmux-agent-workbench new --prompt
-
-Open the tmux prompt used to enter a tmux-agent-workbench new feature and optional repositories.
-
-options:
-  -h, --help  show this help and exit
-EOF
-}
-
-case ${1-} in
-  -h|--help) usage; exit 0 ;;
-  --) shift ;;
-  -*) echo "tmux-agent-workbench new --prompt: unknown option: $1" >&2; usage >&2; exit 2 ;;
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+cli=$dir/../../bin/tmux-agent-workbench-cli
+case ${1:-} in
+  -h|--help)
+    printf '%s\n' 'usage: tmux-agent-workbench new --prompt' 'Open a popup to name a new workspace direction.'
+    exit 0 ;;
+  --read)
+    printf 'Workspace direction: '
+    IFS= read -r direction || exit 0
+    [ -n "$direction" ] || exit 0
+    exec "$cli" new "$direction"
+    ;;
+  -*) echo "tmux-agent-workbench new --prompt: unknown option: $1" >&2; exit 2 ;;
 esac
-[ $# -eq 0 ] || { usage >&2; exit 2; }
-[ -n "${TMUX:-}" ] || { echo "tmux-agent-workbench new --prompt: not inside a tmux session" >&2; exit 1; }
-
-if [ -n "${WORKBENCH_TARGET_CLIENT:-}" ]; then
-  tmux command-prompt -t "$WORKBENCH_TARGET_CLIENT" \
-    -p 'New workspace — feature [repo[:branch] ...]:' \
-    "run-shell -b \"tmux-agent-workbench new %1\""
-else
-  tmux command-prompt -p 'New workspace — feature [repo[:branch] ...]:' \
-    "run-shell -b \"tmux-agent-workbench new %1\""
-fi
+[ $# -eq 0 ] || exit 2
+. "$dir/../../lib/resolve-session.sh"
+caller=$(workbench_resolve_pane)
+quoted_script=$(printf '%s' "$dir/wb-new-prompt" | sed "s/'/'\\\\''/g")
+set -- display-popup -t "$caller" -E -w 70% -h 7 -e "PATH=$PATH"
+[ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT" -e "WORKBENCH_TARGET_CLIENT=$WORKBENCH_TARGET_CLIENT"
+exec tmux "$@" "'$quoted_script' --read"

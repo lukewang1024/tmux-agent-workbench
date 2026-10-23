@@ -1,0 +1,179 @@
+#!/bin/sh
+# One task owns one window and its own repository worktrees.
+# Context variables are assigned by the sourced task-context helpers.
+# shellcheck disable=SC2154
+set -eu
+self=$0
+while [ -h "$self" ]; do
+  target=$(readlink "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
+done
+dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
+cli=$dir/../../bin/tmux-agent-workbench-cli
+. "$dir/../../lib/resolve-session.sh"
+. "$dir/../../lib/task-context.sh"
+. "$dir/../../lib/cleanup-task.sh"
+
+usage() {
+  cat <<'EOF'
+usage: tmux-agent-workbench task new [--detach] <name> [repo[:branch] ...]
+       tmux-agent-workbench task list
+       tmux-agent-workbench task done [--force] <name>
+       tmux-agent-workbench task restore [--legacy] --workspace <path> <name> [repo[:branch] ...]
+
+Create or reopen a task in the current workspace session. Each task gets one
+agent window and isolated worktrees. Repositories can be added later with add.
+Set WORKBENCH_SESSION to target another workspace session.
+EOF
+}
+
+case ${1:-} in
+  -h|--help) usage; exit 0 ;;
+  new|list|done|restore|prompt) action=$1; shift ;;
+  *) usage >&2; exit 2 ;;
+esac
+case ${1:-} in -h|--help) usage; exit 0 ;; esac
+
+case $action in
+  prompt)
+    printf 'Task name: '
+    IFS= read -r task || exit 0
+    [ -n "$task" ] || exit 0
+    exec "$cli" task new "$task"
+    ;;
+  restore)
+    legacy=0
+    if [ "${1:-}" = --legacy ]; then legacy=1; shift; fi
+    [ "${1:-}" = --workspace ] && [ $# -ge 3 ] || { usage >&2; exit 2; }
+    workspace=$2; task=$3; shift 3
+    workbench_valid_name "$task" || exit 2
+    caller=$(workbench_resolve_pane)
+    wb_session=$(tmux display-message -p -t "$caller" '#{session_id}')
+    mkdir -p "$workspace"
+    workspace=$(CDPATH='' cd "$workspace" && pwd -P)
+    actual=$(tmux show-option -qv -t "$wb_session" @workbench_workspace_root)
+    [ -z "$actual" ] || [ "$actual" = "$workspace" ] || {
+      echo 'workbench: refusing to change the workspace of an existing session.' >&2; exit 1
+    }
+    task_root=$workspace/tasks/$task
+    [ "$legacy" = 0 ] || task_root=$workspace
+    [ ! -L "$workspace/tasks" ] && [ ! -L "$task_root" ] || exit 1
+    mkdir -p "$task_root"
+    wb_task_root=$task_root
+    workbench_task_window
+    window=$(tmux display-message -p -t "$caller" '#{window_id}')
+    [ -z "$wb_window" ] || [ "$wb_window" = "$window" ] || {
+      echo "workbench: task $task already has a window: $wb_window" >&2; exit 1
+    }
+    tmux set-option -t "$wb_session" @workbench_workspace_root "$workspace"
+    tmux set-option -t "$wb_session" @workbench_task 1
+    tmux set-option -w -t "$window" automatic-rename off
+    tmux set-option -w -t "$window" @workbench_task_root "$task_root"
+    tmux set-option -w -t "$window" @workbench_task_name "$task"
+    for repo do
+      WORKBENCH_SESSION=$wb_session WORKBENCH_TASK=$task "$cli" add "$repo"
+    done
+    workbench_inherit_proxies
+    tmux set-option -w -t "$window" @workbench_task_started 1
+    WORKBENCH_SESSION=$wb_session
+    WORKBENCH_FEATURE=$(basename "$workspace")
+    WORKBENCH_TASK=$task
+    export WORKBENCH_SESSION WORKBENCH_FEATURE WORKBENCH_TASK
+    cd "$task_root"
+    exec "$cli" agent start --managed
+    ;;
+  new)
+    if [ "${1:-}" = --prompt ]; then
+      [ $# -eq 1 ] || { usage >&2; exit 2; }
+      workbench_workspace_context
+      caller=$(workbench_resolve_pane)
+      quoted_cli=$(printf '%s' "$cli" | sed "s/'/'\\\\''/g")
+      set -- display-popup -t "$caller" -E -w 70% -h 7 \
+        -e "WORKBENCH_SESSION=$wb_session" -e "PATH=$PATH"
+      [ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT"
+      exec tmux "$@" "'$quoted_cli' task prompt"
+    fi
+    detach=0
+    if [ "${1:-}" = --detach ]; then detach=1; shift; fi
+    [ $# -ge 1 ] || { usage >&2; exit 2; }
+    task=$1; shift
+    workbench_valid_name "$task" || exit 2
+    workbench_workspace_context
+    task_root=$wb_workspace/tasks/$task
+    if [ "$task" = "$wb_direction" ] && [ ! -d "$task_root" ]; then
+      for legacy_window in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
+        if [ "$(tmux show-option -wqv -t "$legacy_window" @workbench_task_root)" = "$wb_workspace" ]; then
+          task_root=$wb_workspace
+          break
+        fi
+      done
+    fi
+    [ ! -L "$wb_workspace/tasks" ] && [ ! -L "$task_root" ] || {
+      echo 'workbench: refusing a symlink task directory.' >&2; exit 1
+    }
+    lock=workbench-tasks-$wb_session
+    tmux wait-for -L "$lock"
+    trap 'tmux wait-for -U "$lock" 2>/dev/null || true' 0
+    trap 'exit 1' HUP INT TERM
+    wb_task_root=$task_root
+    workbench_task_window
+    window=$wb_window
+    if [ -z "$window" ]; then
+      if tmux list-windows -t "$wb_session" -F '#{window_name}' | grep -qxF "$task"; then
+        echo "workbench: a window named $task already exists and belongs to another task." >&2
+        exit 1
+      fi
+      mkdir -p "$task_root"
+      window=$(tmux new-window -d -t "$wb_session:" -n "$task" -c "$task_root" -P -F '#{window_id}')
+    fi
+    tmux set-option -w -t "$window" automatic-rename off
+    tmux set-option -w -t "$window" @workbench_task_root "$task_root"
+    tmux set-option -w -t "$window" @workbench_task_name "$task"
+    for repo do
+      WORKBENCH_SESSION=$wb_session WORKBENCH_TASK=$task "$cli" add "$repo"
+    done
+    if [ "$(tmux show-option -wqv -t "$window" @workbench_task_started)" != 1 ]; then
+      workbench_inherit_proxies
+      pane=$(tmux list-panes -t "$window" -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | head -1)
+      tmux respawn-pane -k -t "$pane" -c "$task_root" \
+        -e "PATH=$PATH" \
+        -e "WORKBENCH_CODE_ROOT=${WORKBENCH_CODE_ROOT:-$HOME/Code}" \
+        -e "WORKBENCH_WORKSPACE_ROOT=${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}" \
+        -e "WORKBENCH_AGENT=${WORKBENCH_AGENT:-claude}" \
+        -e "WORKBENCH_PROFILE=${WORKBENCH_PROFILE:-${WORKBENCH_AGENT:-claude}-default}" \
+        -e "WORKBENCH_SESSION=$wb_session" -e "WORKBENCH_FEATURE=$wb_direction" -e "WORKBENCH_TASK=$task" \
+        "$cli" agent start --managed
+      tmux set-option -w -t "$window" @workbench_task_started 1
+    fi
+    [ "$detach" = 1 ] || tmux select-window -t "$window"
+    "$cli" projects rebuild
+    printf '%s\n' "$task_root"
+    ;;
+  list)
+    [ $# -eq 0 ] || { usage >&2; exit 2; }
+    workbench_workspace_context
+    for task_root in "$wb_workspace"/tasks/*; do
+      [ -d "$task_root" ] && [ ! -L "$task_root" ] || continue
+      wb_task_root=$task_root
+      workbench_task_window
+      printf '%s\t%s\t%s\n' "$(basename "$task_root")" "${wb_window:-closed}" "$task_root"
+    done
+    ;;
+  done)
+    force=0
+    if [ "${1:-}" = --force ]; then force=1; shift; fi
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    workbench_task_context "$1"
+    task_root=$wb_task_root
+    window=$wb_window
+    lock=workbench-repos-$wb_session
+    tmux wait-for -L "$lock"
+    trap 'tmux wait-for -U "$lock" 2>/dev/null || true' 0
+    trap 'exit 1' HUP INT TERM
+    keep_root=0
+    [ "$task_root" != "$wb_workspace" ] || keep_root=1
+    workbench_clean_task "$task_root" "$force" "$keep_root"
+    [ -z "$window" ] || tmux kill-window -t "$window"
+    "$cli" projects rebuild
+    ;;
+esac

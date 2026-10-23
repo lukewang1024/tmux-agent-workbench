@@ -31,18 +31,18 @@ use crate::server::ServerIdentity;
 enum Row {
     Section(&'static str),
     AgentSection(AgentSort),
+    AgentGroup(String),
     Session(SessionSnapshot),
     SessionSub(SessionSnapshot),
     Agent(AgentSnapshot),
-    AgentSub(AgentSnapshot),
+    AgentSub(AgentSnapshot, AgentSort),
     Detail(String, String),
     Conversation(AgentSnapshot, ConversationSnapshot),
-    Actions,
     Spacer,
 }
 
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
-/// footer lines never map to an agent row.
+/// footer lines and the pinned action bar never map to an agent row.
 #[derive(Debug, Clone, Copy)]
 struct SidebarViewport {
     first_row: usize,
@@ -51,7 +51,7 @@ struct SidebarViewport {
 
 impl SidebarViewport {
     fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
-        let first_row = usize::from(notice.is_some());
+        let first_row = 1 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
@@ -187,9 +187,6 @@ fn event_loop(
                 Ok(fetched) => {
                     let selected_key = rows.get(selected).and_then(selection_key);
                     rows = build_rows(&fetched, detailed, agent_sort);
-                    if last_content_height != usize::MAX {
-                        rows = balance_sections(rows, last_content_height);
-                    }
                     disconnected = false;
                     last_success = Some(Instant::now());
                     selected = if initial_selection {
@@ -241,10 +238,7 @@ fn event_loop(
                 let selected_key = rows.get(selected).and_then(selection_key);
                 agent_sort = saved;
                 if let Some(snapshot) = &snapshot {
-                    rows = balance_sections(
-                        build_rows(snapshot, detailed, agent_sort),
-                        last_content_height,
-                    );
+                    rows = build_rows(snapshot, detailed, agent_sort);
                     selected = selected_key
                         .as_deref()
                         .and_then(|key| nearest_matching_key(&rows, key, selected))
@@ -261,22 +255,10 @@ fn event_loop(
         let content_height = body_height.saturating_sub(footer_height);
         if content_height != last_content_height {
             last_content_height = content_height;
-            if let Some(snapshot) = &snapshot {
-                let selected_key = rows.get(selected).and_then(selection_key);
-                rows = balance_sections(build_rows(snapshot, detailed, agent_sort), content_height);
-                selected = selected_key
-                    .as_deref()
-                    .and_then(|key| nearest_matching_key(&rows, key, selected))
-                    .or_else(|| nearest_selectable(&rows, selected))
-                    .unwrap_or(0);
-                dirty = true;
-            }
+            dirty = true;
         }
-        let viewport = SidebarViewport::new(
-            content_height,
-            rows.len(),
-            connection_notice(disconnected, snapshot.is_some()),
-        );
+        let notice = connection_notice(disconnected, snapshot.is_some());
+        let viewport = SidebarViewport::new(content_height, rows.len(), notice);
         let viewport_height = viewport.row_height;
         if dirty {
             keep_visible(selected, viewport_height, rows.len(), &mut scroll);
@@ -285,7 +267,8 @@ fn event_loop(
                 .flatten();
             terminal.draw(|frame| {
                 let area = frame.area();
-                let mut lines = Vec::new();
+                let mut lines = Vec::with_capacity(body_height);
+                lines.push(render_actions(area.width, footer_hover));
                 if connection_notice(disconnected, snapshot.is_some()) == Some("disconnected") {
                     lines.push(Line::from(Span::styled(
                         "disconnected",
@@ -307,17 +290,13 @@ fn event_loop(
                     }
                     let row_height = viewport.row_height;
                     for row in rows.iter().skip(scroll).take(row_height) {
-                        lines.push(if matches!(row, Row::Actions) {
-                            render_actions(area.width, footer_hover)
-                        } else {
-                            render_row(
-                                row,
-                                selected_key
-                                    .as_deref()
-                                    .is_some_and(|key| selection_key(row).as_deref() == Some(key)),
-                                area.width,
-                            )
-                        });
+                        lines.push(render_row(
+                            row,
+                            selected_key
+                                .as_deref()
+                                .is_some_and(|key| selection_key(row).as_deref() == Some(key)),
+                            area.width,
+                        ));
                     }
                     let shown = rows.len().saturating_sub(scroll).min(row_height);
                     let hidden = rows.len().saturating_sub(shown);
@@ -407,10 +386,7 @@ fn event_loop(
                         let selected_key = rows.get(selected).and_then(selection_key);
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
-                            rows = balance_sections(
-                                build_rows(snapshot, detailed, agent_sort),
-                                content_height,
-                            );
+                            rows = build_rows(snapshot, detailed, agent_sort);
                             selected = selected_key
                                 .as_deref()
                                 .and_then(|key| nearest_matching_key(&rows, key, selected))
@@ -433,7 +409,11 @@ fn event_loop(
                             return Ok(());
                         }
                     }
-                    KeyCode::Char('P') if selection_visible => promote_selected(&rows, selected)?,
+                    KeyCode::Char('T') if selection_visible => {
+                        if new_task_selected(&rows, selected)? {
+                            return Ok(());
+                        }
+                    }
                     KeyCode::Char('R') => {
                         run_public_workbench(&["projects", "rebuild"], false)?;
                     }
@@ -477,10 +457,7 @@ fn event_loop(
                 match mouse.kind {
                     MouseEventKind::Moved => {
                         let hovered = viewport.row_at(mouse.row, scroll, rows.len());
-                        footer_hover = if matches!(
-                            hovered.and_then(|row| rows.get(row)),
-                            Some(Row::Actions)
-                        ) {
+                        footer_hover = if mouse.row == 0 && content_height > 0 {
                             action_button(size.width, mouse.column)
                         } else if popup_mode()
                             && usize::from(mouse.row) == body_height.saturating_sub(1)
@@ -496,7 +473,7 @@ fn event_loop(
                                     Row::Session(_)
                                         | Row::SessionSub(_)
                                         | Row::Agent(_)
-                                        | Row::AgentSub(_)
+                                        | Row::AgentSub(_, _)
                                         | Row::Conversation(_, _)
                                 )
                             )
@@ -522,27 +499,7 @@ fn event_loop(
                         {
                             return Ok(());
                         }
-                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
-                            continue;
-                        };
-                        if let Some(Row::AgentSection(sort)) = rows.get(clicked)
-                            && agent_sort_button(size.width, *sort, mouse.column)
-                        {
-                            agent_sort = match agent_sort {
-                                AgentSort::Grouped => AgentSort::Prioritized,
-                                AgentSort::Prioritized => AgentSort::Grouped,
-                            };
-                            persist_agent_sort(paths, agent_sort)?;
-                            if let Some(snapshot) = &snapshot {
-                                rows = balance_sections(
-                                    build_rows(snapshot, detailed, agent_sort),
-                                    content_height,
-                                );
-                                selected = nearest_selectable(&rows, selected).unwrap_or(0);
-                            }
-                            continue;
-                        }
-                        if matches!(rows.get(clicked), Some(Row::Actions)) {
+                        if mouse.row == 0 && content_height > 0 {
                             match action_button(size.width, mouse.column) {
                                 Some(FooterButton::New) => {
                                     if run_session_picker()? {
@@ -558,13 +515,30 @@ fn event_loop(
                             }
                             continue;
                         }
+                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
+                            continue;
+                        };
+                        if let Some(Row::AgentSection(sort)) = rows.get(clicked)
+                            && agent_sort_button(size.width, *sort, mouse.column)
+                        {
+                            agent_sort = match agent_sort {
+                                AgentSort::Grouped => AgentSort::Prioritized,
+                                AgentSort::Prioritized => AgentSort::Grouped,
+                            };
+                            persist_agent_sort(paths, agent_sort)?;
+                            if let Some(snapshot) = &snapshot {
+                                rows = build_rows(snapshot, detailed, agent_sort);
+                                selected = nearest_selectable(&rows, selected).unwrap_or(0);
+                            }
+                            continue;
+                        }
                         if matches!(
                             rows.get(clicked),
                             Some(
                                 Row::Session(_)
                                     | Row::SessionSub(_)
                                     | Row::Agent(_)
-                                    | Row::AgentSub(_)
+                                    | Row::AgentSub(_, _)
                                     | Row::Conversation(_, _)
                             )
                         ) {
@@ -585,7 +559,7 @@ fn event_loop(
                                 Row::Session(_)
                                     | Row::SessionSub(_)
                                     | Row::Agent(_)
-                                    | Row::AgentSub(_)
+                                    | Row::AgentSub(_, _)
                                     | Row::Conversation(_, _)
                             )
                         ) {
@@ -636,18 +610,7 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![Row::Section("sessions"), Row::Spacer];
-    let mut sessions = snapshot.sessions.clone();
-    sessions.sort_by_key(stable_session_key);
-    for session in sessions {
-        rows.push(Row::Session(session.clone()));
-        rows.push(Row::SessionSub(session));
-    }
-    rows.push(Row::Spacer);
-    rows.push(Row::Actions);
-    rows.push(Row::Spacer);
-    rows.push(Row::AgentSection(agent_sort));
-    rows.push(Row::Spacer);
+    let mut rows = vec![Row::AgentSection(agent_sort), Row::Spacer];
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
     if agent_sort == AgentSort::Prioritized {
@@ -664,9 +627,20 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
             )
         });
     }
+    let mut previous_session = None;
     for agent in agents {
+        if agent_sort == AgentSort::Grouped {
+            let session = (
+                agent.target.session_name.clone(),
+                agent.target.session_id.clone(),
+            );
+            if previous_session.as_ref() != Some(&session) {
+                rows.push(Row::AgentGroup(session.0.clone()));
+                previous_session = Some(session);
+            }
+        }
         rows.push(Row::Agent(agent.clone()));
-        rows.push(Row::AgentSub(agent.clone()));
+        rows.push(Row::AgentSub(agent.clone(), agent_sort));
         if detailed {
             let pid = agent
                 .process
@@ -695,44 +669,14 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
                 .map(|conversation| Row::Conversation(agent.clone(), conversation)),
         );
     }
-    rows
-}
-
-fn balance_sections(mut rows: Vec<Row>, content_height: usize) -> Vec<Row> {
-    let Some(actions_index) = rows.iter().position(|row| matches!(row, Row::Actions)) else {
-        return rows;
-    };
-
-    // Keep the default Sessions-first layout when the sidebar can show every
-    // row. Once content overflows, prioritize Agents instead: they carry the
-    // live working/blocked state that is most important on short terminals
-    // (notably phone clients), while Sessions remain reachable below.
-    if rows.len() > content_height && rows.iter().any(|row| matches!(row, Row::Agent(_))) {
-        let Some(agents_index) = rows
-            .iter()
-            .position(|row| matches!(row, Row::AgentSection(_)))
-        else {
-            return rows;
-        };
-        let mut agents = rows.split_off(agents_index);
-        let mut sessions = rows;
-        sessions.truncate(actions_index);
-        while matches!(sessions.last(), Some(Row::Spacer)) {
-            sessions.pop();
-        }
-        agents.push(Row::Spacer);
-        agents.push(Row::Actions);
-        agents.push(Row::Spacer);
-        agents.extend(sessions);
-        return agents;
-    }
-
-    let actions_start = content_height / 2;
-    if actions_index < actions_start {
-        rows.splice(
-            actions_index..actions_index,
-            std::iter::repeat_n(Row::Spacer, actions_start - actions_index),
-        );
+    rows.push(Row::Spacer);
+    rows.push(Row::Section("sessions"));
+    rows.push(Row::Spacer);
+    let mut sessions = snapshot.sessions.clone();
+    sessions.sort_by_key(stable_session_key);
+    for session in sessions {
+        rows.push(Row::Session(session.clone()));
+        rows.push(Row::SessionSub(session));
     }
     rows
 }
@@ -767,9 +711,10 @@ fn persisted_agent_sort(paths: &Paths) -> Option<AgentSort> {
     }
 }
 
-fn stable_agent_key(agent: &AgentSnapshot) -> (String, u32, u32, String) {
+fn stable_agent_key(agent: &AgentSnapshot) -> (String, String, u32, u32, String) {
     (
         agent.target.session_name.clone(),
+        agent.target.session_id.clone(),
         agent.target.window_index,
         agent.target.pane_index,
         agent.instance_id.clone(),
@@ -851,6 +796,10 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             muted_style(),
             false,
         ),
+        Row::AgentGroup(name) => Line::from(Span::styled(
+            fit_text(name, usize::from(width)),
+            muted_style().add_modifier(Modifier::BOLD),
+        )),
         Row::Session(session) => icon_title_line(
             glyph(session.rollup_state),
             &session.session_name,
@@ -891,27 +840,39 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             };
             icon_title_line(
                 glyph(agent.display_state),
-                &agent.target.session_name,
+                agent_topic(agent),
                 width,
                 Style::default().fg(state_color(agent.display_state)),
                 title,
                 selected,
             )
         }
-        Row::AgentSub(agent) => aligned_line(
-            format!(
-                "   {} · {}",
-                agent_status(agent),
-                agent_kind_name(agent.kind)
-            ),
-            String::new(),
-            width,
-            Style::default().fg(state_color(agent.display_state)),
-            Style::default()
-                .fg(state_color(agent.display_state))
-                .add_modifier(Modifier::DIM),
-            selected,
-        ),
+        Row::AgentSub(agent, sort) => {
+            let mut context = agent
+                .task_progress
+                .map(|progress| format!("{}/{}", progress.completed, progress.total))
+                .unwrap_or_default();
+            if *sort == AgentSort::Prioritized {
+                if !context.is_empty() {
+                    context.push_str(" · ");
+                }
+                context.push_str(&agent.target.session_name);
+            }
+            aligned_line(
+                format!("   {context}"),
+                format!("{} · {}", agent_status(agent), agent_kind_name(agent.kind)),
+                width,
+                if selected {
+                    Style::default().fg(Color::Rgb(235, 235, 245))
+                } else {
+                    Style::default().fg(Color::Rgb(150, 150, 170))
+                },
+                Style::default()
+                    .fg(state_color(agent.display_state))
+                    .add_modifier(Modifier::DIM),
+                selected,
+            )
+        }
         Row::Conversation(_, conversation) => {
             let status = if conversation.display_state == DisplayState::Blocked {
                 conversation.reason_category.as_deref().unwrap_or("blocked")
@@ -950,7 +911,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
                 Style::default().add_modifier(Modifier::DIM),
             ))
         }
-        Row::Actions | Row::Spacer => Line::default(),
+        Row::Spacer => Line::default(),
     }
 }
 
@@ -1027,9 +988,9 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         Line::from("⏎        open / focus"),
         Line::from("m        item menu"),
         Line::from("N        projects"),
-        Line::from("i        inspect repo"),
+        Line::from("i        temporary Git tool"),
         Line::from("W        new workspace"),
-        Line::from("P        promote selected"),
+        Line::from("T        new task in selected session"),
         Line::from("R        rebuild projects"),
         Line::from("s / a    sessions / agents"),
         Line::from("n        next attention"),
@@ -1073,6 +1034,47 @@ fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
         crate::model::AgentKind::Trae => "trae",
         crate::model::AgentKind::Opencode => "opencode",
     }
+}
+
+fn agent_topic(agent: &AgentSnapshot) -> &str {
+    if let Some(name) = agent
+        .thread_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return name;
+    }
+    // Older daemons stored hook thread names only in label.
+    if agent.hook_session_id.is_some() && meaningful_topic(&agent.label) {
+        return agent.label.trim();
+    }
+    let topic = agent.target.window_name.trim();
+    if !meaningful_topic(topic) {
+        &agent.target.session_name
+    } else {
+        topic
+    }
+}
+
+fn meaningful_topic(topic: &str) -> bool {
+    !topic.trim().is_empty()
+        && !matches!(
+            topic.trim().to_ascii_lowercase().as_str(),
+            "tmux"
+                | "agent"
+                | "codex"
+                | "claude"
+                | "trae"
+                | "traex"
+                | "opencode"
+                | "shell"
+                | "terminal"
+                | "sh"
+                | "zsh"
+                | "bash"
+                | "fish"
+        )
 }
 
 fn agent_status(agent: &AgentSnapshot) -> String {
@@ -1159,8 +1161,27 @@ fn source_health(agent: &AgentSnapshot) -> String {
     format!("{source}{marker}")
 }
 
+fn fit_text(text: &str, width: usize) -> String {
+    if Span::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    for character in text.chars() {
+        result.push(character);
+        if Span::raw(result.as_str()).width() > width - 1 {
+            result.pop();
+            break;
+        }
+    }
+    result.push('…');
+    result
+}
+
 fn aligned_line(
-    mut left: String,
+    left: String,
     right: String,
     width: u16,
     mut left_style: Style,
@@ -1168,13 +1189,12 @@ fn aligned_line(
     selected: bool,
 ) -> Line<'static> {
     let width = usize::from(width);
-    let reserved = right.chars().count().saturating_add(1);
+    let right = fit_text(&right, width);
+    let reserved = Span::raw(right.as_str()).width().saturating_add(1);
     let left_limit = width.saturating_sub(reserved);
-    if left.chars().count() > left_limit {
-        left = left.chars().take(left_limit.saturating_sub(1)).collect();
-        left.push('…');
-    }
-    let gap = width.saturating_sub(left.chars().count() + right.chars().count());
+    let left = fit_text(&left, left_limit);
+    let gap =
+        width.saturating_sub(Span::raw(left.as_str()).width() + Span::raw(right.as_str()).width());
     if selected {
         left_style = left_style
             .remove_modifier(Modifier::DIM)
@@ -1206,14 +1226,11 @@ fn icon_title_line(
 ) -> Line<'static> {
     let width = usize::from(width);
     let prefix = format!(" {icon} ");
-    let title_limit = width.saturating_sub(prefix.chars().count());
-    let truncated = title.chars().count() > title_limit;
-    let mut title = title.chars().take(title_limit).collect::<String>();
-    if truncated && !title.is_empty() {
-        title.pop();
-        title.push('…');
-    }
-    let gap = width.saturating_sub(prefix.chars().count() + title.chars().count());
+    let prefix = fit_text(&prefix, width);
+    let title_limit = width.saturating_sub(Span::raw(prefix.as_str()).width());
+    let title = fit_text(title, title_limit);
+    let gap = width
+        .saturating_sub(Span::raw(prefix.as_str()).width() + Span::raw(title.as_str()).width());
     if selected {
         icon_style = icon_style
             .remove_modifier(Modifier::DIM)
@@ -1283,14 +1300,16 @@ fn selection_key(row: &Row) -> Option<String> {
         Row::Session(session) => Some(format!("session:{}", session.session_id)),
         Row::SessionSub(session) => Some(format!("session:{}", session.session_id)),
         Row::Agent(agent) => Some(format!("agent:{}", agent.instance_id)),
-        Row::AgentSub(agent) => Some(format!("agent:{}", agent.instance_id)),
+        Row::AgentSub(agent, _) => Some(format!("agent:{}", agent.instance_id)),
         Row::Conversation(agent, conversation) => Some(format!(
             "conversation:{}:{}",
             agent.instance_id, conversation.id
         )),
-        Row::Section(_) | Row::AgentSection(_) | Row::Detail(_, _) | Row::Actions | Row::Spacer => {
-            None
-        }
+        Row::Section(_)
+        | Row::AgentSection(_)
+        | Row::AgentGroup(_)
+        | Row::Detail(_, _)
+        | Row::Spacer => None,
     }
 }
 
@@ -1368,14 +1387,14 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             }
             return Ok(true);
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent)) if agent.exited => {
+        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) if agent.exited => {
             if let Some(event) = &agent.attention {
                 let server = ServerIdentity::discover()?;
                 let paths = Paths::discover()?;
                 acknowledge_attention(&paths.socket_for_server(&server.key), &event.id)?;
             }
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent)) => {
+        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) => {
             let mut command = Command::new(std::env::current_exe()?);
             command.args([
                 "focus",
@@ -1450,9 +1469,17 @@ fn show_row_menu(
                         format!("switch-client -t {}", session.session_id),
                     ),
                     (
-                        "New window",
+                        "New task",
                         "n",
-                        format!("new-window -t {}", session.session_id),
+                        format!(
+                            "run-shell -b {}",
+                            shell_quote(&format!(
+                                "WORKBENCH_SESSION={} TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench task new --prompt",
+                                session.session_id,
+                                source_pane().ok_or("sidebar source pane unavailable")?,
+                                shell_quote(&current_client()?)
+                            ))
+                        ),
                     ),
                     (
                         "Rename",
@@ -1473,7 +1500,7 @@ fn show_row_menu(
                 ],
             )
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent))
+        Some(Row::Agent(agent) | Row::AgentSub(agent, _))
             if !agent.exited && safe_target(&agent.target.pane_id, '%') =>
         {
             let executable = std::env::current_exe()?;
@@ -1550,19 +1577,37 @@ fn show_global_menu(
             "run-shell -b tmux-agent-workbench pick project".into(),
         ),
         (
-            "Inspect repo",
+            "Temporary Git tool",
             "i",
-            "run-shell -b tmux-agent-workbench pick repo".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench pick repo",
+                    shell_quote(&current_client()?)
+                ))
+            ),
         ),
         (
             "New workspace",
             "W",
-            "run-shell -b tmux-agent-workbench new --prompt".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench new --prompt",
+                    shell_quote(&current_client()?)
+                ))
+            ),
         ),
         (
-            "Promote selected",
-            "P",
-            format!("send-keys -t {sidebar_pane} P"),
+            "New task",
+            "T",
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "env -u WORKBENCH_SESSION -u WORKBENCH_TASK -u WORKBENCH_FEATURE TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench task new --prompt",
+                    shell_quote(&current_client()?)
+                ))
+            ),
         ),
         (
             "Rebuild projects",
@@ -1595,7 +1640,7 @@ fn show_global_menu(
         // Once this popup closes there is no sidebar pane to receive these
         // synthetic keys. The direct keyboard shortcuts remain available in
         // the TUI; omit only the menu entries whose target would be stale.
-        items.retain(|(label, _, _)| !matches!(*label, "Promote selected" | "Details"));
+        items.retain(|(label, _, _)| *label != "Details");
     }
     show_menu("workbench", anchor, anchor.is_some(), &items)
 }
@@ -1639,8 +1684,13 @@ where
         // in the same inherited tmux client context. Positional shell arguments
         // avoid quoting command paths or user-controlled values.
         let client = current_client()?;
+        let pane = source_pane().ok_or("sidebar source pane unavailable")?;
+        if !safe_target(&pane, '%') {
+            return Err("invalid sidebar pane id".into());
+        }
         let mut deferred = format!(
-            "WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            "TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            shell_quote(&pane),
             shell_quote(&client),
             std::process::id(),
             shell_quote(&program.as_ref().to_string_lossy()),
@@ -1684,9 +1734,9 @@ fn current_client() -> Result<String, Box<dyn std::error::Error>> {
     Ok(client)
 }
 
-fn promote_selected(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn new_task_selected(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
     let pane = match rows.get(selected) {
-        Some(Row::Agent(agent) | Row::AgentSub(agent)) | Some(Row::Conversation(agent, _)) => {
+        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) | Some(Row::Conversation(agent, _)) => {
             Some(agent.target.pane_id.as_str())
         }
         Some(Row::Session(session) | Row::SessionSub(session)) => {
@@ -1695,16 +1745,26 @@ fn promote_selected(rows: &[Row], selected: usize) -> Result<(), Box<dyn std::er
         _ => None,
     };
     let Some(pane) = pane.filter(|pane| safe_target(pane, '%')) else {
-        return Ok(());
+        return Ok(false);
     };
-    Command::new("tmux-agent-workbench")
-        .arg("promote")
-        .env("WORKBENCH_PROMOTE_PANE", pane)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+    dispatch_command(
+        "env",
+        [
+            "-u".to_owned(),
+            "WORKBENCH_SESSION".to_owned(),
+            "-u".to_owned(),
+            "WORKBENCH_FEATURE".to_owned(),
+            "-u".to_owned(),
+            "WORKBENCH_TASK".to_owned(),
+            format!("TMUX_PANE={pane}"),
+            format!("WORKBENCH_TARGET_CLIENT={}", current_client()?),
+            "tmux-agent-workbench".to_owned(),
+            "task".to_owned(),
+            "new".to_owned(),
+            "--prompt".to_owned(),
+        ],
+        true,
+    )
 }
 
 fn show_menu(
@@ -1847,22 +1907,23 @@ mod tests {
         let viewport = SidebarViewport::new(8, rows.len(), Some("stale · reconnecting"));
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
-            rows[viewport.row_at(2, 0, rows.len()).unwrap()],
+            rows[viewport.row_at(3, 0, rows.len()).unwrap()],
             "A subtitle"
         );
-        assert_eq!(rows[viewport.row_at(3, 0, rows.len()).unwrap()], "agent B");
-        assert_eq!(viewport.row_at(5, 0, rows.len()), None);
+        assert_eq!(rows[viewport.row_at(4, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(6, 0, rows.len()), None);
     }
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Six content lines: banner + four rows + overflow; popup footer
-        // follows at screen row six and must not activate any hidden row.
+        // Six content lines: actions + banner + three rows + overflow;
+        // the popup footer follows and must not activate any hidden row.
         let viewport = SidebarViewport::new(6, 20, Some("stale · reconnecting"));
-        assert_eq!(viewport.row_height, 4);
+        assert_eq!(viewport.row_height, 3);
         assert_eq!(viewport.row_at(0, 7, 20), None);
-        assert_eq!(viewport.row_at(1, 7, 20), Some(7));
-        assert_eq!(viewport.row_at(4, 7, 20), Some(10));
+        assert_eq!(viewport.row_at(1, 7, 20), None);
+        assert_eq!(viewport.row_at(2, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(4, 7, 20), Some(9));
         for row in [5, 6, 7] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
@@ -1870,13 +1931,13 @@ mod tests {
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(4, 4, None);
-        assert_eq!(normal.row_at(3, 0, 4), Some(3));
-        let stale = SidebarViewport::new(4, 4, Some("stale · reconnecting"));
+        let normal = SidebarViewport::new(5, 4, None);
+        assert_eq!(normal.row_at(4, 0, 4), Some(3));
+        let stale = SidebarViewport::new(5, 4, Some("stale · reconnecting"));
         assert_eq!(stale.row_height, 2);
-        assert_eq!(stale.row_at(3, 0, 4), None);
+        assert_eq!(stale.row_at(4, 0, 4), None);
         let overflow = SidebarViewport::new(4, 10, None);
-        assert_eq!(overflow.row_at(2, 0, 10), Some(2));
+        assert_eq!(overflow.row_at(2, 0, 10), Some(1));
         assert_eq!(overflow.row_at(3, 0, 10), None);
     }
 
@@ -1954,54 +2015,21 @@ mod tests {
     }
 
     #[test]
-    fn sessions_are_above_midpoint_actions_and_agents_follow() {
+    fn agents_precede_sessions_with_one_blank_separator() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
-        let rows = balance_sections(build_rows(&snapshot, false, AgentSort::Grouped), 20);
+        let rows = build_rows(&snapshot, false, AgentSort::Grouped);
         let sessions = rows
             .iter()
             .position(|row| matches!(row, Row::Section("sessions")))
             .unwrap();
-        let agents = rows
-            .iter()
-            .position(|row| matches!(row, Row::AgentSection(_)))
-            .unwrap();
-        let actions = rows
-            .iter()
-            .position(|row| matches!(row, Row::Actions))
-            .unwrap();
-        assert_eq!(sessions, 0);
-        assert_eq!(actions, 10);
-        assert_eq!(agents, 12);
-        assert!(matches!(rows.get(sessions + 1), Some(Row::Spacer)));
-        assert!(matches!(rows.get(agents + 1), Some(Row::Spacer)));
+        assert!(matches!(rows.first(), Some(Row::AgentSection(_))));
+        assert!(matches!(rows.get(sessions - 1), Some(Row::Spacer)));
+        assert!(!matches!(rows.get(sessions - 2), Some(Row::Spacer)));
     }
 
     #[test]
-    fn overflowing_sidebar_prioritizes_agents_above_sessions() {
-        let snapshot: Snapshot =
-            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
-        let rows = balance_sections(build_rows(&snapshot, false, AgentSort::Grouped), 8);
-        let sessions = rows
-            .iter()
-            .position(|row| matches!(row, Row::Section("sessions")))
-            .unwrap();
-        let agents = rows
-            .iter()
-            .position(|row| matches!(row, Row::AgentSection(_)))
-            .unwrap();
-        let actions = rows
-            .iter()
-            .position(|row| matches!(row, Row::Actions))
-            .unwrap();
-
-        assert_eq!(agents, 0);
-        assert!(agents < actions);
-        assert!(actions < sessions);
-    }
-
-    #[test]
-    fn midpoint_actions_span_left_and_right_without_help() {
+    fn top_actions_span_left_and_right_without_help() {
         assert_eq!(action_button(40, 0), Some(FooterButton::New));
         assert_eq!(action_button(40, 20), None);
         assert_eq!(action_button(40, 34), Some(FooterButton::Menu));
@@ -2041,12 +2069,12 @@ mod tests {
                 Row::Session(session) => Some(session.session_id),
                 Row::Section(_)
                 | Row::AgentSection(_)
+                | Row::AgentGroup(_)
                 | Row::SessionSub(_)
                 | Row::Agent(_)
-                | Row::AgentSub(_)
+                | Row::AgentSub(_, _)
                 | Row::Detail(_, _)
                 | Row::Conversation(_, _)
-                | Row::Actions
                 | Row::Spacer => None,
             })
             .collect();
@@ -2075,14 +2103,40 @@ mod tests {
         snapshot.agents[1].target.session_name = "alpha".into();
         snapshot.agents[2].target.session_name = "alpha".into();
 
-        let agents: Vec<_> = build_rows(&snapshot, false, AgentSort::Grouped)
-            .into_iter()
+        let rows = build_rows(&snapshot, false, AgentSort::Grouped);
+        let groups: Vec<_> = rows
+            .iter()
             .filter_map(|row| match row {
-                Row::Agent(agent) => Some(agent.instance_id),
+                Row::AgentGroup(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, ["alpha", "zeta"]);
+        let agents: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Agent(agent) => Some(agent.instance_id.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(agents, ["first", "pane", "late"]);
+        for row in &rows {
+            if let Row::AgentSub(agent, _) = row {
+                let line = render_row(row, false, 40);
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                assert!(!text.contains(&agent.target.session_name));
+                assert_eq!(
+                    selection_key(row),
+                    Some(format!("agent:{}", agent.instance_id))
+                );
+            } else if matches!(row, Row::AgentGroup(_)) {
+                assert!(selection_key(row).is_none());
+            }
+        }
     }
 
     #[test]
@@ -2103,7 +2157,9 @@ mod tests {
             agent("blocked", DisplayState::Blocked),
             agent("unknown", DisplayState::Unknown),
         ];
-        let agents: Vec<_> = build_rows(&snapshot, false, AgentSort::Prioritized)
+        let rows = build_rows(&snapshot, false, AgentSort::Prioritized);
+        assert!(!rows.iter().any(|row| matches!(row, Row::AgentGroup(_))));
+        let agents: Vec<_> = rows
             .into_iter()
             .filter_map(|row| match row {
                 Row::Agent(agent) => Some(agent.instance_id),
@@ -2124,7 +2180,7 @@ mod tests {
         )));
         assert!(rows.windows(2).any(|pair| matches!(
             pair,
-            [Row::Agent(first), Row::AgentSub(second)] if first.instance_id == second.instance_id
+            [Row::Agent(first), Row::AgentSub(second, _)] if first.instance_id == second.instance_id
         )));
     }
 
@@ -2147,7 +2203,10 @@ mod tests {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let agent = snapshot.agents[0].clone();
-        for row in [Row::Agent(agent.clone()), Row::AgentSub(agent)] {
+        for row in [
+            Row::Agent(agent.clone()),
+            Row::AgentSub(agent, AgentSort::Grouped),
+        ] {
             let line = render_row(&row, true, 40);
             assert!(
                 line.spans
@@ -2164,12 +2223,23 @@ mod tests {
     }
 
     #[test]
-    fn agent_card_places_session_first_and_kind_with_status_second() {
+    fn agent_card_shows_thread_name_with_progress_session_and_status_below() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
-        let agent = snapshot.agents[0].clone();
+        let mut agent = snapshot.agents[0].clone();
+        agent.target.session_name = "Word".into();
+        agent.target.window_name = "Formula".into();
+        agent.thread_name = Some("Readable thread".into());
+        agent.task_progress = Some(crate::model::TaskProgress {
+            completed: 2,
+            total: 5,
+        });
         let first = render_row(&Row::Agent(agent.clone()), false, 40);
-        let second = render_row(&Row::AgentSub(agent.clone()), false, 40);
+        let second = render_row(
+            &Row::AgentSub(agent.clone(), AgentSort::Prioritized),
+            false,
+            40,
+        );
         let text = |line: Line<'_>| {
             line.spans
                 .iter()
@@ -2178,14 +2248,37 @@ mod tests {
         };
         let first = text(first);
         let second = text(second);
-        assert!(first.contains(&agent.target.session_name));
+        assert!(first.contains("Readable thread"));
+        assert!(!first.contains(&agent.target.window_name));
+        assert!(second.contains(&agent.target.session_name));
+        assert!(second.contains("2/5"));
         assert!(!first.contains(agent_kind_name(agent.kind)));
         assert!(second.contains(agent_kind_name(agent.kind)));
         assert!(second.contains(&agent_status(&agent)));
     }
 
     #[test]
-    fn card_titles_are_white_while_status_stays_on_icons_and_agent_subtitles() {
+    fn long_chinese_topics_and_session_names_fit_narrow_agent_cards() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let mut agent = snapshot.agents[0].clone();
+        agent.target.session_name = "文档体验优化方向".into();
+        agent.target.window_name = "修复公式插入时的布局问题".into();
+        for width in [12, 26, 36, 80] {
+            for row in [
+                Row::Agent(agent.clone()),
+                Row::AgentSub(agent.clone(), AgentSort::Grouped),
+            ] {
+                assert_eq!(render_row(&row, false, width).width(), usize::from(width));
+                assert_eq!(render_row(&row, true, width).width(), usize::from(width));
+            }
+        }
+        agent.target.window_name.clear();
+        assert_eq!(agent_topic(&agent), agent.target.session_name);
+    }
+
+    #[test]
+    fn card_titles_are_white_while_status_stays_on_icons_and_agent_status() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let title_color = Color::Rgb(235, 235, 245);
@@ -2209,9 +2302,9 @@ mod tests {
         );
         assert_eq!(title.spans[1].style.fg, Some(title_color));
 
-        let subtitle = render_row(&Row::AgentSub(agent.clone()), false, 40);
+        let subtitle = render_row(&Row::AgentSub(agent.clone(), AgentSort::Grouped), false, 40);
         assert_eq!(
-            subtitle.spans[0].style.fg,
+            subtitle.spans[2].style.fg,
             Some(state_color(agent.display_state))
         );
 
@@ -2301,7 +2394,11 @@ mod tests {
         let mut snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         snapshot.agents[0].hook_health = crate::model::HookHealth::Conflict;
-        let line = render_row(&Row::AgentSub(snapshot.agents[0].clone()), false, 40);
+        let line = render_row(
+            &Row::AgentSub(snapshot.agents[0].clone(), AgentSort::Grouped),
+            false,
+            40,
+        );
         let rendered: String = line
             .spans
             .iter()

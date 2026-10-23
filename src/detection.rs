@@ -293,7 +293,7 @@ impl Detector {
             return Err("invalid agent event envelope".into());
         }
         if report.session_label.as_deref().is_some_and(|label| {
-            label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
+            label.is_empty() || label.chars().count() > 128 || label.chars().any(char::is_control)
         }) {
             return Err("invalid agent session label".into());
         }
@@ -663,8 +663,46 @@ impl Detector {
                 self.machine.process_exited(&previous, now_ms);
             }
         }
-        snapshot
+        let snapshot = if kind == AgentKind::Codex {
+            snapshot
+                .hook_session_id
+                .as_deref()
+                .and_then(crate::hooks::codex_thread_name)
+                .and_then(|name| self.machine.set_thread_name(&snapshot.instance_id, name))
+                .unwrap_or(snapshot)
+        } else {
+            snapshot
+        };
+        let progress = if kind == AgentKind::Codex {
+            codex_task_progress(&pane.title, snapshot.thread_name.as_deref())
+        } else {
+            None
+        };
+        self.machine
+            .set_task_progress(&snapshot.instance_id, progress)
+            .unwrap_or(snapshot)
     }
+}
+
+// The configured Codex title ends with task-progress, after thread-title.
+// Only publish an explicit fraction from that item; absent progress stays absent.
+fn codex_task_progress(
+    title: &str,
+    thread_name: Option<&str>,
+) -> Option<crate::model::TaskProgress> {
+    if !title.to_ascii_lowercase().starts_with("codex | ")
+        || thread_name.is_some_and(|name| title.trim_end().ends_with(name))
+    {
+        return None;
+    }
+    static PROGRESS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PROGRESS.get_or_init(|| {
+        regex::Regex::new(r"(?i)(\d+)\s*/\s*(\d+)(?:\s+(?:tasks?|steps?))?$").unwrap()
+    });
+    let values = pattern.captures(title.trim())?;
+    let completed = values[1].parse().ok()?;
+    let total = values[2].parse().ok()?;
+    (total > 0 && completed <= total).then_some(crate::model::TaskProgress { completed, total })
 }
 
 fn valid_pane_id(value: &str) -> bool {
@@ -774,6 +812,27 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_progress_uses_an_explicit_title_item_and_never_a_thread_name() {
+        for title in [
+            "Codex | Working | Layout | 2/5",
+            "codex | Working ⠦ Layout 2/5 tasks",
+        ] {
+            let progress = codex_task_progress(title, Some("Layout")).unwrap();
+            assert_eq!(progress.completed, 2);
+            assert_eq!(progress.total, 5);
+        }
+        for title in [
+            "Codex | Ready | Layout",
+            "Codex | Working | Layout | 6/5",
+            "Codex | Ready | 0/0",
+            "Other | Ready | Layout | 2/5",
+        ] {
+            assert!(codex_task_progress(title, Some("Layout")).is_none());
+        }
+        assert!(codex_task_progress("Codex | Ready | Fix 2/5", Some("Fix 2/5")).is_none());
+    }
 
     #[test]
     fn hookless_idle_resume_reconciles_through_detector_publication() {
