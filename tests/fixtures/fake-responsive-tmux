@@ -6,12 +6,13 @@ case ${1:-} in
     case "$*" in
       *'#{socket_path}'*) printf '%s\n' /tmp/mock-tmux.sock ;;
       *'#{client_session}'*) printf '%s\n' mock-session ;;
+      *'#{window_width}'*) printf '%s\n' 140 ;;
       *'#{window_id}'*) printf '%s\n' @1 ;;
       *'#{pane_id}'*) printf '%s\n' %1 ;;
       *) exit 1 ;;
     esac
     ;;
-  list-clients) printf '%s\n' '/dev/pts/8 80' ;;
+  list-clients) printf '%s\n' '/dev/pts/8 @1 80' ;;
   show-option)
     case "$*" in
       *'@sidebar_width'*) printf '%s\n' 26 ;;

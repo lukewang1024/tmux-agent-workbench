@@ -258,10 +258,11 @@ fn create(
         option_u16(server, "@sidebar_max_width", 36).min(64),
     );
     let main_min = option_u16(server, "@sidebar_main_min_width", 80);
+    let viewport_width = sidebar_viewport_width(server, window, window_width)?;
     debug(&format!(
-        "create window={window} window_width={window_width} width={width} main_min={main_min} auto={auto}"
+        "create window={window} window_width={window_width} viewport_width={viewport_width} width={width} main_min={main_min} auto={auto}"
     ));
-    if window_width < width.saturating_add(main_min).saturating_add(1) {
+    if viewport_width < width.saturating_add(main_min).saturating_add(1) {
         debug("responsive gate skipped sidebar");
         if auto {
             tmux(
@@ -449,8 +450,9 @@ fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::er
         .trim()
         .parse::<u16>()
         .unwrap_or(0);
+    let viewport_width = sidebar_viewport_width(server, window, window_width)?;
     let rebuilding_sidebar = sidebar_panes(server, window)?.is_empty()
-        && window_width >= width.saturating_add(main_min).saturating_add(1);
+        && viewport_width >= width.saturating_add(main_min).saturating_add(1);
     if rebuilding_sidebar {
         if let Some(pane) = zoomed_pane.as_deref() {
             // list-panes reports the zoomed pane at the full viewport width.
@@ -555,7 +557,8 @@ fn maintain_layout(
         .trim()
         .parse::<u16>()
         .unwrap_or(0);
-    if window_width < width.saturating_add(main_min).saturating_add(1) {
+    let viewport_width = sidebar_viewport_width(server, window, window_width)?;
+    if viewport_width < width.saturating_add(main_min).saturating_add(1) {
         if let Some(pane) = panes.first() {
             tmux(
                 server,
@@ -592,6 +595,26 @@ fn maintain_layout(
         )?;
     }
     Ok(())
+}
+
+fn sidebar_viewport_width(
+    server: &ServerIdentity,
+    window: &str,
+    window_width: u16,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    // window-size=latest and asynchronous resize hooks can leave the shared
+    // window wider than a phone that still views it. A pane sidebar belongs
+    // to that shared layout, so it must fit every client viewing this window.
+    let clients = tmux(
+        server,
+        &["list-clients", "-F", "#{window_id}\u{1f}#{client_width}"],
+    )?;
+    Ok(clients
+        .lines()
+        .filter_map(|row| row.split_once('\u{1f}'))
+        .filter(|(visible_window, _)| *visible_window == window)
+        .filter_map(|(_, width)| width.parse::<u16>().ok())
+        .fold(window_width, u16::min))
 }
 
 fn restore_zoom(
