@@ -325,15 +325,16 @@ class ReorganiseTmuxTests(unittest.TestCase):
         after = self.snapshot()
         scratch = next(row for row in after["windows"] if row["session_name"] == "0")
         pane_id = scratch["pane_ids"][0]
+        expected_path = Path("/tmp").resolve()
         self.tmux("send-keys", "-t", pane_id, "cd /tmp", "Enter")
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            if self.tmux("display-message", "-p", "-t", pane_id, "#{pane_current_path}") == "/tmp":
+            if Path(self.tmux("display-message", "-p", "-t", pane_id, "#{pane_current_path}")).resolve() == expected_path:
                 break
             time.sleep(0.05)
         result = self.call("restore", applied["run_dir"], ok=False)
         self.assertIn("scratch shell changed", result.stderr)
-        self.assertEqual(self.tmux("display-message", "-p", "-t", pane_id, "#{pane_current_path}"), "/tmp")
+        self.assertEqual(Path(self.tmux("display-message", "-p", "-t", pane_id, "#{pane_current_path}")).resolve(), expected_path)
 
     def test_restore_preserves_a_client_viewing_the_created_scratch_shell(self):
         before = self.snapshot()
