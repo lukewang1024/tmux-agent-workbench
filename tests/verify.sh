@@ -11,6 +11,8 @@ python_runner="$repo/tests/python.sh"
 "$python_runner" tests/status-prefix-mouse.py
 cargo fmt --check
 cargo test --locked
+"$python_runner" tests/client-daemon-timeouts.py
+"$python_runner" tests/client-notifications.py
 "$python_runner" tests/client-resume.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-window-resize.py target/debug/tmux-agent-workbench
 sh tests/integration-tmux.sh

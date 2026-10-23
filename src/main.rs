@@ -1,4 +1,5 @@
 mod attached_process;
+mod optional_notifications;
 mod terminal_lease;
 
 use std::collections::HashMap;
@@ -411,11 +412,11 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
             Ok(ClientMessage::Heartbeat {
                 activity_unix_ms, ..
             }) => {
-                let result = ipc_call(
+                let result = client_daemon_update(
                     paths,
                     "client.heartbeat",
                     serde_json::json!({"endpoint_id": endpoint_id, "activity_unix_ms": activity_unix_ms}),
-                )?;
+                );
                 let events: Vec<tmux_agent_workbench::semantic::SemanticEvent> =
                     serde_json::from_value(
                         result
@@ -450,18 +451,18 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             }) => {
                 let target = active_pane.and_then(|pane_id| current_target_for_pane(&pane_id).ok());
-                ipc_call(
+                client_daemon_update(
                     paths,
                     "client.focus",
                     serde_json::json!({"endpoint_id": endpoint_id, "focused": focused, "overlay_visible": false, "target": target}),
-                )?;
+                );
             }
             Ok(ClientMessage::EventAccepted { event_id, .. }) => {
-                ipc_call(
+                client_daemon_update(
                     paths,
                     "client.accepted",
                     serde_json::json!({"endpoint_id": endpoint_id, "event_id": event_id}),
-                )?;
+                );
             }
             Ok(ClientMessage::FocusTarget {
                 event_id, target, ..
@@ -813,6 +814,12 @@ fn client_attach(
     );
     let mut event_targets: HashMap<String, tmux_agent_workbench::model::TmuxTarget> =
         HashMap::new();
+    let notification_paths = paths.clone();
+    let notifications =
+        optional_notifications::Worker::new(move |event: (String, String, String, String)| {
+            platform_notify(&notification_paths, &event.0, &event.1, &event.2, &event.3)
+                .map_err(|error| error.to_string())
+        });
     let mut next_heartbeat = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = pty.child.try_wait()? {
@@ -863,13 +870,12 @@ fn client_attach(
                         ..
                     } => {
                         event_targets.insert(event_id.clone(), target);
-                        platform_notify(
-                            paths,
-                            &format!("{endpoint_id}.{event_id}"),
-                            &category,
-                            &title,
-                            &body,
-                        )?;
+                        notifications.submit((
+                            format!("{endpoint_id}.{event_id}"),
+                            category,
+                            title,
+                            body,
+                        ));
                         let _ = write_frame(
                             &mut *stdin,
                             &ClientMessage::EventAccepted {
@@ -1085,11 +1091,12 @@ fn platform_notify(
     body: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_safe_name(event_id, "event id")?;
-    let status = if std::env::var_os("TERMUX_VERSION").is_some() {
+    let mut command = if std::env::var_os("TERMUX_VERSION").is_some() {
         let am = command_path("am").ok_or("Android activity manager is unavailable")?;
         let action = termux_click_action(paths, event_id, &am)?;
-        ProcessCommand::new("termux-notification")
-            .args([
+        {
+            let mut command = ProcessCommand::new("termux-notification");
+            command.args([
                 "--id",
                 event_id,
                 "--title",
@@ -1098,23 +1105,31 @@ fn platform_notify(
                 body,
                 "--action",
                 &action.to_string_lossy(),
-            ])
-            .status()?
+            ]);
+            command
+        }
     } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
-        ProcessCommand::new("wb-client.exe")
-            .args(["notify", event_id, title, body])
-            .status()?
+        {
+            let mut command = ProcessCommand::new("wb-client.exe");
+            command.args(["notify", event_id, title, body]);
+            command
+        }
     } else if cfg!(target_os = "macos") {
         let script = "on run argv\n display notification (item 3 of argv) with title (item 2 of argv)\nend run";
-        ProcessCommand::new("osascript")
-            .args(["-e", script, event_id, title, body])
-            .status()?
+        {
+            let mut command = ProcessCommand::new("osascript");
+            command.args(["-e", script, event_id, title, body]);
+            command
+        }
     } else {
         let _ = paths;
-        ProcessCommand::new("notify-send")
-            .args(["--app-name", "Workbench", title, body])
-            .status()?
+        {
+            let mut command = ProcessCommand::new("notify-send");
+            command.args(["--app-name", "Workbench", title, body]);
+            command
+        }
     };
+    let status = optional_notifications::run(&mut command, Duration::from_secs(2))?;
     if status.success() {
         Ok(())
     } else {
@@ -1842,6 +1857,24 @@ fn parse_display_state(value: &str) -> Result<DisplayState, String> {
     }
 }
 
+// After registration, daemon bookkeeping is an optional side channel. In
+// particular a busy daemon's two-second read timeout must not tear down SSH.
+fn client_daemon_update(
+    paths: &Paths,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    match ipc_call(paths, method, params) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!(
+                "tmux-agent-workbench: {method} skipped; terminal remains connected: {error}"
+            );
+            serde_json::Value::Null
+        }
+    }
+}
+
 fn ipc_call(
     paths: &Paths,
     method: &str,
@@ -1849,11 +1882,13 @@ fn ipc_call(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let server = ServerIdentity::discover()?;
     let socket = paths.socket_for_server(&server.key);
-    Ok(call(
-        &socket,
-        &Request::new(method, params),
-        Duration::from_secs(2),
-    )?)
+    // Registration and binding must complete before attaching the terminal.
+    // They can wait through a scan; established-session updates stay bounded.
+    let timeout = match method {
+        "client.register" | "client.bind" => Duration::from_secs(10),
+        _ => Duration::from_secs(2),
+    };
+    Ok(call(&socket, &Request::new(method, params), timeout)?)
 }
 
 fn menu_input_mode(paths: &Paths, client: &str, requested: Option<&str>) -> &'static str {
