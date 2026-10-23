@@ -351,6 +351,8 @@ fn deliver_event<B: NotificationBackend>(
         instance_id: format!("relay-{}", event.event_id),
         kind: parse_kind(&event.agent_kind).unwrap_or(AgentKind::Codex),
         label: event.agent_label,
+        thread_name: None,
+        task_progress: None,
         target: TmuxTarget {
             session_id: focus
                 .as_ref()

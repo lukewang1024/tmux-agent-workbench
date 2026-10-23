@@ -5,6 +5,7 @@ mod terminal_lease;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1208,7 +1209,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Status { format } => {
             let home = dirs::home_dir().ok_or("home directory unavailable")?;
             let registry = tmux_agent_workbench::workspace::Registry::new(paths.workspaces_dir());
-            let workspaces = registry.lazy_migrate(&home.join("Workspace"), now_ms())?;
+            let workspace_root = std::env::var_os("WORKBENCH_WORKSPACE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("Workspace"));
+            let workspaces = registry.lazy_migrate(&workspace_root, now_ms())?;
             let capabilities = [
                 "client-protocol-v2",
                 "status-fragments-v1",
@@ -1406,7 +1410,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let home = dirs::home_dir().ok_or("home directory unavailable")?;
             let registry = tmux_agent_workbench::workspace::Registry::new(paths.workspaces_dir());
-            let workspaces = registry.lazy_migrate(&home.join("Workspace"), now_ms())?;
+            let workspace_root = std::env::var_os("WORKBENCH_WORKSPACE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("Workspace"));
+            let workspaces = registry.lazy_migrate(&workspace_root, now_ms())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);
             } else {

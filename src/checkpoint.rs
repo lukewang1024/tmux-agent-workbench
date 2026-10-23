@@ -25,6 +25,8 @@ pub struct RuntimeCheckpoint {
     pub seen_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_name: Option<String>,
     #[serde(default)]
     pub delivered_event_ids: Vec<String>,
     #[serde(default)]

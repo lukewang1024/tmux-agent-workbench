@@ -1,62 +1,8 @@
 #!/bin/sh
-# gen-tmuxinator-configs — (re)generate machine-local tmuxinator named configs
-# in ~/.config/tmuxinator/ from two pools:
-#
-#   WORKBENCH_CODE_ROOT (~/Code)      — each repo's main checkout, plus
-#                              numbered pool slots whose dir is named
-#                              `<repo>-<number>` (e.g. axon-web-7). One config
-#                              per root, seeded with that single repo — a
-#                              single-repo task.
-#   WORKBENCH_WORKSPACE_ROOT (~/Workspace) — every level-1 directory is one
-#                              feature/task. Its immediate children are
-#                              normally per-repo worktrees; a standalone git
-#                              checkout is also valid, and an empty directory
-#                              gets an agent-only config. One config per
-#                              directory, with every known repo pre-built as
-#                              its own inspection window (there's no need to
-#                              wait on lazy `tmux-agent-workbench inspect` accretion for repos
-#                              already present — though it still works for a
-#                              repo the task touches later).
-#
-# Skipped everywhere: anything under a `z-archive/` dir (parked repos — pull
-# one out manually when you need it), use-and-throw worktrees under any
-# `<repo>-worktrees/` dir (the ag-dev per-task convention — a separate,
-# ephemeral pool, not a feature workspace), worktrees registered outside
-# WORKBENCH_CODE_ROOT/WORKBENCH_WORKSPACE_ROOT, and non-numbered extra
-# worktrees under WORKBENCH_CODE_ROOT.
-#
-# Manual exclusions persist across re-runs via a one-name-per-line ignore file
-# at ~/.config/tmuxinator/.genignore (blank lines and #comments allowed;
-# matched against the generated session name, so it covers both pools).
-#
-# Layout (task/window model — a session is a task, seeded with one repo):
-#   - agent window: the session-level coding agent (tmux-agent-workbench agent start --managed → claude/codex/
-#     opencode via $WORKBENCH_AGENT), rooted at the repo. This is where you
-#     steer.
-#   - <repo> window: that repo's inspection surface, three panes stacked
-#     even-vertical — a git TUI on top (tig, or $WORKBENCH_GIT_TOOL e.g.
-#     lazygit), an empty scratchpad shell in the middle, an editor on the
-#     bottom ($VISUAL/$EDITOR else nvim falling back to vim) (+ a dev-server
-#     pane for frontends). Full-screen, small-screen safe. Matches what
-#     `tmux-agent-workbench inspect` builds at runtime, so a pre-seeded window and a later
-#     accreted one look the same.
-# The task grows by accretion: fold more repos in as inspection windows with
-# prefix+G (manual) or `tmux-agent-workbench inspect <path>` (the agent, per the AGENTS.md
-# convention). The seed repo above is just window count 1 of that same model.
-#
-# Re-running: this is the single source of truth driving tmuxinator configs
-# from actual git worktree state, so re-run it whenever that state changes —
-# by hand (prefix+g, or after cloning a new repo under WORKBENCH_CODE_ROOT —
-# there's no hook for that side), or automatically (workspace create/destroy
-# tooling should call this at the end of both operations so a torn-down
-# workspace's config disappears with it; note a live tmux session isn't
-# killed by that — pair teardown with `tmux kill-session -t <workspace>` too
-# if it's running).
-#
-# usage: gen-tmuxinator-configs [code_root] [workspace_root]
-#        (default: $WORKBENCH_CODE_ROOT or ~/Code,
-#                  $WORKBENCH_WORKSPACE_ROOT or ~/Workspace)
-
+# Generate project launchers: one workspace session, one window per task.
+# Code-pool entries create an isolated first task rather than edit the shared
+# checkout. Legacy workspace directories reopen as a single existing task.
+# No Git, editor, shell, or dev-server inspection layouts are pre-created.
 set -eu
 # Resolve $0 through symlinks so sibling dirs (lib/, bin/) resolve even when the
 # script is invoked via a PATH symlink (e.g. ~/.local/bin/<name>).
@@ -68,8 +14,6 @@ while [ -h "$self" ]; do
     *) self=$(dirname "$self")/$target ;;
   esac
 done
-dir=$(cd "$(dirname "$self")" && pwd -P)
-. "$dir/../../lib/resolve-tools.sh"
 
 WORKBENCH_CODE_ROOT="${1:-${WORKBENCH_CODE_ROOT:-$HOME/Code}}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P || echo "$WORKBENCH_CODE_ROOT")  # canonical
@@ -89,10 +33,29 @@ done
 IGNORE="$DEST/.genignore"
 written=0 skipped=0
 
-# Same resolution tmux-agent-workbench inspect uses at runtime, done once here so every
-# generated window matches whatever a later accreted window would look like.
-GIT_TOOL=$(resolve_git_tool)
-EDITOR_CMD=$(resolve_editor)
+quote_arg() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+quote_yaml() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+write_window() {
+  window_name=$1
+  window_root=$2
+  restore_workspace=$3
+  restore_legacy=$4
+  seed_repo=${5:-}
+  restore_command="tmux-agent-workbench task restore "
+  [ "$restore_legacy" = 0 ] || restore_command="$restore_command--legacy "
+  restore_command="$restore_command--workspace $(quote_arg "$restore_workspace") $(quote_arg "$window_name")"
+  [ -z "$seed_repo" ] || restore_command="$restore_command $(quote_arg "$seed_repo")"
+  printf '  - %s:\n' "$(quote_yaml "$window_name")"
+  printf '      root: %s\n' "$(quote_yaml "$window_root")"
+  printf '      panes:\n'
+  printf '        - %s\n' "$(quote_yaml "$restore_command")"
+}
 
 # ---------------------------------------------------------------------------
 # Part A — WORKBENCH_CODE_ROOT: one config per main checkout / numbered pool
@@ -153,33 +116,19 @@ for r in $roots; do
   if [ -f "$IGNORE" ] && grep -qxF "$name" "$IGNORE" 2>/dev/null; then
     skipped=$((skipped + 1)); continue
   fi
-  if [ -f "$r/package.json" ] || [ -f "$r/pnpm-workspace.yaml" ] || [ -f "$r/frontend/package.json" ]; then
-    fe=1
-  else
-    fe=0
-  fi
   {
     printf '%s (%s)\n' "$MARKER" "$r"
-    printf 'name: %s\n' "$name"
-    printf 'root: %s\n' "$r"
-    printf 'startup_window: agent\n'
+    printf 'name: %s\n' "$(quote_yaml "$name")"
+    printf 'root: %s\n' "$(quote_yaml "$r")"
     printf 'windows:\n'
-    printf '  - agent:\n            - tmux-agent-workbench agent start --managed\n'
-    printf '  - %s:\n' "$name"
-    printf '      layout: even-vertical\n'
-    printf '      panes:\n'
-    printf '        - git:\n            - %s\n' "$GIT_TOOL"
-    printf '        - shell:\n'
-    printf '        - editor:\n            - %s\n' "$EDITOR_CMD"
-    [ "$fe" = 1 ] && printf '        - dev:\n            -\n'
+    write_window "$name" "$r" "$WORKBENCH_WORKSPACE_ROOT/$name" 0 "$(basename "$r")"
   } > "$DEST/$name.yml"
   written=$((written + 1))
 done
 
 # ---------------------------------------------------------------------------
 # Part B — WORKBENCH_WORKSPACE_ROOT: one config per level-1 workspace dir,
-# rooted at the workspace directory so the session-level agent covers the
-# whole task, with every member repo pre-built as its own inspection window.
+# reopening one agent window per task, without restoring temporary tools.
 # ---------------------------------------------------------------------------
 WS_ROOT=$(cd "$WORKBENCH_WORKSPACE_ROOT" 2>/dev/null && pwd -P || echo "")
 ws_written=0
@@ -190,50 +139,30 @@ if [ -n "$WS_ROOT" ]; then
     w=${w%/}
     wsname=$(basename "$w" | tr ' .:/' '____')
 
-    # A Workspace level-1 directory can either be a standalone checkout or a
-    # task directory containing immediate child worktrees. Do not descend
-    # further: a workspace's repos are direct children by convention.
-    members=
-    top=$(git -C "$w" rev-parse --show-toplevel 2>/dev/null || true)
-    if [ "$top" = "$w" ]; then
-      members="$w "
-    else
-      for d in "$w"/*/; do
-        [ -d "$d" ] || continue
-        d=${d%/}
-        top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
-        [ "$top" = "$d" ] || continue
-        members="$members$d "
-      done
-    fi
-
     if [ -f "$IGNORE" ] && grep -qxF "$wsname" "$IGNORE" 2>/dev/null; then
       skipped=$((skipped + 1)); continue
     fi
-
     {
       printf '%s (workspace: %s)\n' "$MARKER" "$w"
-      printf 'name: %s\n' "$wsname"
-      printf 'root: %s\n' "$w"
-      printf 'startup_window: agent\n'
+      printf 'name: %s\n' "$(quote_yaml "$wsname")"
+      printf 'root: %s\n' "$(quote_yaml "$w")"
       printf 'windows:\n'
-      printf '  - agent:\n            - tmux-agent-workbench agent start --managed\n'
-      for m in $members; do
-        mname=$(basename "$m" | tr ' .:/' '____')
-        if [ -f "$m/package.json" ] || [ -f "$m/pnpm-workspace.yaml" ] || [ -f "$m/frontend/package.json" ]; then
-          mfe=1
-        else
-          mfe=0
-        fi
-        printf '  - %s:\n' "$mname"
-        printf '      root: %s\n' "$m"
-        printf '      layout: even-vertical\n'
-        printf '      panes:\n'
-        printf '        - git:\n            - %s\n' "$GIT_TOOL"
-        printf '        - shell:\n'
-        printf '        - editor:\n            - %s\n' "$EDITOR_CMD"
-        [ "$mfe" = 1 ] && printf '        - dev:\n            -\n'
+      task_count=0
+      for task_root in "$w"/tasks/*; do
+        [ -d "$task_root" ] && [ ! -L "$task_root" ] || continue
+        write_window "$(basename "$task_root")" "$task_root" "$w" 0
+        task_count=$((task_count + 1))
       done
+      if [ "$task_count" -eq 0 ]; then
+        write_window "$wsname" "$w" "$w" 1
+      else
+        # A legacy task may coexist with newly created isolated tasks.
+        for member in "$w"/.git "$w"/*/.git; do
+          [ -e "$member" ] || continue
+          write_window "$wsname" "$w" "$w" 1
+          break
+        done
+      fi
     } > "$DEST/$wsname.yml"
     ws_written=$((ws_written + 1))
   done
@@ -243,5 +172,5 @@ written=$((written + ws_written))
 summary=$(printf 'gen-tmuxinator-configs: wrote %s pool configs (%s code, %s workspace; %s ignored)' \
   "$written" "$((written - ws_written))" "$ws_written" "$skipped")
 printf '%s → %s\n' "$summary" "$DEST"
-[ -n "${TMUX:-}" ] && tmux display-message "$summary"
+[ -z "${TMUX:-}" ] || tmux display-message "$summary" 2>/dev/null || true
 exit 0

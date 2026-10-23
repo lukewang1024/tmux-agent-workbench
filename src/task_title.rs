@@ -71,6 +71,7 @@ struct Window {
     name: String,
     protected: bool,
     automatic_rename: bool,
+    task_name: Option<String>,
 }
 
 fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, String> {
@@ -110,11 +111,11 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
             "-p",
             "-t",
             target,
-            "#{pane_id}\u{1f}#{window_id}\u{1f}#{window_name}\u{1f}#{@workbench_task}\u{1f}#{@workbench_project_root}\u{1f}#{@pane_role}\u{1f}#{@workbench-window-automatic-rename}\u{1f}#{automatic-rename}",
+            "#{pane_id}\u{1f}#{window_id}\u{1f}#{window_name}\u{1f}#{@workbench_task}\u{1f}#{@workbench_project_root}\u{1f}#{@pane_role}\u{1f}#{@workbench-window-automatic-rename}\u{1f}#{automatic-rename}\u{1f}#{@workbench_task_root}\u{1f}#{@workbench_task_name}",
         ],
     )?;
     let fields: Vec<_> = value.split('\u{1f}').collect();
-    if fields.len() != 8 || !fields[1].starts_with('@') {
+    if fields.len() != 10 || !fields[1].starts_with('@') {
         return Err("agent pane moved or expired; retry with its current identity".into());
     }
     Ok((
@@ -122,11 +123,12 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
         Window {
             id: fields[1].into(),
             name: fields[2].into(),
-            protected: (!fields[3].is_empty() && fields[3] != "0")
+            protected: (!fields[3].is_empty() && fields[3] != "0" && fields[8].is_empty())
                 || !fields[4].is_empty()
                 || (target.starts_with('%') && matches!(fields[5], "sidebar" | "task"))
                 || fields[6] == "on",
             automatic_rename: fields[7] == "1",
+            task_name: (!fields[8].is_empty()).then(|| fields[9].to_owned()),
         },
     ))
 }
@@ -136,7 +138,8 @@ fn generic_name(name: &str) -> bool {
     name.is_empty()
         || matches!(
             name.as_str(),
-            "agent"
+            "tmux"
+                | "agent"
                 | "shell"
                 | "terminal"
                 | "sh"
@@ -376,6 +379,90 @@ fn with_window<T>(
     action(&server, current, state, preserved)
 }
 
+/// Synchronize a verified thread's human name, retaining title ownership and
+/// respecting manual renames. Task IDs and worktree paths never change here.
+fn sync_thread_name(
+    paths: &Paths,
+    snapshot: &Snapshot,
+    agent: &AgentSnapshot,
+    allow_session_change: bool,
+) -> Result<(), String> {
+    let Some(title) = agent.thread_name.as_deref().map(str::trim) else {
+        return Ok(());
+    };
+    if title.is_empty()
+        || title.chars().count() > 128
+        || title.chars().any(char::is_control)
+        || title.contains("#{")
+        || title.contains("#[")
+        || agent.exited
+        || agent.relay_focus.is_some()
+    {
+        return Ok(());
+    }
+    if agent.target.window_name == title {
+        return Ok(());
+    }
+    let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+        .map_err(|error| error.to_string())?;
+    let initial = window(&server, agent)?;
+    let _lock = window_lock(paths, &server, &initial.id)?;
+    let current = window(&server, agent)?;
+    if current.protected || current.name == title {
+        return Ok(());
+    }
+    let mut previous = state(&server, &current)?;
+    if let Some(previous) = previous.as_mut() {
+        if previous.owner.pane == agent.target.pane_id
+            && Some(&previous.owner.process) == agent.process.as_ref()
+        {
+            if !previous.owner.same_task(&Owner::of(agent)?) && !allow_session_change {
+                return Ok(());
+            }
+            if allow_session_change {
+                previous.owner = Owner::of(agent)?;
+            }
+        }
+        if current.name != previous.title.as_deref().unwrap_or(&previous.initial_name) {
+            return Ok(());
+        }
+    } else if !generic_name(&current.name) && current.task_name.as_deref() != Some(&current.name) {
+        return Ok(());
+    }
+    let mut state = owner_state(snapshot, agent, &current, previous)?;
+    if !state.owner.same_task(&Owner::of(agent)?) {
+        return Ok(());
+    }
+    if state.original_options.is_none() {
+        state.original_options = Some(TitleOptions {
+            automatic_rename: automatic_rename(&server, &current.id)?,
+        });
+    }
+    state.title = Some(title.into());
+    let encoded = serde_json::to_string(&state).map_err(|error| error.to_string())?;
+    let condition = format!("#{{==:#{{window_name}},{}}}", format_literal(&current.name));
+    let commands = format!(
+        "rename-window -t {} -- {} ; set-option -w -t {} {} {}",
+        current.id,
+        quote(title),
+        current.id,
+        STATE_OPTION,
+        quote(&encoded)
+    );
+    tmux(
+        &server,
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            &agent.target.pane_id,
+            &condition,
+            &commands,
+        ],
+    )?;
+    Ok(())
+}
+
 fn instruction(agent: &AgentSnapshot) -> String {
     let session = agent.hook_session_id.as_deref().unwrap_or_default();
     let codex = if agent.kind == AgentKind::Codex {
@@ -430,6 +517,10 @@ pub fn hook_output(
             .parent()
             .ok_or("daemon directory unavailable")?
             .into();
+        if agent.thread_name.is_some() {
+            sync_thread_name(&bound_paths, &snapshot, &agent, clear)?;
+            return Ok(json!({}));
+        }
         with_window(
             &bound_paths,
             &snapshot,
@@ -697,6 +788,9 @@ impl TitleReaper {
             return;
         }
         self.next_scan = Instant::now() + Duration::from_millis(500);
+        for agent in &snapshot.agents {
+            let _ = sync_thread_name(paths, snapshot, agent, false);
+        }
         let Ok(windows) = tmux(
             server,
             &[

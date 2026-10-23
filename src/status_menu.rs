@@ -187,6 +187,7 @@ enum ActionCommand {
     Navigate(StatusMenuKind, MenuOptions),
     Tmux(Vec<String>),
     Agent(String),
+    Usage,
     Host(String),
     Botmux(String),
     Launch,
@@ -634,7 +635,11 @@ fn actions(
 ) -> (String, Vec<Action>) {
     let mut actions = vec![];
     let mut title = match kind {
-        StatusMenuKind::Host => "SSH".into(),
+        StatusMenuKind::Host => {
+            let hostname = tmux(&["display-message", "-p", "-t", &context.pane, "#{host}"])
+                .unwrap_or_default();
+            format!("{} · {hostname}", tr("Host", "主机"))
+        }
         StatusMenuKind::Tmux => "tmux".into(),
         StatusMenuKind::Agent => agent_title(context),
     };
@@ -901,6 +906,12 @@ fn actions(
                 ));
             }
             StatusMenuKind::Agent => {
+                actions.push(Action::new(
+                    "usage",
+                    tr("Usage summary...", "使用量总结..."),
+                    'u',
+                    ActionCommand::Usage,
+                ));
                 actions.extend(agent_commands(context, false));
                 if context.input_available
                     && matches!(context.state, BaseState::Idle | BaseState::Working)
@@ -1279,6 +1290,14 @@ fn execute_action(
         }
         ActionCommand::Agent(text) => {
             tmux(&["send-keys", "-t", &context.pane, "-l", &format!("{text} ")])?;
+        }
+        ActionCommand::Usage => {
+            let status = Command::new("workbench-agent-usage")
+                .args(["menu", client])
+                .status()?;
+            if !status.success() {
+                return Err("could not open usage summary".into());
+            }
         }
         ActionCommand::Botmux(operation) => {
             let socket = tmux(&[

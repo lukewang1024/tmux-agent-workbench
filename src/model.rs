@@ -143,6 +143,10 @@ pub struct AgentSnapshot {
     pub instance_id: String,
     pub kind: AgentKind,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_progress: Option<TaskProgress>,
     pub target: TmuxTarget,
     pub process: Option<ProcessFingerprint>,
     pub base_state: BaseState,
@@ -169,6 +173,12 @@ pub struct AgentSnapshot {
     pub exited_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversations: Vec<ConversationSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskProgress {
+    pub completed: u32,
+    pub total: u32,
 }
 
 fn default_state_source() -> StateSource {

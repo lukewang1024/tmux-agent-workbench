@@ -1,18 +1,10 @@
 #!/bin/sh
 # tmux-agent-workbench agent start --managed — launch the task's coding agent in the current directory.
 #
-# Under the task/window model a session == one task, and the agent is the
-# session-level driver living in its own full window (not a per-repo sidebar).
-# Which CLI it is comes from $WORKBENCH_AGENT so claude / codex / trae / opencode are
-# interchangeable without touching the generated tmuxinator configs (they all
-# just run `tmux-agent-workbench agent start --managed`).
-#
-# Cross-repo WRITE scope grows by accretion and is handled per-agent when a repo
-# enters the task (see tmux-agent-workbench inspect and the AGENTS.md / CLAUDE.md convention),
-# because runtime scope-growth is not uniform across the three:
-#   claude   — /add-dir at runtime (immediate)
-#   codex    — reads the tree by default; restart with --add-dir to WRITE elsewhere
-#   opencode — declare via `references`, or approve `external_directory` on first touch
+# A workspace session groups a direction; each window is a separate task.
+# The selected CLI comes from WORKBENCH_AGENT. Repositories are attached to the
+# task with `add`, using isolated worktrees, without opening additional windows.
+# The workspace launcher handles durable task ownership before starting us.
 #
 # usage: tmux-agent-workbench agent start --managed [extra args passed through to the agent]
 #        WORKBENCH_AGENT=codex tmux-agent-workbench agent start --managed      # override per session/pane
@@ -68,12 +60,8 @@ exec_opencode()
   exec agent-team start opencode --auto "$@"
 }
 
-# Mark this tmux session as a task workbench. This is the single flag that opts
-# a session into the window-per-role model: only here does the agent-driven
-# `tmux-agent-workbench inspect` fold repos in as inspection windows. Sessions where the agent is
-# launched some other way (a bare `claude` in an ad-hoc session) stay unmarked,
-# so that automatic behaviour never leaks into them. Session-scoped, so it lives
-# for the session and is queryable from any pane via `tmux show-option -qv`.
+# Retain the managed-session marker for compatibility and legacy cleanup.
+# Task ownership lives on @workbench_task_root on each window.
 if [ "${WORKBENCH_MANAGED:-1}" = 1 ] && [ -n "${TMUX:-}" ]; then
   tmux set-option @workbench_task 1 2>/dev/null || true
 fi

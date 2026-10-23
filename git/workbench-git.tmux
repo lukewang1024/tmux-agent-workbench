@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # workbench-git.tmux — layer 2 (git-worktree workspace) TPM entrypoint.
 #
-# Depends on layer 1 (../workbench.tmux) for inspection windows and @workbench_task —
+# Depends on layer 1 (../workbench.tmux) for task windows and agent tracking —
 # never duplicates that logic. Loads automatically alongside layer 1 from the
 # same single @tpm_plugins entry (TPM discovers every executable *.tmux file
 # under the plugin tree). Opt out of this layer entirely — e.g. you only want
@@ -42,6 +42,9 @@ esac
 bind_tracked "@workbench-key-regen" "@workbench-_bound-regen" "" \
   "regenerate tmuxinator pool configs" run-shell -b "tmux-agent-workbench projects rebuild"
 bind_tracked "@workbench-key-new" "@workbench-_bound-new" "" \
-  "new workspace (feature + repos)" run-shell -b "tmux-agent-workbench new --prompt"
+  "new workspace direction" run-shell -b "TMUX_PANE='#{pane_id}' tmux-agent-workbench new --prompt"
+bind_tracked "@workbench-key-task" "@workbench-_bound-task" "" \
+  "new isolated task in this workspace" run-shell -b "TMUX_PANE='#{pane_id}' tmux-agent-workbench task new --prompt"
+# Legacy key option, forwarding to the task workflow.
 bind_tracked "@workbench-key-promote" "@workbench-_bound-promote" "" \
-  "promote current repo into a new task" run-shell -b "tmux-agent-workbench promote"
+  "new isolated task in this workspace" run-shell -b "TMUX_PANE='#{pane_id}' tmux-agent-workbench task new --prompt"

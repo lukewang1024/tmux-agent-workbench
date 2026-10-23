@@ -633,6 +633,8 @@ mod tests {
             instance_id: "agent-1".into(),
             kind: crate::model::AgentKind::Codex,
             label: "build".into(),
+            thread_name: None,
+            task_progress: None,
             target: TmuxTarget {
                 session_id: "$1".into(),
                 session_name: "s".into(),

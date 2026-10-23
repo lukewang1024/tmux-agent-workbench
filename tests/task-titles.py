@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
     env = dict(os.environ, TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,
                XDG_CONFIG_HOME=root+'/config', XDG_STATE_HOME=root+'/state',
                XDG_CACHE_HOME=root+'/cache', XDG_RUNTIME_DIR=root,
-               TMUX=socket+',0,0')
+               TMUX=socket+',0,0', CODEX_HOME=root+'/codex')
     detached_env = {key: value for key, value in env.items()
                     if key not in ('TMUX', 'TMUX_PANE', 'TMUX_AGENT_WORKBENCH_TMUX_SOCKET')}
     claude = root + '/claude'
@@ -360,6 +360,43 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 json.loads(core('snapshot', '--json').stdout))
             assert title(new_task, 'Resumed naming repair')['status'] == 'renamed'
             assert name(new_task) == 'Resumed naming repair'
+
+            # Thread-name is shared by the sidebar and automatically owned title.
+            named = spawn()
+            assert hook(named, 'SessionStart', thread_name='Readable thread') == {}
+            assert name(named) == 'Readable thread'
+            assert hook(named, 'UserPromptSubmit', thread_name='Renamed thread') == {}
+            assert name(named) == 'Renamed thread'
+            tracked = wait_agent(named['pane'])
+            assert tracked['thread_name'] == 'Renamed thread'
+            assert tracked['label'] == 'Renamed thread'
+            Path(root, 'codex').mkdir(exist_ok=True)
+            Path(root, 'codex/session_index.jsonl').write_text(json.dumps({
+                'id': named['session_id'], 'thread_name': 'Renamed from UI'}) + '\n')
+            deadline = time.monotonic() + 8
+            while name(named) != 'Renamed from UI':
+                assert time.monotonic() < deadline
+                time.sleep(.1)
+            assert wait_agent(named['pane'])['thread_name'] == 'Renamed from UI'
+            tty = tmux('display-message', '-p', '-t', named['pane'], '#{pane_tty}')
+            with open(tty, 'w') as stream:
+                stream.write('\x1b]2;Codex | Working | Renamed thread | 2/5\x07')
+                stream.flush()
+            deadline = time.monotonic() + 8
+            while wait_agent(named['pane']).get('task_progress') != {'completed': 2, 'total': 5}:
+                assert time.monotonic() < deadline
+                time.sleep(.1)
+            tmux('rename-window', '-t', named['pane'], 'Manual override')
+            assert hook(named, 'UserPromptSubmit', thread_name='Another topic') == {}
+            assert name(named) == 'Manual override'
+
+            task = spawn('Planned task')
+            tmux('set-option', '-w', '-t', task['pane'], '@workbench_task_root', root + '/tasks/planned')
+            tmux('set-option', '-w', '-t', task['pane'], '@workbench_task_name', 'Planned task')
+            assert hook(task, 'SessionStart', thread_name='Actual thread topic') == {}
+            assert name(task) == 'Actual thread topic'
+            assert hook(task, 'UserPromptSubmit', thread_name='Updated thread topic') == {}
+            assert name(task) == 'Updated thread topic'
 
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], capture_output=True)
