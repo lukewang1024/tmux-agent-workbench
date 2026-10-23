@@ -696,8 +696,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             rendered = wait_for_text(client_process, b'Configured model is unavailable', b'(enter)')
         assert b'(enter)' in rendered
         # A new selection clears the old launch failure and stays on this panel.
+        # Finish the previous redraw and wait for the newly selected scene;
+        # its unselected label may still be buffered from the previous page.
+        drain()
         os.write(master, b'd')
-        rendered = wait_for_text(client_process, b'Daily development')
+        rendered = wait_for_text(client_process, '● Daily development'.encode(), b'(enter)')
         assert b'Configured model is unavailable' not in rendered, rendered
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agent')

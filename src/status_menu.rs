@@ -906,12 +906,6 @@ fn actions(
                 ));
             }
             StatusMenuKind::Agent => {
-                actions.push(Action::new(
-                    "usage",
-                    tr("Usage summary...", "使用量总结..."),
-                    'u',
-                    ActionCommand::Usage,
-                ));
                 actions.extend(agent_commands(context, false));
                 if context.input_available
                     && matches!(context.state, BaseState::Idle | BaseState::Working)
@@ -987,6 +981,14 @@ fn actions(
             'f',
             kind,
             options.at(View::Botmux),
+        ));
+    }
+    if options.view == View::Root && matches!(kind, StatusMenuKind::Agent) {
+        actions.push(Action::new(
+            "usage",
+            tr("Usage summary...", "使用量总结..."),
+            'u',
+            ActionCommand::Usage,
         ));
     }
     if options.view != View::Root {
