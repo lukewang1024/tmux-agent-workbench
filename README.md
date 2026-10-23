@@ -670,6 +670,20 @@ The installer also exposes the bundled `handoff` skill through the shared
 the whole active task, select an exact profile when the user did not, and make
 `tmux-agent-workbench agent handoff` its final action.
 
+The bundled `reorganise-agents` skill groups existing agent windows into
+sessions by task. It resolves `agent-team`'s Codex `batch` worker model and
+effort and delegates the operation to one native subagent with fresh context.
+It preserves the caller's execution permissions; it does not launch a second
+interactive CLI or use the scene's lead model. Group names follow the current
+tasks, and retaining a scratchpad session such as `0` is optional.
+
+`tmux-agent-workbench reorganise batch-worker` prints the resolved worker
+settings. The `snapshot`, `apply --snapshot FILE --plan FILE`, and
+`restore RUN_DIR` subcommands provide the deterministic layout operations.
+Migration records live under `$XDG_STATE_HOME/tmux-agent-workbench/reorganise`.
+The worker instructions and plan format are maintained in the
+[skill](skills/reorganise-agents/SKILL.md).
+
 ### Layer 2 — opinionated git-worktree workspaces (`git/bin/`)
 
 - **`tmux-agent-workbench new <feature> [repo[:branch] ...]`** — starts a new task: creates
