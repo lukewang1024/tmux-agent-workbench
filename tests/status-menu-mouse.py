@@ -76,6 +76,22 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                              shlex.quote(str(usage_choice_done)) + '; fi\nexit "$result"\n')
     usage_wrapper.chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
+    # Give only the legacy Host menu a deliberately long machine name. Keep
+    # the native tmux menu and client real so an oversized title cannot pass
+    # merely because this particular runner happens to have a short hostname.
+    legacy_bin = root / 'long-host-bin'
+    legacy_bin.mkdir()
+    legacy_tmux = legacy_bin / 'tmux.py'
+    legacy_tmux.write_text(
+        'import os, sys\n'
+        'args = [arg.replace("#H", "#{@workbench_test_hostname}")'
+        '.replace(":host}", ":@workbench_test_hostname}") for arg in sys.argv[1:]]\n'
+        'os.execv(' + repr(shutil.which('tmux', path=env['PATH'])) + ', ["tmux", *args])\n')
+    legacy_wrapper = legacy_bin / 'tmux'
+    legacy_wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' ' +
+                              shlex.quote(str(legacy_tmux)) + ' "$@"\n')
+    legacy_wrapper.chmod(0o755)
+    legacy_path = str(legacy_bin) + ':' + env['PATH']
     project = root / 'project'
     for name in ('grill-me', 'handoff'):
         skill = project / '.agents/skills' / name
@@ -283,13 +299,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 drain(0.7)
                 menu.wait(timeout=3)
                 print('PASS held clicks navigate and redraw exactly once on release:', input_mode)
+        tmux('set-option', '-g', '@workbench_test_hostname', 'long-ci-host-' + 'x' * 100)
         for kind in ('host', 'tmux', 'agent', 'usage', 'metrics', 'legacy-host'):
             for close in ('outside', 'escape', 'backspace', 'button'):
                 args = ([str(repo / 'bin/workbench-agent-usage'), 'menu', client] if kind == 'usage'
                         else [str(repo / 'bin/workbench-host-metrics-menu'), client, pane] if kind == 'metrics'
                         else [str(repo / 'bin/workbench-host-menu'), client, pane] if kind == 'legacy-host'
                         else [str(repo / 'bin/workbench-status-popup'), kind, client, pane])
-                menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                menu = open_menu(args, env=dict(env, PATH=legacy_path) if kind == 'legacy-host' else env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
                 assert b'(back)' not in rendered and b'(BSpace)' not in rendered, (kind, rendered)
                 if kind == 'host':
@@ -298,6 +316,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     # short hostnames must appear in full, long ones by prefix.
                     hostname = tmux('display-message', '-p', '#{host}')
                     assert hostname[:24].encode() in rendered, rendered
+                elif kind == 'legacy-host':
+                    assert b'long-ci-host-' in rendered, rendered
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
                 elif close == 'escape':
