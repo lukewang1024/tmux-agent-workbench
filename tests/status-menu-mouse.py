@@ -293,7 +293,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 rendered = wait_for_text(menu)
                 assert b'(back)' not in rendered and b'(BSpace)' not in rendered, (kind, rendered)
                 if kind == 'host':
-                    assert tmux('display-message', '-p', '#{host}').encode() in rendered, rendered
+                    # Native menu titles are bounded by the terminal width.
+                    # CI hosts can have names longer than the 80-column client;
+                    # short hostnames must appear in full, long ones by prefix.
+                    hostname = tmux('display-message', '-p', '#{host}')
+                    assert hostname[:24].encode() in rendered, rendered
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
                 elif close == 'escape':

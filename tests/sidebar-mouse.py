@@ -99,9 +99,15 @@ def check(height, target, section='agent'):
             assert '+ new' in rows[0] and 'menu' in rows[0], rows
             row = next(i for i, line in enumerate(rows) if target_row(line))
             assert tmux('list-clients', '-F', '#{pane_id}') == main
-            if height == 12 and target == 'e-agent':
+            # tmux before 3.8 cannot scroll native menus. Keep the menu test
+            # tall enough for all actions while the sidebar itself overflows;
+            # the 12-line cases below still cover first-click navigation.
+            if height == 16 and target == 'e-agent':
                 os.write(master, b'\x1b[<0;33;1M\x1b[<0;33;1m')
-                output = drain(.4)
+                output = b''
+                deadline = time.monotonic() + 5
+                while b'workbench' not in output and time.monotonic() < deadline:
+                    output += drain(.05)
                 assert b'workbench' in output, output
                 os.write(master, b'\x1b')
                 drain(.7)
@@ -124,16 +130,22 @@ def check(height, target, section='agent'):
                                       screen())) from None
             print(f'PASS: pinned actions and first click focus {section} {target} at height {height}')
         finally:
-            if client is not None:
-                client.terminate()
-                client.wait(timeout=5)
-            subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # A detached client can block flushing its final redraw on macOS.
+            # Release the PTY before waiting for the client to be reaped.
             os.close(master)
             os.close(slave)
+            if client is not None:
+                try:
+                    client.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    client.wait(timeout=5)
+            subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 check(12, 'e-agent')
 check(12, 'a-target')
+check(16, 'e-agent')
 check(40, 'a-target')
 check(60, 'a-target', 'session')
