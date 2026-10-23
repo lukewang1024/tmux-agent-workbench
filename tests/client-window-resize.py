@@ -81,6 +81,51 @@ with tempfile.TemporaryDirectory(prefix="wb-client-window-") as root, ExitStack(
             os.write(clients[1][1], b"\x02" + str(index).encode())
             settled(index, 63, 30)
         print("PASS phone window switches resize the window and foreground pane together")
+
+        # With window-size=latest, desktop activity (or a late resize hook)
+        # can grow the shared window while the phone still views it. Every
+        # sidebar entrypoint must keep the phone's viewport free of drawers.
+        window = tmux("display-message", "-p", "-t", "test:", "#{window_id}")
+
+        def maintain():
+            subprocess.run([core, "sidebar-control", "maintain", window],
+                           env=env, check=True, stdout=subprocess.DEVNULL)
+
+        def assert_sidebar(expected):
+            roles = tmux("list-panes", "-t", window, "-F", "#{@pane_role}").splitlines()
+            assert ("sidebar" in roles) == expected, (expected, roles)
+
+        for action in ("maintain", "ensure-all", "toggle"):
+            tmux("resize-window", "-t", window, "-x", "318", "-y", "75")
+            command = [core, "sidebar-control", action]
+            if action != "ensure-all":
+                command.append(window)
+            if action == "toggle":
+                command.append("--create-only")
+            subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
+            assert_sidebar(False)
+        print("PASS desktop-sized shared windows stay free of drawers while a phone is viewing")
+
+        # Only clients viewing this exact window participate in its layout.
+        # A phone elsewhere must not suppress the desktop sidebar.
+        tmux("new-session", "-d", "-s", "phone-away")
+        phone = os.ttyname(clients[1][2])
+        tmux("switch-client", "-c", phone, "-t", "phone-away")
+        maintain()
+        assert_sidebar(True)
+        print("PASS desktop drawer returns when the phone leaves the shared window")
+
+        # Manual dismissal remains distinct from automatic narrow hiding.
+        subprocess.run([core, "sidebar-control", "toggle", window],
+                       env=env, check=True, stdout=subprocess.DEVNULL)
+        assert_sidebar(False)
+        tmux("switch-client", "-c", phone, "-t", "test")
+        maintain()
+        assert_sidebar(False)
+        tmux("switch-client", "-c", phone, "-t", "phone-away")
+        maintain()
+        assert_sidebar(False)
+        print("PASS responsive transitions preserve manual sidebar dismissal")
     finally:
         subprocess.run(["tmux", "-S", env["TMUX_AGENT_WORKBENCH_TMUX_SOCKET"], "kill-server"],
                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
