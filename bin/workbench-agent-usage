@@ -260,8 +260,17 @@ detail() {
   done
 }
 
+menu_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+menu_callback() {
+  menu_command="WORKBENCH_MENU_PARENT=$(menu_quote "${WORKBENCH_MENU_PARENT:-}") WORKBENCH_SOURCE_PANE=$(menu_quote "${WORKBENCH_SOURCE_PANE:-}") WORKBENCH_TARGET_CLIENT=$(menu_quote "$client") workbench-agent-usage $1"
+  printf 'run-shell -b %s' "$(menu_quote "$menu_command")"
+}
+
 menu() {
-  client=${1:-$(tmux display-message -p '#{client_name}')}
+  client=${1:-${WORKBENCH_TARGET_CLIENT:-$(tmux display-message -p '#{client_name}')}}
   case $client in
     ''|*[!A-Za-z0-9_./-]*) return 2 ;;
   esac
@@ -336,8 +345,6 @@ menu() {
   trae_line=$(printf '%-25s%s' 'Trae' "$trae_mark")
   opencode_line=$(printf '%-25s%s' 'OpenCode' "$opencode_mark")
 
-  # Modern tmux and Termux taps select on release. Only old pointer clients
-  # need -O to keep unpressed mouse motion from dismissing the menu.
   mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
   set -- "$script_dir/tmux-agent-workbench-cli" display-menu -- -M
   [ "$mouse_mode" != mouse ] || set -- "$@" -O
@@ -361,12 +368,12 @@ EOF
   menu_status=0
   "$@" \
     '' \
-    'Refresh now' r "run-shell -b 'workbench-agent-usage refresh-menu $client'" \
+    'Refresh now' r "$(menu_callback "refresh-menu $client")" \
     '' \
-    "$codex_line" c 'run-shell -b "workbench-agent-usage choose codex"' \
-    "$claude_line" l 'run-shell -b "workbench-agent-usage choose claude"' \
-    "$trae_line" t 'run-shell -b "workbench-agent-usage choose trae"' \
-    "$opencode_line" o 'run-shell -b "workbench-agent-usage choose opencode"' || menu_status=$?
+    "$codex_line" c "$(menu_callback "choose codex $client")" \
+    "$claude_line" l "$(menu_callback "choose claude $client")" \
+    "$trae_line" t "$(menu_callback "choose trae $client")" \
+    "$opencode_line" o "$(menu_callback "choose opencode $client")" || menu_status=$?
   # A duplicate touch can race after the first menu is already visible. tmux
   # returns 2 for that client-local collision; it is not an action failure.
   case $menu_status in 0|2) return 0 ;; *) return "$menu_status" ;; esac
@@ -383,7 +390,7 @@ choose_source() {
   # The old menu closes after executing its item. Reopen after that close has
   # completed so selection behaves like an in-place source switch.
   sleep 0.1
-  menu
+  menu "${2:-}"
 }
 
 focus() {
@@ -427,7 +434,7 @@ cycle() {
 
 case ${1:-badge} in
   badge) badge "${2:-}" ;;
-  choose) choose_source "${2:-}" ;;
+  choose) choose_source "${2:-}" "${3:-}" ;;
   render) render "${2:-}" ;;
   refresh) refresh "${2:-}" "${3:-}" ;;
   refresh-menu) refresh_menu "${2:-}" ;;

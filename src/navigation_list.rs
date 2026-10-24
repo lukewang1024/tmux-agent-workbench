@@ -324,7 +324,6 @@ impl<A: Clone + Eq> NavigationList<A> {
                 {
                     self.selected = self.start(index);
                     self.selection_visible = true;
-                    return Some(Hit::Item(key));
                 }
             }
             _ => {}

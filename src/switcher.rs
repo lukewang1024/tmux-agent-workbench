@@ -40,6 +40,8 @@ pub enum Kind {
 pub enum ReturnTo {
     #[default]
     Menu,
+    MenuFromMain,
+    SidebarMenu,
     SidebarPane,
     SidebarPopup,
 }
@@ -48,6 +50,8 @@ impl ReturnTo {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Menu => "menu",
+            Self::MenuFromMain => "menu-from-main",
+            Self::SidebarMenu => "sidebar-menu",
             Self::SidebarPane => "sidebar-pane",
             Self::SidebarPopup => "sidebar-popup",
         }
@@ -870,19 +874,24 @@ pub fn run(
                 )?;
                 return Ok(None);
             }
-            crate::sidebar::run_workbench(
-                &[
-                    "status-menu",
-                    "tmux",
-                    "--pane",
-                    pane,
-                    "--client",
-                    client,
-                    "--language",
-                    crate::ui_language::name(),
-                ],
-                true,
-            )?;
+            let mut destination = vec![
+                "status-menu",
+                if matches!(return_to, ReturnTo::SidebarMenu) {
+                    "sidebar"
+                } else {
+                    "tmux"
+                },
+                "--pane",
+                pane,
+                "--client",
+                client,
+                "--language",
+                crate::ui_language::name(),
+            ];
+            if matches!(return_to, ReturnTo::MenuFromMain | ReturnTo::SidebarMenu) {
+                destination.push("--from-menu");
+            }
+            crate::sidebar::run_workbench(&destination, true)?;
             Ok(None)
         }
     }

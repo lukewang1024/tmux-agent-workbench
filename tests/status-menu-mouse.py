@@ -30,12 +30,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket)
     for key in ('TMUX', 'TMUX_PANE'):
         env.pop(key, None)
-    for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
+    for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = str(root / key)
     shim = root / 'bin'
     shim.mkdir()
+    hosts = root / 'hosts'
+    hosts.write_text('dev-host\ntest-host\n')
+    host_connected = root / 'host-connected'
     ssh = shim / 'ssh-connect'
-    ssh.write_text('#!/bin/sh\nprintf "%s\\n" dev-host test-host\n')
+    ssh.write_text('#!/bin/sh\ncase "$1" in hosts) cat ' + shlex.quote(str(hosts)) +
+                   ' ;; connect) printf "%s\\n" "$2" > ' + shlex.quote(str(host_connected)) +
+                   '; exec sleep 100000 ;; esac\n')
     ssh.chmod(0o755)
     # Keep launch fixtures long-lived without calling any model API. The
     # Node-based fixture below is used when process identity must be detected.
@@ -167,13 +172,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 elif command == 'D': x -= amount
                 elif command == 'A': y -= amount
                 elif command == 'B': y += amount
-                elif command in ('J', 'K'):
+                elif command in ('J', 'K', 'X'):
                     mode = numbers[0]
                     for col, row in list(screen):
                         if command == 'J':
                             erase = mode == 2 or (mode == 0 and (row, col) >= (y, x)) or (mode == 1 and (row, col) <= (y, x))
-                        else:
+                        elif command == 'K':
                             erase = row == y and (mode == 2 or (mode == 0 and col >= x) or (mode == 1 and col <= x))
+                        else:
+                            erase = row == y and x <= col < x + amount
                         if erase:
                             del screen[col, row]
             elif token.startswith('\x1b'):
@@ -184,6 +191,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 screen[x, y] = token
                 x += 1
         return [''.join(screen.get((col, row), ' ') for col in range(columns)) for row in range(rows)]
+
+    def screen_text(output):
+        return '\n'.join(screen_rows(output)).encode()
 
     def item_position(output, label="close"):
         rows = screen_rows(output)
@@ -294,7 +304,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         labels = ('Switch window', 'Switch session', 'Switch agent', 'Switch pane', 'New session...', 'New window', 'Launch agent...', 'Panes & layout...')
         positions = [item_position(rendered, label)[1] for label in labels]
         assert positions == sorted(set(positions)), (positions, rendered)
-        assert b'Switch window / session' not in rendered
+        assert b'Switch window / session' not in screen_text(rendered)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain(0.7)
@@ -354,6 +364,69 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             os.close(other_master)
             os.close(other_slave)
         print('PASS root switch entries and named session creation, cancellation, cwd and client isolation')
+        # The combined entry is deliberately smaller than Sidebar, with the
+        # same release/scroll interaction. Exercise the key sequence emitted
+        # by Termux's SSH swipe-up macro as well as all five destinations.
+        tmux('set-option', '-g', '@workbench_plugin_dir', str(repo))
+        tmux('set-option', '-g', 'prefix', '`')
+        tmux('bind-key', '-T', 'prefix', 'M-m', 'run-shell', '-b', shlex.join(
+            [str(repo / 'bin/tmux-agent-workbench-cli'), 'menu', '--pane', pane, '--client', client]))
+        os.write(master, b'`\x1bm')
+        rendered = wait_for_text(client_process, b'Sidebar', b'Host / SSH', b'CPU / resources')
+        borders = [row for row in screen_rows(rendered) if '┌' in row and '┐' in row]
+        assert len(borders) == 1 and borders[0].index('┐') - borders[0].index('┌') < 60, borders
+        for key, expected in [(b'a', b'No foreground agent'), (b'h', b'dev-host'),
+                              (b'c', b'Resources'), (b't', b'New session...')]:
+            os.write(master, key)
+            wait_for_text(client_process, expected, b'(back)')
+            os.write(master, b'\x7f')
+            rendered = wait_for_text(client_process, b'Sidebar', b'CPU / resources')
+        # A scoped Sidebar view returns to its collection, then the main menu.
+        x, y = item_position(rendered, 'Sidebar')
+        os.write(master, f'\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m'.encode())
+        wait_for_text(client_process, b'Open Sidebar')
+        os.write(master, b'w')
+        wait_for_text(client_process, b'Switch windows', menu_footer=False)
+        os.write(master, b'\x7f')
+        wait_for_text(client_process, b'Open Sidebar', b'(back)')
+        os.write(master, b'\x7f')
+        rendered = wait_for_text(client_process, b'Sidebar', b'CPU / resources')
+        x, y = item_position(rendered, 'close')
+        os.write(master, f'\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m'.encode())
+        drain(.7)
+        tmux('set-option', '-g', 'prefix', 'C-b')
+        # More than 35 hosts remain reachable. Wheel scrolling over the pinned
+        # footer must cancel a held button, and a second-row tap uses the item
+        # currently painted there, without retaining an old index.
+        hosts.write_text(''.join(f'host-{index:02}\n' for index in range(50)))
+        menu = open_menu([core, 'status-menu', 'host', '--pane', pane, '--client', client],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, b'host-00')
+        x, y = item_position(rendered, 'host-00')
+        footer_x, footer_y = item_position(rendered, 'close')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<65;{footer_x};{footer_y}M\x1b[<0;{x};{y}m'.encode())
+        rendered += drain(.2)
+        assert menu.poll() is None and not host_connected.exists()
+        for _ in range(48):
+            os.write(master, f'\x1b[<65;{footer_x};{footer_y}M'.encode())
+            rendered += drain(.015)
+        visible = '\n'.join(screen_rows(rendered))
+        assert 'host-48' in visible and 'host-00' not in visible, visible
+        x, y = item_position(rendered, 'host-48')
+        os.write(master, f'\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m'.encode())
+        menu.wait(timeout=3)
+        deadline = time.monotonic() + 5
+        while not host_connected.exists():
+            assert time.monotonic() < deadline, 'scrolled host action did not execute'
+            drain(.05)
+        assert host_connected.read_text() == 'host-48\n'
+        host_window = tmux('display-message', '-p', '-c', client, '#{window_id}')
+        tmux('kill-window', '-t', host_window)
+        hosts.write_text('dev-host\ntest-host\n')
+        drain(.3)
+        # All private requests/replies are deleted after their popup closes.
+        assert not list(root.glob('**/menu-*.json')) and not list(root.glob('**/menu-*.reply'))
+        print('PASS compact menu collection, Termux key sequence, nested Back, wheel scrolling and large button hit areas')
         if release_menus:
             for input_mode in ('mouse', 'touch'):
                 menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
@@ -394,17 +467,20 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 menu = open_menu(args, env=dict(env, PATH=legacy_path) if kind == 'legacy-host' else env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
-                assert b'(back)' not in rendered and b'(BSpace)' not in rendered, (kind, rendered)
+                assert b'(back)' not in screen_text(rendered) and b'(BSpace)' not in screen_text(rendered), (kind, rendered)
                 if kind == 'host':
                     # Native menu titles are bounded by the terminal width.
                     # CI hosts can have names longer than the 80-column client;
                     # short hostnames must appear in full, long ones by prefix.
                     hostname = tmux('display-message', '-p', '#{host}')
-                    assert hostname[:24].encode() in rendered, rendered
+                    assert hostname[:24].encode() in screen_text(rendered), rendered
                 elif kind == 'legacy-host':
-                    assert b'long-ci-host-' in rendered, rendered
+                    assert b'long-ci-host-' in screen_text(rendered), rendered
                 if close == 'outside':
                     os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+                    drain(.2)
+                    assert menu.poll() is None, 'outside tap dismissed the touch menu'
+                    os.write(master, b'\x1b')
                 elif close == 'escape':
                     os.write(master, b'\x1b')
                 elif close == 'backspace':
@@ -412,7 +488,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 else:
                     x, y = item_position(rendered)
                     os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-                for _ in range(40):
+                for _ in range(100):
                     drain(0.05)
                     if menu.poll() is not None:
                         break
@@ -428,20 +504,21 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             parent = b'choose agent' if view == 'configure' else b'Launch agent...'
             menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu) + drain()
-            assert b'(back)' in rendered and b'(esc)' in rendered, (view, rendered)
-            assert not any(key in rendered for key in (b'(BSpace)', b'(Escape)', b'(Enter)')), (view, rendered)
+            assert b'(back)' in screen_text(rendered) and b'(esc)' in screen_text(rendered), (view, rendered)
+            assert not any(key in screen_text(rendered) for key in (b'(BSpace)', b'(Escape)', b'(Enter)')), (view, rendered)
             back_x, back_y = item_position(rendered, '← Back')
             close_x, close_y = item_position(rendered, 'close')
-            assert close_y == back_y + 1
+            assert close_y == back_y
             back_key_x, _ = item_position(rendered, '(back)')
             close_key_x, _ = item_position(rendered, '(esc)')
-            assert back_key_x + len('(back)') == close_key_x + len('(esc)'), (view, rendered)
+            assert item_position(rendered, '(back)')[1] == back_y + 1
+            assert item_position(rendered, '(esc)')[1] == close_y + 1
             if view == 'configure':
                 launch_x, launch_y = item_position(rendered, '▶ Launch')
-                assert launch_x == back_x and launch_y + 1 == back_y
+                assert launch_y + 2 <= back_y
                 enter_key_x, _ = item_position(rendered, '(enter)')
-                assert enter_key_x + len('(enter)') == close_key_x + len('(esc)'), rendered
-            assert b'(B)' not in rendered, (view, 'legacy Back shortcut')
+                assert item_position(rendered, '(enter)')[1] == launch_y
+            assert b'(B)' not in screen_text(rendered), (view, 'legacy Back shortcut')
             os.write(master, b'\x7f')
             menu.wait(timeout=3)
             wait_for_text(client_process, parent)
@@ -590,9 +667,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/btw' not in rendered
-        assert b'Focus this pane' not in rendered and b'Refresh' not in rendered
-        assert b'/side' in rendered, (rendered, tmux('capture-pane', '-p', '-t', pane))
+        assert b'/btw' not in screen_text(rendered)
+        assert b'Focus this pane' not in screen_text(rendered) and b'Refresh' not in screen_text(rendered)
+        assert b'/side' in screen_text(rendered), (rendered, tmux('capture-pane', '-p', '-t', pane))
         os.write(master, b's')
         menu.wait(timeout=3)
         drain(0.3)
@@ -607,8 +684,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu)
-            assert b'/goal' in rendered and b'grill-me' in rendered and b'handoff' in rendered
-            assert b'/fork' not in rendered and b'/status' not in rendered
+            assert b'/goal' in screen_text(rendered) and b'grill-me' in screen_text(rendered) and b'handoff' in screen_text(rendered)
+            assert b'/fork' not in screen_text(rendered) and b'/status' not in screen_text(rendered)
             os.write(master, key)
             menu.wait(timeout=3)
             drain(0.3)
@@ -623,8 +700,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'working' in rendered and b'grill-me' in rendered and b'handoff' in rendered
-        assert b'/side' in rendered and b'/btw' not in rendered
+        assert b'working' in screen_text(rendered) and b'grill-me' in screen_text(rendered) and b'handoff' in screen_text(rendered)
+        assert b'/side' in screen_text(rendered) and b'/btw' not in screen_text(rendered)
         os.write(master, b'q')
         menu.wait(timeout=3)
         drain(0.3)
@@ -638,7 +715,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'Usage summary...' in rendered, rendered
+        assert b'Usage summary...' in screen_text(rendered), rendered
         os.write(master, b'u')
         menu.wait(timeout=3)
         wait_for_text(client_process, 'Usage · OpenCode'.encode())
@@ -682,7 +759,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # Earlier asynchronous redraws may still contain the replaced agent's
         # commands. The stale callback above verifies that /side cannot reach
         # the shell; wait for this menu's own no-agent state here.
-        assert b'No foreground agent' in rendered
+        assert b'No foreground agent' in screen_text(rendered)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain()
@@ -751,7 +828,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         os.write(master, b'\r')
         menu.wait(timeout=3)
         rendered = wait_for_text(client_process, b'Configured model is unavailable')
-        assert b'hard-single' in rendered
+        assert b'hard-single' in screen_text(rendered)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agent')
         os.write(master, b'\x1b')
@@ -775,11 +852,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         rendered = wait_for_text(client_process, b'Configured model is unavailable', b'(enter)')
         for key in (b']', b'['):
-            assert re.search(rb'Configured model is unavailable.*?\(enter\)', rendered, re.S), rendered
+            assert re.search(rb'Configured model is unavailable.*?\(enter\)', screen_text(rendered), re.S), rendered
             drain()
             os.write(master, key)
             rendered = wait_for_text(client_process, b'Configured model is unavailable', b'(enter)')
-        assert b'(enter)' in rendered
+        assert b'(enter)' in screen_text(rendered)
         # A new selection clears the old launch failure and stays on this panel.
         # Check the current screen; the PTY may still contain older redraws
         # with the error even after the newly selected scene has replaced it.
@@ -821,8 +898,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 wait_for_text(client_process, b'batch-single')
             os.write(master, b't')
             rendered = wait_for_text(client_process, (scene + '-lead').encode())
-            assert b'Worker: worker-model' in rendered
-            assert '临时调整'.encode() not in rendered
+            assert b'Worker: worker-model' in screen_text(rendered)
+            assert '临时调整'.encode() not in screen_text(rendered)
             if panes:
                 os.write(master, b'm')
                 wait_for_text(client_process, b'close')
@@ -850,7 +927,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                   '--view', 'configure', '--tool', tool], env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu)
-                assert b'Budget' not in rendered and b'launch.toml' not in rendered
+                assert b'Budget' not in screen_text(rendered) and b'launch.toml' not in screen_text(rendered)
                 if preset == 'team':
                     os.write(master, key)
                     wait_for_text(client_process, b'Native subagents')
@@ -872,11 +949,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, '日常开发'.encode(), '模式'.encode(), '启动'.encode(),
                                  absent=(b'Daily development',))
-        assert '模式'.encode() in rendered and '启动'.encode() in rendered
+        assert '模式'.encode() in screen_text(rendered) and '启动'.encode() in screen_text(rendered)
         assert b'Daily development' not in '\n'.join(screen_rows(rendered)).encode()
         os.write(master, b't')
         rendered = wait_for_text(client_process, '主代理'.encode())
-        assert '协作方式'.encode() in rendered and '原生子代理'.encode() in rendered
+        assert '协作方式'.encode() in screen_text(rendered) and '原生子代理'.encode() in screen_text(rendered)
         os.write(master, b'\x7f')
         wait_for_text(client_process, '选择 agent'.encode())
         os.write(master, b'q')
@@ -892,7 +969,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'Return to the agent prompt')
-        assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
+        assert b'/side' not in screen_text(rendered) and b'Return to the agent prompt' in screen_text(rendered)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         # Let the terminal's Escape parser settle before opening another menu.
@@ -903,7 +980,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'/side' not in rendered
+        assert b'/side' not in screen_text(rendered)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         tmux('send-keys', '-t', pane, '-X', 'cancel')
@@ -948,7 +1025,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         wait_for_text(menu, b'Team members & progress...')
         os.write(master, b't')
         rendered = wait_for_text(client_process, b'worker_a')
-        assert b'lead' in rendered and b'ready' in rendered
+        assert b'lead' in screen_text(rendered) and b'ready' in screen_text(rendered)
         drain(0.2)
         # Team layout uses the same sidebar-preserving helper as Alt+4.
         sidebar = tmux('split-window', '-d', '-P', '-F', '#{pane_id}', '-h', '-b', '-l', '18', '-t', pane, '/bin/sh')
@@ -993,16 +1070,23 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
-        for next_page in (b'Daily development', b'Batch work'):
-            # Check the native footer's output order directly. Replaying a
-            # resized terminal into an 80-column mouse-coordinate model can
-            # erase valid rows when tmux scrolls the source pane underneath.
-            assert re.search(rb'\(enter\).*?\(back\).*?close.*?\(esc\)', rendered, re.S), rendered
+        # Disabled cwd/summary rows remain inert instead of dismissing the menu.
+        x, y = item_position(rendered, '/tmp/')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        rendered += drain(.15)
+        assert menu.poll() is None
+        visited = []
+        for _ in range(6):
+            visible = '\n'.join(screen_rows(rendered))
+            assert all(hint in visible for hint in ('(enter)', '(back)', '(esc)')), visible
+            assert item_position(rendered, '← Back')[1] == item_position(rendered, 'close')[1]
+            visited.append(visible)
             os.write(master, b']')
-            # A redraw of the old page can still contain Close. Wait for the
-            # next page's own content before sending another navigation key.
-            # Native menus can redraw only changed cells.
-            rendered += wait_for_text(client_process, next_page)
+            # Preserve the current screen: the shared renderer only emits
+            # changed cells, so the pinned footer need not be written again.
+            rendered += drain(.15)
+        assert any('Daily development' in screen for screen in visited)
+        assert any('Batch work' in screen for screen in visited)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agen')
         os.write(master, b'\x1b')

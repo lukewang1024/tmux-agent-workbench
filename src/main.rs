@@ -54,7 +54,14 @@ enum Command {
         #[arg(long)]
         client: Option<String>,
     },
-    /// Open a touch-friendly list of windows, sessions, agents or panes.
+    /// Open the combined Workbench action menu.
+    Menu {
+        #[arg(long)]
+        pane: Option<String>,
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Open a scoped Sidebar navigation view.
     Switch {
         kind: tmux_agent_workbench::switcher::Kind,
         #[arg(long)]
@@ -81,6 +88,10 @@ enum Command {
     DisplayMenu {
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    #[command(hide = true)]
+    MenuPanel {
+        request: std::path::PathBuf,
     },
     #[command(hide = true)]
     StatusMenu {
@@ -1390,6 +1401,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::DisplayMenu { args } => tmux_agent_workbench::menu_footer::display(&args)?,
+        Command::Menu { pane, client } => {
+            tmux_agent_workbench::status_menu::open_root(pane.as_deref(), client.as_deref())?
+        }
+        Command::MenuPanel { request } => tmux_agent_workbench::menu::run_request(&request)?,
         Command::MenuMouseMode { client } => {
             println!("{}", menu_input_mode(&paths, &client, None));
         }

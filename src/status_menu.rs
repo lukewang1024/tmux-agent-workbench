@@ -9,6 +9,8 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusMenuKind {
+    Menu,
+    Sidebar,
     Host,
     Tmux,
     Agent,
@@ -103,6 +105,8 @@ impl Scene {
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct MenuOptions {
+    #[arg(long, hide = true)]
+    pub from_menu: bool,
     #[arg(long, value_enum, default_value = "daily")]
     pub scene: Scene,
     #[arg(long, hide = true, value_parser = decode_launch_error)]
@@ -126,7 +130,7 @@ pub struct MenuOptions {
 }
 impl MenuOptions {
     fn route(&self) -> String {
-        format!(
+        let mut route = format!(
             "--view {} --tool {} --preset {} --scene {}{}{} --language {}{}",
             self.view.to_possible_value().unwrap().get_name(),
             self.tool.name(),
@@ -144,7 +148,11 @@ impl MenuOptions {
                 .as_ref()
                 .map(|error| format!(" --launch-error={}", encode_launch_error(error)))
                 .unwrap_or_default()
-        )
+        );
+        if self.from_menu {
+            route.push_str(" --from-menu");
+        }
+        route
     }
 
     fn at(&self, view: View) -> Self {
@@ -187,6 +195,8 @@ enum ActionCommand {
     Tmux(Vec<String>),
     NewSession,
     Switch(crate::switcher::Kind),
+    Sidebar,
+    Metrics,
     Agent(String),
     Usage,
     Host(String),
@@ -211,7 +221,7 @@ impl Action {
 }
 
 fn launch_context(kind: StatusMenuKind, view: View) -> bool {
-    kind == StatusMenuKind::Tmux
+    kind != StatusMenuKind::Agent
         || matches!(view, View::Launch | View::Configure | View::AgentTarget)
 }
 
@@ -261,6 +271,23 @@ fn open_agent_status(
         return focus_agent_menu(target, &context.window, client, stay_open, options);
     }
     if targets.is_empty() {
+        if options.from_menu {
+            let next = MenuOptions {
+                focus_agent: false,
+                guard: Some(direct.guard.clone()),
+                ..options.clone()
+            };
+            return run_with_context(
+                StatusMenuKind::Agent,
+                pane,
+                client,
+                None,
+                0,
+                stay_open,
+                &next,
+                &direct,
+            );
+        }
         return message(
             client,
             tr(
@@ -371,6 +398,41 @@ pub fn run(
     )
 }
 
+pub fn open_root(pane: Option<&str>, client: Option<&str>) -> Result<()> {
+    let pane = pane
+        .map(str::to_owned)
+        .or_else(|| std::env::var("TMUX_PANE").ok())
+        .ok_or("open the menu inside tmux")?;
+    let client = client
+        .map(str::to_owned)
+        .or_else(|| std::env::var("WORKBENCH_TARGET_CLIENT").ok());
+    let client = match client {
+        Some(client) => client,
+        None => {
+            let clients = tmux(&["list-clients", "-F", "#{client_name}\t#{pane_id}"])?;
+            let candidates: Vec<_> = clients
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .filter(|(_, target)| *target == pane)
+                .map(|(name, _)| name.to_owned())
+                .collect();
+            if candidates.len() != 1 {
+                return Err("menu needs an explicit client; use the tmux menu binding".into());
+            }
+            candidates[0].clone()
+        }
+    };
+    run(
+        StatusMenuKind::Menu,
+        &pane,
+        &client,
+        None,
+        0,
+        false,
+        &MenuOptions::default(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_with_context(
     kind: StatusMenuKind,
@@ -402,6 +464,9 @@ fn run_with_context(
             return Err("menu action requires a pane identity guard".into());
         }
         if let ActionCommand::Navigate(next_kind, next) = &selected.command {
+            if *next_kind == StatusMenuKind::Agent && next.focus_agent {
+                return open_agent_status(pane, client, stay_open, next);
+            }
             if launch_context(kind, options.view) != launch_context(*next_kind, next.view) {
                 // Validate the old scope above before entering the new one.
                 let paths = Paths::discover()?;
@@ -423,7 +488,7 @@ fn run_with_context(
         if let ActionCommand::AgentTarget(target) = &selected.command {
             return focus_agent_menu(target, &context.window, client, stay_open, options);
         }
-        if let Err(error) = execute_action(selected, context, client, options) {
+        if let Err(error) = execute_action(selected, context, client, options, kind) {
             // This is an interactive callback: report the failure in the
             // client's status line instead of leaving a run-shell output pager.
             if matches!(selected.command, ActionCommand::Launch) {
@@ -465,171 +530,62 @@ fn run_with_context(
         };
         actions.splice(index..=index, summary);
     }
-    let clients = tmux(&[
-        "list-clients",
-        "-F",
-        "#{client_name} #{client_width} #{client_height}",
-    ])?;
-    let size = clients
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            (fields.next()? == client).then(|| {
-                Some((
-                    fields.next()?.parse::<usize>().ok()?,
-                    fields.next()?.parse::<usize>().ok()?,
-                ))
-            })?
-        })
-        .ok_or("Workbench client disappeared")?;
-    let footer = MenuFooter::new(&actions);
-    let items: Vec<_> = actions
-        .iter()
-        .filter(|action| !matches!(action.id.as_str(), "back" | "start" | "launch-error"))
-        .collect();
-    let page_size = footer.page_size(size.1, items.len());
-    let page = page.min(items.len().saturating_sub(1) / page_size);
-    let start = page * page_size;
     let executable = std::env::current_exe()?;
-    let kind_name = kind.to_possible_value().unwrap();
     let base = format!(
         "{} status-menu {} --pane {} --client {} {} --guard {}",
         shell_quote(&executable.to_string_lossy()),
-        kind_name.get_name(),
+        kind.to_possible_value().unwrap().get_name(),
         shell_quote(pane),
         shell_quote(client),
         options.route(),
         shell_quote(&context.guard)
     );
-    let mut command = Command::new("tmux");
-    let server = crate::server::ServerIdentity::discover()?;
-    command.args(server.tmux_args());
-    // The source pane remains the action target, but a native menu needs a
-    // pane visible to the destination client to obtain its drawing screen.
-    let display_pane = crate::tmux::Tmux::new(server)
-        .client_format(client, "#{pane_id}")?
-        .ok_or("Workbench client disappeared")?;
-    command.args(["display-menu", "-M"]);
-    // -O selects on press and can send the same click's release to a new menu.
-    // Keep it only for old tmux pointer clients whose hover handling needs it.
-    if stay_open {
-        command.arg("-O");
-    }
-    command.args([
-        "-C",
-        "0",
-        "-c",
-        client,
-        "-t",
-        &display_pane,
-        "-b",
-        "rounded",
-        "-T",
-        &format!(" {} ", menu_label(&title, size.0)),
-        "-x",
-        "C",
-        "-y",
-        "C",
-    ]);
-    command.arg("--");
-    for action in items.iter().skip(start).take(page_size) {
-        render_action(&mut command, action, &base, size.0);
-    }
-    footer.render(
-        &mut command,
-        &base,
-        size.0,
-        page,
-        start + page_size < items.len(),
-    );
-    match command.status()?.code() {
-        Some(0 | 2) => Ok(()),
-        _ => Err("could not display status menu".into()),
-    }
-}
-
-struct MenuFooter<'a> {
-    back: Option<&'a Action>,
-    launch: Option<&'a Action>,
-    error: Option<&'a Action>,
-}
-
-impl<'a> MenuFooter<'a> {
-    fn new(actions: &'a [Action]) -> Self {
-        Self {
-            back: actions.iter().find(|action| action.id == "back"),
-            launch: actions.iter().find(|action| action.id == "start"),
-            error: actions.iter().find(|action| action.id == "launch-error"),
-        }
-    }
-
-    fn reserved_rows(&self) -> usize {
-        // Borders, separator, pagination and Close, plus the optional rows.
-        6 + usize::from(self.back.is_some())
-            + usize::from(self.launch.is_some())
-            + usize::from(self.error.is_some())
-    }
-
-    fn page_size(&self, height: usize, total: usize) -> usize {
-        let without_pagination = self.reserved_rows() - 2;
-        let available = height.saturating_sub(without_pagination).max(1);
-        if total <= available {
-            available
-        } else {
-            height.saturating_sub(self.reserved_rows()).max(1)
-        }
-    }
-
-    fn render(&self, command: &mut Command, base: &str, width: usize, page: usize, has_next: bool) {
-        command.arg("");
-        for (show, label, key, next) in [
-            (
-                page > 0,
-                tr("Previous page", "上一页"),
-                "[",
-                page.saturating_sub(1),
-            ),
-            (has_next, tr("Next page", "下一页"), "]", page + 1),
-        ] {
-            if show {
-                command.args([
-                    label.into(),
-                    key.into(),
+    let items = actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let enabled = !matches!(action.command, ActionCommand::Disabled);
+            crate::menu::Item {
+                id: if action.id.is_empty() {
+                    format!("note:{index}")
+                } else {
+                    action.id.clone()
+                },
+                label: action.label.clone(),
+                key: if enabled && action.key != '\0' {
+                    crate::menu_footer::key_name(action.key)
+                } else {
+                    String::new()
+                },
+                command: if enabled {
                     format!(
                         "run-shell -b {}",
-                        shell_quote(&format!("{base} --page {next}"))
-                    ),
-                ]);
+                        shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
+                    )
+                } else {
+                    String::new()
+                },
+                enabled,
+                role: match action.id.as_str() {
+                    "back" => crate::menu::Role::Back,
+                    "start" => crate::menu::Role::Primary,
+                    "launch-error" => crate::menu::Role::Error,
+                    _ => crate::menu::Role::Body,
+                },
             }
-        }
-        for action in [self.error, self.launch, self.back].into_iter().flatten() {
-            render_action(command, action, base, width);
-        }
-        command.args(crate::menu_footer::close_item(self.back.is_none()));
-    }
-}
-
-fn render_action(command: &mut Command, action: &Action, base: &str, width: usize) {
-    if matches!(action.command, ActionCommand::Disabled) {
-        command.args([
-            format!("-{}", menu_label(&action.label, width)),
-            String::new(),
-            String::new(),
-        ]);
-    } else {
-        command.args([
-            crate::menu_footer::item_label(&menu_label(&action.label, width), action.key),
-            crate::menu_footer::key_name(action.key),
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!("{base} --action {}", shell_quote(&action.id)))
-            ),
-        ]);
-    }
+        })
+        .collect();
+    crate::menu::display(crate::menu::Menu { title, items }, pane, client, page)
 }
 
 fn nav(id: &str, label: &str, key: char, kind: StatusMenuKind, options: MenuOptions) -> Action {
     Action::new(id, label, key, ActionCommand::Navigate(kind, options))
+}
+fn list_shortcut(index: usize) -> char {
+    "123456789abcdefghijklmnopqrstuvwxyz"
+        .chars()
+        .nth(index)
+        .unwrap_or('\0')
 }
 fn tmux_action(id: &str, label: &str, key: char, args: &[&str]) -> Action {
     Action::new(
@@ -646,6 +602,8 @@ fn actions(
 ) -> (String, Vec<Action>) {
     let mut actions = vec![];
     let mut title = match kind {
+        StatusMenuKind::Menu => tr("Menu", "菜单").into(),
+        StatusMenuKind::Sidebar => "Sidebar".into(),
         StatusMenuKind::Host => {
             let hostname = tmux(&["display-message", "-p", "-t", &context.pane, "#{host}"])
                 .unwrap_or_default();
@@ -659,11 +617,11 @@ fn actions(
         View::AgentTarget => {
             title = tr("Choose agent", "选择 agent").into();
             if let Ok(targets) = agent_targets(&context.window) {
-                for (index, (pane, _)) in targets.iter().take(9).enumerate() {
+                for (index, (pane, _)) in targets.iter().enumerate() {
                     actions.push(Action::new(
                         &format!("target:{pane}"),
                         &format!("Agent {pane}"),
-                        char::from_digit((index + 1) as u32, 10).unwrap(),
+                        list_shortcut(index),
                         ActionCommand::AgentTarget(pane.clone()),
                     ));
                 }
@@ -795,7 +753,7 @@ fn actions(
         }
         View::Team => {
             title = format!("Team · {}", context.role.as_deref().unwrap_or("members"));
-            for (index, member) in context.team.iter().enumerate().take(35) {
+            for (index, member) in context.team.iter().enumerate() {
                 let label = format!(
                     "{}{}",
                     if member.pane == context.pane {
@@ -808,10 +766,7 @@ fn actions(
                 actions.push(Action::new(
                     &format!("member:{}", member.pane),
                     &label,
-                    "123456789abcdefghijklmnopqrstuvwxyz"
-                        .chars()
-                        .nth(index)
-                        .unwrap(),
+                    list_shortcut(index),
                     ActionCommand::Focus(member.pane.clone()),
                 ));
             }
@@ -864,6 +819,73 @@ fn actions(
             actions.extend(agent_commands(context, true));
         }
         View::Root => match kind {
+            StatusMenuKind::Menu => {
+                for (next_kind, id, label, key) in [
+                    (StatusMenuKind::Agent, "agent", "Agent", 'a'),
+                    (StatusMenuKind::Sidebar, "sidebar", "Sidebar", 's'),
+                    (StatusMenuKind::Tmux, "tmux", "Tmux", 't'),
+                    (
+                        StatusMenuKind::Host,
+                        "host",
+                        tr("Host / SSH", "主机 / SSH"),
+                        'h',
+                    ),
+                ] {
+                    actions.push(nav(
+                        id,
+                        label,
+                        key,
+                        next_kind,
+                        MenuOptions {
+                            from_menu: true,
+                            focus_agent: next_kind == StatusMenuKind::Agent,
+                            ..options.at(View::Root)
+                        },
+                    ));
+                }
+                actions.push(Action::new(
+                    "metrics",
+                    tr("CPU / resources", "CPU / 资源"),
+                    'c',
+                    ActionCommand::Metrics,
+                ));
+            }
+            StatusMenuKind::Sidebar => {
+                actions.push(Action::new(
+                    "overview",
+                    tr("Open Sidebar", "打开 Sidebar"),
+                    'b',
+                    ActionCommand::Sidebar,
+                ));
+                for (target, id, label, key) in [
+                    (
+                        crate::switcher::Kind::Session,
+                        "sessions",
+                        tr("Switch session", "切换会话"),
+                        's',
+                    ),
+                    (
+                        crate::switcher::Kind::Agent,
+                        "agents",
+                        tr("Switch agent", "切换 Agent"),
+                        'a',
+                    ),
+                    (
+                        crate::switcher::Kind::Window,
+                        "windows",
+                        tr("Switch window", "切换窗口"),
+                        'w',
+                    ),
+                    (
+                        crate::switcher::Kind::Pane,
+                        "panes",
+                        tr("Switch pane", "切换窗格"),
+                        'p',
+                    ),
+                ] {
+                    actions.push(Action::new(id, label, key, ActionCommand::Switch(target)));
+                }
+            }
             StatusMenuKind::Tmux => {
                 actions.extend([
                     Action::new(
@@ -975,16 +997,12 @@ fn actions(
                         for (index, host) in String::from_utf8_lossy(&output.stdout)
                             .lines()
                             .filter(|h| !h.is_empty())
-                            .take(35)
                             .enumerate()
                         {
                             actions.push(Action::new(
                                 &format!("host:{host}"),
                                 host,
-                                "123456789abcdefghijklmnopqrstuvwxyz"
-                                    .chars()
-                                    .nth(index)
-                                    .unwrap(),
+                                list_shortcut(index),
                                 ActionCommand::Host(host.into()),
                             ));
                         }
@@ -1025,6 +1043,17 @@ fn actions(
             crate::menu_footer::BACK_KEY,
             kind,
             options.at(back),
+        ));
+    } else if options.from_menu && kind != StatusMenuKind::Menu {
+        actions.push(nav(
+            "back",
+            crate::menu_footer::back_label(),
+            crate::menu_footer::BACK_KEY,
+            StatusMenuKind::Menu,
+            MenuOptions {
+                from_menu: false,
+                ..options.at(View::Root)
+            },
         ));
     }
     (title, actions)
@@ -1282,6 +1311,7 @@ fn execute_action(
     context: &Context,
     client: &str,
     options: &MenuOptions,
+    kind: StatusMenuKind,
 ) -> Result<()> {
     match &action.command {
         ActionCommand::Tmux(args) => {
@@ -1317,17 +1347,57 @@ fn execute_action(
             full.extend_from_slice(&args[1..]);
             tmux(&full.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
-        ActionCommand::Switch(kind) => {
+        ActionCommand::Switch(target_kind) => {
             crate::switcher::run(
                 &Paths::discover()?,
                 &crate::server::ServerIdentity::discover()?,
-                *kind,
+                *target_kind,
                 &context.pane,
                 client,
                 false,
                 Some(crate::ui_language::name()),
-                crate::switcher::ReturnTo::Menu,
+                if options.from_menu {
+                    if kind == StatusMenuKind::Sidebar {
+                        crate::switcher::ReturnTo::SidebarMenu
+                    } else {
+                        crate::switcher::ReturnTo::MenuFromMain
+                    }
+                } else {
+                    crate::switcher::ReturnTo::Menu
+                },
             )?;
+        }
+        ActionCommand::Sidebar => {
+            crate::sidebar::open_popup(
+                &crate::server::ServerIdentity::discover()?,
+                &context.pane,
+                client,
+            )?;
+        }
+        ActionCommand::Metrics => {
+            let plugin = tmux(&["show-option", "-gqv", "@workbench_plugin_dir"])?;
+            let script = std::path::Path::new(&plugin).join("bin/workbench-host-metrics-menu");
+            if plugin.is_empty() || !script.is_file() {
+                return Err("resource menu unavailable; reload Workbench".into());
+            }
+            let parent = format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "{} status-menu menu --pane {} --client {} --language {}",
+                    shell_quote(&std::env::current_exe()?.to_string_lossy()),
+                    shell_quote(&context.pane),
+                    shell_quote(client),
+                    crate::ui_language::name()
+                ))
+            );
+            if !Command::new(script)
+                .args([client, &context.pane])
+                .env("WORKBENCH_MENU_PARENT", parent)
+                .status()?
+                .success()
+            {
+                return Err("could not open resource menu".into());
+            }
         }
         ActionCommand::NewSession => {
             // The prompt is launched by a helper without a terminal. Create
@@ -1349,8 +1419,21 @@ fn execute_action(
             tmux(&["send-keys", "-t", &context.pane, "-l", &format!("{text} ")])?;
         }
         ActionCommand::Usage => {
+            let parent = format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "{} status-menu {} --pane {} --client {} {}",
+                    shell_quote(&std::env::current_exe()?.to_string_lossy()),
+                    kind.to_possible_value().unwrap().get_name(),
+                    shell_quote(&context.pane),
+                    shell_quote(client),
+                    options.at(View::Root).route()
+                ))
+            );
             let status = Command::new("workbench-agent-usage")
                 .args(["menu", client])
+                .env("WORKBENCH_MENU_PARENT", parent)
+                .env("WORKBENCH_SOURCE_PANE", &context.pane)
                 .status()?;
             if !status.success() {
                 return Err("could not open usage summary".into());
@@ -1484,14 +1567,6 @@ fn message(client: &str, text: &str) -> Result<()> {
     ])?;
     Ok(())
 }
-fn menu_label(label: &str, width: usize) -> String {
-    label
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(width.saturating_sub(10).max(1))
-        .collect::<String>()
-        .replace('#', "##")
-}
 fn validate_pane(pane: &str) -> Result<()> {
     if pane
         .strip_prefix('%')
@@ -1510,18 +1585,6 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::{model::ProcessFingerprint, process::AgentProcess};
-    #[test]
-    fn short_menus_do_not_reserve_invisible_pagination_rows() {
-        let footer = MenuFooter::new(&[]);
-        assert!(footer.page_size(12, 7) >= 7);
-        // Even an eight-row phone viewport keeps two navigation actions
-        // accessible per page while retaining both paging controls and Close.
-        assert!(footer.page_size(8, 10) >= 2);
-        for height in [8, 12, 20] {
-            let capacity = footer.page_size(height, 20);
-            assert!(capacity + footer.reserved_rows() <= height);
-        }
-    }
     fn context(kind: Option<AgentKind>, state: BaseState) -> Context {
         Context {
             pane: "%1".into(),
@@ -1727,7 +1790,12 @@ mod tests {
 
     #[test]
     fn all_views_have_unique_shortcuts() {
-        for kind in [StatusMenuKind::Tmux, StatusMenuKind::Agent] {
+        for kind in [
+            StatusMenuKind::Menu,
+            StatusMenuKind::Sidebar,
+            StatusMenuKind::Tmux,
+            StatusMenuKind::Agent,
+        ] {
             for agent in [
                 AgentKind::Codex,
                 AgentKind::Claude,
@@ -1764,10 +1832,38 @@ mod tests {
         }
     }
     #[test]
+    fn collection_routes_back_from_each_submenu() {
+        let context = context(None, BaseState::Idle);
+        let (_, root) = actions(StatusMenuKind::Menu, &MenuOptions::default(), &context);
+        assert_eq!(
+            root.iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            ["agent", "sidebar", "tmux", "host", "metrics"]
+        );
+        for kind in [
+            StatusMenuKind::Agent,
+            StatusMenuKind::Sidebar,
+            StatusMenuKind::Tmux,
+            StatusMenuKind::Host,
+        ] {
+            let options = MenuOptions {
+                from_menu: true,
+                ..Default::default()
+            };
+            assert!(options.route().contains("--from-menu"));
+            let (_, submenu) = actions(kind, &options, &context);
+            assert!(submenu.iter().any(|action| matches!(
+                &action.command,
+                ActionCommand::Navigate(StatusMenuKind::Menu, options)
+                    if action.id == "back" && !options.from_menu
+            )));
+        }
+    }
+    #[test]
     fn targets_and_labels_are_not_shell_or_tmux_code() {
         assert!(validate_pane("%12").is_ok());
         assert!(validate_pane("%12;kill-server").is_err());
         assert_eq!(shell_quote("dev'box"), "'dev'\\''box'");
-        assert_eq!(menu_label("a#{host}\nb", 80), "a##{host}b");
     }
 }

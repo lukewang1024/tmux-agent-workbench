@@ -121,9 +121,10 @@ set -g @workbench-disable-git 1
 
 ## Keybindings
 
-Workbench uses the sidebar as its control surface. By default the only global
-binding is `prefix+Tab`; once focused, press `?` for a centered list of plain
-single-key actions. Optional global bindings are (re)installed each time the
+Workbench uses the sidebar and compact Menu as its control surfaces. Press
+`prefix+Tab` for Sidebar, or `prefix Alt+m` for the combined menu; once Sidebar
+is focused, press `?` for a centered list of plain single-key actions.
+Optional global bindings are (re)installed each time the
 plugin loads when their option is explicitly set.
 
 | Action | Option | Default | Runs |
@@ -134,6 +135,9 @@ plugin loads when their option is explicitly set.
 | Prompt for a new workspace | `@workbench-key-new` | unbound | Workspace name prompt |
 | New isolated task in this workspace | `@workbench-key-task` | unbound | Task name popup |
 | Toggle current-window Agent sidebar | `@workbench-key-sidebar` | `Tab` | Rust sidebar |
+| Open combined Menu | `@workbench-key-main-menu` | `M-m` | Agent / Sidebar / Tmux / Host / CPU |
+| Open tmux controls | `@workbench-key-mobile-menu` | `M-t` | Tmux menu |
+| Open Agent commands | `@workbench-key-agent-menu` | `M-a` | Agent menu |
 | Toggle all Agent sidebars | `@workbench-key-sidebar-all` | unbound | Rust sidebar |
 | Pick any session by attention | `@workbench-key-session` | unbound | session picker |
 | Pick any detected Agent | `@workbench-key-agent` | unbound | Agent picker |
@@ -153,7 +157,7 @@ grabs it at load time). Verify with the *live*, post-plugin-load table, not
 just the file:
 
 ```sh
-tmux list-keys -T prefix | grep -E '(^| )(G|M-g|M-t|M-T)( |$)'
+tmux list-keys -T prefix | grep -E '(^| )(M-a|M-m|M-t|Tab)( |$)'
 ```
 
 To rebind, set the option **before** the plugin loads (add it above
@@ -341,7 +345,7 @@ Selecting an agent opens one configuration panel. Codex and Trae expose scene,
 Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
 show only Single/Team and collaboration choices. Clicking a choice refreshes
 this same panel. There is no temporary adjustment or separate review step.
-All native menus share a footer: Escape closes the menu, and Backspace returns
+All action menus share a footer: Escape closes the menu, and Backspace returns
 one level when a parent exists or closes a root menu without an extra hint.
 The launch panel keeps Launch visible on every
 page; Enter launches. Shortcuts: `d/h/b` for scenes,
@@ -387,16 +391,19 @@ menu implementation, including touch behavior and small-screen pagination.
 See [menu design and validation](docs/menus.md) for the interaction map and
 capability boundaries.
 
-Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
-use native menus that select the row at the next click's coordinates, including
-on touch screens without hover events. The opening release is consumed before
-the menu appears. On tmux 3.8+, both pointer and touch clients select on release,
-so a held click cannot open a submenu and then dismiss it on mouse-up. Hover
-only highlights items. Older tmux keeps its pointer press-selection workaround
-for its hover bug; reliable held-click navigation requires tmux 3.8+.
-Termux clients keep release-based touch selection on older versions too.
-Escape or clicking outside dismisses the menu; keyboard shortcuts and arrow-key
-navigation remain available.
+`tmux-agent-workbench menu` and `prefix Alt+m` open a compact collection of
+Agent, Sidebar, Tmux, Host/SSH and CPU/resources controls. Each submenu returns
+to that collection. The source pane and client may also be supplied explicitly
+with `--pane` and `--client`.
+
+Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, Resources and
+Sidebar menus all use the same Menu component, with two-row buttons and a
+content-sized popup capped at 60 columns. Menus share Sidebar's wheel/drag,
+keyboard and release handling; held presses never open the next menu early.
+Wheel scrolling works over the pinned footer too. Back/Close and Launch remain
+visible on short screens. Information, blank and outside taps leave the menu
+open; Escape or Close dismisses it. Long Host/member lists remain scrollable
+after their shortcut keys run out.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit

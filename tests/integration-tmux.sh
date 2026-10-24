@@ -236,6 +236,8 @@ fi
 tmux -S "$socket" list-keys -T prefix -N | grep 'next layout without resizing sidebar$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'select pane left with responsive zoom$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'open compact tmux menu$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'open combined Workbench menu$' >/dev/null
+[ "$(tmux -S "$socket" show-option -gqv @workbench_plugin_dir)" = "$repo" ]
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \
   grep -E 'pick tmuxinator workbench project|new workspace \(feature \+ repos\)|pick agent$' >/dev/null; then

@@ -117,89 +117,13 @@ pub fn open_popup(
     popup(server, pane, client, &["sidebar"])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PopupSize {
-    width: u16,
-    height: u16,
-    border: bool,
-}
-
-impl PopupSize {
-    fn new(width: u16, height: u16) -> Self {
-        // Keep the terminal visible around the Sidebar whenever its border and
-        // margins leave enough room for useful, two-line navigation entries.
-        if width < 36 || height < 12 {
-            return Self {
-                width,
-                height,
-                border: false,
-            };
-        }
-        Self {
-            width: ((u32::from(width) * 9 / 10) as u16)
-                .clamp(32, 96)
-                .min(width),
-            height: ((u32::from(height) * 9 / 10) as u16)
-                .clamp(12, 40)
-                .min(height),
-            border: true,
-        }
-    }
-}
-
 pub(crate) fn popup(
     server: &ServerIdentity,
     pane: &str,
     client: &str,
     args: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !pane
-        .strip_prefix('%')
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return Err("invalid source pane".into());
-    }
-    let dimensions = crate::tmux::Tmux::new(server.clone())
-        .client_format(client, "#{client_width} #{client_height}")?
-        .ok_or("navigation client disappeared")?;
-    let (width, height) = dimensions.split_once(' ').ok_or("invalid client size")?;
-    let size = PopupSize::new(width.parse()?, height.parse()?);
-    let command = format!(
-        "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
-        shell_quote(client),
-        shell_quote(pane),
-        shell_quote(&server.socket_path.to_string_lossy()),
-        shell_quote(&std::env::current_exe()?.to_string_lossy()),
-        args.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    let mut popup = Command::new("tmux");
-    popup.args(server.tmux_args()).args([
-        "display-popup",
-        "-E",
-        "-c",
-        client,
-        "-t",
-        pane,
-        "-x",
-        "C",
-        "-y",
-        "C",
-        "-w",
-        &size.width.to_string(),
-        "-h",
-        &size.height.to_string(),
-    ]);
-    if !size.border {
-        popup.arg("-B");
-    }
-    let status = popup.arg(command).status()?;
-    if !status.success() && !matches!(status.code(), Some(129 | 130)) {
-        return Err("could not open navigation panel".into());
-    }
-    Ok(())
+    crate::popup::open(server, pane, client, args, crate::popup::Sizing::Sidebar)
 }
 
 fn switch_return_to() -> crate::switcher::ReturnTo {
@@ -548,6 +472,13 @@ fn event_loop(
                     popup_mode(),
                 );
                 let hit = navigation.mouse(mouse, &actions);
+                let hit = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                    navigation
+                        .hit(mouse.column, mouse.row, &actions)
+                        .filter(|hit| matches!(hit, Hit::Item(_)))
+                } else {
+                    hit
+                };
                 footer_hover = match navigation.hovered {
                     Some(Hit::Action(action)) => Some(action),
                     _ => None,
@@ -1461,7 +1392,11 @@ fn show_row_menu(
                     (
                         "Switch",
                         "s",
-                        format!("switch-client -t {}", session.session_id),
+                        format!(
+                            "switch-client -c {} -t {}",
+                            shell_quote(&current_client()?),
+                            session.session_id
+                        ),
                     ),
                     (
                         "New task",
@@ -1480,7 +1415,8 @@ fn show_row_menu(
                         "Rename",
                         "r",
                         format!(
-                            "command-prompt -p 'Rename session:' \"rename-session -t {} '%%'\"",
+                            "command-prompt -t {} -p 'Rename session:' \"rename-session -t {} '%%'\"",
+                            shell_quote(&current_client()?),
                             session.session_id
                         ),
                     ),
@@ -1488,7 +1424,8 @@ fn show_row_menu(
                         "Close",
                         "x",
                         format!(
-                            "confirm-before -p 'Close session?' 'kill-session -t {}'",
+                            "confirm-before -t {} -p 'Close session?' 'kill-session -t {}'",
+                            shell_quote(&current_client()?),
                             session.session_id
                         ),
                     ),
@@ -1541,7 +1478,8 @@ fn show_row_menu(
                         "Close pane",
                         "x",
                         format!(
-                            "confirm-before -p 'Close pane?' 'kill-pane -t {}'",
+                            "confirm-before -t {} -p 'Close pane?' 'kill-pane -t {}'",
+                            shell_quote(&current_client()?),
                             agent.target.pane_id
                         ),
                     ),
@@ -1777,25 +1715,22 @@ fn show_menu(
     pointer_bottom_right: bool,
     items: &[(&'static str, &'static str, String)],
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let server = ServerIdentity::discover()?;
     let pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
+    let client = current_client()?;
     let (x, y) = menu_position(anchor, pointer_bottom_right);
     let mut args = vec![
         "display-menu".to_owned(),
-        // The sidebar, rather than a tmux mouse binding, received the click.
-        // Tell tmux to handle subsequent mouse events and ignore the opening
-        // button's release so the menu remains available for a normal click.
         "-M".to_owned(),
         "-O".to_owned(),
         "-c".to_owned(),
-        current_client()?,
+        client.clone(),
         "-T".to_owned(),
         title.to_owned(),
         "-t".to_owned(),
-        pane,
+        pane.clone(),
         "-x".to_owned(),
         x,
         "-y".to_owned(),
@@ -1805,20 +1740,26 @@ fn show_menu(
         args.extend([(*label).to_owned(), (*key).to_owned(), command.clone()]);
     }
     args.push(String::new());
-    args.extend(crate::menu_footer::close_item(true));
     if popup_mode() {
-        let mut command_args: Vec<OsString> = server
-            .tmux_args()
-            .into_iter()
-            .map(|arg| arg.as_os_str().to_os_string())
-            .collect();
-        command_args.extend(args.into_iter().map(OsString::from));
-        dispatch_command("tmux", &command_args, true)
-    } else {
-        let refs: Vec<_> = args.iter().map(String::as_str).collect();
-        tmux_ui(&server, &refs)?;
-        Ok(false)
+        let parent = format!(
+            "{} sidebar --popup --pane {} --client {}",
+            shell_quote(&std::env::current_exe()?.to_string_lossy()),
+            shell_quote(&pane),
+            shell_quote(&client)
+        );
+        args.extend([
+            crate::menu_footer::back_label().into(),
+            "BSpace".into(),
+            format!("run-shell -b {}", shell_quote(&parent)),
+        ]);
     }
+    args.extend(crate::menu_footer::close_item(!popup_mode()));
+    let mut command_args = vec!["display-menu".to_owned(), "--".to_owned()];
+    command_args.extend(args.into_iter().skip(1));
+    run_workbench(
+        &command_args.iter().map(String::as_str).collect::<Vec<_>>(),
+        true,
+    )
 }
 
 fn menu_position(anchor: Option<(u16, u16)>, pointer_bottom_right: bool) -> (String, String) {
@@ -1836,21 +1777,6 @@ fn menu_position(anchor: Option<(u16, u16)>, pointer_bottom_right: bool) -> (Str
             "#{e|+:#{e|-:#{popup_pane_right},#{popup_width}},1}".into(),
             "P".into(),
         ),
-    }
-}
-
-fn tmux_ui(server: &ServerIdentity, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("tmux")
-        .args(server.tmux_args())
-        .args(args)
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_owned()
-            .into())
     }
 }
 
@@ -1904,26 +1830,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn navigation_popup_preserves_context_until_space_is_too_small() {
-        for (width, height) in [(40, 20), (63, 31), (160, 50)] {
-            let size = PopupSize::new(width, height);
-            assert!(size.border);
-            assert!(size.width < width && size.height < height);
-            assert!(size.width <= 96 && size.height <= 40);
-        }
-        for (width, height) in [(32, 12), (24, 8), (80, 10)] {
-            assert_eq!(
-                PopupSize::new(width, height),
-                PopupSize {
-                    width,
-                    height,
-                    border: false,
-                }
-            );
-        }
-    }
 
     #[test]
     fn sidebar_labels_use_the_full_cell_budget_without_ellipsis() {

@@ -1,6 +1,13 @@
 # Contextual menus
 
 ```text
+prefix M-m / tmux-agent-workbench menu
+  Agent → current-window Agent commands, or an empty state and Usage
+  Sidebar → overview, Switch session / agent / window / pane
+  Tmux → window/session controls and agent launch
+  Host / SSH → SSH destinations
+  CPU / resources → status density and btop
+
 statusbar tmux / prefix M-t
   Switch window → current Session's windows
   Switch session → Sessions only
@@ -29,11 +36,17 @@ statusbar Agent / prefix M-a
     restore main-vertical layout
 ```
 
-All native menus use a shared footer. Submenus keep **← Back** (`Backspace`)
-beside **× close** (`Esc`) with right-aligned shortcuts on every page. Key hints
-use lowercase `enter`, `back`, and `esc`. Root menus only show Close; Backspace
-also closes them without an extra hint. Escape and outside clicks always dismiss
-the entire menu. On short terminals, `[` and `]` change pages. The source pane
+All action menus use `menu::Menu`, including legacy shell providers through the
+`display-menu` adapter. Content providers supply labels, keys and callbacks;
+the component owns layout, two-row buttons and pinned navigation. Its popup
+fits the content, with a maximum width of 60 cells, rather than using Sidebar's
+larger dimensions. Every cell of both button rows is clickable. Descriptions
+wrap within the content area. Information, title, blank and outside taps leave
+the menu open. Escape and Close dismiss it; Backspace returns to its parent
+or closes a root menu. Back/Close and Launch stay pinned while the body scrolls.
+Wheel and drag scrolling use the same `NavigationList` as Sidebar, and `[` / `]`
+and the previous/next buttons also browse a long menu. Host and member lists
+are not limited by the number of available shortcut keys. The source pane
 stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
 carry a hash of the target identity and rebuild their available actions before
@@ -44,19 +57,13 @@ Launch previews read local agent-team JSON settings directly, with no process
 scan, Python startup, model lookup or cache warmup. Launch-time validation stays
 in agent-team.
 
-On tmux 3.8+, pointer and touch menus execute an item only on mouse release.
-Holding a click never opens the next menu early, including configuration
-changes and Back, so the same release cannot dismiss or activate that menu.
-Older tmux keeps its pointer press-selection workaround because it mistakes
-hover motion for a release; held-click navigation requires tmux 3.8+.
-
-Known limitation, confirmed on tmux 3.8: clicking a disabled information row,
-separator, title or border can still close the native menu. This is deferred;
-Workbench does not require a patched tmux. Restoring `-O` would reintroduce
-press-selection and the held-click submenu bug. Making information rows
-selectable and reopening the menu would add keyboard stops and leave border
-clicks unresolved. A complete Workbench-side solution would need a different
-menu input implementation, with outside-click and keyboard behavior preserved.
+Pointer and touch menus execute only on release. A hold, drag, wheel movement
+or resize cannot launch a held item. The component handles these events itself
+instead of depending on native `display-menu` mouse behavior. A selected
+callback runs only after its popup closes, allowing it to open a submenu or
+prompt. Private request/reply files carry the model and result and are removed
+when the menu finishes. Usage source changes retain their invoking client and
+parent menu.
 
 ## Capability boundaries
 
@@ -111,7 +118,7 @@ or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
 
 `tests/switcher.py` exercises real 40×20, 32×12, and 24×8 PTY clients, including
-touching all three card rows, held presses, swipes, search, paging, keyboard-size
+touching both card rows, held presses, swipes, search, paging, keyboard-size
 viewport changes, empty lists, disappearing targets, linked windows, multiple
 clients, and Sidebar-to-list-to-Sidebar returns. The test uses local Agent
 fixtures and does not call a model service. This is terminal-level simulation;
@@ -149,13 +156,14 @@ The same component also restores terminal mouse/focus/paste modes on exit.
 | Wheel behavior differs between lists or snaps back during refresh | All list views use one controller and preserve the browsed item through refresh |
 | Sidebar opens a different picker and Back loses context | Both Sidebar routes use the same lists and preserve their origin |
 | Keyboard reduces the terminal viewport | Entries, paging and footer resize together without clearing search |
-| Short action menus reserve blank pagination rows | Menus that fit keep their full content; paginated menus use the actual footer budget |
+| Action menu rows are hard to tap | All menu providers use two-row, full-width targets and the shared list controller |
+| Information taps dismiss a menu | Disabled rows and blank areas ignore taps |
+| Status controls are too small to be the only entry | Prefix Alt+m opens the combined Agent/Sidebar/Tmux/Host/CPU menu |
+| Long inventories are silently truncated | Host and member lists scroll beyond their shortcut-key count |
 
-Host/Agent/configuration actions still use the native menu
-renderer. They retain single-row targets and the disabled-row dismissal behavior
-documented above; moving these action panels to the shared touch renderer is the
-next interaction improvement. The navigation lists themselves ignore blank-area
-taps and expose explicit Back and Close buttons.
+Host, Agent, launch configuration, Usage, Resources and Sidebar action menus
+all use the shared compact Menu. Navigation lists and action menus expose
+explicit Back and Close buttons and share wheel/drag/release handling.
 Returning to a popup Sidebar reselects the current Agent. Restoring its previous
 browsing position, including scroll, remains a useful follow-up for long lists.
 

@@ -367,8 +367,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         # Sidebar keyboard and contextual-menu entries use the same lists,
         # while Back returns to Sidebar rather than an unrelated tmux menu.
         prepare_popup()
-        sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
-                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sidebar = subprocess.Popen([str(Path(__file__).resolve().parents[1] / 'bin/tmux-agent-workbench-cli'), 'popup'],
+                                   env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
         text('+ new')
         drain(.2)
@@ -377,6 +378,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         footer(0)
         text('+ new')
         drain(.2)
+        tap(content_rect()[2] - 2, 1)
+        text('workbench')
+        os.write(master, b'\x7f')
+        text('+ new')
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'a')

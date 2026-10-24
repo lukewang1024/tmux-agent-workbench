@@ -26,7 +26,7 @@ agents:   agent start|list|goto|next|profiles|handoff
 layout:   reorganise batch-worker|snapshot|apply|restore
 titles:   title set <task-name> | title status
 clients:  attach, client serve|status|setup
-ui:       sidebar, popup, pick repo|project|session|agent, host-metrics [compact|standard|full|cpu]
+ui:       menu, sidebar, popup, switch window|session|agent|pane, pick repo|project|session|agent
 tmux:     resurrect save|restore
 system:   conventions, status, doctor, config, hooks, daemon
 EOF
@@ -93,12 +93,16 @@ case $command_name in
   sidebar) need_core; exec "$core" sidebar "$@" ;;
   popup)
     need_core
-    client=$(tmux display-message -p '#{client_name}')
+    client=${WORKBENCH_TARGET_CLIENT:-$(tmux display-message -p '#{client_name}')}
     case $client in
-      ''|*[!A-Za-z0-9_./-]*) die 'Workbench client unavailable' ;;
+      ''|*[!A-Za-z0-9_./-]*) echo 'Workbench client unavailable' >&2; exit 1 ;;
     esac
-    exec tmux display-popup -c "$client" -E -w 100% -h 100% \
-      "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT='$client' '$core' sidebar"
+    pane=${WORKBENCH_SOURCE_PANE:-${TMUX_PANE:-}}
+    if [ -z "$pane" ]; then
+      pane=$(tmux list-clients -F '#{client_name} #{pane_id}' |
+        awk -v client="$client" '$1 == client { print $2; exit }')
+    fi
+    exec "$core" sidebar --popup --pane "$pane" --client "$client"
     ;;
   projects) [ "${1:-}" = rebuild ] || { usage >&2; exit 2; }; shift
     exec "$plugin_dir/git/bin/gen-tmuxinator-configs" "$@" ;;
