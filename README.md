@@ -311,8 +311,8 @@ owns sampling, caching, width defaults and the menu action. Set
 `@workbench-host-metrics off` to disable them. See [host metrics](docs/host-metrics.md)
 for mode selection, platform support and the standalone CLI.
 
-Session/Sidebar and tmux controls form the left group, followed by a gap
-and window labels. CPU, Host and Agent status remain on the right, with a flat
+Session/Sidebar and tmux controls form the left group, followed by window
+labels. CPU, Host and Agent status remain on the right, with a flat
 outer edge. tmux and Agent status open the same menus as `M-t` and `M-a`, while
 the session label performs the same responsive Sidebar toggle as `Tab`.
 Prefix remains available through the keyboard. Workbench owns their ranges and behavior;
@@ -322,10 +322,16 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu starts with **Switch window**, **Switch session**, **New session**,
-and **New window**, followed by **Launch agent**, **Panes & layout**, the installed
-editor, and **Detach**. Switching windows and sessions opens their respective
-choosers directly. New session prompts for a name, starts in the source pane's
+The tmux menu starts with **Switch window**, **Switch session**, **Switch agent**,
+and **Switch pane**, followed by **New session**, **New window**, **Launch agent**,
+**Panes & layout**, the installed editor, and **Detach**. Switch window lists only
+the source Session's windows; Switch pane lists only its Window's panes. Sessions
+and running Agents have separate server-wide lists. Each fullscreen touch list
+uses three-row cards with wrapped titles, status/context, search, paging, and a
+two-row Back/Close bar. Selection happens on release; dragging scrolls without
+activating. Sidebar's Session/Agent shortcuts and menu use these same lists,
+and Back restores the originating Sidebar or tmux menu. New session prompts for
+a name, starts in the source pane's
 directory, and switches only the invoking client to the new session.
 Selecting an agent opens one configuration panel. Codex and Trae expose scene,
 Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode

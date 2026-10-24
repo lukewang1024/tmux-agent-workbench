@@ -2,6 +2,12 @@
 
 ```text
 statusbar tmux / prefix M-t
+  Switch window → current Session's windows
+  Switch session → Sessions only
+  Switch agent → running Agents only
+  Switch pane → current Window's panes
+  New session → name, create in source directory, enter
+  New window
   Launch agent
     Codex / Claude Code / Trae / OpenCode (installed tools only)
       One configuration panel (choices update in place)
@@ -9,9 +15,7 @@ statusbar tmux / prefix M-t
         Claude / OpenCode: Single/Team + Native/tmux (Team only)
         Actual model / thinking / Fast preview; inline launch errors
         Enter: launch in source directory; Backspace: agents; Esc: close
-  New window
   Panes & layout → split, zoom, main-vertical, tiled
-  Switch → window, session
   Open project in VS Code (when installed)
   Detach this client
 
@@ -23,7 +27,6 @@ statusbar Agent / prefix M-a
   Team members & progress (pane teams only)
     lead / workers + reported status → focus member
     restore main-vertical layout
-  Launch agent
 ```
 
 All native menus use a shared footer. Submenus keep **← Back** (`Backspace`)
@@ -107,6 +110,39 @@ avoid paid model requests; this validates menu orchestration, not model quality
 or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
 
+`tests/switcher.py` exercises real 40×20, 32×12, and 24×8 PTY clients, including
+touching all three card rows, held presses, swipes, search, paging, keyboard-size
+viewport changes, empty lists, disappearing targets, linked windows, multiple
+clients, and Sidebar-to-list-to-Sidebar returns. The test uses local Agent
+fixtures and does not call a model service. This is terminal-level simulation;
+it does not claim a physical handset or Android keyboard acceptance run.
+
+## Mobile navigation and interaction review
+
+The four switch actions use Workbench's fullscreen list rather than tmux's
+tree or fzf. A card reserves two lines for the title and a third for context;
+every cell in those lines is clickable. Titles wrap without adding an ellipsis.
+The footer's four buttons occupy two full rows, with compact captions below
+32 columns. Its previous/next controls remain visible alongside Back and Close.
+Tap the search line or type `/` to search; pasted Chinese text is supported.
+Arrow keys, Page Up/Down, Enter, Escape and Backspace remain available.
+
+| Mobile issue | Result |
+| --- | --- |
+| Native tree rows and dense fzf lists require precise taps | Three-row touch cards replace them in tmux and Sidebar navigation |
+| Window/Pane scopes are ambiguous | Window stays in the opening Session; Pane stays in the opening Window |
+| Long task titles lose useful text | Two title rows wrap names; context and current-target marks remain visible |
+| Press, swipe or refresh can select the wrong row | Release confirms a stable target identity; swipes and stale touches do not activate |
+| Sidebar opens a different picker and Back loses context | Both Sidebar routes use the same lists and preserve their origin |
+| Keyboard reduces the terminal viewport | Cards, paging and footer resize together without clearing search |
+| Short action menus reserve blank pagination rows | Menus that fit keep their full content; paginated menus use the actual footer budget |
+
+Host/Agent/configuration actions still use the native menu
+renderer. They retain single-row targets and the disabled-row dismissal behavior
+documented above; moving these action panels to the shared touch renderer is the
+next interaction improvement. The navigation lists themselves ignore blank-area
+taps and expose explicit Back and Close buttons.
+
 ## Scene launch policy
 
 Codex and Trae use only daily, hard and batch scenes, each in Single or Team mode.
@@ -144,14 +180,15 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
-The tmux root menu exposes Switch window (`w`), Switch session (`s`), New session
-(`n`), and New window (`c`) first. Launch agent and Panes & layout follow, then
-the installed editor and Detach. There is no intermediate Switch submenu.
+The tmux root menu exposes Switch window (`w`), Switch session (`s`), Switch agent
+(`g`), and Switch pane (`p`) first. New session (`n`), New window (`c`), Launch
+agent (`a`), and Panes & layout (`l`) follow, then the installed editor and Detach.
+There is no intermediate Switch submenu.
 New session asks for a name and switches the invoking client to a new session
 in the source pane's directory; cancelling the prompt creates nothing.
 
-The left group runs Session/Sidebar → tmux, then a gap before window
-labels. CPU, Host and Agent status with usage stay on the right, whose outer
+The left group runs Session/Sidebar → tmux → window labels.
+CPU, Host and Agent status with usage stay on the right, whose outer
 edge is flat. The theme's time/date/battery modules have independent opt-in
 switches and stay visible in both densities when enabled. Clicking Session
 toggles Sidebar. Prefix remains available through the keyboard. The

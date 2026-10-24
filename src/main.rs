@@ -46,7 +46,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    Sidebar,
+    Sidebar {
+        #[arg(long, requires_all = ["pane", "client"])]
+        popup: bool,
+        #[arg(long)]
+        pane: Option<String>,
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Open a touch-friendly list of windows, sessions, agents or panes.
+    Switch {
+        kind: tmux_agent_workbench::switcher::Kind,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        client: String,
+        #[arg(long, hide = true)]
+        inside: bool,
+        #[arg(long, value_parser = ["en", "zh"])]
+        language: Option<String>,
+        #[arg(long, hide = true, value_enum, default_value = "menu")]
+        return_to: tmux_agent_workbench::switcher::ReturnTo,
+    },
     #[command(hide = true)]
     NormalizeResurrectLayout {
         path: std::path::PathBuf,
@@ -120,6 +141,8 @@ enum Command {
     },
     #[command(hide = true)]
     Focus {
+        #[arg(long)]
+        client: Option<String>,
         #[arg(long)]
         session: String,
         #[arg(long)]
@@ -1318,9 +1341,53 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Command::Sidebar => {
+        Command::Sidebar {
+            popup,
+            pane,
+            client,
+        } => {
             let server = ServerIdentity::discover()?;
-            tmux_agent_workbench::sidebar::run(&paths, &server)?;
+            if popup {
+                tmux_agent_workbench::sidebar::open_popup(
+                    &server,
+                    pane.as_deref().unwrap(),
+                    client.as_deref().unwrap(),
+                )?;
+            } else {
+                tmux_agent_workbench::sidebar::run(&paths, &server)?;
+            }
+        }
+        Command::Switch {
+            kind,
+            pane,
+            client,
+            inside,
+            language,
+            return_to,
+        } => {
+            let server = ServerIdentity::discover()?;
+            if kind == tmux_agent_workbench::switcher::Kind::Agent {
+                let _ = ensure_daemon_quiet(&paths);
+            }
+            if let Some(target) = tmux_agent_workbench::switcher::run(
+                &paths,
+                &server,
+                kind,
+                &pane,
+                &client,
+                inside,
+                language.as_deref(),
+                return_to,
+            )? {
+                focus_target(
+                    &target.session_id,
+                    Some(&format!("{}:{}", target.session_id, target.window_index)),
+                    Some(&target.pane_id),
+                    Some(&pane),
+                    true,
+                    Some(&client),
+                )?;
+            }
         }
         Command::DisplayMenu { args } => tmux_agent_workbench::menu_footer::display(&args)?,
         Command::MenuMouseMode { client } => {
@@ -1536,6 +1603,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         Command::Focus {
+            client,
             session,
             window,
             pane,
@@ -1547,6 +1615,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pane.as_deref(),
             source_pane.as_deref(),
             responsive,
+            client.as_deref(),
         )?,
         Command::SidebarControl {
             action,
@@ -1614,6 +1683,7 @@ fn focus_agent(agent: &AgentSnapshot) -> Result<(), Box<dyn std::error::Error>> 
         Some(&agent.target.pane_id),
         None,
         true,
+        None,
     )
 }
 
@@ -1623,10 +1693,19 @@ fn focus_target(
     pane: Option<&str>,
     source_pane: Option<&str>,
     responsive: bool,
+    target_client: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(session, '$')?;
     if let Some(window) = window {
-        validate_target(window, '@')?;
+        if !window.starts_with(&format!("{session}:")) {
+            validate_target(window, '@')?;
+        } else if window.len() == session.len() + 1
+            || !window[session.len() + 1..]
+                .chars()
+                .all(|c| c.is_ascii_digit())
+        {
+            return Err("invalid scoped window target".into());
+        }
     }
     if let Some(pane) = pane {
         validate_target(pane, '%')?;
@@ -1649,9 +1728,13 @@ fn focus_target(
         ])
         .output()?;
     let clients = parse_focus_clients(&String::from_utf8_lossy(&client_output.stdout));
-    let client = source_client
-        .as_deref()
+    let client = target_client
         .and_then(|name| clients.iter().find(|client| client.name == name))
+        .or_else(|| {
+            source_client
+                .as_deref()
+                .and_then(|name| clients.iter().find(|client| client.name == name))
+        })
         .or_else(|| {
             clients
                 .iter()
@@ -1659,6 +1742,9 @@ fn focus_target(
                 .max_by_key(|client| client.activity)
         })
         .or_else(|| clients.iter().max_by_key(|client| client.activity));
+    if target_client.is_some_and(|name| client.is_none_or(|client| client.name != name)) {
+        return Err("switching client disappeared".into());
+    }
     let mut switch = vec!["switch-client"];
     if let Some(client) = client {
         switch.extend(["-c", &client.name]);

@@ -121,6 +121,42 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     result
 }
 
+pub fn open_popup(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::switcher::popup(server, pane, client, &["sidebar"])
+}
+
+fn switch_return_to() -> crate::switcher::ReturnTo {
+    if popup_mode() {
+        crate::switcher::ReturnTo::SidebarPopup
+    } else {
+        crate::switcher::ReturnTo::SidebarPane
+    }
+}
+
+fn switch_list(kind: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let pane = source_pane().ok_or("sidebar source pane unavailable")?;
+    let client = current_client()?;
+    run_workbench(
+        &[
+            "switch",
+            kind,
+            "--pane",
+            &pane,
+            "--client",
+            &client,
+            "--return-to",
+            switch_return_to().name(),
+            "--language",
+            crate::ui_language::name(),
+        ],
+        true,
+    )
+}
+
 fn refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 1 } else { 5 })
 }
@@ -423,12 +459,12 @@ fn event_loop(
                         }
                     }
                     KeyCode::Char('s') => {
-                        if run_workbench(&["pick", "session"], true)? {
+                        if switch_list("session")? {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('a') => {
-                        if run_workbench(&["pick", "agent"], true)? {
+                        if switch_list("agent")? {
                             return Ok(());
                         }
                     }
@@ -1027,7 +1063,7 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
+pub(crate) fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
     match kind {
         crate::model::AgentKind::Codex => "codex",
         crate::model::AgentKind::Claude => "claude",
@@ -1036,7 +1072,7 @@ fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
     }
 }
 
-fn agent_topic(agent: &AgentSnapshot) -> &str {
+pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
     if let Some(name) = agent
         .thread_name
         .as_deref()
@@ -1077,7 +1113,7 @@ fn meaningful_topic(topic: &str) -> bool {
         )
 }
 
-fn agent_status(agent: &AgentSnapshot) -> String {
+pub(crate) fn agent_status(agent: &AgentSnapshot) -> String {
     if agent.display_state == DisplayState::Blocked
         && agent.base_state != crate::model::BaseState::Blocked
         && agent.hook_health == crate::model::HookHealth::Conflict
@@ -1247,7 +1283,7 @@ fn icon_title_line(
     ])
 }
 
-fn state_color(state: DisplayState) -> Color {
+pub(crate) fn state_color(state: DisplayState) -> Color {
     match state {
         DisplayState::Blocked => Color::Red,
         DisplayState::Working => Color::Yellow,
@@ -1267,7 +1303,7 @@ fn state_name(state: DisplayState) -> &'static str {
     }
 }
 
-fn glyph(state: DisplayState) -> &'static str {
+pub(crate) fn glyph(state: DisplayState) -> &'static str {
     match state {
         DisplayState::Blocked => "●",
         DisplayState::Done => "●",
@@ -1570,6 +1606,20 @@ fn show_global_menu(
     if !safe_target(&sidebar_pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
+    let navigation = |kind: &str| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(format!(
+            "run-shell -b {}",
+            shell_quote(&format!(
+                "{} switch {} --pane {} --client {} --return-to {} --language {}",
+                executable,
+                kind,
+                shell_quote(&sidebar_pane),
+                shell_quote(&current_client()?),
+                switch_return_to().name(),
+                crate::ui_language::name()
+            ))
+        ))
+    };
     let mut items = vec![
         (
             "New",
@@ -1615,16 +1665,8 @@ fn show_global_menu(
             "run-shell -b tmux-agent-workbench projects rebuild".into(),
         ),
         ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
-        (
-            "Sessions",
-            "s",
-            format!("run-shell \"{} pick session\"", executable),
-        ),
-        (
-            "Agents",
-            "a",
-            format!("run-shell \"{} pick agent\"", executable),
-        ),
+        ("Sessions", "s", navigation("session")?),
+        ("Agents", "a", navigation("agent")?),
         (
             "Next",
             "n",
@@ -1645,7 +1687,10 @@ fn show_global_menu(
     show_menu("workbench", anchor, anchor.is_some(), &items)
 }
 
-fn run_workbench(args: &[&str], clear_popup: bool) -> Result<bool, Box<dyn std::error::Error>> {
+pub(crate) fn run_workbench(
+    args: &[&str],
+    clear_popup: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     dispatch_command(&executable, args.iter().map(OsStr::new), clear_popup)
 }

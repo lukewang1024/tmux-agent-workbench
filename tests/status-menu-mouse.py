@@ -291,25 +291,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
         menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'Switch window', b'Switch session', b'New session...', b'Launch agent...')
-        labels = ('Switch window', 'Switch session', 'New session...', 'New window', 'Launch agent...', 'Panes & layout...')
+        labels = ('Switch window', 'Switch session', 'Switch agent', 'Switch pane', 'New session...', 'New window', 'Launch agent...', 'Panes & layout...')
         positions = [item_position(rendered, label)[1] for label in labels]
         assert positions == sorted(set(positions)), (positions, rendered)
         assert b'Switch window / session' not in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain(0.7)
-        for key in (b'w', b's'):
-            menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for_text(menu, b'Switch session')
-            os.write(master, key)
-            menu.wait(timeout=3)
-            for _ in range(40):
-                if tmux('display-message', '-p', '-t', pane, '#{pane_mode}') == 'tree-mode':
-                    break
-                drain(0.05)
-            assert tmux('display-message', '-p', '-t', pane, '#{pane_mode}') == 'tree-mode', key
-            tmux('send-keys', '-t', pane, 'q')
-            drain()
         before_sessions = tmux('list-sessions', '-F', '#{session_id}')
         menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu, b'New session...')
@@ -365,7 +353,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 other_client_process.wait(timeout=5)
             os.close(other_master)
             os.close(other_slave)
-        print('PASS root window/session choosers and named session creation, cancellation, cwd and client isolation')
+        print('PASS root switch entries and named session creation, cancellation, cwd and client isolation')
         if release_menus:
             for input_mode in ('mouse', 'touch'):
                 menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
@@ -1005,7 +993,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
-        for next_page in (b'Scene', b'Daily development'):
+        for next_page in (b'Daily development', b'Batch work'):
             # Check the native footer's output order directly. Replaying a
             # resized terminal into an 80-column mouse-coordinate model can
             # erase valid rows when tmux scrolls the source pane underneath.

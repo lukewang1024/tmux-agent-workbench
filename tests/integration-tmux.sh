@@ -89,6 +89,7 @@ fi
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 "$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
+"$python_runner" "$repo/tests/switcher.py" "$binary"
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/task-title-exit.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
@@ -446,6 +447,23 @@ tmux -S "$socket" list-clients -F '#{pane_id}' | grep "^$agent_pane$" >/dev/null
 printf '%s\n' 'integration phase: local focus'
 exec 9>&2 2>"$test_root/local-focus.log"
 set -x
+# These assertions exercise focus itself, independently of responsive hooks.
+# Session/window changes trigger the same background path as resize, so stop
+# all layout producers and hold their per-client lock after existing work ends.
+for focus_hook in client-attached client-resized client-session-changed session-window-changed window-resized after-kill-pane pane-exited after-new-window; do
+  tmux -S "$socket" set-hook -gu "$focus_hook[920]"
+done
+focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
+  sort -n | sed -n '1s/^[0-9][0-9]* //p')
+focus_server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
+focus_client_key=$(printf '%s' "$focus_client" | tr '/.' '__')
+focus_hook_lock=$XDG_RUNTIME_DIR/workbench-responsive-$focus_server_pid-$focus_client_key.lock
+tries=0
+while ! mkdir "$focus_hook_lock" 2>/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 100 ] || exit 1
+  sleep 0.05
+done
 # jump must restore the source window's previous pane, otherwise returning to
 # that window lands in the sidebar itself.
 tmux -S "$socket" new-session -d -s source-restore -x 140 -y 40
@@ -470,11 +488,7 @@ done
 # Keep a real second work pane: responsive maintenance removes the sidebar,
 # and tmux cannot zoom a window that contains only one remaining pane.
 tmux -S "$socket" split-window -d -t "$agent_pane"
-focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
-  sort -n | sed -n '1s/^[0-9][0-9]* //p')
-# Disable the resize-driven path so this assertion proves focus itself owns the
-# transition instead of racing an asynchronous client-resized hook.
-tmux -S "$socket" set-hook -gu 'client-resized[920]'
+# The hook lock above also rejects late jobs queued before the hooks retired.
 tmux -S "$socket" switch-client -c "$focus_client" -t source-restore
 sleep 0.2
 if [ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 1 ]; then

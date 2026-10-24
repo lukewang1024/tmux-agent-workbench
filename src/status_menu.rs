@@ -186,6 +186,7 @@ enum ActionCommand {
     Navigate(StatusMenuKind, MenuOptions),
     Tmux(Vec<String>),
     NewSession,
+    Switch(crate::switcher::Kind),
     Agent(String),
     Usage,
     Host(String),
@@ -486,7 +487,7 @@ fn run_with_context(
         .iter()
         .filter(|action| !matches!(action.id.as_str(), "back" | "start" | "launch-error"))
         .collect();
-    let page_size = size.1.saturating_sub(footer.reserved_rows()).max(1);
+    let page_size = footer.page_size(size.1, items.len());
     let page = page.min(items.len().saturating_sub(1) / page_size);
     let start = page * page_size;
     let executable = std::env::current_exe()?;
@@ -564,9 +565,19 @@ impl<'a> MenuFooter<'a> {
 
     fn reserved_rows(&self) -> usize {
         // Borders, separator, pagination and Close, plus the optional rows.
-        7 + usize::from(self.back.is_some())
+        6 + usize::from(self.back.is_some())
             + usize::from(self.launch.is_some())
             + usize::from(self.error.is_some())
+    }
+
+    fn page_size(&self, height: usize, total: usize) -> usize {
+        let without_pagination = self.reserved_rows() - 2;
+        let available = height.saturating_sub(without_pagination).max(1);
+        if total <= available {
+            available
+        } else {
+            height.saturating_sub(self.reserved_rows()).max(1)
+        }
     }
 
     fn render(&self, command: &mut Command, base: &str, width: usize, page: usize, has_next: bool) {
@@ -855,17 +866,29 @@ fn actions(
         View::Root => match kind {
             StatusMenuKind::Tmux => {
                 actions.extend([
-                    tmux_action(
+                    Action::new(
                         "windows",
                         tr("Switch window", "切换窗口"),
                         'w',
-                        &["choose-tree", "-Zw"],
+                        ActionCommand::Switch(crate::switcher::Kind::Window),
                     ),
-                    tmux_action(
+                    Action::new(
                         "sessions",
                         tr("Switch session", "切换会话"),
                         's',
-                        &["choose-tree", "-Zs"],
+                        ActionCommand::Switch(crate::switcher::Kind::Session),
+                    ),
+                    Action::new(
+                        "agents",
+                        tr("Switch agent", "切换 Agent"),
+                        'g',
+                        ActionCommand::Switch(crate::switcher::Kind::Agent),
+                    ),
+                    Action::new(
+                        "switch-panes",
+                        tr("Switch pane", "切换窗格"),
+                        'p',
+                        ActionCommand::Switch(crate::switcher::Kind::Pane),
                     ),
                     Action::new(
                         "new-session",
@@ -884,7 +907,7 @@ fn actions(
                     nav(
                         "panes",
                         "Panes & layout...",
-                        'p',
+                        'l',
                         kind,
                         options.at(View::Panes),
                     ),
@@ -1294,6 +1317,18 @@ fn execute_action(
             full.extend_from_slice(&args[1..]);
             tmux(&full.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
+        ActionCommand::Switch(kind) => {
+            crate::switcher::run(
+                &Paths::discover()?,
+                &crate::server::ServerIdentity::discover()?,
+                *kind,
+                &context.pane,
+                client,
+                false,
+                Some(crate::ui_language::name()),
+                crate::switcher::ReturnTo::Menu,
+            )?;
+        }
         ActionCommand::NewSession => {
             // The prompt is launched by a helper without a terminal. Create
             // detached, then switch the client that opened this menu.
@@ -1475,6 +1510,18 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::{model::ProcessFingerprint, process::AgentProcess};
+    #[test]
+    fn short_menus_do_not_reserve_invisible_pagination_rows() {
+        let footer = MenuFooter::new(&[]);
+        assert!(footer.page_size(12, 7) >= 7);
+        // Even an eight-row phone viewport keeps two navigation actions
+        // accessible per page while retaining both paging controls and Close.
+        assert!(footer.page_size(8, 10) >= 2);
+        for height in [8, 12, 20] {
+            let capacity = footer.page_size(height, 20);
+            assert!(capacity + footer.reserved_rows() <= height);
+        }
+    }
     fn context(kind: Option<AgentKind>, state: BaseState) -> Context {
         Context {
             pane: "%1".into(),
