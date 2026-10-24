@@ -66,6 +66,27 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
         return json.loads(core('hook', 'ingest', agent['kind'], event,
                                run_env=hook_env, data=data).stdout)
 
+    def wait_hook_context(agent, event, **extra):
+        # Restarted daemons discover and bind a replacement CLI asynchronously.
+        # A busy hook may safely return {}. Require the real context once the
+        # binding is ready, while keeping the one-shot Stop assertions below.
+        deadline = time.monotonic() + 8
+        while True:
+            output = hook(agent, event, **extra)
+            specific = output.get('hookSpecificOutput')
+            if specific:
+                assert specific['hookEventName'] == event, output
+                context = specific['additionalContext']
+                assert agent['pane'] in context and agent['session_id'] in context, output
+                return specific
+            assert output == {}, output
+            if time.monotonic() >= deadline:
+                raise AssertionError(('naming context did not become ready', event, extra,
+                                      agent, output,
+                                      tmux('show-option', '-wqv', '-t', agent['pane'], '@workbench_task_title'),
+                                      json.loads(core('snapshot', '--json').stdout)))
+            time.sleep(.05)
+
     def title(agent, value=None, run_env=None, **extra):
         args = ['title', 'status'] if value is None else ['title', 'set', value]
         result = core(*args, '--pane', agent['pane'], '--session-id', agent['session_id'],
@@ -360,7 +381,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                  'env', 'WORKBENCH_FIXTURE_SECONDS=300', fixture)
             repair['agent_pid'] = wait_agent(repair['pane'], previous_pid)['process']['pid']
             for source in ('resume', 'compact'):
-                assert hook(repair, 'SessionStart', source=source)['hookSpecificOutput']
+                wait_hook_context(repair, 'SessionStart', source=source)
                 assert hook(repair, 'Stop') == {}
             assert title(repair)['repair_used'] is True
             new_task = dict(repair, session_id=str(uuid.uuid4()))

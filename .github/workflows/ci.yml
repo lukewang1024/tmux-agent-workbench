@@ -38,13 +38,28 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tmux fzf
       - run: sh tests/verify.sh
+  intel_title_hooks:
+    name: Title hooks (macos-15-intel)
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install test dependencies
+        run: brew install tmux
+      - run: cargo test --locked --lib task_title::tests
+      - run: cargo build --locked --bin tmux-agent-workbench --example codex
+      - run: sh tests/python.sh tests/task-titles.py target/debug/tmux-agent-workbench target/debug/examples/codex
   required:
     name: CI gate
     if: always()
-    needs: verify
+    needs: [verify, intel_title_hooks]
     runs-on: ubuntu-24.04
     steps:
       - name: Require all platforms to pass
         env:
-          RESULT: ${{ needs.verify.result }}
-        run: test "$RESULT" = success
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          INTEL_RESULT: ${{ needs.intel_title_hooks.result }}
+        run: |
+          test "$VERIFY_RESULT" = success
+          test "$INTEL_RESULT" = success
