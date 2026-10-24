@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -18,7 +19,7 @@ use crate::config::{Config, ConfigError};
 use crate::detection::{Detector, MetadataReport};
 use crate::ipc::{Request, Response, read_request, write_response};
 use crate::manifest::{ManifestError, ManifestSet};
-use crate::model::{AgentEventReport, DetachedAgentEventReport, Snapshot};
+use crate::model::{AgentEventReport, DetachedAgentEventReport, Snapshot, TmuxTarget};
 use crate::notification::SystemBackend;
 use crate::notification_pipeline::NotificationPipeline;
 use crate::paths::Paths;
@@ -73,6 +74,31 @@ struct State {
     server_incarnation: String,
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
     recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
+    attached_focus: AttachedFocus,
+}
+
+#[derive(Default)]
+struct AttachedFocus {
+    last_sync: Option<Instant>,
+    remembered: HashMap<String, (TmuxTarget, Vec<String>)>,
+}
+
+impl AttachedFocus {
+    fn due(&mut self, now: Instant) -> bool {
+        if self
+            .last_sync
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(250))
+        {
+            return false;
+        }
+        self.last_sync = Some(now);
+        true
+    }
+
+    fn invalidate(&mut self, attachment: &str) {
+        self.remembered.remove(attachment);
+        self.last_sync = None;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +233,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         server_incarnation,
         recovered_pending,
         recovered_runtimes,
+        attached_focus: AttachedFocus::default(),
     }));
     if state
         .read()
@@ -465,6 +492,9 @@ fn dispatch_notifications(state: &mut State, now_ms: u64) {
 }
 
 fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
+    if !state.attached_focus.due(Instant::now()) {
+        return;
+    }
     let server = match ServerIdentity::discover() {
         Ok(server) => server,
         Err(_) => return,
@@ -475,52 +505,94 @@ fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
         .args([
             "list-clients",
             "-F",
-            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{pane_id}\u{1f}#{@workbench_overlay_visible}\u{1f}#{session_id}",
+            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{@workbench_overlay_visible}\u{1f}#{session_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_index}",
         ])
         .output()
     {
         Ok(output) if output.status.success() => output,
         _ => return,
     };
+    let mut seen = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let fields: Vec<_> = line.split('\u{1f}').collect();
-        if fields.len() != 5 {
+        let Some((attachment, focus, overlay_visible, observed)) = attached_client_row(line) else {
             continue;
-        }
-        let focus = if fields[1].split(',').any(|flag| flag == "focused") {
-            FocusState::Focused
-        } else {
-            FocusState::Unknown
         };
-        let resume_keys = state.clients.resume_keys_for_attachment(fields[0]);
-        if let Some(target) =
-            crate::attachment::pane_target_in_session(&server, fields[2], fields[4])
-        {
-            crate::attachment::remember(
+        seen.insert(attachment.clone());
+        let mut resume_keys = state.clients.resume_keys_for_attachment(&attachment);
+        resume_keys.sort();
+        resume_keys.dedup();
+        // One client inventory carries the complete session-relative target.
+        // Stable attachments need no per-pane queries or option reads/writes.
+        let changed = state
+            .attached_focus
+            .remembered
+            .get(&attachment)
+            .is_none_or(|(target, keys)| target != &observed || keys != &resume_keys);
+        if changed {
+            let mut remembered = crate::attachment::remember(
                 &server,
-                &crate::attachment::attachment_key(fields[0]),
-                &target,
+                &crate::attachment::attachment_key(&attachment),
+                &observed,
             );
+            for key in &resume_keys {
+                remembered &= crate::attachment::remember(&server, key, &observed);
+            }
+            if remembered {
+                state
+                    .attached_focus
+                    .remembered
+                    .insert(attachment.clone(), (observed.clone(), resume_keys.clone()));
+            }
         }
         let target = if resume_keys.is_empty() {
             state
                 .snapshot
                 .agents
                 .iter()
-                .find(|agent| agent.target.pane_id == fields[2])
+                .find(|agent| agent.target.pane_id == observed.pane_id)
                 .map(|agent| agent.target.clone())
         } else {
-            crate::attachment::pane_target_in_session(&server, fields[2], fields[4])
+            Some(observed)
         };
-        if let Some(target) = &target {
-            for key in resume_keys {
-                crate::attachment::remember(&server, &key, target);
-            }
-        }
         state
             .clients
-            .update_attachment_focus(fields[0], focus, fields[3] == "1", target, now_ms);
+            .update_attachment_focus(&attachment, focus, overlay_visible, target, now_ms);
     }
+    state
+        .attached_focus
+        .remembered
+        .retain(|attachment, _| seen.contains(attachment));
+}
+
+fn attached_client_row(line: &str) -> Option<(String, FocusState, bool, TmuxTarget)> {
+    let fields: Vec<_> = line.split('\u{1f}').collect();
+    if fields.len() != 10
+        || fields[0].is_empty()
+        || !crate::attachment::valid_id(fields[3], '$')
+        || !crate::attachment::valid_id(fields[5], '@')
+        || !crate::attachment::valid_id(fields[8], '%')
+    {
+        return None;
+    }
+    let focus = if fields[1].split(',').any(|flag| flag == "focused") {
+        FocusState::Focused
+    } else {
+        FocusState::Unknown
+    };
+    Some((
+        fields[0].into(),
+        focus,
+        fields[2] == "1",
+        TmuxTarget {
+            session_id: fields[3].into(),
+            session_name: fields[4].into(),
+            window_id: fields[5].into(),
+            window_index: fields[6].parse().ok()?,
+            window_name: fields[7].into(),
+            pane_id: fields[8].into(),
+            pane_index: fields[9].parse().ok()?,
+        },
+    ))
 }
 
 fn server_incarnation(server: &ServerIdentity) -> String {
@@ -807,6 +879,7 @@ fn handle(
         }),
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
+            state.attached_focus.invalidate(&params.attachment);
             crate::attachment::forget(server, &crate::attachment::attachment_key(&params.attachment));
             let endpoint_id = state.clients.bind(&params.token, params.attachment, now_unix_ms())?;
             let resume_target = state.clients.resume_key(&endpoint_id)
@@ -829,11 +902,12 @@ fn handle(
                         .and_then(|target| crate::attachment::pane_target_in_session(server, &target.pane_id, &target.session_id))
                 });
             crate::attachment::forget(server, &key);
+            let mut state = state.write().expect("state poisoned");
+            state.attached_focus.invalidate(&params.attachment);
             let Some(target) = target else {
                 return Ok(json!({"remembered": false, "reason": "detach_target_unavailable"}));
             };
             crate::attachment::remember(server, crate::attachment::LAST, &target);
-            let state = state.read().expect("state poisoned");
             for key in state.clients.resume_keys_for_attachment(&params.attachment) {
                 crate::attachment::remember(server, &key, &target);
             }
@@ -1065,4 +1139,48 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn fast_detector_ticks_only_poll_clients_four_times_per_second() {
+        let start = Instant::now();
+        let mut focus = AttachedFocus::default();
+        let polls = (0..20)
+            .filter(|tick| focus.due(start + Duration::from_millis(tick * 50)))
+            .count();
+        assert_eq!(polls, 4);
+        focus.invalidate("/dev/tty1");
+        assert!(focus.due(start + Duration::from_millis(960)));
+    }
+
+    #[test]
+    fn batched_client_target_keeps_linked_session_and_rejects_missing_context() {
+        let row = [
+            "/dev/tty1",
+            "attached,focused",
+            "1",
+            "$9",
+            "linked session",
+            "@4",
+            "7",
+            "window name",
+            "%6",
+            "2",
+        ]
+        .join("\u{1f}");
+        let (attachment, focus, overlay, target) = attached_client_row(&row).unwrap();
+        assert_eq!(attachment, "/dev/tty1");
+        assert!(matches!(focus, FocusState::Focused));
+        assert!(overlay);
+        assert_eq!(target.session_id, "$9");
+        assert_eq!(target.session_name, "linked session");
+        assert_eq!(target.window_index, 7);
+        assert_eq!(target.pane_index, 2);
+        assert!(attached_client_row(&row.replace("$9", "")).is_none());
+        assert!(attached_client_row(&row.replace("%6", "garbage")).is_none());
+    }
 }

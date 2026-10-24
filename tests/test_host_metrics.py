@@ -46,13 +46,13 @@ class MetricsLockTests(unittest.TestCase):
         old = time.time() - 60
         os.utime(self.lock, (old, old))
         self.assertNotEqual(self.sample(), 'old 33%')
-        self.assertTrue((self.cache / 'time').is_file())
+        self.assertTrue((self.cache / 'snapshot').is_file())
         self.assertFalse(self.lock.exists())
 
     def test_initializing_owner_keeps_lock(self):
         self.assertEqual(self.sample(), 'old 33%')
         self.assertTrue(self.lock.is_dir())
-        self.assertFalse((self.cache / 'time').exists())
+        self.assertFalse((self.cache / 'snapshot').exists())
 
     def test_live_owner_keeps_lock_even_when_old(self):
         (self.lock / 'pid').write_text(str(os.getpid()))

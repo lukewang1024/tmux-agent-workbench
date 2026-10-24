@@ -91,20 +91,22 @@ pub fn pane_target_in_session(
     Some(target)
 }
 
-pub fn remember(server: &ServerIdentity, key: &str, target: &TmuxTarget) {
+pub fn remember(server: &ServerIdentity, key: &str, target: &TmuxTarget) -> bool {
     if let Ok(value) = serde_json::to_string(target) {
         // Avoid server writes on every detector tick when nothing has changed.
         if output(server, &["show-options", "-gqv", key]).as_deref() != Some(&value) {
-            let _ = output(server, &["set-option", "-g", key, &value]);
+            return output(server, &["set-option", "-g", key, &value]).is_some();
         }
+        return true;
     }
+    false
 }
 
 pub fn recalled(server: &ServerIdentity, key: &str) -> Option<TmuxTarget> {
     serde_json::from_str(&output(server, &["show-options", "-gqv", key])?).ok()
 }
 
-fn valid_id(value: &str, prefix: char) -> bool {
+pub(crate) fn valid_id(value: &str, prefix: char) -> bool {
     value.starts_with(prefix) && value.len() > 1 && value[1..].bytes().all(|b| b.is_ascii_digit())
 }
 

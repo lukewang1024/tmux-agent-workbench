@@ -25,7 +25,9 @@ It is invoked through `sh`, including on Termux where `/bin/sh` may not exist.
 No Python, background service or additional monitoring package is required.
 
 - Linux: CPU counter deltas from `/proc/stat`; memory is total minus available.
-- macOS: CPU from `top`; memory is active + wired + compressor pages from `vm_stat`.
+- macOS: CPU counter deltas from the core's native Mach host statistics query,
+  without launching `top` or inventorying processes. Older cores fall back to
+  `top` until upgraded. Memory is active + wired + compressor pages from `vm_stat`.
 - Disk: usage of the filesystem containing HOME (`df -Pk`). Override the path
   with `TMUX_METRICS_DISK_PATH` if another mounted filesystem matters more.
 - Network: Linux uses byte-counter deltas for the default-route interface from
@@ -37,10 +39,18 @@ No Python, background service or additional monitoring package is required.
   Unavailable metrics show `--`, while available memory/disk metrics still work.
   Real-device Termux acceptance remains pending.
 
-Samples share a two-second cache in `$XDG_CACHE_HOME/tmux-agent-workbench/host-metrics` (default
-`~/.cache/tmux-agent-workbench/host-metrics`). The first counter sample and samples more than
+Only displayed metrics are sampled: CPU mode reads CPU ticks, Compact adds
+memory, Standard adds disk, and Full adds network. Changing modes reuses fresh
+CPU samples and preserves the network counter baseline across other modes.
+
+Samples share a two-second, atomic `snapshot` file in
+`$XDG_CACHE_HOME/tmux-agent-workbench/host-metrics` (default
+`~/.cache/tmux-agent-workbench/host-metrics`). A cache hit reads that snapshot
+without creating a lock or rewriting files. Refreshes replace one snapshot
+instead of separate counter and per-mode output files. The first counter sample and samples more than
 120 seconds apart show `--` until a new baseline is established. The tmux
-status interval controls subsequent refreshes. No traffic payload is collected.
+status interval controls subsequent refreshes. Cached tmux status jobs also honor
+the widget's off setting, so hiding it via the plugin stops sampling. No traffic payload is collected.
 
 Icons use Nerd Fonts: `md-cpu-64-bit`, `md-memory`, `md-harddisk`, `md-upload`,
 `md-download`, verified against the official glyph map:
