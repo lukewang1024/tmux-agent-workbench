@@ -128,10 +128,10 @@ Optional global bindings are (re)installed each time the
 plugin loads when their option is explicitly set.
 
 The classic tmux menu is the default. Choose **Interface · classic / new** in
-the combined Menu to compare it with the new Sidebar list renderer. Content,
-scope checks and callbacks are shared; switching applies to subsequent menus
-and switch lists immediately. The Sidebar itself keeps its established list
-interaction. The CLI offers the same switch:
+the combined Menu to compare its two renderers. Buttons, order, scope checks
+and callbacks are shared. The setting changes action menus only; Sidebar and
+all four switchers always use the same list interaction. The CLI offers the
+same switch:
 
 ```sh
 tmux-agent-workbench ui old
@@ -143,7 +143,8 @@ tmux-agent-workbench ui status
 The preference is saved under `$XDG_CONFIG_HOME/tmux-agent-workbench/ui-mode`.
 The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
 The classic renderer uses native one-line tmux menus with pagination; the new
-renderer uses larger list rows and Sidebar-sized navigation popups.
+renderer uses larger list rows. Both modes use Sidebar-sized navigation popups
+for Switch Agent, Window, Pane and Session.
 
 | Action | Option | Default | Runs |
 |---|---|---|---|
@@ -350,7 +351,7 @@ The tmux menu starts with **Switch**, **Create**, **Kill**, **Layout**, and
 and **Session**, in that order. Kill shows its target for confirmation and
 rechecks its identity before acting. Switch Window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
-and running Agents have separate server-wide views. In the new UI these views share Sidebar's
+and running Agents have separate server-wide views. In both menu modes these views share Sidebar's
 bordered popup and two-line title/context rows, with search, paging, and a
 full-width Back and Close rows. The popup leaves terminal context visible, caps its size
 at 96 columns by 40 rows, and uses all available space on very small screens.

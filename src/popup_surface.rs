@@ -8,6 +8,7 @@ use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
 use crate::popup::{Dimensions, Sizing};
@@ -169,6 +170,16 @@ impl Backdrop {
             Paragraph::new(text.as_str())
                 .style(muted)
                 .render(Rect::new(0, *row, area.width, 1), &mut buffer);
+        }
+        // A wide backdrop glyph starting just outside the card can suppress
+        // its first border cell in Buffer::diff. Clip that overlapping glyph.
+        if geometry.card.x > 0 {
+            for row in geometry.card.y..geometry.card.bottom() {
+                let cell = &mut buffer[(geometry.card.x - 1, row)];
+                if Span::raw(cell.symbol()).width() > 1 {
+                    cell.reset();
+                }
+            }
         }
         Clear.render(geometry.card, &mut buffer);
         if geometry.card != geometry.content {
@@ -498,6 +509,39 @@ mod tests {
             assert!(
                 matches!(surface.input(mouse(MouseEventKind::Moved, geometry.content.x, geometry.content.y)).unwrap(), Some(Event::Mouse(event)) if (event.column, event.row) == (0, 0))
             );
+        }
+    }
+
+    #[test]
+    fn wide_backdrop_characters_do_not_erase_card_borders() {
+        let text = ("中".repeat(40) + "\n").repeat(30);
+        let mut terminal = Terminal::new(Surface::new(
+            TestBackend::new(80, 30),
+            Some(Sizing::Menu {
+                width: 30,
+                height: 12,
+            }),
+            Backdrop {
+                panes: vec![(0, 0, 80, 30, text)],
+                status: vec![],
+            },
+        ))
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("菜单 action"), frame.area());
+            })
+            .unwrap();
+        let surface = terminal.backend();
+        let card = surface.current().unwrap().unwrap().card;
+        let buffer = surface.backend.buffer();
+        for row in card.y + 1..card.bottom() - 1 {
+            assert_eq!(
+                buffer[(card.x, row)].symbol(),
+                "│",
+                "left border missing at row {row}"
+            );
+            assert_eq!(buffer[(card.right() - 1, row)].symbol(), "│");
         }
     }
 }

@@ -765,7 +765,7 @@ fn actions(
                 (
                     crate::ui::Mode::New,
                     "ui-new",
-                    tr("New · Sidebar lists", "新版 · Sidebar 列表"),
+                    tr("New · list menus", "新版 · 列表菜单"),
                     'n',
                 ),
             ] {

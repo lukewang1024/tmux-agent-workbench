@@ -46,7 +46,7 @@ struct SidebarViewport {
 impl SidebarViewport {
     fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
         // Actions and the Agents/sort heading stay above the scrolling body.
-        let first_row = 2 + usize::from(notice.is_some());
+        let first_row = 3 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
@@ -277,7 +277,7 @@ fn event_loop(
 
         let size = terminal.size()?;
         let body_height = usize::from(size.height).max(1);
-        let footer_height = usize::from(popup_mode());
+        let footer_height = 2 * usize::from(popup_mode());
         let content_height = body_height.saturating_sub(footer_height);
         if content_height != last_content_height {
             last_content_height = content_height;
@@ -306,6 +306,10 @@ fn event_loop(
                     header.push(Line::from(Span::styled(notice, muted_style())));
                 }
                 frame.render_widget(Paragraph::new(header), area);
+                crate::navigation_list::separator(
+                    frame,
+                    Rect::new(0, (viewport.first_row - 1) as u16, area.width, 1),
+                );
                 navigation.render(frame, |index, selected| {
                     render_row(&rows[index], selected, area.width)
                 });
@@ -334,6 +338,15 @@ fn event_loop(
                     );
                 }
                 if popup_mode() && area.height > 0 {
+                    crate::navigation_list::separator(
+                        frame,
+                        Rect::new(
+                            0,
+                            area.height.saturating_sub(2),
+                            area.width,
+                            u16::from(area.height > 1),
+                        ),
+                    );
                     frame.render_widget(
                         Paragraph::new(render_close(area.width, footer_hover)),
                         Rect::new(0, area.height - 1, area.width, 1),
@@ -568,7 +581,7 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![Row::Spacer];
+    let mut rows = vec![];
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
     if agent_sort == AgentSort::Prioritized {
@@ -1853,42 +1866,43 @@ mod tests {
     #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {
         let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
-        let viewport = SidebarViewport::new(9, rows.len(), Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(10, rows.len(), Some("stale · reconnecting"));
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
-            rows[viewport.row_at(4, 0, rows.len()).unwrap()],
+            rows[viewport.row_at(5, 0, rows.len()).unwrap()],
             "A subtitle"
         );
-        assert_eq!(rows[viewport.row_at(5, 0, rows.len()).unwrap()], "agent B");
-        assert_eq!(viewport.row_at(7, 0, rows.len()), None);
+        assert_eq!(rows[viewport.row_at(6, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(8, 0, rows.len()), None);
     }
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Seven content lines: actions + heading + banner + three rows + overflow;
+        // Eight content lines: actions + heading + banner + divider + three rows + overflow;
         // the popup footer follows and must not activate any hidden row.
-        let viewport = SidebarViewport::new(7, 20, Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(8, 20, Some("stale · reconnecting"));
         assert_eq!(viewport.row_height, 3);
         assert_eq!(viewport.row_at(0, 7, 20), None);
         assert_eq!(viewport.row_at(1, 7, 20), None);
         assert_eq!(viewport.row_at(2, 7, 20), None);
-        assert_eq!(viewport.row_at(3, 7, 20), Some(7));
-        assert_eq!(viewport.row_at(5, 7, 20), Some(9));
-        for row in [6, 7, 8] {
+        assert_eq!(viewport.row_at(3, 7, 20), None);
+        assert_eq!(viewport.row_at(4, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(6, 7, 20), Some(9));
+        for row in [7, 8, 9] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
     }
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(6, 4, None);
-        assert_eq!(normal.row_at(5, 0, 4), Some(3));
-        let stale = SidebarViewport::new(6, 4, Some("stale · reconnecting"));
+        let normal = SidebarViewport::new(7, 4, None);
+        assert_eq!(normal.row_at(6, 0, 4), Some(3));
+        let stale = SidebarViewport::new(7, 4, Some("stale · reconnecting"));
         assert_eq!(stale.row_height, 2);
-        assert_eq!(stale.row_at(5, 0, 4), None);
-        let overflow = SidebarViewport::new(5, 10, None);
-        assert_eq!(overflow.row_at(3, 0, 10), Some(1));
-        assert_eq!(overflow.row_at(4, 0, 10), None);
+        assert_eq!(stale.row_at(6, 0, 4), None);
+        let overflow = SidebarViewport::new(6, 10, None);
+        assert_eq!(overflow.row_at(4, 0, 10), Some(1));
+        assert_eq!(overflow.row_at(5, 0, 10), None);
     }
 
     #[test]
@@ -1973,7 +1987,7 @@ mod tests {
             .iter()
             .position(|row| matches!(row, Row::Section("sessions")))
             .unwrap();
-        assert!(matches!(rows.first(), Some(Row::Spacer)));
+        assert!(matches!(rows.first(), Some(Row::AgentGroup(_))));
         assert!(!rows.iter().any(|row| matches!(row, Row::AgentSection(_))));
         assert!(matches!(rows.get(sessions - 1), Some(Row::Spacer)));
         assert!(!matches!(rows.get(sessions - 2), Some(Row::Spacer)));

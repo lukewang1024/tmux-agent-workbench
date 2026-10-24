@@ -366,21 +366,24 @@ struct Geometry {
     height: u16,
     header: u16,
     footer: u16,
+    divider: u16,
     card: u16,
     capacity: usize,
 }
 
 impl Geometry {
     fn new(width: u16, height: u16) -> Self {
-        let header = if height >= 8 { 3 } else { 1 }.min(height);
-        let footer = if height >= 10 { 4 } else { 2 }.min(height.saturating_sub(header));
-        let body = height.saturating_sub(header + footer);
+        let divider = u16::from(height >= 6);
+        let header = (if height >= 10 { 3 } else { 1 } + divider).min(height);
+        let footer = if height >= 12 { 4 } else { 2 }.min(height.saturating_sub(header + divider));
+        let body = height.saturating_sub(header + footer + divider);
         let card = body.clamp(1, 2);
         Self {
             width,
             height,
             header,
             footer,
+            divider,
             card,
             capacity: usize::from(body / card).max(1),
         }
@@ -459,7 +462,7 @@ impl List {
             (geometry.capacity as u16 * geometry.card).min(
                 geometry
                     .height
-                    .saturating_sub(geometry.header + geometry.footer),
+                    .saturating_sub(geometry.header + geometry.footer + geometry.divider),
             ),
         ));
         self.navigation.set_actions(&[
@@ -474,7 +477,7 @@ impl List {
             .enumerate()
             .map(|(index, action)| (geometry.footer_rect(index as u16), action))
             .collect();
-        if geometry.header == 3 {
+        if geometry.header >= 3 {
             actions.push((Rect::new(0, 2, geometry.width, 1), Action::Search));
         }
         actions
@@ -512,7 +515,7 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
         ))),
         Rect::new(0, 0, geometry.width, 1),
     );
-    if geometry.header == 3 {
+    if geometry.header >= 3 {
         frame.render_widget(
             Paragraph::new(format!(
                 " {}",
@@ -535,6 +538,16 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
                 .min(usize::from(geometry.width.saturating_sub(1)));
             frame.set_cursor_position((column as u16, 2));
         }
+    }
+    if geometry.divider > 0 {
+        crate::navigation_list::separator(
+            frame,
+            Rect::new(0, geometry.header - 1, geometry.width, 1),
+        );
+        crate::navigation_list::separator(
+            frame,
+            Rect::new(0, geometry.height - geometry.footer - 1, geometry.width, 1),
+        );
     }
     list.navigation.render(frame, |row, selected| {
         let entry = &list.entries[list.visible[row / usize::from(geometry.card)]];
@@ -579,7 +592,7 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
                 geometry.width.saturating_sub(1),
                 geometry
                     .height
-                    .saturating_sub(geometry.header + geometry.footer),
+                    .saturating_sub(geometry.header + geometry.footer + geometry.divider),
             ),
         );
     }
@@ -657,119 +670,6 @@ pub fn select(
         kind,
         &Scope::read(server, pane, client)?,
         key,
-    )
-}
-
-fn native_picker(
-    paths: &Paths,
-    server: &ServerIdentity,
-    kind: Kind,
-    scope: &Scope,
-    pane: &str,
-    client: &str,
-    return_to: ReturnTo,
-    page: usize,
-) -> Result<()> {
-    use crate::menu::{Item, Menu, Pager, Role};
-    use crate::status_menu::shell_quote as quote;
-    let executable = quote(&std::env::current_exe()?.to_string_lossy());
-    let base = format!(
-        "{executable} switch {} --pane {} --client {} --language {} --return-to {}",
-        kind.name(),
-        quote(pane),
-        quote(client),
-        crate::ui_language::name(),
-        return_to.name()
-    );
-    let mut items: Vec<_> = load(paths, server, kind, scope)?
-        .into_iter()
-        .enumerate()
-        .map(|(index, entry)| Item {
-            id: entry.key.clone(),
-            label: format!(
-                "{}{} · {}",
-                if entry.current { "● " } else { "" },
-                entry.title,
-                entry.detail
-            ),
-            key: "123456789abcdefghijklmnopqrstuvwxyz"
-                .chars()
-                .nth(index)
-                .map(|key| key.to_string())
-                .unwrap_or_default(),
-            command: format!(
-                "run-shell -b {}",
-                quote(&format!("{base} --select {}", quote(&entry.key)))
-            ),
-            enabled: true,
-            role: Role::Body,
-        })
-        .collect();
-    if items.is_empty() {
-        items.push(Item {
-            id: "empty".into(),
-            label: tr("No entries", "没有可切换的项目").into(),
-            key: String::new(),
-            command: String::new(),
-            enabled: false,
-            role: Role::Body,
-        });
-    }
-    let destination = match return_to {
-        ReturnTo::SidebarPane => String::new(),
-        ReturnTo::SidebarPopup => format!(
-            "run-shell -b {}",
-            quote(&format!(
-                "{executable} sidebar --popup --pane {} --client {}",
-                quote(pane),
-                quote(client)
-            ))
-        ),
-        _ => format!(
-            "run-shell -b {}",
-            quote(&format!(
-                "{executable} status-menu {} --pane {} --client {} --language {}{}{}",
-                if matches!(return_to, ReturnTo::SidebarMenu) {
-                    "sidebar"
-                } else {
-                    "tmux"
-                },
-                quote(pane),
-                quote(client),
-                crate::ui_language::name(),
-                if matches!(return_to, ReturnTo::MenuFromMain | ReturnTo::SidebarMenu) {
-                    " --from-menu"
-                } else {
-                    ""
-                },
-                if matches!(return_to, ReturnTo::Menu | ReturnTo::MenuFromMain) {
-                    " --view switch"
-                } else {
-                    ""
-                }
-            ))
-        ),
-    };
-    items.push(Item {
-        id: "back".into(),
-        label: crate::menu_footer::back_label().into(),
-        key: "BSpace".into(),
-        command: destination,
-        enabled: true,
-        role: Role::Back,
-    });
-    crate::menu::display(
-        Menu {
-            title: format!("{} · {}", kind.title(), scope.label(kind)),
-            items,
-            pager: Some(Pager {
-                before_page: base,
-                after_page: String::new(),
-            }),
-        },
-        pane,
-        client,
-        page,
     )
 }
 
@@ -939,14 +839,10 @@ pub fn run(
     inside: bool,
     language: Option<&str>,
     return_to: ReturnTo,
-    page: usize,
+    _page: usize,
 ) -> Result<Option<TmuxTarget>> {
     crate::ui_language::set_language(language);
     let scope = Scope::read(server, pane, client)?;
-    if !inside && crate::ui::Mode::current()? == crate::ui::Mode::Old {
-        native_picker(paths, server, kind, &scope, pane, client, return_to, page)?;
-        return Ok(None);
-    }
     if !inside {
         crate::sidebar::popup(
             server,
@@ -1144,9 +1040,15 @@ mod tests {
         list.replace(entries(Kind::Window, &scope, &panes, None));
         let geometry = Geometry::new(40, 20);
         list.layout(geometry);
-        let pressed = list.navigation.hit(5, 3, &list.actions(geometry));
+        let pressed = list
+            .navigation
+            .hit(5, geometry.header, &list.actions(geometry));
         list.replace(entries(Kind::Window, &scope, &panes[2..], None));
-        assert_ne!(list.navigation.hit(5, 3, &list.actions(geometry)), pressed);
+        assert_ne!(
+            list.navigation
+                .hit(5, geometry.header, &list.actions(geometry)),
+            pressed
+        );
     }
 
     #[test]

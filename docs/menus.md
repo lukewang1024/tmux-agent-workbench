@@ -7,7 +7,7 @@ prefix M-m / tmux-agent-workbench menu
   Tmux → window/session controls and agent launch
   Host / SSH → SSH destinations
   CPU / resources → status density and btop
-  Interface → classic tmux menus / new Sidebar lists
+  Interface → classic tmux menus / new list menus
 
 statusbar tmux / prefix M-t
   Switch → Agent / Window / Pane / Session
@@ -44,6 +44,9 @@ default and retains one-line menus with pagination. Choose Interface in the
 combined Menu, or run `tmux-agent-workbench ui old|new|toggle|status`, to switch
 without reloading. The saved XDG configuration preference is overridden by
 the current server's `@workbench-ui` option when it is set.
+This setting changes action-menu rendering only. Sidebar and the Agent,
+Window, Pane and Session switchers always use the shared list UI. Both menu
+renderers expose the same ordered actions, targets and return destinations.
 
 The new renderer owns layout, two-row buttons and pinned navigation. Its popup
 fits the content, with a maximum width of 60 cells, rather than using Sidebar's
@@ -62,6 +65,9 @@ no pane, focus, or key binding is changed to implement outside dismissal.
 Action menus dismiss when the terminal viewport changes, so their backdrop
 always covers the current screen. Scoped navigation lists keep their existing
 resize handling and search state.
+Horizontal rules separate the pinned header, scrolling body and footer in
+Sidebar popups, switchers and new menus. Divider rows do not activate actions;
+very short screens prioritize content and controls over divider rows.
 Wheel and drag scrolling use the same `NavigationList` as Sidebar, and `[` / `]`
 and Page Up/Down also browse a long menu. Host and member lists
 are not limited by the number of available shortcut keys. The source pane
@@ -146,7 +152,7 @@ it does not claim a physical handset or Android keyboard acceptance run.
 
 ## Mobile navigation and interaction review
 
-In the new UI the four switch actions use filtered Sidebar views. They share
+In both menu modes the four switch actions use filtered Sidebar views. They share
 Sidebar's popup container, title renderer, colors and secondary
 context row; every cell in both entry rows is clickable. The bordered popup
 uses about 90% of the client dimensions, capped at 96 columns by 40 rows, to
@@ -164,7 +170,9 @@ Views provide stable row keys, a row renderer, content bounds and action regions
 the shared component owns wheel/drag scrolling, release activation, keyboard
 selection, hit testing, refresh anchors and resize handling. Wheel moves the
 highlight, as the original Sidebar did, and reveals the selected row when
-needed. It also works when every item fits on screen. Menu controls participate
+needed. Selecting the first entry resets the scroll offset to zero, including
+its leading group heading. Wheel scrolling also reaches informational rows at
+either end of the list. It works when every item fits on screen. Menu controls participate
 in the same navigation, and hover highlights both entries and controls.
 The same component also restores terminal mouse/focus/paste modes on exit.
 

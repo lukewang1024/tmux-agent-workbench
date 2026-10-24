@@ -18,6 +18,7 @@ import tempfile
 import termios
 import time
 import uuid
+import unicodedata
 
 from daemon_fixture import running_daemon
 
@@ -149,7 +150,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                       actual, tmux('capture-pane', '-p', '-t', target)))
             drain(0.05)
 
-    def screen_rows(output):
+    def screen_rows(output, compact=False):
         # Project cursor writes and erases onto the current terminal screen.
         columns, rows = os.get_terminal_size(slave)
         screen = {}
@@ -187,13 +188,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 continue
             elif token == '\r': x = 0
             elif token == '\n': y += 1
-            elif token.isprintable():
+            elif token.isprintable() and not unicodedata.combining(token):
                 screen[x, y] = token
-                x += 1
-        return [''.join(screen.get((col, row), ' ') for col in range(columns)) for row in range(rows)]
+                width = 2 if unicodedata.east_asian_width(token) in ('W', 'F') else 1
+                if width == 2:
+                    screen[x + 1, y] = ''
+                x += width
+        return [''.join(screen.get((col, row), ' ') or ('' if compact else ' ')
+                        for col in range(columns)) for row in range(rows)]
 
     def screen_text(output):
-        return '\n'.join(screen_rows(output)).encode()
+        return '\n'.join(screen_rows(output, compact=True)).encode()
 
     def item_position(output, label="close"):
         rows = screen_rows(output)
@@ -212,7 +217,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         output = b''
         for _ in range(40):
             output += drain(0.05)
-            visible = '\n'.join(screen_rows(output)).encode() if current_screen else output
+            visible = screen_text(output) if current_screen else output
             # Native menu content precedes its Close footer. A matching heading
             # alone can arrive before later rows, especially on slower clients.
             expected = (needle, *additional) + ((b'(esc)',) if menu_footer else ())
@@ -405,27 +410,62 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         client_process.send_signal(signal.SIGWINCH)
         drain(.3)
         print('PASS backdrop drag cancellation and context-menu viewport dismissal')
-        root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
-        menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu, b'Switch', b'Create', b'Kill', b'Layout', b'Detach')
-        labels = ('Switch', 'Create', 'Kill', 'Layout', 'Detach')
-        positions = [item_position(rendered, label)[1] for label in labels]
-        assert positions == sorted(set(positions)), (positions, rendered)
-        assert b'Switch window' not in screen_text(rendered)
+        # A wide glyph immediately to the left of the card used to erase
+        # a border cell during the backdrop diff. Use a width with an odd edge.
+        background = ('中' * 40 + '\n') * 25
+        tmux('send-keys', '-t', pane, '-l', shlex.join(['printf', '%s', background]))
+        tmux('send-keys', '-t', pane, 'Enter')
+        drain(.2)
+        border_label = 'Border integrity'.ljust(28, 'x')
+        border_args = list(choice_args)
+        border_args[border_args.index('Alpha')] = border_label
+        menu = open_menu(border_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, border_label.encode(), b'Beta')
+        for _ in range(2):
+            rows = screen_rows(rendered)
+            top = next(i for i, row in enumerate(rows) if '┌' in row and '┐' in row)
+            left, right = rows[top].index('┌'), rows[top].index('┐')
+            bottom = next(i for i in range(top + 1, len(rows))
+                          if rows[i][left] == '└' and rows[i][right] == '┘')
+            assert all(rows[i][left] == rows[i][right] == '│' for i in range(top + 1, bottom)), rows
+            assert rows[top][left + 1:right] == rows[bottom][left + 1:right] == '─' * (right - left - 1), rows
+            dividers = [i for i in range(top + 1, bottom) if rows[i][left + 1:right] == '─' * (right - left - 1)]
+            assert len(dividers) >= 2, rows
+            x, y = (left + right) // 2 + 1, dividers[0] + 1
+            os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+            rendered += drain(.2)
+            assert menu.poll() is None, 'header divider activated a menu action'
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
-        drain(0.7)
-        for key, title in [(b's', b'Switch'), (b'c', b'Create'), (b'k', b'Kill')]:
+        drain(.7)
+        tmux('send-keys', '-t', pane, '-l', shlex.join(['printf', r'\033[2J\033[H']))
+        tmux('send-keys', '-t', pane, 'Enter')
+        drain(.2)
+        print('PASS complete menu borders over wide text and inert header/body/footer dividers')
+        root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
+        for mode in ('old', 'new'):
+            subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
             menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for_text(menu, b'Create', b'Detach')
-            os.write(master, key)
-            rendered = wait_for_text(client_process, title, b'Agent', b'Window', b'Pane', b'Session', b'(back)')
-            positions = [item_position(rendered, name)[1] for name in ('Agent', 'Window', 'Pane', 'Session')]
-            assert positions == sorted(set(positions)), (title, positions)
-            os.write(master, b'\x7f')
-            wait_for_text(client_process, b'Create', b'Detach')
+            rendered = wait_for_text(menu, b'Switch', b'Create', b'Kill', b'Layout', b'Detach')
+            labels = ('Switch', 'Create', 'Kill', 'Layout', 'Detach')
+            positions = [item_position(rendered, label)[1] for label in labels]
+            assert positions == sorted(set(positions)), (positions, rendered)
+            assert b'Switch window' not in screen_text(rendered)
             os.write(master, b'\x1b')
-            drain(.7)
+            menu.wait(timeout=3)
+            drain(0.7)
+            for key, title in [(b's', b'Switch'), (b'c', b'Create'), (b'k', b'Kill')]:
+                menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                wait_for_text(menu, b'Create', b'Detach')
+                os.write(master, key)
+                rendered = wait_for_text(client_process, title, b'Agent', b'Window', b'Pane', b'Session', b'(back)')
+                positions = [item_position(rendered, name)[1] for name in ('Agent', 'Window', 'Pane', 'Session')]
+                assert positions == sorted(set(positions)), (title, positions)
+                os.write(master, b'\x7f')
+                wait_for_text(client_process, b'Create', b'Detach')
+                os.write(master, b'\x1b')
+                drain(.7)
+        print('PASS classic and new menus expose identical root groups, object order and Back destinations')
         create_args = root_args + ['--view', 'create']
         before_sessions = tmux('list-sessions', '-F', '#{session_id}')
         menu = open_menu(create_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1179,6 +1219,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert b'Daily development' not in '\n'.join(screen_rows(rendered)).encode()
         os.write(master, b't')
         rendered = wait_for_text(client_process, '主代理'.encode())
+        if '原生子代理'.encode() not in screen_text(rendered):
+            os.write(master, b'\x1b[6~')
+            rendered = wait_for_text(client_process, '协作方式'.encode(), '原生子代理'.encode(), menu_footer=False)
         assert '协作方式'.encode() in screen_text(rendered) and '原生子代理'.encode() in screen_text(rendered)
         os.write(master, b'\x7f')
         wait_for_text(client_process, '选择 agent'.encode())

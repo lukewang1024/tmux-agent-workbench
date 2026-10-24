@@ -112,7 +112,9 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .into_iter()
         .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
         .collect();
-    let capacity = height.saturating_sub(pinned.len() + 5).max(1);
+    let capacity = height
+        .saturating_sub(pinned.len() + 5 + usize::from(!pinned.is_empty()))
+        .max(1);
     let paging = body.len() > capacity && menu.pager.is_some();
     let capacity = capacity.saturating_sub(if paging { 2 } else { 0 }).max(1);
     let page = page.min(body.len().saturating_sub(1) / capacity);
@@ -140,7 +142,7 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
     // Disabled rows start with '-'. Stop option parsing before the first row,
     // including Agent's leading prefill notice and empty-state information.
     args.push("--".into());
-    let mut append = |item: &Item| {
+    let append = |args: &mut Vec<String>, item: &Item| {
         let label = escape(&item.label);
         args.extend([
             if item.enabled {
@@ -161,10 +163,13 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         ]);
     };
     for item in body.iter().skip(page * capacity).take(capacity) {
-        append(item);
+        append(&mut args, item);
+    }
+    if !pinned.is_empty() {
+        args.push(String::new());
     }
     for item in pinned {
-        append(item);
+        append(&mut args, item);
     }
     if paging && let Some(pager) = &menu.pager {
         for (label, key, next, enabled) in [
@@ -269,7 +274,7 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
             Role::Close => 0,
         })
         .sum::<usize>()
-        .saturating_add(3)
+        .saturating_add(5)
         .min(u16::MAX as usize) as u16;
     crate::popup::open(
         &ServerIdentity::discover()?,
@@ -337,6 +342,7 @@ struct Layout {
     height: u16,
     header: u16,
     footer: u16,
+    divider: u16,
     primary: u16,
     error: u16,
     summary: u16,
@@ -344,21 +350,26 @@ struct Layout {
 }
 impl Layout {
     fn new(width: u16, height: u16, menu: &Menu) -> Self {
-        let header = 1.min(height);
+        let divider = u16::from(height >= 6);
+        let header = (1 + divider).min(height);
         let count = 1 + u16::from(
             menu.items
                 .iter()
                 .any(|item| item.role == Role::Back && item.enabled),
         );
-        let row_height = if height
-            >= header + count * 2 + u16::from(menu.items.iter().any(|item| item.role == Role::Body))
-        {
-            2
-        } else {
-            1
-        };
+        let has_body = menu.items.iter().any(|item| item.role == Role::Body);
+        let pinned_minimum =
+            2 * u16::from(menu.items.iter().any(|item| item.role == Role::Primary))
+                + u16::from(menu.items.iter().any(|item| item.role == Role::Error))
+                + u16::from(menu.items.iter().any(|item| item.role == Role::Summary));
+        let row_height =
+            if height >= header + divider + count * 2 + u16::from(has_body) + pinned_minimum {
+                2
+            } else {
+                1
+            };
         let footer = (count * row_height).min(height.saturating_sub(header));
-        let mut available = height.saturating_sub(header + footer);
+        let mut available = height.saturating_sub(header + footer + divider);
         let primary = if menu.items.iter().any(|item| item.role == Role::Primary) {
             available.saturating_sub(1).min(2)
         } else {
@@ -371,7 +382,7 @@ impl Layout {
             0
         };
         available -= error;
-        let summary = available.saturating_sub(2).min(
+        let summary = available.saturating_sub(2 * u16::from(has_body)).min(
             menu.items
                 .iter()
                 .filter(|item| item.role == Role::Summary)
@@ -385,6 +396,7 @@ impl Layout {
             height,
             header,
             footer,
+            divider,
             primary,
             error,
             summary,
@@ -557,13 +569,20 @@ fn render(
 ) {
     frame.render_widget(
         Paragraph::new(clean(&menu.title)).style(Style::default().add_modifier(Modifier::BOLD)),
-        Rect::new(0, 0, layout.width, layout.header),
+        Rect::new(0, 0, layout.width, layout.header.min(1)),
     );
+    if layout.divider > 0 {
+        crate::navigation_list::separator(frame, Rect::new(0, layout.header - 1, layout.width, 1));
+        crate::navigation_list::separator(
+            frame,
+            Rect::new(0, layout.body.bottom() + layout.summary, layout.width, 1),
+        );
+    }
     navigation.render(frame, |index, selected| {
         let (item, part) = rows[index];
         row_line(&menu.items[item], part, layout.width, selected)
     });
-    let mut y = layout.height - layout.footer - layout.primary - layout.error - layout.summary;
+    let mut y = layout.body.bottom();
     let summary_end = y + layout.summary;
     for item in menu.items.iter().filter(|item| item.role == Role::Summary) {
         for part in 0..row_count(item, layout.width) {
@@ -1042,6 +1061,52 @@ mod tests {
             .0;
         assert!(line(back.y).contains("Back") && line(back.y).ends_with("(back)"));
         assert_ne!(buffer[(5, back.y)].bg, Color::DarkGray);
+    }
+
+    #[test]
+    fn short_menus_keep_context_visible_above_the_action_divider() {
+        for has_body in [false, true] {
+            let mut items = vec![
+                Item {
+                    enabled: false,
+                    ..item("daily-single", Role::Summary)
+                },
+                item("Launch", Role::Primary),
+                item("Back", Role::Back),
+            ];
+            if has_body {
+                items.insert(0, item("Daily", Role::Body));
+            }
+            let menu = Menu {
+                title: "test".into(),
+                pager: None,
+                items,
+            };
+            let layout = Layout::new(30, 10, &menu);
+            let mut navigation = NavigationList::default();
+            let rows = if has_body {
+                vec![(0, 0), (0, 1)]
+            } else {
+                vec![]
+            };
+            navigation.replace_rows(rows.iter().map(|_| Some("Daily".into())).collect());
+            navigation.set_viewport(layout.body);
+            let actions = layout.actions(&menu);
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 10)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &menu, layout, &navigation, &rows, &actions))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for label in ["daily-single", "Launch", "Back", "close"] {
+                assert!(text.contains(label), "missing {label}: {buffer:?}");
+            }
+            assert_eq!(navigation.hit(2, layout.body.bottom(), &actions), None);
+        }
     }
 
     #[test]

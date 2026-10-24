@@ -12,8 +12,20 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
+
+pub(crate) fn separator(frame: &mut ratatui::Frame, area: Rect) {
+    let area = area.intersection(frame.area());
+    if area.height > 0 {
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(area.width)))
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Hit<A> {
@@ -128,6 +140,15 @@ impl<A: Clone + Eq> NavigationList<A> {
 
     fn reveal_selection(&mut self) {
         let height = usize::from(self.area.height);
+        // Reveal a leading heading without hiding the selected entry when a
+        // menu's introductory information is longer than its tiny viewport.
+        if self.selected < height
+            && self.rows.get(self.selected).is_some_and(Option::is_some)
+            && !self.rows[..self.selected].iter().any(Option::is_some)
+        {
+            self.scroll = 0;
+            return;
+        }
         if height == 0 {
             return;
         }
@@ -160,6 +181,16 @@ impl<A: Clone + Eq> NavigationList<A> {
         }
     }
 
+    fn next_entry(&self, down: bool) -> Option<usize> {
+        let selectable =
+            |index: &usize| self.rows[*index].is_some() && self.start(*index) == *index;
+        if down {
+            (self.selected + 1..self.rows.len()).find(selectable)
+        } else {
+            (0..self.selected).rev().find(selectable)
+        }
+    }
+
     pub fn navigate(&mut self, key: KeyCode) -> bool {
         self.hovered = None;
         let down = matches!(key, KeyCode::Down | KeyCode::Char('j'));
@@ -188,11 +219,8 @@ impl<A: Clone + Eq> NavigationList<A> {
             return true;
         }
         let next = match key {
-            KeyCode::Down | KeyCode::Char('j') => (self.selected + 1..self.rows.len())
-                .find(|index| self.rows[*index].is_some() && self.start(*index) == *index),
-            KeyCode::Up | KeyCode::Char('k') => (0..self.selected)
-                .rev()
-                .find(|index| self.rows[*index].is_some() && self.start(*index) == *index),
+            KeyCode::Down | KeyCode::Char('j') => self.next_entry(true),
+            KeyCode::Up | KeyCode::Char('k') => self.next_entry(false),
             KeyCode::Home => self.rows.iter().position(Option::is_some),
             KeyCode::End => self.rows.iter().rposition(Option::is_some),
             KeyCode::PageDown | KeyCode::PageUp => {
@@ -204,6 +232,14 @@ impl<A: Clone + Eq> NavigationList<A> {
         self.pressed = None;
         if let Some(index) = next {
             self.select(index);
+        } else if up && self.scroll > 0 {
+            // Headings before the first selectable entry are still content.
+            if self.rows.get(self.selected).is_some_and(Option::is_some) {
+                self.follow_selection = true;
+                self.reveal_selection();
+            } else {
+                self.scroll_by(-1);
+            }
         } else if down {
             self.focused_action = self.actions.first().cloned();
         }
@@ -366,23 +402,15 @@ impl<A: Clone + Eq> NavigationList<A> {
                 self.hovered = None;
                 self.selection_visible = true;
                 let down = mouse.kind == MouseEventKind::ScrollDown;
-                let next_item = if down {
-                    self.rows
-                        .iter()
-                        .skip(self.selected + 1)
-                        .any(Option::is_some)
-                } else {
-                    self.rows.iter().take(self.selected).any(Option::is_some)
-                };
-                // A menu may end with explanatory lines, or contain only
-                // information. Keep those lines reachable before its controls.
+                let next_item = self.next_entry(down).is_some();
+                // Headings and information at either edge remain reachable,
+                // including in lists without pinned keyboard controls.
                 let can_scroll = if down {
                     self.visible_rows().end < self.rows.len()
                 } else {
                     self.scroll > 0
                 };
-                if !self.actions.is_empty()
-                    && !next_item
+                if !next_item
                     && can_scroll
                     && (self.focused_action.is_none() || !self.rows.iter().any(Option::is_some))
                 {
@@ -507,8 +535,42 @@ mod tests {
         for _ in 0..20 {
             list.mouse(mouse(MouseEventKind::ScrollUp, 3), &[]);
         }
-        assert_eq!(list.scroll, 1);
+        assert_eq!(list.scroll, 0);
         assert_eq!(list.selected, 1);
+    }
+
+    #[test]
+    fn wheel_reaches_information_at_both_ends_without_pinned_controls() {
+        let mut list = NavigationList::<()>::default();
+        list.replace_rows(
+            [
+                None,
+                None,
+                Some("a"),
+                Some("a"),
+                Some("b"),
+                Some("b"),
+                None,
+                None,
+            ]
+            .into_iter()
+            .map(|key| key.map(str::to_owned))
+            .collect(),
+        );
+        list.set_viewport(Rect::new(1, 2, 24, 3));
+        list.select(2);
+        for _ in 0..20 {
+            list.mouse(mouse(MouseEventKind::ScrollDown, 3), &[]);
+        }
+        assert_eq!(list.visible_rows().end, list.rows.len());
+        for _ in 0..20 {
+            list.mouse(mouse(MouseEventKind::ScrollUp, 3), &[]);
+        }
+        assert_eq!(list.scroll, 0);
+        assert_eq!(list.selected, 2);
+        list.replace_rows(list.rows.clone());
+        list.set_viewport(Rect::new(1, 2, 20, 3));
+        assert_eq!(list.scroll, 0, "refresh or resize hid the leading headings");
     }
 
     #[test]
@@ -639,12 +701,55 @@ mod tests {
         assert_eq!(list.scroll, 4);
         list.navigate(KeyCode::Home);
         assert_eq!(list.selected, 1);
-        assert_eq!(list.scroll, 1);
+        assert_eq!(list.scroll, 0);
         list.navigate(KeyCode::End);
         assert_eq!(list.selected, 6);
         list.page(-1);
         assert_eq!(list.scroll, 0);
         assert_eq!(list.selected, 1);
+    }
+
+    #[test]
+    fn keyboard_up_can_reveal_headings_before_the_first_entry() {
+        let mut list = list();
+        list.select(6);
+        for _ in 0..2 {
+            list.navigate(KeyCode::Up);
+        }
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.scroll, 0);
+    }
+
+    #[test]
+    fn selecting_the_first_entry_resets_the_offset_with_its_headings() {
+        let mut list = list();
+        list.select(6);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 3), &[]);
+        assert_eq!(list.selected, 4);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 3), &[]);
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.scroll, 0);
+        list.set_viewport(Rect::new(1, 2, 24, 2));
+        assert_eq!(list.scroll, 0);
+    }
+
+    #[test]
+    fn long_intro_does_not_hide_the_first_entry_on_tiny_screens() {
+        let mut list = NavigationList::<()>::default();
+        list.replace_rows(vec![
+            None,
+            None,
+            None,
+            Some("first".into()),
+            Some("first".into()),
+        ]);
+        list.set_viewport(Rect::new(0, 0, 24, 2));
+        list.select(3);
+        assert!(list.visible_rows().contains(&list.selected));
+        list.navigate(KeyCode::Home);
+        assert!(list.visible_rows().contains(&list.selected));
+        list.navigate(KeyCode::Up);
+        assert!(list.visible_rows().contains(&list.selected));
     }
 
     #[test]

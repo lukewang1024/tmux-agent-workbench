@@ -1,5 +1,5 @@
-//! Backend selection is independent of content providers. The classic tmux UI
-//! stays available while the shared Sidebar renderer is being evaluated.
+//! Action-menu backend selection is independent of content providers.
+//! Sidebar and switchers always use their shared list renderer.
 use crate::{paths::Paths, server::ServerIdentity};
 use clap::ValueEnum;
 use std::{fs, process::Command};

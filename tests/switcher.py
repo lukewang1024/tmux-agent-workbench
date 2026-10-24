@@ -177,7 +177,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         return [row[left:left + width] for row in screen_rows()[top:top + height]]
 
     def first_row():
-        return 4 if content_rect()[3] >= 8 else 2
+        return 5 if content_rect()[3] >= 10 else 3 if content_rect()[3] >= 6 else 2
 
     def open_list(kind):
         drain()
@@ -238,26 +238,32 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         client = os.ttyname(slave)
         sibling = os.ttyname(other_slave)
         reset()
-        subprocess.check_call([core, 'ui', 'old'], env=env, stdout=subprocess.DEVNULL)
-        for kind, shortcut, target_window, target_pane, target_session in [
-            ('window', b'2', windows[1], None, 'source'),
-            ('pane', b'2', None, second, 'source'),
-            ('session', b'1', None, other, 'other'),
-            ('agent', b'1', None, other, 'other'),
-        ]:
-            popup = open_list(kind)
-            os.write(master, shortcut)
-            popup.wait(timeout=5)
-            wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
-                 'classic picker lost its scope or callback target')
-            assert client_value(sibling, '#{session_name}') == 'source'
-            reset()
-        subprocess.check_call([core, 'ui', 'new'], env=env, stdout=subprocess.DEVNULL)
-        print('PASS classic scoped pickers share content, identity guards and client isolation', flush=True)
+        for mode in ('old', 'new'):
+            subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
+            for kind, query, target_window, target_pane, target_session in [
+                ('window', '中文', windows[1], None, 'source'),
+                ('pane', 'pane-right', None, second, 'source'),
+                ('session', 'other', None, other, 'other'),
+                ('agent', 'other-agent-window', None, other, 'other'),
+            ]:
+                popup = open_list(kind)
+                rows = visible_rows()
+                assert rows[first_row() - 2].strip('─ ') == '' and '─' in rows[first_row() - 2], rows
+                assert rows[-5].strip('─ ') == '' and '─' in rows[-5], rows
+                os.write(master, ('/' + query).encode())
+                text(query)
+                os.write(master, b'\r')
+                popup.wait(timeout=5)
+                wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
+                     'shared switcher lost its scope or callback target in ' + mode)
+                assert client_value(sibling, '#{session_name}') == 'source'
+                reset()
+        print('PASS both menu modes use the same divided switch lists, search, identity guards and client isolation', flush=True)
         # Both lines of a Sidebar entry must activate the same window, and
         # press-and-hold must not activate before release.
-        for y in (6, 7):
+        for part in (0, 1):
             popup = open_list('window')
+            y = first_row() + 2 + part
             press(10, y)
             drain(.35)
             assert focused(window=windows[0]), 'press activated before release'
@@ -269,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         print('PASS both Sidebar entry rows select on release inside the bordered modal', flush=True)
         tmux('set-option', '-g', 'status', 'on')
         popup = open_list('window')
-        tap(10, 6)
+        tap(10, first_row() + 2)
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[1]), 'status bar changed the popup hit target')
         reset()
@@ -277,16 +283,16 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         print('PASS bordered navigation keeps the correct target with the status bar visible', flush=True)
         popup = open_list('window')
         wheel(True, 6)
-        wait(lambda: 'window-zero' not in visible_rows()[3], 'wheel did not scroll the window list')
-        before_refresh = visible_rows()[3]
+        wait(lambda: 'window-zero' not in visible_rows()[first_row() - 1], 'wheel did not scroll the window list')
+        before_refresh = visible_rows()[first_row() - 1]
         drain(1.4)
-        assert visible_rows()[3] == before_refresh, 'refresh reset the wheel position'
+        assert visible_rows()[first_row() - 1] == before_refresh, 'refresh reset the wheel position'
         assert focused(window=windows[0]) and popup.poll() is None, 'wheel activated a target'
         wheel(False, 8)
-        wait(lambda: 'window-zero' in visible_rows()[3], 'wheel up did not stop at the beginning')
+        wait(lambda: 'window-zero' in visible_rows()[first_row() - 1], 'wheel up did not stop at the beginning')
         wheel(True)
         drain(.2)
-        tap(10, 6)
+        tap(10, first_row() + 2)
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[1]), 'click after wheel scrolling chose the wrong window')
         reset()
@@ -308,10 +314,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         reset()
         print('PASS touch paging and search reach windows absent from the status bar', flush=True)
         popup = open_list('window')
-        press(10, 7)
-        x, y = position(10, 4)
+        press(10, first_row() + 3)
+        x, y = position(10, first_row())
         os.write(master, f'\x1b[<32;{x};{y}M'.encode())
-        release(10, 4)
+        release(10, first_row())
         drain(.2)
         assert focused(window=windows[0]) and popup.poll() is None, 'swipe also activated a card'
         close(popup)
@@ -321,7 +327,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         text('No matching results')
         os.write(master, b'\x15')
         text('pane-right')
-        tap(10, 7)
+        tap(10, first_row() + 3)
         popup.wait(timeout=5)
         wait(lambda: focused(pane=second), 'pane card did not focus the pane')
         reset()
@@ -339,10 +345,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         reset()
         print('PASS independent session, Agent and pane views, Sidebar exclusion and client isolation', flush=True)
         popup = open_list('window')
-        press(10, 6)
+        press(10, first_row() + 2)
         tmux('kill-window', '-t', windows[1])
         drain(1.5)
-        release(10, 6)
+        release(10, first_row() + 2)
         drain(.2)
         assert focused(window=windows[0]) and popup.poll() is None, 'refresh retargeted a held touch'
         close(popup)
@@ -351,7 +357,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             popup = open_list('window')
             _, _, inner_width, inner_height = content_rect()
             assert inner_width + 2 < width and inner_height + 2 < height
-            tap(10, 6)
+            tap(10, first_row() + 2)
             popup.wait(timeout=5)
             wait(lambda: focused(window=windows[2]), 'bounded Sidebar popup click missed its target')
             reset()
@@ -363,7 +369,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             drain(.2)
             tap(10, first_row())
             popup.wait(timeout=5)
-            target = windows[3] if height == 12 else windows[2]
+            target = windows[2]
             wait(lambda: focused(window=target), 'small viewport card was not usable')
             reset()
         resize(40, 20)
@@ -426,9 +432,16 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         text('+ new')
         wait(lambda: 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1]
              and visible_rows()[3].strip() == 'other', 'Sidebar hid its heading or first Session group')
-        wheel(True, 12)
-        drain(.2)
+        for _ in range(2):
+            wheel(True, 12)
+            wait(lambda: visible_rows()[3].strip() != 'other', 'first Session group did not scroll away')
+            wheel(False, 50)
+            wait(lambda: visible_rows()[3].strip() == 'other', 'wheel could not restore the first Session group heading')
+            drain(1.4)
+            assert visible_rows()[3].strip() == 'other', 'snapshot refresh hid the restored first group'
         assert 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1], visible_rows()
+        assert visible_rows()[2].strip('─ ') == '' and '─' in visible_rows()[2], visible_rows()
+        assert visible_rows()[-2].strip('─ ') == '' and '─' in visible_rows()[-2], visible_rows()
         tap(content_rect()[2] - 2, 2)
         text('prioritized')
         assert 'agents' in visible_rows()[1] and 'prioritized' in visible_rows()[1], visible_rows()
@@ -439,7 +452,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar.wait(timeout=5)
         drain(.7)
         assert focused(window=windows[0]), 'opening the overview changed its source window'
-        print('PASS overview opens at its first group and pins the Agents/sort header through scrolling', flush=True)
+        print('PASS overview pins its Agents/sort header and restores the first group after repeated wheel round trips', flush=True)
         # A shared pane ID must still list and focus windows in this client's
         # Session rather than whichever Session tmux finds first.
         tmux('new-session', '-d', '-s', 'linked', '-n', 'linked-only', '/bin/sh')
@@ -450,7 +463,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         text('No matching results')
         os.write(master, b'\x15')
         text('linked-only')
-        tap(10, 7)
+        tap(10, first_row() + 3)
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[0], session='linked'), 'linked window chose another Session')
         assert client_value(sibling, '#{session_name}') == 'source'
@@ -518,7 +531,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         os.write(master, b'\x1b')
         sidebar.wait(timeout=5)
         drain(.7)
-        print('PASS classic Sidebar menu and picker return to Sidebar through Back', flush=True)
+        print('PASS classic menu uses the shared switcher and preserves its Sidebar Back destination', flush=True)
     finally:
         resources.close()
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
