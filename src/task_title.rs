@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn exit_detection_checks_process_identity_and_actual_termination() {
-        let mut child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .unwrap();
@@ -963,11 +963,18 @@ mod tests {
             reaper.exited(&probe);
             if let Some(process) = reaper.system.process(Pid::from_u32(child.id())) {
                 if let Some(path) = process.exe() {
-                    break Some(ProcessFingerprint {
-                        pid: child.id(),
-                        started_at_ticks: process.start_time(),
-                        executable: path.display().to_string(),
-                    });
+                    // The fork/exec metadata may still describe the parent.
+                    // Wait for the final executable before fingerprinting it.
+                    if path.file_name() == Some(std::ffi::OsStr::new("sleep"))
+                        && process.start_time() != 0
+                        && process.status() != sysinfo::ProcessStatus::Zombie
+                    {
+                        break Some(ProcessFingerprint {
+                            pid: child.id(),
+                            started_at_ticks: process.start_time(),
+                            executable: path.display().to_string(),
+                        });
+                    }
                 }
             }
             if Instant::now() >= deadline {
@@ -987,7 +994,7 @@ mod tests {
         // Reap before assertions so a failed test cannot leave a child behind.
         let _ = child.kill();
         child.wait().unwrap();
-        assert_eq!(observations, Some((true, true, true)));
+        assert_eq!(observations, Some((true, true, true)), "{identity:?}");
         assert!(reaper.exited(identity.as_ref().unwrap()));
     }
 
