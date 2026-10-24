@@ -10,22 +10,22 @@ prefix M-m / tmux-agent-workbench menu
   Interface → classic tmux menus / new Sidebar lists
 
 statusbar tmux / prefix M-t
-  Switch window → current Session's windows
-  Switch session → Sessions only
-  Switch agent → running Agents only
-  Switch pane → current Window's panes
-  New session → name, create in source directory, enter
-  New window
-  Launch agent
-    Codex / Claude Code / Trae / OpenCode (installed tools only)
-      One configuration panel (choices update in place)
-        Codex / Trae: scene + Single/Team + Native/tmux (Team only)
-        Claude / OpenCode: Single/Team + Native/tmux (Team only)
-        Actual model / thinking / Fast preview; inline launch errors
-        Enter: launch in source directory; Backspace: agents; Esc: close
-  Panes & layout → split, zoom, main-vertical, tiled
-  Open project in VS Code (when installed)
-  Detach this client
+  Switch → Agent / Window / Pane / Session
+    Agent → running Agents only
+    Window → current Session's windows
+    Pane → current Window's panes
+    Session → Sessions only
+  Create → Agent / Window / Pane / Session
+    Agent → installed tool → scene / mode / collaboration → Launch
+    Window → new shell in source directory
+    Pane → split below / right in source directory
+    Session → name, create in source directory, enter
+    Open project in VS Code (when installed)
+  Kill → Agent / Window / Pane / Session
+    Each shows its current target and requires confirmation
+    Agent terminates the verified foreground Agent process only
+  Layout → zoom, even horizontal / vertical, main-vertical, tiled
+  Detach → this client only
 
 statusbar Agent / prefix M-a
   actual foreground CLI + state + source pane + team role
@@ -48,11 +48,20 @@ the current server's `@workbench-ui` option when it is set.
 The new renderer owns layout, two-row buttons and pinned navigation. Its popup
 fits the content, with a maximum width of 60 cells, rather than using Sidebar's
 larger dimensions. Every cell of both button rows is clickable. Descriptions
-wrap within the content area. Information, title, blank and outside taps leave
-the menu open. Escape and Close dismiss it; Backspace returns to its parent
+wrap within the content area. Tapping outside the menu closes it on release
+without sending that click to the underlying terminal. Outside hover, wheel
+and drags leave it open, as do information, title and blank taps inside the
+card. Escape and Close dismiss it; Backspace returns to its parent
 or closes a root menu. Back, Close and Launch use full-width list rows, with
 their shortcut on the right of the label, and stay pinned while the body scrolls.
 Launch configuration summaries also stay visible near Launch when space allows.
+The action-menu container captures a muted, in-memory snapshot of the terminal
+behind its bounded card. This client-local input surface receives backdrop
+clicks that native tmux popups discard. The live terminal returns on dismissal;
+no pane, focus, or key binding is changed to implement outside dismissal.
+Action menus dismiss when the terminal viewport changes, so their backdrop
+always covers the current screen. Scoped navigation lists keep their existing
+resize handling and search state.
 Wheel and drag scrolling use the same `NavigationList` as Sidebar, and `[` / `]`
 and Page Up/Down also browse a long menu. Host and member lists
 are not limited by the number of available shortcut keys. The source pane
@@ -217,12 +226,20 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
-The tmux root menu exposes Switch window (`w`), Switch session (`s`), Switch agent
-(`g`), and Switch pane (`p`) first. New session (`n`), New window (`c`), Launch
-agent (`a`), and Panes & layout (`l`) follow, then the installed editor and Detach.
-There is no intermediate Switch submenu.
-New session asks for a name and switches the invoking client to a new session
+The tmux root menu exposes Switch (`s`), Create (`c`), Kill (`k`), Layout (`l`)
+and Detach (`d`), in that order. Switch, Create and Kill all start with Agent
+(`a`), Window (`w`), Pane (`p`) and Session (`s`). Back returns to the immediate
+group, including after a scoped switch list or Agent launch configuration.
+Kill shows the source target and a separate confirmation; its callback rechecks
+the pane identity, and Agent termination additionally checks the process
+fingerprint. It never uses a process-name match or kills the entire tmux server.
+Create Session asks for a name and switches the invoking client to a new session
 in the source pane's directory; cancelling the prompt creates nothing.
+
+The overview Sidebar pins its Agents/sort heading above the scrolling body.
+Its popup starts at the first group instead of following a lower current Agent
+and hiding the first Session name. Persistent Sidebar panes retain their current
+Agent selection. Changing sort explicitly starts the newly sorted list at its top.
 
 The left group runs Session/Sidebar → tmux → window labels.
 CPU, Host and Agent status with usage stay on the right, whose outer

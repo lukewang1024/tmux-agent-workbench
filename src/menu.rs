@@ -633,7 +633,9 @@ fn render(
 
 fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
     let _screen = Screen::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
+        CrosstermBackend::new(stdout()),
+    )?)?;
     let mut navigation = NavigationList::<Action>::default();
     let mut rows = vec![];
     let mut row_width = None;
@@ -680,7 +682,10 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
             continue;
         }
         let mut chosen = None;
-        match event::read()? {
+        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+            continue;
+        };
+        match input {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 navigation.cancel_press();
                 if key.code == KeyCode::Esc
@@ -750,7 +755,7 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
     }
 }
 
-fn plain_label(text: &str) -> String {
+pub(crate) fn plain_label(text: &str) -> String {
     let mut result = String::new();
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {

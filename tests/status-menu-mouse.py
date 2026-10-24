@@ -375,20 +375,62 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert tmux('show-option', '-gqv', '@pointer-choice') == expected, event_kind
             drain(.3)
         print('PASS fitting menu: SGR/legacy wheel both directions, hover selection and Close hover')
+        for crossing in ('inside-outside', 'inside-outside-inside', 'outside-inside'):
+            tmux('set-option', '-gu', '@pointer-choice')
+            menu = open_menu(choice_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu, b'Alpha', b'Beta')
+            x, y = item_position(rendered, 'Alpha')
+            if crossing == 'outside-inside':
+                report = f'\x1b[<0;1;1M\x1b[<0;{x};{y}m'
+            else:
+                report = f'\x1b[<0;{x};{y}M\x1b[<32;1;1M'
+                report += f'\x1b[<32;{x};{y}M\x1b[<0;{x};{y}m' if crossing.endswith('-inside') else '\x1b[<0;1;1m'
+            os.write(master, report.encode())
+            drain(.2)
+            assert menu.poll() is None and not tmux('show-option', '-gqv', '@pointer-choice'), crossing
+            os.write(master, b'\x1b')
+            menu.wait(timeout=3)
+            drain(.7)
+        # Context menus dismiss when the viewport changes, including growth
+        # beyond tmux's original popup extent. The next menu uses the new size.
+        for width, height in [(60, 20), (100, 35)]:
+            menu = open_menu(choice_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'Alpha', b'Beta')
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', height, width, 0, 0))
+            client_process.send_signal(signal.SIGWINCH)
+            menu.wait(timeout=5)
+            assert menu.returncode == 0 and not tmux('show-option', '-gqv', '@pointer-choice')
+            drain(.3)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        drain(.3)
+        print('PASS backdrop drag cancellation and context-menu viewport dismissal')
         root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
         menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu, b'Switch window', b'Switch session', b'New session...', b'Launch agent...')
-        labels = ('Switch window', 'Switch session', 'Switch agent', 'Switch pane', 'New session...', 'New window', 'Launch agent...', 'Panes & layout...')
+        rendered = wait_for_text(menu, b'Switch', b'Create', b'Kill', b'Layout', b'Detach')
+        labels = ('Switch', 'Create', 'Kill', 'Layout', 'Detach')
         positions = [item_position(rendered, label)[1] for label in labels]
         assert positions == sorted(set(positions)), (positions, rendered)
-        assert b'Switch window / session' not in screen_text(rendered)
+        assert b'Switch window' not in screen_text(rendered)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain(0.7)
+        for key, title in [(b's', b'Switch'), (b'c', b'Create'), (b'k', b'Kill')]:
+            menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'Create', b'Detach')
+            os.write(master, key)
+            rendered = wait_for_text(client_process, title, b'Agent', b'Window', b'Pane', b'Session', b'(back)')
+            positions = [item_position(rendered, name)[1] for name in ('Agent', 'Window', 'Pane', 'Session')]
+            assert positions == sorted(set(positions)), (title, positions)
+            os.write(master, b'\x7f')
+            wait_for_text(client_process, b'Create', b'Detach')
+            os.write(master, b'\x1b')
+            drain(.7)
+        create_args = root_args + ['--view', 'create']
         before_sessions = tmux('list-sessions', '-F', '#{session_id}')
-        menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu, b'New session...')
-        os.write(master, b'n')
+        menu = open_menu(create_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Create', b'Session')
+        os.write(master, b's')
         wait_for_text(client_process, b'New session name:', menu_footer=False)
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
@@ -413,9 +455,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 drain(0.05)
             assert len(other_clients) == 1, other_clients
             for session_name in ("new 'session'; display-message injected", '中文会话'):
-                menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                wait_for_text(menu, b'New session...')
-                os.write(master, b'n')
+                menu = open_menu(create_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                wait_for_text(menu, b'Create', b'Session')
+                os.write(master, b's')
                 wait_for_text(client_process, b'New session name:', menu_footer=False)
                 os.write(master, session_name.encode() + b'\r')
                 menu.wait(timeout=3)
@@ -440,7 +482,87 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 other_client_process.wait(timeout=5)
             os.close(other_master)
             os.close(other_slave)
-        print('PASS root switch entries and named session creation, cancellation, cwd and client isolation')
+        print('PASS grouped root/object order and named session creation, cancellation, cwd and client isolation')
+        # Kill has a separate, guarded confirmation. Cancel leaves its exact
+        # target alive; confirming Pane/Window/Session affects only that target.
+        for kind in ('pane', 'window', 'session'):
+            if kind == 'session':
+                target = tmux('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', 'delete-session', '/bin/sh')
+            else:
+                target = tmux('new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'delete-' + kind, '/bin/sh')
+            target_window = tmux('display-message', '-p', '-t', target, '#{window_id}')
+            sibling = None
+            if kind == 'pane':
+                sibling = tmux('split-window', '-d', '-t', target, '-P', '-F', '#{pane_id}', '/bin/sh')
+            args = [core, 'status-menu', 'tmux', '--pane', target, '--client', client, '--view', 'kill-' + kind]
+            menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, ('Kill ' + kind.title() + '?').encode(), b'(y)')
+            os.write(master, b'\x1b')
+            menu.wait(timeout=3)
+            drain(.7)
+            assert target in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines()
+            menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'(y)')
+            os.write(master, b'y')
+            menu.wait(timeout=3)
+            for _ in range(60):
+                if target not in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines(): break
+                drain(.05)
+            assert target not in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines(), kind
+            assert pane in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines(), kind
+            if sibling:
+                assert sibling in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines()
+                tmux('kill-window', '-t', target_window)
+            assert client_session(client) == 'audit'
+            drain(.3)
+        agent_command = shlex.join(['/bin/sh', '-c', shlex.quote(str(shim / 'codex')) + '; exec /bin/sh'])
+        target = tmux('new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'delete-agent', agent_command)
+        target_window = tmux('display-message', '-p', '-t', target, '#{window_id}')
+        wait_for_pane_text('interactive-ready', target)
+        def fixture_agent_pid(target):
+            parent = int(tmux('display-message', '-p', '-t', target, '#{pane_pid}'))
+            for _ in range(100):
+                rows = [line.split(None, 2) for line in subprocess.check_output(
+                    ['ps', '-axo', 'pid=,ppid=,args='], text=True).splitlines()]
+                descendants = {parent}
+                for _ in range(8):
+                    descendants.update(int(pid) for pid, ppid, _ in rows if int(ppid) in descendants)
+                nodes = [int(pid) for pid, _, command in rows
+                         if int(pid) in descendants and str(codex_js) in command]
+                if len(nodes) == 1:
+                    return nodes[0]
+                drain(.05)
+            raise AssertionError((target, nodes))
+        fixture_agent_pid(target)
+        args = [core, 'status-menu', 'tmux', '--pane', target, '--client', client, '--view', 'kill-agent']
+        menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Kill Agent?', b'(y)')
+        old_pid = tmux('display-message', '-p', '-t', target, '#{pane_pid}')
+        tmux('respawn-pane', '-k', '-t', target, agent_command)
+        wait_for_pane_text('interactive-ready', target)
+        agent_pid = fixture_agent_pid(target)
+        new_pid = tmux('display-message', '-p', '-t', target, '#{pane_pid}')
+        assert old_pid != new_pid
+        os.write(master, b'y')
+        menu.wait(timeout=3)
+        drain(.3)
+        assert tmux('display-message', '-p', '-t', target, '#{pane_pid}') == new_pid
+        os.kill(agent_pid, 0)
+        menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Kill Agent?', b'(y)')
+        os.write(master, b'y')
+        menu.wait(timeout=3)
+        for _ in range(40):
+            remaining_pids = [int(pid) for pid in subprocess.check_output(['ps', '-axo', 'pid='], text=True).split()]
+            if agent_pid not in remaining_pids: break
+            drain(.05)
+        assert agent_pid not in remaining_pids
+        wait_for_pane_command(target, ('sh', 'dash', 'bash'))
+        assert tmux('display-message', '-p', '-t', target, '#{pane_pid}') == new_pid
+        assert target in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines()
+        tmux('kill-window', '-t', target_window)
+        drain(.7)
+        print('PASS Kill confirmations, exact target scope, Agent-only termination and stale process rejection')
         # The combined entry is deliberately smaller than Sidebar, with the
         # same release/scroll interaction. Exercise the key sequence emitted
         # by Termux's SSH swipe-up macro as well as all five destinations.
@@ -453,7 +575,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         borders = [row for row in screen_rows(rendered) if '┌' in row and '┐' in row]
         assert len(borders) == 1 and borders[0].index('┐') - borders[0].index('┌') < 60, borders
         for key, expected in [(b'a', b'No foreground agent'), (b'h', b'dev-host'),
-                              (b'c', b'Resources'), (b't', b'New session...')]:
+                              (b'c', b'Resources'), (b't', b'Create')]:
             os.write(master, key)
             wait_for_text(client_process, expected, b'(back)')
             os.write(master, b'\x7f')
@@ -510,7 +632,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                   '--input-mode', input_mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 rendered = wait_for_text(menu) + drain()
                 for label, expected in (
-                    ('Launch agent...', b'choose agent'),
+                    ('Create', b'Session'),
+                    ('Agent', b'choose agent'),
                     ('Codex', b'daily-single'),
                     ('Batch', b'batch-single'),
                     ('\u2190 Back', b'choose agent'),
@@ -535,6 +658,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 menu.wait(timeout=3)
                 print('PASS held clicks navigate and redraw exactly once on release:', input_mode)
         tmux('set-option', '-g', '@workbench_test_hostname', 'long-ci-host-' + 'x' * 100)
+        root_bindings = tmux('list-keys', '-T', 'root')
+        tmux('bind-key', '-T', 'root', 'MouseDown1Pane', 'set-option', '-g', '@outside-click-leaked', 'down')
+        tmux('bind-key', '-T', 'root', 'MouseUp1Pane', 'set-option', '-g', '@outside-click-leaked', 'up')
         for kind in ('host', 'tmux', 'agent', 'usage', 'metrics', 'legacy-host'):
             for close in ('outside', 'escape', 'backspace', 'button'):
                 args = ([str(repo / 'bin/workbench-agent-usage'), 'menu', client] if kind == 'usage'
@@ -554,10 +680,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 elif kind == 'legacy-host':
                     assert b'long-ci-host-' in screen_text(rendered), rendered
                 if close == 'outside':
-                    os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+                    os.write(master, b'\x1b[<35;1;1M\x1b[<65;1;1M')
                     drain(.2)
-                    assert menu.poll() is None, 'outside tap dismissed the touch menu'
-                    os.write(master, b'\x1b')
+                    assert menu.poll() is None, 'outside hover/wheel dismissed the menu'
+                    os.write(master, b'\x1b[<0;1;1M')
+                    drain(.2)
+                    assert menu.poll() is None, 'outside press dismissed before release'
+                    os.write(master, b'\x1b[<0;1;1m')
                 elif close == 'escape':
                     os.write(master, b'\x1b')
                 elif close == 'backspace':
@@ -570,15 +699,21 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     if menu.poll() is not None:
                         break
                 assert menu.poll() == 0, (kind, close, menu.poll())
+                assert tmux('show-option', '-gqv', '@outside-click-leaked') == '', (kind, close, 'click leaked to source pane')
                 assert tmux('list-windows', '-F', '#{window_id}').count('\n') == 0, (kind, close)
                 if close == 'escape':
                     drain(0.7)
                 print('PASS', kind, close)
+        tmux('unbind-key', '-T', 'root', 'MouseUp1Pane')
+        subprocess.run(['tmux', '-S', socket, 'source-file', '-'], input=root_bindings + '\n',
+                       env=env, text=True, check=True)
         # Every submenu uses the same navigation, including Configure and
         # views with no available actions. Escape must never open its parent.
-        for view in ('launch', 'configure', 'panes', 'more', 'team', 'botmux', 'agent-target'):
+        for view in ('switch', 'create', 'create-pane', 'kill', 'kill-agent', 'kill-window', 'kill-pane', 'kill-session',
+                     'launch', 'configure', 'panes', 'more', 'team', 'botmux', 'agent-target'):
             args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client, '--view', view]
-            parent = b'choose agent' if view == 'configure' else b'Launch agent...'
+            parent = (b'choose agent' if view == 'configure' else b'Create' if view in ('launch', 'create-pane')
+                      else b'Kill' if view.startswith('kill-') else b'Detach')
             menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu) + drain()
             assert b'(back)' in screen_text(rendered) and b'(esc)' in screen_text(rendered), (view, rendered)
@@ -636,7 +771,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # The binding launches the status popup asynchronously; wait for its
         # mouse mode and rendering to settle before moving into the menu.
         drain(0.75)
-        x, y = item_position(rendered, 'New window')
+        x, y = item_position(rendered, 'Create')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        rendered = wait_for_text(client_process, b'Create', b'Window', b'Session')
+        x, y = item_position(rendered, 'Window')
         os.write(master, f'\x1b[<35;{x};{y}M'.encode())
         drain(0.1)
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
@@ -863,8 +1001,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # A preceding menu can leave a pending redraw containing "close".
         # Wait for this menu's own action before sending its first shortcut.
-        wait_for_text(menu, b'Launch agent...')
-        for key, expected in [(b'a', b'choose agent'), (b'x', b'daily-single')]:
+        wait_for_text(menu, b'Create', b'Detach')
+        for key, expected in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'daily-single')]:
             started = time.monotonic()
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -976,8 +1114,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for scene, panes, expected in [('daily', False, ['start', 'codex', '--scene', 'daily', '--team']), ('batch', True, ['start', 'codex', '--scene', 'batch', '--team', '--tmux'])]:
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for_text(menu, b'Launch agent...')
-            for key, heading in [(b'a', b'choose agent'), (b'x', b'daily-single')]:
+            wait_for_text(menu, b'Create', b'Detach')
+            for key, heading in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'daily-single')]:
                 os.write(master, key)
                 wait_for_text(client_process, heading)
                 drain(0.15)

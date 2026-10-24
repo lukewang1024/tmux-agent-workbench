@@ -45,7 +45,8 @@ struct SidebarViewport {
 
 impl SidebarViewport {
     fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
-        let first_row = 1 + usize::from(notice.is_some());
+        // Actions and the Agents/sort heading stay above the scrolling body.
+        let first_row = 2 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
@@ -203,7 +204,7 @@ fn event_loop(
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
     if let Some(snapshot) = &snapshot
-        && let Some(index) = current_agent_selection(&rows, snapshot, server)
+        && let Some(index) = initial_row(&rows, snapshot, server, is_popup)
     {
         navigation.select(index);
     }
@@ -229,7 +230,7 @@ fn event_loop(
                     if initial_selection {
                         initial_selection = false;
                         navigation
-                            .select(current_agent_selection(&rows, &fetched, server).unwrap_or(0));
+                            .select(initial_row(&rows, &fetched, server, is_popup).unwrap_or(0));
                     }
                     snapshot = Some(fetched);
                 }
@@ -293,7 +294,14 @@ fn event_loop(
         if dirty {
             terminal.draw(|frame| {
                 let area = frame.area();
-                let mut header = vec![render_actions(area.width, footer_hover)];
+                let mut header = vec![
+                    render_actions(area.width, footer_hover),
+                    render_row(
+                        &Row::AgentSection(agent_sort),
+                        footer_hover == Some(Action::Sort),
+                        area.width,
+                    ),
+                ];
                 if let Some(notice) = notice {
                     header.push(Line::from(Span::styled(notice, muted_style())));
                 }
@@ -466,9 +474,7 @@ fn event_loop(
                 }
                 let actions = action_regions(
                     Rect::new(0, 0, size.width, size.height),
-                    viewport,
-                    &rows,
-                    &navigation,
+                    agent_sort,
                     popup_mode(),
                 );
                 let hit = navigation.mouse(mouse, &actions);
@@ -503,6 +509,7 @@ fn event_loop(
                         persist_agent_sort(paths, agent_sort)?;
                         if let Some(snapshot) = &snapshot {
                             rows = build_rows(snapshot, detailed, agent_sort);
+                            navigation = NavigationList::default();
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
@@ -561,7 +568,7 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![Row::AgentSection(agent_sort), Row::Spacer];
+    let mut rows = vec![Row::Spacer];
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
     if agent_sort == AgentSort::Prioritized {
@@ -687,6 +694,22 @@ fn current_agent_selection(
         .rposition(|row| matches!(row, Row::Agent(agent) if agent.instance_id == instance))
 }
 
+fn initial_row(
+    rows: &[Row],
+    snapshot: &Snapshot,
+    server: &ServerIdentity,
+    popup: bool,
+) -> Option<usize> {
+    if popup {
+        // An overview opens at the top, including the first Session group.
+        // Following a lower current Agent used to hide the heading and begin
+        // in the middle of a group as soon as the popup opened.
+        rows.iter().position(|row| selection_key(row).is_some())
+    } else {
+        current_agent_selection(rows, snapshot, server)
+    }
+}
+
 fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Option<String> {
     let source = source_pane()?;
     if let Some(agent) = snapshot
@@ -745,7 +768,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             width,
             muted_style().add_modifier(Modifier::BOLD),
             muted_style(),
-            false,
+            selected,
         ),
         Row::AgentGroup(name) => Line::from(Span::styled(
             fit_text(name, usize::from(width)),
@@ -895,13 +918,7 @@ fn render_close(width: u16, hovered: Option<Action>) -> Line<'static> {
     ])
 }
 
-fn action_regions(
-    area: Rect,
-    viewport: SidebarViewport,
-    rows: &[Row],
-    navigation: &NavigationList<Action>,
-    is_popup: bool,
-) -> Vec<(Rect, Action)> {
+fn action_regions(area: Rect, agent_sort: AgentSort, is_popup: bool) -> Vec<(Rect, Action)> {
     let mut actions = vec![];
     if area.height > 0 {
         actions.push((Rect::new(0, 0, area.width.min(5), 1), Action::New));
@@ -921,23 +938,16 @@ fn action_regions(
             ));
         }
     }
-    for index in navigation.visible_rows() {
-        if let Row::AgentSection(sort) = &rows[index] {
-            let width = match sort {
-                AgentSort::Grouped => 7,
-                AgentSort::Prioritized => 11,
-            }
-            .min(area.width);
-            actions.push((
-                Rect::new(
-                    area.width.saturating_sub(width),
-                    (viewport.first_row + index - navigation.scroll) as u16,
-                    width,
-                    1,
-                ),
-                Action::Sort,
-            ));
+    if area.height > 1 {
+        let width = match agent_sort {
+            AgentSort::Grouped => 7,
+            AgentSort::Prioritized => 11,
         }
+        .min(area.width);
+        actions.push((
+            Rect::new(area.width.saturating_sub(width), 1, width, 1),
+            Action::Sort,
+        ));
     }
     actions
 }
@@ -1843,41 +1853,42 @@ mod tests {
     #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {
         let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
-        let viewport = SidebarViewport::new(8, rows.len(), Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(9, rows.len(), Some("stale · reconnecting"));
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
-            rows[viewport.row_at(3, 0, rows.len()).unwrap()],
+            rows[viewport.row_at(4, 0, rows.len()).unwrap()],
             "A subtitle"
         );
-        assert_eq!(rows[viewport.row_at(4, 0, rows.len()).unwrap()], "agent B");
-        assert_eq!(viewport.row_at(6, 0, rows.len()), None);
+        assert_eq!(rows[viewport.row_at(5, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(7, 0, rows.len()), None);
     }
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Six content lines: actions + banner + three rows + overflow;
+        // Seven content lines: actions + heading + banner + three rows + overflow;
         // the popup footer follows and must not activate any hidden row.
-        let viewport = SidebarViewport::new(6, 20, Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(7, 20, Some("stale · reconnecting"));
         assert_eq!(viewport.row_height, 3);
         assert_eq!(viewport.row_at(0, 7, 20), None);
         assert_eq!(viewport.row_at(1, 7, 20), None);
-        assert_eq!(viewport.row_at(2, 7, 20), Some(7));
-        assert_eq!(viewport.row_at(4, 7, 20), Some(9));
-        for row in [5, 6, 7] {
+        assert_eq!(viewport.row_at(2, 7, 20), None);
+        assert_eq!(viewport.row_at(3, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(5, 7, 20), Some(9));
+        for row in [6, 7, 8] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
     }
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(5, 4, None);
-        assert_eq!(normal.row_at(4, 0, 4), Some(3));
-        let stale = SidebarViewport::new(5, 4, Some("stale · reconnecting"));
+        let normal = SidebarViewport::new(6, 4, None);
+        assert_eq!(normal.row_at(5, 0, 4), Some(3));
+        let stale = SidebarViewport::new(6, 4, Some("stale · reconnecting"));
         assert_eq!(stale.row_height, 2);
-        assert_eq!(stale.row_at(4, 0, 4), None);
-        let overflow = SidebarViewport::new(4, 10, None);
-        assert_eq!(overflow.row_at(2, 0, 10), Some(1));
-        assert_eq!(overflow.row_at(3, 0, 10), None);
+        assert_eq!(stale.row_at(5, 0, 4), None);
+        let overflow = SidebarViewport::new(5, 10, None);
+        assert_eq!(overflow.row_at(3, 0, 10), Some(1));
+        assert_eq!(overflow.row_at(4, 0, 10), None);
     }
 
     #[test]
@@ -1962,7 +1973,8 @@ mod tests {
             .iter()
             .position(|row| matches!(row, Row::Section("sessions")))
             .unwrap();
-        assert!(matches!(rows.first(), Some(Row::AgentSection(_))));
+        assert!(matches!(rows.first(), Some(Row::Spacer)));
+        assert!(!rows.iter().any(|row| matches!(row, Row::AgentSection(_))));
         assert!(matches!(rows.get(sessions - 1), Some(Row::Spacer)));
         assert!(!matches!(rows.get(sessions - 2), Some(Row::Spacer)));
     }
@@ -1970,17 +1982,12 @@ mod tests {
     #[test]
     fn top_actions_span_left_and_right_without_help() {
         let list = NavigationList::<Action>::default();
-        let actions = action_regions(
-            Rect::new(0, 0, 40, 20),
-            SidebarViewport::new(19, 0, None),
-            &[],
-            &list,
-            true,
-        );
+        let actions = action_regions(Rect::new(0, 0, 40, 20), AgentSort::Grouped, true);
         assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::New)));
         assert_eq!(list.hit(20, 0, &actions), None);
         assert_eq!(list.hit(34, 0, &actions), Some(Hit::Action(Action::Menu)));
         assert_eq!(list.hit(33, 19, &actions), Some(Hit::Action(Action::Close)));
+        assert_eq!(list.hit(38, 1, &actions), Some(Hit::Action(Action::Sort)));
     }
 
     #[test]

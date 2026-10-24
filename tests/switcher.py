@@ -380,14 +380,14 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         popup = open_list('window')
         footer(0)
         popup.wait(timeout=5)
-        text('New session')
+        text('Session')
         os.write(master, b'w')
         text('Switch windows')
         footer(3)
         drain(.6)
         assert focused(window=windows[0])
         assert tmux('display-message', '-p', '-t', source, '#{pane_in_mode}') == '0'
-        print('PASS root menu opens the touch list, Back restores the root, and Close leaves native tree mode unused', flush=True)
+        print('PASS Switch submenu reopens its touch list and Close leaves native tree mode unused', flush=True)
         # Sidebar keyboard and contextual-menu entries use the same lists,
         # while Back returns to Sidebar rather than an unrelated tmux menu.
         prepare_popup()
@@ -416,6 +416,30 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         drain(.7)
         assert focused(window=windows[0])
         print('PASS Sidebar and contextual-menu routes share the touch UI and preserve their Back destination', flush=True)
+        # A lower current Agent must not open the overview halfway through its
+        # groups. The Agents/sort heading also stays usable after scrolling.
+        prepare_popup()
+        lower_pane = tmux('display-message', '-p', '-t', windows[8], '#{pane_id}')
+        sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', lower_pane, '--client', client],
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        popups.append(sidebar)
+        text('+ new')
+        wait(lambda: 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1]
+             and visible_rows()[3].strip() == 'other', 'Sidebar hid its heading or first Session group')
+        wheel(True, 12)
+        drain(.2)
+        assert 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1], visible_rows()
+        tap(content_rect()[2] - 2, 2)
+        text('prioritized')
+        assert 'agents' in visible_rows()[1] and 'prioritized' in visible_rows()[1], visible_rows()
+        tap(content_rect()[2] - 2, 2)
+        text('grouped')
+        wait(lambda: visible_rows()[3].strip() == 'other', 'grouped sort did not restore the first group')
+        os.write(master, b'\x1b')
+        sidebar.wait(timeout=5)
+        drain(.7)
+        assert focused(window=windows[0]), 'opening the overview changed its source window'
+        print('PASS overview opens at its first group and pins the Agents/sort header through scrolling', flush=True)
         # A shared pane ID must still list and focus windows in this client's
         # Session rather than whichever Session tmux finds first.
         tmux('new-session', '-d', '-s', 'linked', '-n', 'linked-only', '/bin/sh')

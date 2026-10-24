@@ -728,7 +728,7 @@ fn native_picker(
         _ => format!(
             "run-shell -b {}",
             quote(&format!(
-                "{executable} status-menu {} --pane {} --client {} --language {}{}",
+                "{executable} status-menu {} --pane {} --client {} --language {}{}{}",
                 if matches!(return_to, ReturnTo::SidebarMenu) {
                     "sidebar"
                 } else {
@@ -739,6 +739,11 @@ fn native_picker(
                 crate::ui_language::name(),
                 if matches!(return_to, ReturnTo::MenuFromMain | ReturnTo::SidebarMenu) {
                     " --from-menu"
+                } else {
+                    ""
+                },
+                if matches!(return_to, ReturnTo::Menu | ReturnTo::MenuFromMain) {
+                    " --view switch"
                 } else {
                     ""
                 }
@@ -993,6 +998,9 @@ pub fn run(
             ];
             if matches!(return_to, ReturnTo::MenuFromMain | ReturnTo::SidebarMenu) {
                 destination.push("--from-menu");
+            }
+            if matches!(return_to, ReturnTo::Menu | ReturnTo::MenuFromMain) {
+                destination.extend(["--view", "switch"]);
             }
             crate::sidebar::run_workbench(&destination, true)?;
             Ok(None)

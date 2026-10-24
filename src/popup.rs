@@ -1,21 +1,22 @@
 //! Containers for Sidebar views and compact action menus.
 use crate::server::ServerIdentity;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Sizing {
     Sidebar,
     Menu { width: u16, height: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Dimensions {
-    width: u16,
-    height: u16,
-    border: bool,
+pub(crate) struct Dimensions {
+    pub width: u16,
+    pub height: u16,
+    pub border: bool,
 }
 impl Dimensions {
-    fn new(width: u16, height: u16, sizing: Sizing) -> Self {
+    pub fn new(width: u16, height: u16, sizing: Sizing) -> Self {
         let border = width >= 36 && height >= 12;
         let (requested_width, requested_height) = match sizing {
             Sizing::Sidebar if border => (
@@ -67,9 +68,17 @@ pub(crate) fn open(
         .ok_or("navigation client disappeared")?;
     let (width, height) = dimensions.split_once(' ').ok_or("invalid client size")?;
     let size = Dimensions::new(width.parse()?, height.parse()?, sizing);
+    // tmux discards mouse events outside a display-popup. Action menus use a
+    // client-local input surface with the same bounded card drawn inside it.
+    // The surface consumes the closing click instead of forwarding it to the
+    // underlying terminal. Sidebar panes/popups keep their existing container.
+    let surface = match sizing {
+        Sizing::Menu { width, height } => format!("WORKBENCH_MENU_SURFACE={width},{height} "),
+        Sizing::Sidebar => String::new(),
+    };
     let shell_quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
     let command = format!(
-        "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
+        "{surface}WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
         shell_quote(client),
         shell_quote(pane),
         shell_quote(&server.socket_path.to_string_lossy()),
@@ -92,11 +101,19 @@ pub(crate) fn open(
         "-y",
         "C",
         "-w",
-        &size.width.to_string(),
+        &if surface.is_empty() {
+            size.width.to_string()
+        } else {
+            width.into()
+        },
         "-h",
-        &size.height.to_string(),
+        &if surface.is_empty() {
+            size.height.to_string()
+        } else {
+            height.into()
+        },
     ]);
-    if !size.border {
+    if !size.border || !surface.is_empty() {
         popup.arg("-B");
     }
     for variable in [
@@ -111,7 +128,33 @@ pub(crate) fn open(
             popup.args([std::ffi::OsString::from("-e"), entry]);
         }
     }
-    let status = popup.arg(command).status()?;
+    let status = if surface.is_empty() {
+        popup.arg(command).status()?
+    } else {
+        let mut child = popup.arg(command).spawn()?;
+        let mut next_size_check = Instant::now() + Duration::from_millis(200);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= next_size_check {
+                next_size_check = Instant::now() + Duration::from_millis(200);
+                let current = crate::tmux::Tmux::new(server.clone())
+                    .client_format(client, "#{client_width} #{client_height}")?;
+                if current.as_deref() != Some(dimensions.as_str()) {
+                    // Context menus dismiss on viewport changes. In particular,
+                    // tmux cannot grow a popup beyond its initial size, so a
+                    // stale input surface must not leave uncaptured margins.
+                    let _ = Command::new("tmux")
+                        .args(server.tmux_args())
+                        .args(["display-popup", "-C", "-c", client])
+                        .output();
+                    break child.wait()?;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
     if !status.success() && !matches!(status.code(), Some(129 | 130)) {
         return Err("could not open navigation panel".into());
     }

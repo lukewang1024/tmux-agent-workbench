@@ -274,7 +274,8 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 
 The sidebar shows all sessions and all detected agents from the current tmux
 server in separate sections. A pinned top row keeps `new` on the left and
-`menu` on the right. Agents always appear above Sessions, on every screen size.
+`menu` on the right. The Agents heading and sort control stay pinned below it.
+Agents always appear above Sessions, on every screen size.
 Session groups in Agents follow one another without blank rows. A single blank
 row separates Agents from Sessions. Both sections use one continuous scrolling
 list, without rebuilding or sorting it on resize. Help remains available from `?`
@@ -344,9 +345,10 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu starts with **Switch window**, **Switch session**, **Switch agent**,
-and **Switch pane**, followed by **New session**, **New window**, **Launch agent**,
-**Panes & layout**, the installed editor, and **Detach**. Switch window lists only
+The tmux menu starts with **Switch**, **Create**, **Kill**, **Layout**, and
+**Detach**. The first three groups start with **Agent**, **Window**, **Pane**,
+and **Session**, in that order. Kill shows its target for confirmation and
+rechecks its identity before acting. Switch Window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
 and running Agents have separate server-wide views. In the new UI these views share Sidebar's
 bordered popup and two-line title/context rows, with search, paging, and a
@@ -420,8 +422,12 @@ content-sized popup capped at 60 columns. Menus share Sidebar's wheel/drag,
 keyboard and release handling; held presses never open the next menu early.
 Wheel moves the selection even when the list fits, and scrolls to keep it visible.
 Hover highlights both entries and pinned controls. Back/Close and Launch remain
-visible on short screens. Information, blank and outside taps leave the menu
-open; Escape or Close dismisses it. Long Host/member lists remain scrollable
+visible on short screens. Information and blank taps inside the menu leave it
+open. Clicking the muted backdrop closes on release without clicking through;
+outside hover, wheel and drags leave it open. Escape or Close also dismisses it.
+Context menus dismiss when the terminal viewport changes; the scoped lists
+retain their search and resize behavior.
+Long Host/member lists remain scrollable
 after their shortcut keys run out.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`

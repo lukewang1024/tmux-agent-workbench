@@ -20,6 +20,14 @@ pub enum View {
     #[default]
     Root,
     Interface,
+    Switch,
+    Create,
+    CreatePane,
+    Kill,
+    KillAgent,
+    KillWindow,
+    KillPane,
+    KillSession,
     Panes,
     Launch,
     Configure,
@@ -196,6 +204,7 @@ enum ActionCommand {
     Tmux(Vec<String>),
     NewSession,
     Switch(crate::switcher::Kind),
+    Kill(KillTarget),
     SetUi(crate::ui::Mode),
     Sidebar,
     Metrics,
@@ -207,6 +216,25 @@ enum ActionCommand {
     Focus(String),
     AgentTarget(String),
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KillTarget {
+    Agent,
+    Window,
+    Pane,
+    Session,
+}
+
+impl KillTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Agent",
+            Self::Window => "Window",
+            Self::Pane => "Pane",
+            Self::Session => "Session",
+        }
+    }
 }
 impl Action {
     fn new(id: &str, label: &str, key: char, command: ActionCommand) -> Self {
@@ -223,8 +251,9 @@ impl Action {
 }
 
 fn launch_context(kind: StatusMenuKind, view: View) -> bool {
-    kind != StatusMenuKind::Agent
-        || matches!(view, View::Launch | View::Configure | View::AgentTarget)
+    view != View::KillAgent
+        && (kind != StatusMenuKind::Agent
+            || matches!(view, View::Launch | View::Configure | View::AgentTarget))
 }
 
 fn agent_targets(window: &str) -> Result<Vec<(String, bool)>> {
@@ -575,7 +604,7 @@ fn run_with_context(
                 role: match action.id.as_str() {
                     id if id.starts_with("summary:") => crate::menu::Role::Summary,
                     "back" => crate::menu::Role::Back,
-                    "start" => crate::menu::Role::Primary,
+                    "start" | "confirm-kill" => crate::menu::Role::Primary,
                     "launch-error" => crate::menu::Role::Error,
                     _ => crate::menu::Role::Body,
                 },
@@ -633,6 +662,97 @@ fn actions(
     };
     let mut back = View::Root;
     match options.view {
+        View::Switch => {
+            title = tr("Switch", "切换 · Switch").into();
+            for (target, id, label, key) in [
+                (crate::switcher::Kind::Agent, "agents", "Agent", 'a'),
+                (crate::switcher::Kind::Window, "windows", "Window", 'w'),
+                (crate::switcher::Kind::Pane, "switch-panes", "Pane", 'p'),
+                (crate::switcher::Kind::Session, "sessions", "Session", 's'),
+            ] {
+                actions.push(Action::new(id, label, key, ActionCommand::Switch(target)));
+            }
+        }
+        View::Create => {
+            title = tr("Create", "创建 · Create").into();
+            actions.extend([
+                nav("launch", "Agent", 'a', kind, options.at(View::Launch)),
+                tmux_action("new", "Window", 'w', &["new-window"]),
+                nav(
+                    "create-pane",
+                    "Pane",
+                    'p',
+                    kind,
+                    options.at(View::CreatePane),
+                ),
+                Action::new("new-session", "Session", 's', ActionCommand::NewSession),
+            ]);
+            if executable("code") {
+                actions.push(tmux_action(
+                    "editor",
+                    "Open project in VS Code",
+                    'v',
+                    &[
+                        "new-window",
+                        "-n",
+                        "code",
+                        "code .; exec ${SHELL:-/bin/sh} -l",
+                    ],
+                ));
+            }
+        }
+        View::CreatePane => {
+            title = tr("Create Pane", "创建 Pane").into();
+            back = View::Create;
+            actions.extend([
+                tmux_action(
+                    "below",
+                    tr("Split below", "向下分割"),
+                    '-',
+                    &["split-window", "-v"],
+                ),
+                tmux_action(
+                    "right",
+                    tr("Split right", "向右分割"),
+                    '|',
+                    &["split-window", "-h"],
+                ),
+            ]);
+        }
+        View::Kill => {
+            title = "Kill".into();
+            for (view, id, label, key) in [
+                (View::KillAgent, "kill-agent", "Agent", 'a'),
+                (View::KillWindow, "kill-window", "Window", 'w'),
+                (View::KillPane, "kill-pane", "Pane", 'p'),
+                (View::KillSession, "kill-session", "Session", 's'),
+            ] {
+                actions.push(nav(id, label, key, kind, options.at(view)));
+            }
+        }
+        View::KillAgent | View::KillWindow | View::KillPane | View::KillSession => {
+            back = View::Kill;
+            let (target, detail) = match options.view {
+                View::KillAgent => (KillTarget::Agent, agent_title(context)),
+                View::KillWindow => (KillTarget::Window, tmux(&["display-message", "-p", "-t", &context.pane, "Window #{window_index}:#{window_name} (#{window_id}) · Session #{session_name}"]).unwrap_or_else(|_| context.window.clone())),
+                View::KillPane => (KillTarget::Pane, tmux(&["display-message", "-p", "-t", &context.pane, "Pane #{pane_index} (#{pane_id}) · #{pane_current_command} · Window #{window_index}:#{window_name}"]).unwrap_or_else(|_| context.pane.clone())),
+                View::KillSession => (KillTarget::Session, tmux(&["display-message", "-p", "-t", &context.pane, "Session #{session_name} (#{session_id})"]).unwrap_or_else(|_| context.session.clone())),
+                _ => unreachable!(),
+            };
+            title = format!("Kill {}?", target.label());
+            actions.push(Action {
+                id: "summary:target".into(),
+                ..Action::note(&detail)
+            });
+            if !matches!(target, KillTarget::Agent) || context.agent.is_some() {
+                actions.push(Action::new(
+                    "confirm-kill",
+                    &format!("Kill {}", target.label()),
+                    'y',
+                    ActionCommand::Kill(target),
+                ));
+            }
+        }
         View::Interface => {
             let current = crate::ui::Mode::current().unwrap_or_default();
             for (mode, id, label, key) in [
@@ -672,6 +792,9 @@ fn actions(
         }
         View::Launch => {
             title = tr("Launch · choose agent", "启动 · 选择 agent").into();
+            if kind == StatusMenuKind::Tmux {
+                back = View::Create;
+            }
             for (tool, key) in [
                 (Tool::Codex, 'x'),
                 (Tool::Claude, 'c'),
@@ -780,11 +903,21 @@ fn actions(
             }
         }
         View::Panes => {
-            title = "Panes & layout".into();
+            title = tr("Layout", "布局 · Layout").into();
             actions.extend([
-                tmux_action("below", "Split below", '-', &["split-window", "-v"]),
-                tmux_action("right", "Split right", '|', &["split-window", "-h"]),
                 tmux_action("zoom", "Zoom / unzoom", 'z', &["resize-pane", "-Z"]),
+                tmux_action(
+                    "even-horizontal",
+                    "Even horizontal",
+                    'h',
+                    &["select-layout", "even-horizontal"],
+                ),
+                tmux_action(
+                    "even-vertical",
+                    "Even vertical",
+                    'v',
+                    &["select-layout", "even-vertical"],
+                ),
                 tmux_action(
                     "layout",
                     "Main vertical (prefix Alt+4)",
@@ -938,71 +1071,30 @@ fn actions(
             }
             StatusMenuKind::Tmux => {
                 actions.extend([
-                    Action::new(
-                        "windows",
-                        tr("Switch window", "切换窗口"),
-                        'w',
-                        ActionCommand::Switch(crate::switcher::Kind::Window),
-                    ),
-                    Action::new(
-                        "sessions",
-                        tr("Switch session", "切换会话"),
-                        's',
-                        ActionCommand::Switch(crate::switcher::Kind::Session),
-                    ),
-                    Action::new(
-                        "agents",
-                        tr("Switch agent", "切换 Agent"),
-                        'g',
-                        ActionCommand::Switch(crate::switcher::Kind::Agent),
-                    ),
-                    Action::new(
-                        "switch-panes",
-                        tr("Switch pane", "切换窗格"),
-                        'p',
-                        ActionCommand::Switch(crate::switcher::Kind::Pane),
-                    ),
-                    Action::new(
-                        "new-session",
-                        tr("New session...", "新建会话..."),
-                        'n',
-                        ActionCommand::NewSession,
-                    ),
-                    tmux_action("new", "New window", 'c', &["new-window"]),
                     nav(
-                        "launch",
-                        tr("Launch agent...", "启动 agent..."),
-                        'a',
+                        "switch",
+                        tr("Switch", "切换 · Switch"),
+                        's',
                         kind,
-                        options.at(View::Launch),
+                        options.at(View::Switch),
                     ),
+                    nav(
+                        "create",
+                        tr("Create", "创建 · Create"),
+                        'c',
+                        kind,
+                        options.at(View::Create),
+                    ),
+                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
                     nav(
                         "panes",
-                        "Panes & layout...",
+                        tr("Layout", "布局 · Layout"),
                         'l',
                         kind,
                         options.at(View::Panes),
                     ),
+                    tmux_action("detach", "Detach", 'd', &["detach-client"]),
                 ]);
-                if executable("code") {
-                    actions.push(tmux_action(
-                        "editor",
-                        "Open project in VS Code",
-                        'v',
-                        &[
-                            "new-window",
-                            "-n",
-                            "code",
-                            "code .; exec ${SHELL:-/bin/sh} -l",
-                        ],
-                    ));
-                }
-                actions.push(tmux_action(
-                    "detach",
-                    "Detach this client",
-                    'd',
-                    &["detach-client"],
-                ));
             }
             StatusMenuKind::Agent => {
                 actions.extend(agent_commands(context, false));
@@ -1364,6 +1456,28 @@ fn execute_action(
     kind: StatusMenuKind,
 ) -> Result<()> {
     match &action.command {
+        ActionCommand::Kill(target) => {
+            match target {
+                KillTarget::Agent => {
+                    // Context and its process fingerprint have just been read
+                    // and compared with the confirmation's identity guard.
+                    let agent = context.agent.as_ref().ok_or("Agent is no longer running")?;
+                    let pid = libc::pid_t::try_from(agent.fingerprint.pid)?;
+                    if pid <= 0 || unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                }
+                KillTarget::Window => {
+                    tmux(&["kill-window", "-t", &context.window])?;
+                }
+                KillTarget::Pane => {
+                    tmux(&["kill-pane", "-t", &context.pane])?;
+                }
+                KillTarget::Session => {
+                    tmux(&["kill-session", "-t", &context.session])?;
+                }
+            }
+        }
         ActionCommand::Tmux(args) => {
             if args[0] == "select-layout" {
                 // Use the same sidebar-preserving path as prefix Alt+4.
@@ -1871,6 +1985,14 @@ mod tests {
                 for view in [
                     View::Root,
                     View::Interface,
+                    View::Switch,
+                    View::Create,
+                    View::CreatePane,
+                    View::Kill,
+                    View::KillAgent,
+                    View::KillWindow,
+                    View::KillPane,
+                    View::KillSession,
                     View::Panes,
                     View::Launch,
                     View::Configure,
@@ -1925,6 +2047,69 @@ mod tests {
                 ActionCommand::Navigate(StatusMenuKind::Menu, options)
                     if action.id == "back" && !options.from_menu
             )));
+        }
+    }
+    #[test]
+    fn tmux_groups_share_object_order_and_return_to_their_parent() {
+        let context = context(None, BaseState::Idle);
+        let (_, root) = actions(StatusMenuKind::Tmux, &MenuOptions::default(), &context);
+        assert_eq!(
+            root.iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            ["switch", "create", "kill", "panes", "detach"]
+        );
+        for view in [View::Switch, View::Create, View::Kill] {
+            let (_, group) = actions(
+                StatusMenuKind::Tmux,
+                &MenuOptions {
+                    view,
+                    ..Default::default()
+                },
+                &context,
+            );
+            assert_eq!(
+                group
+                    .iter()
+                    .take(4)
+                    .map(|action| action.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Agent", "Window", "Pane", "Session"]
+            );
+            assert!(group.iter().any(|action| matches!(&action.command,
+                ActionCommand::Navigate(StatusMenuKind::Tmux, next) if action.id == "back" && next.view == View::Root)));
+            assert!(
+                !group
+                    .iter()
+                    .any(|action| matches!(action.command, ActionCommand::Kill(_)))
+            );
+        }
+        for (view, parent) in [
+            (View::CreatePane, View::Create),
+            (View::Launch, View::Create),
+            (View::KillAgent, View::Kill),
+            (View::KillWindow, View::Kill),
+            (View::KillPane, View::Kill),
+            (View::KillSession, View::Kill),
+        ] {
+            let (_, group) = actions(
+                StatusMenuKind::Tmux,
+                &MenuOptions {
+                    view,
+                    ..Default::default()
+                },
+                &context,
+            );
+            assert!(group.iter().any(|action| matches!(&action.command,
+                ActionCommand::Navigate(StatusMenuKind::Tmux, next) if action.id == "back" && next.view == parent)));
+            if view == View::KillAgent {
+                assert!(
+                    !group
+                        .iter()
+                        .any(|action| matches!(action.command, ActionCommand::Kill(_)))
+                );
+                assert!(!launch_context(StatusMenuKind::Tmux, view));
+            }
         }
     }
     #[test]

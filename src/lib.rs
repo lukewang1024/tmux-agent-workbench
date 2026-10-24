@@ -21,6 +21,7 @@ pub mod notification_pipeline;
 pub mod paths;
 pub mod picker;
 mod popup;
+mod popup_surface;
 pub mod process;
 pub mod relay;
 pub mod resurrect;
