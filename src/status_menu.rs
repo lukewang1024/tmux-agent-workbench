@@ -18,7 +18,6 @@ pub enum View {
     #[default]
     Root,
     Panes,
-    Switch,
     Launch,
     Configure,
     AgentTarget,
@@ -186,6 +185,7 @@ struct Action {
 enum ActionCommand {
     Navigate(StatusMenuKind, MenuOptions),
     Tmux(Vec<String>),
+    NewSession,
     Agent(String),
     Usage,
     Host(String),
@@ -782,13 +782,6 @@ fn actions(
                 tmux_action("tiled", "Tile panes", 't', &["select-layout", "tiled"]),
             ]);
         }
-        View::Switch => {
-            title = "Switch".into();
-            actions.extend([
-                tmux_action("windows", "Choose window", 'w', &["choose-tree", "-Zw"]),
-                tmux_action("sessions", "Choose session", 's', &["choose-tree", "-Zs"]),
-            ]);
-        }
         View::Team => {
             title = format!("Team · {}", context.role.as_deref().unwrap_or("members"));
             for (index, member) in context.team.iter().enumerate().take(35) {
@@ -862,6 +855,25 @@ fn actions(
         View::Root => match kind {
             StatusMenuKind::Tmux => {
                 actions.extend([
+                    tmux_action(
+                        "windows",
+                        tr("Switch window", "切换窗口"),
+                        'w',
+                        &["choose-tree", "-Zw"],
+                    ),
+                    tmux_action(
+                        "sessions",
+                        tr("Switch session", "切换会话"),
+                        's',
+                        &["choose-tree", "-Zs"],
+                    ),
+                    Action::new(
+                        "new-session",
+                        tr("New session...", "新建会话..."),
+                        'n',
+                        ActionCommand::NewSession,
+                    ),
+                    tmux_action("new", "New window", 'c', &["new-window"]),
                     nav(
                         "launch",
                         tr("Launch agent...", "启动 agent..."),
@@ -869,20 +881,12 @@ fn actions(
                         kind,
                         options.at(View::Launch),
                     ),
-                    tmux_action("new", "New window", 'c', &["new-window"]),
                     nav(
                         "panes",
                         "Panes & layout...",
                         'p',
                         kind,
                         options.at(View::Panes),
-                    ),
-                    nav(
-                        "switch",
-                        "Switch window / session...",
-                        'w',
-                        kind,
-                        options.at(View::Switch),
                     ),
                 ]);
                 if executable("code") {
@@ -1290,6 +1294,22 @@ fn execute_action(
             full.extend_from_slice(&args[1..]);
             tmux(&full.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
+        ActionCommand::NewSession => {
+            // The prompt is launched by a helper without a terminal. Create
+            // detached, then switch the client that opened this menu.
+            tmux(&[
+                "command-prompt",
+                "-t",
+                client,
+                "-p",
+                tr("New session name:", "新会话名称："),
+                &format!(
+                    "new-session -d -s \"%%%\" -c {} ; switch-client -c {} -t \"=%1%\"",
+                    shell_quote(&context.cwd),
+                    shell_quote(client)
+                ),
+            ])?;
+        }
         ActionCommand::Agent(text) => {
             tmux(&["send-keys", "-t", &context.pane, "-l", &format!("{text} ")])?;
         }
@@ -1670,7 +1690,6 @@ mod tests {
                 for view in [
                     View::Root,
                     View::Panes,
-                    View::Switch,
                     View::Launch,
                     View::Configure,
                     View::AgentTarget,

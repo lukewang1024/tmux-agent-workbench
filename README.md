@@ -322,8 +322,11 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu groups actions into **Launch agent**, **New window**, **Panes &
-layout**, **Switch window / session**, the installed editor, and **Detach**.
+The tmux menu starts with **Switch window**, **Switch session**, **New session**,
+and **New window**, followed by **Launch agent**, **Panes & layout**, the installed
+editor, and **Detach**. Switching windows and sessions opens their respective
+choosers directly. New session prompts for a name, starts in the source pane's
+directory, and switches only the invoking client to the new session.
 Selecting an agent opens one configuration panel. Codex and Trae expose scene,
 Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
 show only Single/Team and collaboration choices. Clicking a choice refreshes

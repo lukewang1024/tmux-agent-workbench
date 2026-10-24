@@ -144,6 +144,12 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
+The tmux root menu exposes Switch window (`w`), Switch session (`s`), New session
+(`n`), and New window (`c`) first. Launch agent and Panes & layout follow, then
+the installed editor and Detach. There is no intermediate Switch submenu.
+New session asks for a name and switches the invoking client to a new session
+in the source pane's directory; cancelling the prompt creates nothing.
+
 The left group runs Session/Sidebar → tmux, then a gap before window
 labels. CPU, Host and Agent status with usage stay on the right, whose outer
 edge is flat. The theme's time/date/battery modules have independent opt-in

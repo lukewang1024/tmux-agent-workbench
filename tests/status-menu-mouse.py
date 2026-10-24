@@ -198,14 +198,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         return subprocess.Popen(*args, **kwargs)
 
-    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=()):
+    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=(), menu_footer=True):
         output = b''
         for _ in range(40):
             output += drain(0.05)
             visible = '\n'.join(screen_rows(output)).encode() if current_screen else output
             # Native menu content precedes its Close footer. A matching heading
             # alone can arrive before later rows, especially on slower clients.
-            if all(text in visible for text in (needle, *additional, b'(esc)')) and not any(text in visible for text in absent):
+            expected = (needle, *additional) + ((b'(esc)',) if menu_footer else ())
+            if all(text in visible for text in expected) and not any(text in visible for text in absent):
                 return output
             if proc.poll() is not None:
                 probe = subprocess.run(
@@ -267,6 +268,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('set-option', '-g', 'exit-empty', 'off')
         tmux('set-option', '-g', 'exit-unattached', 'off')
         tmux('set-option', '-g', 'default-shell', '/bin/sh')
+        tmux('set-option', '-g', 'status-keys', 'emacs')
         tmux('set-option', '-g', 'mouse', 'on')
         # Retain the native Escape parser timeout; wait for it after dismissal.
         tmux('set-option', '-sg', 'escape-time', '500')
@@ -286,6 +288,84 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         version = re.search(r'(\d+)\.(\d+)', tmux('display-message', '-p', '#{version}'))
         release_menus = version is not None and tuple(map(int, version.groups())) >= (3, 8)
+        root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
+        menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, b'Switch window', b'Switch session', b'New session...', b'Launch agent...')
+        labels = ('Switch window', 'Switch session', 'New session...', 'New window', 'Launch agent...', 'Panes & layout...')
+        positions = [item_position(rendered, label)[1] for label in labels]
+        assert positions == sorted(set(positions)), (positions, rendered)
+        assert b'Switch window / session' not in rendered
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(0.7)
+        for key in (b'w', b's'):
+            menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'Switch session')
+            os.write(master, key)
+            menu.wait(timeout=3)
+            for _ in range(40):
+                if tmux('display-message', '-p', '-t', pane, '#{pane_mode}') == 'tree-mode':
+                    break
+                drain(0.05)
+            assert tmux('display-message', '-p', '-t', pane, '#{pane_mode}') == 'tree-mode', key
+            tmux('send-keys', '-t', pane, 'q')
+            drain()
+        before_sessions = tmux('list-sessions', '-F', '#{session_id}')
+        menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'New session...')
+        os.write(master, b'n')
+        wait_for_text(client_process, b'New session name:', menu_footer=False)
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(0.7)
+        assert tmux('list-sessions', '-F', '#{session_id}') == before_sessions
+        # A second attached client must stay in its original session while
+        # the invoking client creates a named session in the source directory.
+        def client_session(name):
+            return dict(line.split('\t', 1) for line in tmux(
+                'list-clients', '-F', '#{client_name}\t#{session_name}').splitlines())[name]
+
+        other_master, other_slave = pty.openpty()
+        other_client_process = None
+        try:
+            fcntl.ioctl(other_slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
+            other_client_process = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'audit'],
+                                                    stdin=other_slave, stdout=other_slave, stderr=other_slave, env=env)
+            for _ in range(40):
+                other_clients = [name for name in tmux('list-clients', '-F', '#{client_name}').splitlines() if name != client]
+                if other_clients:
+                    break
+                drain(0.05)
+            assert len(other_clients) == 1, other_clients
+            for session_name in ("new 'session'; display-message injected", '中文会话'):
+                menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                wait_for_text(menu, b'New session...')
+                os.write(master, b'n')
+                wait_for_text(client_process, b'New session name:', menu_footer=False)
+                os.write(master, session_name.encode() + b'\r')
+                menu.wait(timeout=3)
+                for _ in range(40):
+                    if client_session(client) == session_name:
+                        break
+                    drain(0.05)
+                assert client_session(client) == session_name, (
+                    session_name, tmux('list-sessions', '-F', '#{session_id} #{session_name}'),
+                    tmux('list-clients', '-F', '#{client_name} #{session_name}'))
+                created = next(sid for sid, name in (
+                    line.split('\t', 1) for line in tmux('list-sessions', '-F', '#{session_id}\t#{session_name}').splitlines()
+                ) if name == session_name)
+                assert tmux('display-message', '-p', '-t', created + ':', '#{pane_current_path}') == str(project)
+                assert client_session(other_clients[0]) == 'audit'
+                tmux('switch-client', '-c', client, '-t', 'audit')
+                tmux('kill-session', '-t', created)
+                drain()
+        finally:
+            if other_client_process:
+                other_client_process.terminate()
+                other_client_process.wait(timeout=5)
+            os.close(other_master)
+            os.close(other_slave)
+        print('PASS root window/session choosers and named session creation, cancellation, cwd and client isolation')
         if release_menus:
             for input_mode in ('mouse', 'touch'):
                 menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
@@ -355,7 +435,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 print('PASS', kind, close)
         # Every submenu uses the same navigation, including Configure and
         # views with no available actions. Escape must never open its parent.
-        for view in ('launch', 'configure', 'panes', 'switch', 'more', 'team', 'botmux', 'agent-target'):
+        for view in ('launch', 'configure', 'panes', 'more', 'team', 'botmux', 'agent-target'):
             args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client, '--view', view]
             parent = b'choose agent' if view == 'configure' else b'Launch agent...'
             menu = open_menu(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -827,6 +907,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert b'/side' not in rendered and b'Return to the agent prompt' in rendered
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
+        # Let the terminal's Escape parser settle before opening another menu.
+        drain(0.7)
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         tmux('copy-mode', '-t', pane)
         drain()
