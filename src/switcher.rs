@@ -20,13 +20,15 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::ipc::{Request, call};
 use crate::model::{DisplayState, Snapshot, TmuxTarget};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
-use crate::sidebar::{agent_kind_name, agent_status, agent_topic, glyph, state_color};
+use crate::sidebar::{
+    agent_kind_name, agent_status, agent_topic, context_line, glyph, icon_title_line, state_color,
+};
 use crate::tmux::{Pane, Tmux, TmuxSource};
 use crate::ui_language::text as tr;
 
@@ -385,7 +387,7 @@ impl Geometry {
         let header = if height >= 8 { 3 } else { 1 }.min(height);
         let footer = if height >= 6 { 2 } else { 1 }.min(height.saturating_sub(header));
         let body = height.saturating_sub(header + footer);
-        let card = body.clamp(1, 3);
+        let card = body.clamp(1, 2);
         Self {
             width,
             height,
@@ -600,33 +602,31 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
             Block::default().style(style),
             Rect::new(0, row, geometry.width, height),
         );
-        let current = if entry.current {
-            tr(" · current", " · 当前")
+        let title_style = Style::default().fg(Color::Rgb(235, 235, 245));
+        let title_style = if entry.current {
+            title_style.add_modifier(Modifier::BOLD)
         } else {
-            ""
+            title_style
         };
-        let title = Line::from(vec![
-            Span::styled(
-                format!(" {} ", glyph(entry.state)),
-                style.fg(state_color(entry.state)),
-            ),
-            Span::styled(
-                format!("{}{current}", entry.title),
-                style.add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        let title_height = if height >= 3 { 2 } else { 1 };
         frame.render_widget(
-            Paragraph::new(title).wrap(Wrap { trim: false }),
-            Rect::new(0, row, geometry.width, title_height),
+            Paragraph::new(icon_title_line(
+                glyph(entry.state),
+                &entry.title,
+                geometry.width,
+                Style::default().fg(state_color(entry.state)),
+                title_style,
+                selected,
+            )),
+            Rect::new(0, row, geometry.width, 1),
         );
         if height >= 2 {
+            let detail = if entry.current {
+                format!("{} · {}", tr("current", "当前"), entry.detail)
+            } else {
+                entry.detail.clone()
+            };
             frame.render_widget(
-                Paragraph::new(format!("   {}", entry.detail)).style(if selected {
-                    style
-                } else {
-                    muted
-                }),
+                Paragraph::new(context_line(&detail, geometry.width, selected)),
                 Rect::new(0, row + height - 1, geometry.width, 1),
             );
         }
@@ -653,7 +653,14 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
             ),
         );
     }
-    let labels = if geometry.width < 32 {
+    let labels = if geometry.width < 28 {
+        [
+            tr("back", "返回"),
+            tr("prev", "上页"),
+            tr("next", "下页"),
+            tr("close", "关闭"),
+        ]
+    } else if geometry.width < 32 {
         [
             tr("‹back", "‹返回"),
             tr("↑prev", "↑上页"),
@@ -940,7 +947,7 @@ pub fn run(
     crate::ui_language::set_language(language);
     let scope = Scope::read(server, pane, client)?;
     if !inside {
-        popup(
+        crate::sidebar::popup(
             server,
             pane,
             client,
@@ -990,54 +997,6 @@ pub fn run(
             Ok(None)
         }
     }
-}
-
-pub(crate) fn popup(
-    server: &ServerIdentity,
-    pane: &str,
-    client: &str,
-    args: &[&str],
-) -> Result<()> {
-    Scope::read(server, pane, client)?;
-    if Tmux::new(server.clone())
-        .client_format(client, "#{session_id}")?
-        .is_none()
-    {
-        return Err("switching client disappeared".into());
-    }
-    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
-    let command = format!(
-        "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
-        quote(client),
-        quote(pane),
-        quote(&server.socket_path.to_string_lossy()),
-        quote(&std::env::current_exe()?.to_string_lossy()),
-        args.iter()
-            .map(|arg| quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    let status = Command::new("tmux")
-        .args(server.tmux_args())
-        .args([
-            "display-popup",
-            "-B",
-            "-E",
-            "-c",
-            client,
-            "-t",
-            pane,
-            "-w",
-            "100%",
-            "-h",
-            "100%",
-            &command,
-        ])
-        .status()?;
-    if !status.success() && !matches!(status.code(), Some(129 | 130)) {
-        return Err("could not open navigation panel".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1176,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn small_render_wraps_titles_and_preserves_both_footer_lines() {
+    fn small_render_uses_sidebar_labels_and_preserves_both_footer_lines() {
         let panes = inventory();
         let scope = Scope {
             target: panes[0].target.clone(),

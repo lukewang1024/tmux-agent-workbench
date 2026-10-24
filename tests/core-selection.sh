@@ -21,6 +21,7 @@ make_core() {
   # Arguments are expanded by the generated executable.
   # shellcheck disable=SC2016
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "$CORE_SELECTION_LOG.args"\nprintf "%%s\\n" "%s"\n' "$2" > "$1"
+  printf 'case $* in "sidebar --popup "*) printf "%%s\\n" "$*" > "$CORE_SELECTION_LOG.popup" ;; esac\n' >> "$1"
   chmod +x "$1"
 }
 installed="$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-core"
@@ -76,6 +77,7 @@ check() {
   [ "$(cat "$CORE_SELECTION_LOG.args")" = 'sidebar-control toggle @1' ]
   actual=$(MOCK_CLIENT_WIDTH=80 "$plugin/bin/wb-responsive" @1 /dev/pts/8)
   [ "$actual" = "$1" ] || { echo 'wrong sidebar popup core' >&2; exit 1; }
+  [ "$(cat "$CORE_SELECTION_LOG.popup")" = 'sidebar --popup --pane %1 --client /dev/pts/8' ]
   # The divider needs one column too: 26 + 80 must still use a popup,
   # while 26 + 80 + 1 is the first width that can hold a drawer.
   rm -f "$CORE_SELECTION_LOG.popup"

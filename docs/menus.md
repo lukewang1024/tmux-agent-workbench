@@ -119,9 +119,14 @@ it does not claim a physical handset or Android keyboard acceptance run.
 
 ## Mobile navigation and interaction review
 
-The four switch actions use Workbench's fullscreen list rather than tmux's
-tree or fzf. A card reserves two lines for the title and a third for context;
-every cell in those lines is clickable. Titles wrap without adding an ellipsis.
+The four switch actions use filtered Sidebar views rather than tmux's tree or
+fzf. They share Sidebar's popup container, title renderer, colors and secondary
+context row; every cell in both entry rows is clickable. The bordered popup
+uses about 90% of the client dimensions, capped at 96 columns by 40 rows, to
+keep the terminal visible around it. Clients below 36 columns or 12 rows use
+the available screen without a border. Sidebar's normal popup entry and these
+filtered views follow the same sizing policy. Labels use all available cells
+without adding an ellipsis; search matches their full, unshortened text.
 The footer's four buttons occupy two full rows, with compact captions below
 32 columns. Its previous/next controls remain visible alongside Back and Close.
 Tap the search line or type `/` to search; pasted Chinese text is supported.
@@ -129,12 +134,13 @@ Arrow keys, Page Up/Down, Enter, Escape and Backspace remain available.
 
 | Mobile issue | Result |
 | --- | --- |
-| Native tree rows and dense fzf lists require precise taps | Three-row touch cards replace them in tmux and Sidebar navigation |
+| Native tree rows and dense fzf lists require precise taps | Sidebar's two-line entries provide a single touch target across both rows |
 | Window/Pane scopes are ambiguous | Window stays in the opening Session; Pane stays in the opening Window |
-| Long task titles lose useful text | Two title rows wrap names; context and current-target marks remain visible |
+| Navigation takes over the whole terminal | Sidebar and filtered views share a bounded popup; tiny clients use the full screen |
+| Shortened labels spend cells on ellipses | Shared Sidebar labels use those cells for text; search still matches full titles |
 | Press, swipe or refresh can select the wrong row | Release confirms a stable target identity; swipes and stale touches do not activate |
 | Sidebar opens a different picker and Back loses context | Both Sidebar routes use the same lists and preserve their origin |
-| Keyboard reduces the terminal viewport | Cards, paging and footer resize together without clearing search |
+| Keyboard reduces the terminal viewport | Entries, paging and footer resize together without clearing search |
 | Short action menus reserve blank pagination rows | Menus that fit keep their full content; paginated menus use the actual footer budget |
 
 Host/Agent/configuration actions still use the native menu
@@ -142,6 +148,8 @@ renderer. They retain single-row targets and the disabled-row dismissal behavior
 documented above; moving these action panels to the shared touch renderer is the
 next interaction improvement. The navigation lists themselves ignore blank-area
 taps and expose explicit Back and Close buttons.
+Returning to a popup Sidebar reselects the current Agent. Restoring its previous
+browsing position, including scroll, remains a useful follow-up for long lists.
 
 ## Scene launch policy
 

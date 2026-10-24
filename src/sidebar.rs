@@ -126,7 +126,92 @@ pub fn open_popup(
     pane: &str,
     client: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    crate::switcher::popup(server, pane, client, &["sidebar"])
+    popup(server, pane, client, &["sidebar"])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PopupSize {
+    width: u16,
+    height: u16,
+    border: bool,
+}
+
+impl PopupSize {
+    fn new(width: u16, height: u16) -> Self {
+        // Keep the terminal visible around the Sidebar whenever its border and
+        // margins leave enough room for useful, two-line navigation entries.
+        if width < 36 || height < 12 {
+            return Self {
+                width,
+                height,
+                border: false,
+            };
+        }
+        Self {
+            width: ((u32::from(width) * 9 / 10) as u16)
+                .clamp(32, 96)
+                .min(width),
+            height: ((u32::from(height) * 9 / 10) as u16)
+                .clamp(12, 40)
+                .min(height),
+            border: true,
+        }
+    }
+}
+
+pub(crate) fn popup(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+    args: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !pane
+        .strip_prefix('%')
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("invalid source pane".into());
+    }
+    let dimensions = crate::tmux::Tmux::new(server.clone())
+        .client_format(client, "#{client_width} #{client_height}")?
+        .ok_or("navigation client disappeared")?;
+    let (width, height) = dimensions.split_once(' ').ok_or("invalid client size")?;
+    let size = PopupSize::new(width.parse()?, height.parse()?);
+    let command = format!(
+        "WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
+        shell_quote(client),
+        shell_quote(pane),
+        shell_quote(&server.socket_path.to_string_lossy()),
+        shell_quote(&std::env::current_exe()?.to_string_lossy()),
+        args.iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let mut popup = Command::new("tmux");
+    popup.args(server.tmux_args()).args([
+        "display-popup",
+        "-E",
+        "-c",
+        client,
+        "-t",
+        pane,
+        "-x",
+        "C",
+        "-y",
+        "C",
+        "-w",
+        &size.width.to_string(),
+        "-h",
+        &size.height.to_string(),
+    ]);
+    if !size.border {
+        popup.arg("-B");
+    }
+    let status = popup.arg(command).status()?;
+    if !status.success() && !matches!(status.code(), Some(129 | 130)) {
+        return Err("could not open navigation panel".into());
+    }
+    Ok(())
 }
 
 fn switch_return_to() -> crate::switcher::ReturnTo {
@@ -850,22 +935,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             },
             selected,
         ),
-        Row::SessionSub(session) => aligned_line(
-            format!("   {}", session_context(session)),
-            String::new(),
-            width,
-            if selected {
-                Style::default().fg(Color::Rgb(235, 235, 245))
-            } else {
-                Style::default().fg(Color::Rgb(150, 150, 170))
-            },
-            if selected {
-                Style::default().fg(Color::Rgb(235, 235, 245))
-            } else {
-                Style::default().fg(Color::Rgb(150, 150, 170))
-            },
-            selected,
-        ),
+        Row::SessionSub(session) => context_line(&session_context(session), width, selected),
         Row::Agent(agent) => {
             let title = if agent.visible && agent.state_source != StateSource::Screen {
                 Style::default()
@@ -1207,13 +1277,28 @@ fn fit_text(text: &str, width: usize) -> String {
     let mut result = String::new();
     for character in text.chars() {
         result.push(character);
-        if Span::raw(result.as_str()).width() > width - 1 {
+        if Span::raw(result.as_str()).width() > width {
             result.pop();
             break;
         }
     }
-    result.push('…');
     result
+}
+
+pub(crate) fn context_line(text: &str, width: u16, selected: bool) -> Line<'static> {
+    let style = Style::default().fg(if selected {
+        Color::Rgb(235, 235, 245)
+    } else {
+        Color::Rgb(150, 150, 170)
+    });
+    aligned_line(
+        format!("   {text}"),
+        String::new(),
+        width,
+        style,
+        style,
+        selected,
+    )
 }
 
 fn aligned_line(
@@ -1226,7 +1311,7 @@ fn aligned_line(
 ) -> Line<'static> {
     let width = usize::from(width);
     let right = fit_text(&right, width);
-    let reserved = Span::raw(right.as_str()).width().saturating_add(1);
+    let reserved = Span::raw(right.as_str()).width() + usize::from(!right.is_empty());
     let left_limit = width.saturating_sub(reserved);
     let left = fit_text(&left, left_limit);
     let gap =
@@ -1252,7 +1337,7 @@ fn aligned_line(
     ])
 }
 
-fn icon_title_line(
+pub(crate) fn icon_title_line(
     icon: &str,
     title: &str,
     width: u16,
@@ -1945,6 +2030,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn navigation_popup_preserves_context_until_space_is_too_small() {
+        for (width, height) in [(40, 20), (63, 31), (160, 50)] {
+            let size = PopupSize::new(width, height);
+            assert!(size.border);
+            assert!(size.width < width && size.height < height);
+            assert!(size.width <= 96 && size.height <= 40);
+        }
+        for (width, height) in [(32, 12), (24, 8), (80, 10)] {
+            assert_eq!(
+                PopupSize::new(width, height),
+                PopupSize {
+                    width,
+                    height,
+                    border: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_labels_use_the_full_cell_budget_without_ellipsis() {
+        assert_eq!(fit_text("中文字符", 5), "中文");
+        assert_eq!(fit_text("abcdefgh", 5), "abcde");
+        assert_eq!(fit_text("中文字符", 0), "");
+        let line = context_line("abcdefgh", 8, false);
+        assert_eq!(line.to_string(), "   abcde");
+    }
 
     #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {

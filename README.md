@@ -326,13 +326,15 @@ The tmux menu starts with **Switch window**, **Switch session**, **Switch agent*
 and **Switch pane**, followed by **New session**, **New window**, **Launch agent**,
 **Panes & layout**, the installed editor, and **Detach**. Switch window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
-and running Agents have separate server-wide lists. Each fullscreen touch list
-uses three-row cards with wrapped titles, status/context, search, paging, and a
-two-row Back/Close bar. Selection happens on release; dragging scrolls without
-activating. Sidebar's Session/Agent shortcuts and menu use these same lists,
-and Back restores the originating Sidebar or tmux menu. New session prompts for
-a name, starts in the source pane's
-directory, and switches only the invoking client to the new session.
+and running Agents have separate server-wide views. These views share Sidebar's
+bordered popup and two-line title/context rows, with search, paging, and a
+two-row Back/Close bar. The popup leaves terminal context visible, caps its size
+at 96 columns by 40 rows, and uses all available space on very small screens.
+Labels use the available cells without ellipses. Selection happens on release;
+dragging scrolls without activating. Sidebar's Session/Agent shortcuts and menu
+use these same lists, and Back restores the originating Sidebar or tmux menu. New session prompts for
+a name, starts in the source pane's directory, and switches only the invoking
+client to the new session.
 Selecting an agent opens one configuration panel. Codex and Trae expose scene,
 Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
 show only Single/Team and collaboration choices. Clicking a choice refreshes
