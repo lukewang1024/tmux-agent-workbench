@@ -24,6 +24,11 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                TMUX=socket+',0,0', CODEX_HOME=root+'/codex')
     detached_env = {key: value for key, value in env.items()
                     if key not in ('TMUX', 'TMUX_PANE', 'TMUX_AGENT_WORKBENCH_TMUX_SOCKET')}
+    config_dir = Path(env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
+    config_dir.mkdir(parents=True)
+    # This suite verifies naming. Desktop delivery has separate coverage and
+    # must not open notification overlays on the runner while hooks are tested.
+    (config_dir / 'config.toml').write_text('[notifications]\nenabled = false\n')
     claude = root + '/claude'
     shutil.copyfile(fixture, claude)
     os.chmod(claude, 0o700)
@@ -66,25 +71,42 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
         return json.loads(core('hook', 'ingest', agent['kind'], event,
                                run_env=hook_env, data=data).stdout)
 
-    def wait_hook_context(agent, event, **extra):
-        # Restarted daemons discover and bind a replacement CLI asynchronously.
+    def wait_hook_context(agent, event, run_env=None, **extra):
+        # Daemons discover CLIs and associate their hook sessions asynchronously.
         # A busy hook may safely return {}. Require the real context once the
         # binding is ready, while keeping the one-shot Stop assertions below.
         deadline = time.monotonic() + 8
         while True:
-            output = hook(agent, event, **extra)
+            output = hook(agent, event, run_env=run_env, **extra)
             specific = output.get('hookSpecificOutput')
             if specific:
                 assert specific['hookEventName'] == event, output
                 context = specific['additionalContext']
                 assert agent['pane'] in context and agent['session_id'] in context, output
-                return specific
+                return output
             assert output == {}, output
             if time.monotonic() >= deadline:
                 raise AssertionError(('naming context did not become ready', event, extra,
                                       agent, output,
                                       tmux('show-option', '-wqv', '-t', agent['pane'], '@workbench_task_title'),
                                       json.loads(core('snapshot', '--json').stdout)))
+            time.sleep(.05)
+
+    def wait_hook_binding(agent):
+        # Hooks can be spooled after a bounded transport timeout. Observe the
+        # accepted session before asserting ownership after intentional no-op
+        # hooks (manual names, managed windows, and auxiliary sessions).
+        deadline = time.monotonic() + 8
+        while True:
+            snapshot = json.loads(core('snapshot', '--json').stdout)
+            if any(item['target']['pane_id'] == agent['pane']
+                   and not item['exited']
+                   and (item.get('process') or {}).get('pid') == agent['agent_pid']
+                   and item.get('hook_session_id') == agent['session_id']
+                   for item in snapshot['agents']):
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(('hook session did not become ready', agent, snapshot))
             time.sleep(.05)
 
     def title(agent, value=None, run_env=None, **extra):
@@ -138,16 +160,16 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
         tmux('set-option', '-g', 'automatic-rename', 'off')
         with running_daemon(binary, env):
             repair = spawn()
-            startup = hook(repair, 'SessionStart')
+            startup = wait_hook_context(repair, 'SessionStart')
             assert startup.get('hookSpecificOutput', {}).get('hookEventName') == 'SessionStart', (
                 startup, json.loads(core('snapshot', '--json').stdout))
             assert hook(repair, 'Stop') == {}, 'startup without a user task must not continue'
-            context = hook(repair, 'UserPromptSubmit')['hookSpecificOutput']['additionalContext']
+            context = wait_hook_context(repair, 'UserPromptSubmit')['hookSpecificOutput']['additionalContext']
             assert repair['pane'] in context and repair['session_id'] in context
             stripped_env = dict(env)
             for key in ('TMUX', 'TMUX_PANE', 'XDG_RUNTIME_DIR'):
                 stripped_env.pop(key, None)
-            stripped = hook(repair, 'UserPromptSubmit', run_env=stripped_env)
+            stripped = wait_hook_context(repair, 'UserPromptSubmit', run_env=stripped_env)
             assert repair['pane'] in stripped['hookSpecificOutput']['additionalContext']
             recovered = core('title', 'status', '--pane', repair['pane'], '--session-id', repair['session_id'],
                              run_env=stripped_env)
@@ -229,14 +251,14 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                     # The hook's verified binding works on the first approved
                     # call; no failed tool call or permission probe is needed.
                     first_call = spawn()
-                    hook(first_call, 'SessionStart')
+                    wait_hook_context(first_call, 'SessionStart')
                     approved_first = sandbox_title(first_call, allowed=root)
                     assert approved_first.returncode == 0, approved_first.stderr
                     assert json.loads(approved_first.stdout)['status'] == 'renamed'
                     assert name(first_call) == 'Approved sandbox title'
 
                     access = spawn()
-                    hook(access, 'SessionStart')
+                    wait_hook_context(access, 'SessionStart')
                     no_runtime = dict(detached_env)
                     no_runtime.pop('XDG_RUNTIME_DIR', None)
                     no_runtime['TMUX_AGENT_WORKBENCH_TMUX_SOCKET'] = socket
@@ -260,24 +282,26 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             # the visible TUI remains on its original thread. Previously this
             # replaced the owner and invalidated the command already issued.
             foreground = spawn()
-            hook(foreground, 'SessionStart')
-            hook(foreground, 'UserPromptSubmit')
+            wait_hook_context(foreground, 'SessionStart')
+            wait_hook_context(foreground, 'UserPromptSubmit')
             thread_title(foreground)
             assert hook(foreground, 'Stop')['decision'] == 'block'
             auxiliary = dict(foreground, session_id=str(uuid.uuid4()))
             for event in ('SessionStart', 'UserPromptSubmit', 'Stop'):
                 assert hook(auxiliary, event) == {}, 'auxiliary session must not claim a title or continue'
+            wait_hook_binding(auxiliary)
             assert title(foreground)['repair_used'] is True, 'auxiliary hooks must not reset the repair budget'
             result = title(foreground, 'Node Package Managers')
             assert result['status'] == 'renamed', result
             assert name(foreground) == 'Node Package Managers'
 
             legacy = spawn()
-            hook(legacy, 'SessionStart')
-            hook(legacy, 'UserPromptSubmit')
+            wait_hook_context(legacy, 'SessionStart')
+            wait_hook_context(legacy, 'UserPromptSubmit')
             thread_title(legacy)
             auxiliary = dict(legacy, session_id=str(uuid.uuid4()))
             hook(auxiliary, 'SessionStart')
+            wait_hook_binding(auxiliary)
             legacy_state = json.loads(tmux('show-option', '-wqv', '-t', legacy['pane'], '@workbench_task_title'))
             legacy_state['owner']['session'] = auxiliary['session_id']
             legacy_state['repair_used'] = True
@@ -285,17 +309,18 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert title(legacy, 'Recover issued naming binding')['status'] == 'renamed'
 
             no_title = spawn()
-            hook(no_title, 'SessionStart')
+            wait_hook_context(no_title, 'SessionStart')
             auxiliary = dict(no_title, session_id=str(uuid.uuid4()))
             assert hook(auxiliary, 'SessionStart') == {}
+            wait_hook_binding(auxiliary)
             assert title(no_title, 'Keep issued binding without OSC')['status'] == 'renamed'
 
             switched = spawn()
-            hook(switched, 'SessionStart')
-            hook(switched, 'UserPromptSubmit')
+            wait_hook_context(switched, 'SessionStart')
+            wait_hook_context(switched, 'UserPromptSubmit')
             next_thread = dict(switched, session_id=str(uuid.uuid4()))
             thread_title(next_thread)
-            assert hook(next_thread, 'SessionStart', source='clear')['hookSpecificOutput']
+            wait_hook_context(next_thread, 'SessionStart', source='clear')
             stale = core('title', 'set', 'Stale session title', '--pane', switched['pane'],
                          '--session-id', switched['session_id'], run_env=detached_env, check=False)
             assert stale.returncode != 0 and 'foreground task' in stale.stderr
@@ -305,13 +330,14 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             primary = spawn()
             secondary = spawn(split=primary['pane'])
             assert hook(secondary, 'SessionStart') == {}, 'first hook must not steal an older agent window'
+            wait_hook_binding(secondary)
             assert title(secondary)['status'] == 'not_owner'
-            hook(primary, 'SessionStart')
-            assert hook(primary, 'UserPromptSubmit')['hookSpecificOutput']
+            wait_hook_context(primary, 'SessionStart')
+            wait_hook_context(primary, 'UserPromptSubmit')
             assert title(secondary, 'Steal primary task')['status'] == 'not_owner'
             assert name(primary) == 'zsh'
             stale_env = dict(env, TMUX_PANE=inspection)
-            stale = hook(primary, 'UserPromptSubmit', run_env=stale_env)
+            stale = wait_hook_context(primary, 'UserPromptSubmit', run_env=stale_env)
             assert primary['pane'] in stale['hookSpecificOutput']['additionalContext']
             tmux('select-pane', '-t', inspection)
             assert title(primary, '光标复现与验收')['status'] == 'renamed'
@@ -329,14 +355,14 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             # A manual edit made after the naming request remains authoritative,
             # even if the human deliberately chooses another generic name.
             edited = spawn()
-            hook(edited, 'SessionStart')
-            hook(edited, 'UserPromptSubmit')
+            wait_hook_context(edited, 'SessionStart')
+            wait_hook_context(edited, 'UserPromptSubmit')
             tmux('rename-window', '-t', edited['pane'], 'bash')
             assert title(edited, 'Overwrite manual default')['status'] == 'preserved'
             assert hook(edited, 'Stop') == {}
 
             quoted = spawn()
-            hook(quoted, 'SessionStart')
+            wait_hook_context(quoted, 'SessionStart')
             punctuation = "Fix O'Reilly's $PATH; parsing"
             assert title(quoted, punctuation)['status'] == 'renamed'
             assert name(quoted) == punctuation
@@ -344,11 +370,13 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             manual = spawn('Keep this task')
             for event in ('SessionStart', 'UserPromptSubmit', 'Stop'):
                 assert hook(manual, event) == {}
+            wait_hook_binding(manual)
             assert title(manual, 'Replace named task')['status'] == 'preserved'
 
             managed = spawn()
             tmux('set-option', '-w', '-t', managed['pane'], '@workbench_project_root', root)
             hook(managed, 'SessionStart')
+            wait_hook_binding(managed)
             assert hook(managed, 'UserPromptSubmit') == {}
             assert title(managed, 'Rename inspection')['status'] == 'preserved'
             tmux('set-option', '-wu', '-t', managed['pane'], '@workbench_project_root')
@@ -363,8 +391,8 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             tmux('set-option', '-gu', '@workbench-window-automatic-rename')
 
             claude_agent = spawn(kind='claude')
-            assert hook(claude_agent, 'SessionStart')['hookSpecificOutput']
-            assert hook(claude_agent, 'UserPromptSubmit')['hookSpecificOutput']
+            wait_hook_context(claude_agent, 'SessionStart')
+            wait_hook_context(claude_agent, 'UserPromptSubmit')
             assert hook(claude_agent, 'Stop')['decision'] == 'block'
             assert title(claude_agent, 'Claude task title')['status'] == 'renamed'
 
@@ -385,8 +413,8 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 assert hook(repair, 'Stop') == {}
             assert title(repair)['repair_used'] is True
             new_task = dict(repair, session_id=str(uuid.uuid4()))
-            clear = hook(new_task, 'SessionStart', source='clear')
-            submitted = hook(new_task, 'UserPromptSubmit')
+            clear = wait_hook_context(new_task, 'SessionStart', source='clear')
+            submitted = wait_hook_context(new_task, 'UserPromptSubmit')
             stopped = hook(new_task, 'Stop')
             assert stopped.get('decision') == 'block', (
                 clear, submitted, stopped,
