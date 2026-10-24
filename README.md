@@ -332,7 +332,9 @@ two-row Back/Close bar. The popup leaves terminal context visible, caps its size
 at 96 columns by 40 rows, and uses all available space on very small screens.
 Labels use the available cells without ellipses. Selection happens on release;
 dragging scrolls without activating. Sidebar's Session/Agent shortcuts and menu
-use these same lists, and Back restores the originating Sidebar or tmux menu. New session prompts for
+use these same lists, and Back restores the originating Sidebar or tmux menu.
+Wheel scrolling, touch, keyboard navigation and refresh positioning share one
+list component across Sidebar and the four filtered views. New session prompts for
 a name, starts in the source pane's directory, and switches only the invoking
 client to the new session.
 Selecting an agent opens one configuration panel. Codex and Trae expose scene,

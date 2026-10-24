@@ -7,14 +7,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
-use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
@@ -24,6 +17,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::ipc::{Request, call};
 use crate::model::{DisplayState, Snapshot, TmuxTarget};
+use crate::navigation_list::{Hit, NavigationList, Screen};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
 use crate::sidebar::{
@@ -355,21 +349,13 @@ fn load(paths: &Paths, server: &ServerIdentity, kind: Kind, scope: &Scope) -> Re
     Ok(entries(kind, scope, &panes, snapshot.as_ref()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Hit {
-    Item(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
     Back,
     Previous,
     Next,
     Close,
     Search,
-}
-
-#[derive(Clone)]
-struct Press {
-    hit: Hit,
-    row: u16,
-    dragged: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -414,29 +400,17 @@ impl Geometry {
 struct List {
     entries: Vec<Entry>,
     visible: Vec<usize>,
-    selected: usize,
-    scroll: usize,
+    navigation: NavigationList<Action>,
+    card: u16,
     query: String,
     searching: bool,
-    pressed: Option<Press>,
     error: Option<String>,
 }
 
 impl List {
     fn replace(&mut self, entries: Vec<Entry>) {
-        let key = self
-            .visible
-            .get(self.selected)
-            .map(|index| self.entries[*index].key.clone());
         self.entries = entries;
         self.filter();
-        self.selected = key
-            .and_then(|key| {
-                self.visible
-                    .iter()
-                    .position(|index| self.entries[*index].key == key)
-            })
-            .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
     }
 
     fn filter(&mut self) {
@@ -452,99 +426,83 @@ impl List {
             })
             .map(|(index, _)| index)
             .collect();
-        self.selected = self.selected.min(self.visible.len().saturating_sub(1));
-        self.scroll = self.scroll.min(self.visible.len().saturating_sub(1));
+        self.sync_rows();
+    }
+
+    fn sync_rows(&mut self) {
+        self.navigation.replace_rows(
+            self.visible
+                .iter()
+                .flat_map(|index| {
+                    std::iter::repeat_n(
+                        Some(self.entries[*index].key.clone()),
+                        usize::from(self.card.max(1)),
+                    )
+                })
+                .collect(),
+        );
     }
 
     fn search(&mut self) {
         self.filter();
-        self.selected = 0;
-        self.scroll = 0;
-        self.pressed = None;
+        self.navigation.scroll = 0;
+        self.navigation.select(0);
+        self.navigation.cancel_press();
     }
 
-    fn move_by(&mut self, delta: i32, capacity: usize) {
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta as isize)
-            .min(self.visible.len().saturating_sub(1));
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
+    fn layout(&mut self, geometry: Geometry) {
+        if self.card != geometry.card {
+            self.card = geometry.card;
+            self.sync_rows();
         }
-        if self.selected >= self.scroll + capacity {
-            self.scroll = self.selected.saturating_sub(capacity - 1);
-        }
+        self.navigation.set_viewport(Rect::new(
+            0,
+            geometry.header,
+            geometry.width,
+            (geometry.capacity as u16 * geometry.card).min(
+                geometry
+                    .height
+                    .saturating_sub(geometry.header + geometry.footer),
+            ),
+        ));
     }
 
-    fn page(&mut self, delta: i32, capacity: usize) {
-        self.scroll = self
-            .scroll
-            .saturating_add_signed(delta as isize)
-            .min(self.visible.len().saturating_sub(capacity));
-        self.selected = self.scroll;
+    fn actions(&self, geometry: Geometry) -> Vec<(Rect, Action)> {
+        let mut actions: Vec<_> = [Action::Back, Action::Previous, Action::Next, Action::Close]
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| (geometry.footer_rect(index as u16), action))
+            .collect();
+        if geometry.header == 3 {
+            actions.push((Rect::new(0, 2, geometry.width, 1), Action::Search));
+        }
+        actions
     }
 
-    fn hit(&self, geometry: Geometry, column: u16, row: u16) -> Option<Hit> {
-        if column >= geometry.width || row >= geometry.height {
-            return None;
-        }
-        if row >= geometry.height - geometry.footer {
-            return (0..4)
-                .find(|index| {
-                    let rect = geometry.footer_rect(*index);
-                    column >= rect.x && column < rect.right()
-                })
-                .map(|index| {
-                    [Hit::Back, Hit::Previous, Hit::Next, Hit::Close][index as usize].clone()
-                });
-        }
-        if geometry.header == 3 && row == 2 {
-            return Some(Hit::Search);
-        }
-        let offset = row.checked_sub(geometry.header)? / geometry.card;
-        if usize::from(offset) >= geometry.capacity {
-            return None;
-        }
+    fn selected_entry(&self) -> Option<&Entry> {
         self.visible
-            .get(self.scroll + usize::from(offset))
-            .map(|index| Hit::Item(self.entries[*index].key.clone()))
-    }
-}
-
-struct Screen;
-impl Screen {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        let guard = Self;
-        execute!(
-            stdout(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
-        Ok(guard)
-    }
-}
-impl Drop for Screen {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            crossterm::cursor::Show
-        );
+            .get(self.navigation.selected / usize::from(self.card.max(1)))
+            .map(|index| &self.entries[*index])
     }
 }
 
 fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geometry: Geometry) {
     let muted = Style::default().fg(Color::DarkGray);
-    let end = (list.scroll + geometry.capacity).min(list.visible.len());
+    let end = list
+        .navigation
+        .visible_rows()
+        .end
+        .div_ceil(usize::from(geometry.card))
+        .min(list.visible.len());
     let count = if list.visible.is_empty() {
         "0".into()
     } else {
-        format!("{}–{} / {}", list.scroll + 1, end, list.visible.len())
+        format!(
+            "{}–{} / {}",
+            list.navigation.scroll / usize::from(geometry.card) + 1,
+            end,
+            list.visible.len()
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -577,60 +535,31 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
             frame.set_cursor_position((column as u16, 2));
         }
     }
-    for (offset, index) in list
-        .visible
-        .iter()
-        .skip(list.scroll)
-        .take(geometry.capacity)
-        .enumerate()
-    {
-        let entry = &list.entries[*index];
-        let row = geometry.header + offset as u16 * geometry.card;
-        let height = geometry
-            .card
-            .min((geometry.height - geometry.footer).saturating_sub(row));
-        if height == 0 {
-            continue;
-        }
-        let selected = list.scroll + offset == list.selected;
-        let style = if selected {
-            Style::default().bg(Color::DarkGray)
-        } else {
-            Style::default()
-        };
-        frame.render_widget(
-            Block::default().style(style),
-            Rect::new(0, row, geometry.width, height),
-        );
-        let title_style = Style::default().fg(Color::Rgb(235, 235, 245));
-        let title_style = if entry.current {
-            title_style.add_modifier(Modifier::BOLD)
-        } else {
-            title_style
-        };
-        frame.render_widget(
-            Paragraph::new(icon_title_line(
+    list.navigation.render(frame, |row, selected| {
+        let entry = &list.entries[list.visible[row / usize::from(geometry.card)]];
+        if row % usize::from(geometry.card) == 0 {
+            let title_style = Style::default().fg(Color::Rgb(235, 235, 245));
+            icon_title_line(
                 glyph(entry.state),
                 &entry.title,
                 geometry.width,
                 Style::default().fg(state_color(entry.state)),
-                title_style,
+                if entry.current {
+                    title_style.add_modifier(Modifier::BOLD)
+                } else {
+                    title_style
+                },
                 selected,
-            )),
-            Rect::new(0, row, geometry.width, 1),
-        );
-        if height >= 2 {
+            )
+        } else {
             let detail = if entry.current {
                 format!("{} · {}", tr("current", "当前"), entry.detail)
             } else {
                 entry.detail.clone()
             };
-            frame.render_widget(
-                Paragraph::new(context_line(&detail, geometry.width, selected)),
-                Rect::new(0, row + height - 1, geometry.width, 1),
-            );
+            context_line(&detail, geometry.width, selected)
         }
-    }
+    });
     if list.visible.is_empty() {
         let empty = if !list.query.is_empty() {
             tr("No matching results", "没有匹配项")
@@ -677,16 +606,16 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
     };
     for (index, label) in labels.iter().enumerate() {
         let rect = geometry.footer_rect(index as u16);
-        let disabled =
-            (index == 1 && list.scroll == 0) || (index == 2 && end == list.visible.len());
+        let disabled = (index == 1 && list.navigation.scroll == 0)
+            || (index == 2 && end == list.visible.len());
         let mut style = if disabled {
             muted
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         };
-        if list.pressed.as_ref().is_some_and(|press| {
-            !press.dragged && press.hit == [Hit::Back, Hit::Previous, Hit::Next, Hit::Close][index]
-        }) {
+        if list.navigation.is_pressed(&Hit::Action(
+            [Action::Back, Action::Previous, Action::Next, Action::Close][index],
+        )) {
             style = style.bg(Color::DarkGray);
         }
         frame.render_widget(Block::default().style(style), rect);
@@ -758,7 +687,7 @@ fn event_loop(
         Ok(entries) => list.replace(entries),
         Err(error) => list.error = Some(error.to_string()),
     }
-    list.selected = list
+    let current = list
         .visible
         .iter()
         .position(|index| list.entries[*index].current)
@@ -787,7 +716,8 @@ fn event_loop(
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let size = terminal.size()?;
     let geometry = Geometry::new(size.width, size.height);
-    list.move_by(0, geometry.capacity);
+    list.layout(geometry);
+    list.navigation.select(current * usize::from(geometry.card));
     let mut next_refresh = Instant::now() + Duration::from_secs(1);
     let mut dirty = true;
     loop {
@@ -807,9 +737,7 @@ fn event_loop(
         }
         let size = terminal.size()?;
         let geometry = Geometry::new(size.width, size.height);
-        list.scroll = list
-            .scroll
-            .min(list.visible.len().saturating_sub(geometry.capacity));
+        list.layout(geometry);
         if dirty {
             terminal.draw(|frame| draw(frame, kind, scope, &list, geometry))?;
             dirty = false;
@@ -820,98 +748,59 @@ fn event_loop(
         let input = event::read()?;
         let mut action = None;
         match input {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc => return Ok(Outcome::Close),
-                KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(Outcome::Close);
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    list.query.clear();
-                    list.search();
-                }
-                KeyCode::Char('q') if !list.searching => return Ok(Outcome::Close),
-                KeyCode::Down => list.move_by(1, geometry.capacity),
-                KeyCode::Up => list.move_by(-1, geometry.capacity),
-                KeyCode::Char('j') if !list.searching => list.move_by(1, geometry.capacity),
-                KeyCode::Char('k') if !list.searching => list.move_by(-1, geometry.capacity),
-                KeyCode::PageDown => list.page(geometry.capacity as i32, geometry.capacity),
-                KeyCode::PageUp => list.page(-(geometry.capacity as i32), geometry.capacity),
-                KeyCode::Enter => {
-                    action = list
-                        .visible
-                        .get(list.selected)
-                        .map(|index| Hit::Item(list.entries[*index].key.clone()))
-                }
-                KeyCode::Backspace if list.query.is_empty() && !list.searching => {
-                    return Ok(Outcome::Back);
-                }
-                KeyCode::Backspace => {
-                    list.query.pop();
-                    list.search();
-                }
-                KeyCode::Char('/') if !list.searching => list.searching = true,
-                KeyCode::Char(character)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if (!list.searching || !matches!(key.code, KeyCode::Char('j' | 'k')))
+                    && list.navigation.navigate(key.code)
                 {
-                    list.searching = true;
-                    list.query.push(character);
-                    list.search();
+                    dirty = true;
+                    continue;
                 }
-                _ => {}
-            },
+                match key.code {
+                    KeyCode::Esc => return Ok(Outcome::Close),
+                    KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(Outcome::Close);
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        list.query.clear();
+                        list.search();
+                    }
+                    KeyCode::Char('q') if !list.searching => return Ok(Outcome::Close),
+                    KeyCode::Enter => {
+                        action = list
+                            .selected_entry()
+                            .map(|entry| Hit::Item(entry.key.clone()));
+                    }
+                    KeyCode::Backspace if list.query.is_empty() && !list.searching => {
+                        return Ok(Outcome::Back);
+                    }
+                    KeyCode::Backspace => {
+                        list.query.pop();
+                        list.search();
+                    }
+                    KeyCode::Char('/') if !list.searching => list.searching = true,
+                    KeyCode::Char(character)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        list.searching = true;
+                        list.query.push(character);
+                        list.search();
+                    }
+                    _ => {}
+                }
+            }
             Event::Paste(text) => {
                 list.searching = true;
                 list.query.push_str(&clean(&text));
                 list.search();
             }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(Hit::Item(key)) = list.hit(geometry, mouse.column, mouse.row) {
-                        list.selected = list
-                            .visible
-                            .iter()
-                            .position(|index| list.entries[*index].key == key)
-                            .unwrap_or(list.selected);
-                    }
-                    list.pressed = list
-                        .hit(geometry, mouse.column, mouse.row)
-                        .map(|hit| Press {
-                            hit,
-                            row: mouse.row,
-                            dragged: false,
-                        })
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if let Some(press) = &mut list.pressed {
-                        press.dragged = true;
-                        let delta = (i32::from(press.row) - i32::from(mouse.row))
-                            / i32::from(geometry.card);
-                        if delta != 0 {
-                            press.row = mouse.row;
-                            list.page(delta, geometry.capacity);
-                        }
-                    }
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if let Some(press) = list.pressed.take()
-                        && !press.dragged
-                        && list.hit(geometry, mouse.column, mouse.row).as_ref() == Some(&press.hit)
-                    {
-                        action = Some(press.hit);
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    list.pressed = None;
-                    list.page(1, geometry.capacity);
-                }
-                MouseEventKind::ScrollUp => {
-                    list.pressed = None;
-                    list.page(-1, geometry.capacity);
-                }
-                _ => {}
-            },
+            Event::Mouse(mouse) => {
+                let actions = list.actions(geometry);
+                action = list.navigation.mouse(mouse, &actions);
+            }
+            Event::FocusLost => list.navigation.blur(),
+            Event::FocusGained => list.navigation.selection_visible = true,
             _ => {}
         }
         match action {
@@ -922,11 +811,11 @@ fn event_loop(
                     let _ = requests.try_send(());
                 }
             },
-            Some(Hit::Back) => return Ok(Outcome::Back),
-            Some(Hit::Close) => return Ok(Outcome::Close),
-            Some(Hit::Previous) => list.page(-(geometry.capacity as i32), geometry.capacity),
-            Some(Hit::Next) => list.page(geometry.capacity as i32, geometry.capacity),
-            Some(Hit::Search) => list.searching = true,
+            Some(Hit::Action(Action::Back)) => return Ok(Outcome::Back),
+            Some(Hit::Action(Action::Close)) => return Ok(Outcome::Close),
+            Some(Hit::Action(Action::Previous)) => list.navigation.page(-1),
+            Some(Hit::Action(Action::Next)) => list.navigation.page(1),
+            Some(Hit::Action(Action::Search)) => list.searching = true,
             None => {}
         }
         dirty = true;
@@ -1096,9 +985,14 @@ mod tests {
         list.replace(entries(Kind::Window, &scope, &panes, None));
         for (width, height) in [(40, 20), (32, 12), (24, 8)] {
             let geometry = Geometry::new(width, height);
+            list.layout(geometry);
             for offset in 0..geometry.card {
                 assert_eq!(
-                    list.hit(geometry, width - 1, geometry.header + offset),
+                    list.navigation.hit(
+                        width - 1,
+                        geometry.header + offset,
+                        &list.actions(geometry)
+                    ),
                     Some(Hit::Item("@1".into()))
                 );
             }
@@ -1106,16 +1000,19 @@ mod tests {
                 let rect = geometry.footer_rect(index);
                 for row in rect.y..rect.bottom() {
                     assert_eq!(
-                        list.hit(geometry, rect.x, row),
-                        Some(
-                            [Hit::Back, Hit::Previous, Hit::Next, Hit::Close][index as usize]
-                                .clone()
-                        )
+                        list.navigation.hit(rect.x, row, &list.actions(geometry)),
+                        Some(Hit::Action(
+                            [Action::Back, Action::Previous, Action::Next, Action::Close]
+                                [index as usize]
+                        ))
                     );
                 }
             }
             for row in 0..geometry.header {
-                assert!(!matches!(list.hit(geometry, 1, row), Some(Hit::Item(_))));
+                assert!(!matches!(
+                    list.navigation.hit(1, row, &list.actions(geometry)),
+                    Some(Hit::Item(_))
+                ));
             }
         }
     }
@@ -1129,9 +1026,10 @@ mod tests {
         let mut list = List::default();
         list.replace(entries(Kind::Window, &scope, &panes, None));
         let geometry = Geometry::new(40, 20);
-        let pressed = list.hit(geometry, 5, 3);
+        list.layout(geometry);
+        let pressed = list.navigation.hit(5, 3, &list.actions(geometry));
         list.replace(entries(Kind::Window, &scope, &panes[2..], None));
-        assert_ne!(list.hit(geometry, 5, 3), pressed);
+        assert_ne!(list.navigation.hit(5, 3, &list.actions(geometry)), pressed);
     }
 
     #[test]
@@ -1146,6 +1044,7 @@ mod tests {
         for (width, height) in [(40, 20), (32, 12), (24, 8), (12, 4)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let geometry = Geometry::new(width, height);
+            list.layout(geometry);
             terminal
                 .draw(|frame| draw(frame, Kind::Window, &scope, &list, geometry))
                 .unwrap();

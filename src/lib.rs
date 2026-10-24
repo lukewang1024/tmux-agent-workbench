@@ -14,6 +14,7 @@ mod menu_context;
 pub mod menu_footer;
 mod menu_skills;
 pub mod model;
+mod navigation_list;
 pub mod notification;
 pub mod notification_pipeline;
 pub mod paths;

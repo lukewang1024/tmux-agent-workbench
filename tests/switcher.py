@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         end = time.monotonic() + 8
         while not predicate():
             if time.monotonic() >= end:
-                raise AssertionError(label)
+                raise AssertionError((label, screen_rows()))
             drain(.05)
 
     def text(needle):
@@ -165,6 +165,14 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         _, _, width, height = content_rect()
         tap(width * (2 * index + 1) // 8, height)
 
+    def wheel(down, count=1):
+        x, y = position(10, 1)
+        os.write(master, (f'\x1b[<{65 if down else 64};{x};{y}M' * count).encode())
+
+    def visible_rows():
+        left, top, width, height = content_rect()
+        return [row[left:left + width] for row in screen_rows()[top:top + height]]
+
     def first_row():
         return 4 if content_rect()[3] >= 8 else 2
 
@@ -247,6 +255,22 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         reset()
         tmux('set-option', '-g', 'status', 'off')
         print('PASS bordered navigation keeps the correct target with the status bar visible', flush=True)
+        popup = open_list('window')
+        wheel(True)
+        wait(lambda: 'window-zero' not in visible_rows()[3], 'wheel did not scroll the window list')
+        before_refresh = visible_rows()[3]
+        drain(1.4)
+        assert visible_rows()[3] == before_refresh, 'refresh reset the wheel position'
+        assert focused(window=windows[0]) and popup.poll() is None, 'wheel activated a target'
+        wheel(False, 8)
+        wait(lambda: 'window-zero' in visible_rows()[3], 'wheel up did not stop at the beginning')
+        wheel(True)
+        drain(.2)
+        tap(10, 4)
+        popup.wait(timeout=5)
+        wait(lambda: focused(window=windows[1]), 'click after wheel scrolling chose the wrong window')
+        reset()
+        print('PASS shared wheel scrolling preserves position through refresh and keeps subsequent clicks accurate', flush=True)
         popup = open_list('window')
         footer(2)
         text('window-8')
@@ -332,7 +356,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         popup = open_list('window')
         footer(0)
         popup.wait(timeout=5)
-        text('Switch window')
+        text('New session')
         os.write(master, b'w')
         text('Switch windows')
         footer(3)
@@ -387,6 +411,42 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         assert popup.poll() is None and focused(window=windows[0])
         close(popup)
         print('PASS an empty Agent view stays usable and never turns a blank row into a target', flush=True)
+        # The overview Sidebar uses the same wheel/drag controller as filtered
+        # views, including when the pointer is over the pinned action bar.
+        for index in range(8):
+            tmux('new-session', '-d', '-s', f'wheel-{index}', '/bin/sh')
+        drain(1.3)
+        prepare_popup()
+        sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        popups.append(sidebar)
+        text('+ new')
+        wait(lambda: any('sessions' in row for row in visible_rows()), 'Sidebar session rows not ready')
+        wheel(True, 20)
+        wait(lambda: any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel did not reach the last session')
+        after_scroll = visible_rows()[1:-1]
+        drain(1.4)
+        assert visible_rows()[1:-1] == after_scroll, 'Sidebar refresh pulled the wheel back to its selection'
+        assert focused(window=windows[0]), 'Sidebar wheel changed the client target'
+        wheel(False, 20)
+        drain(.2)
+        assert not any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel could not return to the start'
+        for _ in range(12):
+            if any('wheel-0' in row for row in visible_rows()):
+                break
+            wheel(True)
+            drain(.1)
+        assert any('wheel-0' in row for row in visible_rows()), 'Sidebar could not browse to a session row'
+        row = next(index + 1 for index, value in enumerate(visible_rows()) if 'wheel-0' in value)
+        press(10, row)
+        drain(.2)
+        assert focused(window=windows[0]), 'Sidebar activated before release'
+        wheel(True)
+        release(10, row)
+        drain(.2)
+        assert sidebar.poll() is None and focused(window=windows[0]), 'wheeling while held also activated the Sidebar row'
+        close(sidebar)
+        print('PASS overview Sidebar shares wheel limits, refresh stability and release cancellation with filtered lists', flush=True)
     finally:
         resources.close()
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

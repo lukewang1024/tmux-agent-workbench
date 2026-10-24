@@ -132,6 +132,13 @@ The footer's four buttons occupy two full rows, with compact captions below
 Tap the search line or type `/` to search; pasted Chinese text is supported.
 Arrow keys, Page Up/Down, Enter, Escape and Backspace remain available.
 
+Sidebar and all four filtered views use `navigation_list::NavigationList`.
+Views provide stable row keys, a row renderer, content bounds and action regions;
+the shared component owns wheel/drag scrolling, release activation, keyboard
+selection, hit testing, refresh anchors and resize handling. Wheel scrolling
+moves the viewport independently of selection, including over pinned controls.
+The same component also restores terminal mouse/focus/paste modes on exit.
+
 | Mobile issue | Result |
 | --- | --- |
 | Native tree rows and dense fzf lists require precise taps | Sidebar's two-line entries provide a single touch target across both rows |
@@ -139,6 +146,7 @@ Arrow keys, Page Up/Down, Enter, Escape and Backspace remain available.
 | Navigation takes over the whole terminal | Sidebar and filtered views share a bounded popup; tiny clients use the full screen |
 | Shortened labels spend cells on ellipses | Shared Sidebar labels use those cells for text; search still matches full titles |
 | Press, swipe or refresh can select the wrong row | Release confirms a stable target identity; swipes and stale touches do not activate |
+| Wheel behavior differs between lists or snaps back during refresh | All list views use one controller and preserve the browsed item through refresh |
 | Sidebar opens a different picker and Back loses context | Both Sidebar routes use the same lists and preserve their origin |
 | Keyboard reduces the terminal viewport | Entries, paging and footer resize together without clearing search |
 | Short action menus reserve blank pagination rows | Menus that fit keep their full content; paginated menus use the actual footer budget |
