@@ -163,7 +163,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
 
     def footer(index):
         _, _, width, height = content_rect()
-        tap(width * (2 * index + 1) // 8, height)
+        if index in (1, 2):
+            os.write(master, b'\x1b[5~' if index == 1 else b'\x1b[6~')
+        else:
+            tap(width // 2, height - (2 if height >= 10 else 1) if index == 0 else height)
 
     def wheel(down, count=1):
         x, y = position(10, 1)
@@ -207,7 +210,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         source = tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'source', '-n', 'window-zero',
                       '-x', '40', '-y', '20', '-P', '-F', '#{pane_id}', '/bin/sh')
         for key, value in (('mouse', 'on'), ('status', 'off'), ('default-shell', '/bin/sh'),
-                           ('status-keys', 'emacs'), ('exit-empty', 'off'), ('exit-unattached', 'off')):
+                           ('status-keys', 'emacs'), ('exit-empty', 'off'), ('exit-unattached', 'off'),
+                           ('@workbench-ui', 'new')):
             tmux('set-option', '-g', key, value)
         tmux('set-option', '-sg', 'escape-time', '50')
         tmux('select-pane', '-t', source, '-T', 'pane-left')
@@ -234,6 +238,22 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         client = os.ttyname(slave)
         sibling = os.ttyname(other_slave)
         reset()
+        subprocess.check_call([core, 'ui', 'old'], env=env, stdout=subprocess.DEVNULL)
+        for kind, shortcut, target_window, target_pane, target_session in [
+            ('window', b'2', windows[1], None, 'source'),
+            ('pane', b'2', None, second, 'source'),
+            ('session', b'1', None, other, 'other'),
+            ('agent', b'1', None, other, 'other'),
+        ]:
+            popup = open_list(kind)
+            os.write(master, shortcut)
+            popup.wait(timeout=5)
+            wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
+                 'classic picker lost its scope or callback target')
+            assert client_value(sibling, '#{session_name}') == 'source'
+            reset()
+        subprocess.check_call([core, 'ui', 'new'], env=env, stdout=subprocess.DEVNULL)
+        print('PASS classic scoped pickers share content, identity guards and client isolation', flush=True)
         # Both lines of a Sidebar entry must activate the same window, and
         # press-and-hold must not activate before release.
         for y in (6, 7):
@@ -256,7 +276,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         tmux('set-option', '-g', 'status', 'off')
         print('PASS bordered navigation keeps the correct target with the status bar visible', flush=True)
         popup = open_list('window')
-        wheel(True)
+        wheel(True, 6)
         wait(lambda: 'window-zero' not in visible_rows()[3], 'wheel did not scroll the window list')
         before_refresh = visible_rows()[3]
         drain(1.4)
@@ -266,14 +286,18 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         wait(lambda: 'window-zero' in visible_rows()[3], 'wheel up did not stop at the beginning')
         wheel(True)
         drain(.2)
-        tap(10, 4)
+        tap(10, 6)
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[1]), 'click after wheel scrolling chose the wrong window')
         reset()
         print('PASS shared wheel scrolling preserves position through refresh and keeps subsequent clicks accurate', flush=True)
         popup = open_list('window')
         footer(2)
+        drain(.15)
+        footer(2)
         text('window-8')
+        footer(1)
+        drain(.15)
         footer(1)
         text('window-zero')
         os.write(master, b'/window-8')
@@ -339,7 +363,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             drain(.2)
             tap(10, first_row())
             popup.wait(timeout=5)
-            target = windows[4] if height == 12 else windows[2]
+            target = windows[3] if height == 12 else windows[2]
             wait(lambda: focused(window=target), 'small viewport card was not usable')
             reset()
         resize(40, 20)
@@ -452,6 +476,25 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         assert sidebar.poll() is None and focused(window=windows[0]), 'wheeling while held also activated the Sidebar row'
         close(sidebar)
         print('PASS overview Sidebar shares wheel limits, refresh stability and release cancellation with filtered lists', flush=True)
+        subprocess.check_call([core, 'ui', 'old'], env=env, stdout=subprocess.DEVNULL)
+        prepare_popup()
+        sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        popups.append(sidebar)
+        text('+ new')
+        drain(.2)
+        tap(content_rect()[2] - 2, 1)
+        text('workbench')
+        os.write(master, b'\x7f')
+        text('+ new')
+        os.write(master, b's')
+        text('Switch sessions')
+        os.write(master, b'\x7f')
+        text('+ new')
+        os.write(master, b'\x1b')
+        sidebar.wait(timeout=5)
+        drain(.7)
+        print('PASS classic Sidebar menu and picker return to Sidebar through Back', flush=True)
     finally:
         resources.close()
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -19,6 +19,7 @@ pub enum StatusMenuKind {
 pub enum View {
     #[default]
     Root,
+    Interface,
     Panes,
     Launch,
     Configure,
@@ -195,6 +196,7 @@ enum ActionCommand {
     Tmux(Vec<String>),
     NewSession,
     Switch(crate::switcher::Kind),
+    SetUi(crate::ui::Mode),
     Sidebar,
     Metrics,
     Agent(String),
@@ -511,7 +513,11 @@ fn run_with_context(
         let summary = match launch_summary(options) {
             Ok(lines) => lines
                 .into_iter()
-                .map(|line| Action::note(&line))
+                .enumerate()
+                .map(|(index, line)| Action {
+                    id: format!("summary:{index}"),
+                    ..Action::note(&line)
+                })
                 .collect::<Vec<_>>(),
             Err(error) => {
                 if let Some(start) = actions.iter_mut().find(|action| action.id == "start") {
@@ -567,6 +573,7 @@ fn run_with_context(
                 },
                 enabled,
                 role: match action.id.as_str() {
+                    id if id.starts_with("summary:") => crate::menu::Role::Summary,
                     "back" => crate::menu::Role::Back,
                     "start" => crate::menu::Role::Primary,
                     "launch-error" => crate::menu::Role::Error,
@@ -575,7 +582,19 @@ fn run_with_context(
             }
         })
         .collect();
-    crate::menu::display(crate::menu::Menu { title, items }, pane, client, page)
+    crate::menu::display(
+        crate::menu::Menu {
+            title,
+            items,
+            pager: Some(crate::menu::Pager {
+                before_page: base,
+                after_page: String::new(),
+            }),
+        },
+        pane,
+        client,
+        page,
+    )
 }
 
 fn nav(id: &str, label: &str, key: char, kind: StatusMenuKind, options: MenuOptions) -> Action {
@@ -614,6 +633,30 @@ fn actions(
     };
     let mut back = View::Root;
     match options.view {
+        View::Interface => {
+            let current = crate::ui::Mode::current().unwrap_or_default();
+            for (mode, id, label, key) in [
+                (
+                    crate::ui::Mode::Old,
+                    "ui-old",
+                    tr("Classic · tmux menus", "旧版 · tmux 菜单"),
+                    'o',
+                ),
+                (
+                    crate::ui::Mode::New,
+                    "ui-new",
+                    tr("New · Sidebar lists", "新版 · Sidebar 列表"),
+                    'n',
+                ),
+            ] {
+                actions.push(Action::new(
+                    id,
+                    &format!("{} {label}", if current == mode { "●" } else { "○" }),
+                    key,
+                    ActionCommand::SetUi(mode),
+                ));
+            }
+        }
         View::AgentTarget => {
             title = tr("Choose agent", "选择 agent").into();
             if let Ok(targets) = agent_targets(&context.window) {
@@ -848,6 +891,13 @@ fn actions(
                     tr("CPU / resources", "CPU / 资源"),
                     'c',
                     ActionCommand::Metrics,
+                ));
+                actions.push(nav(
+                    "interface",
+                    tr("Interface · classic / new", "交互 · 旧版 / 新版"),
+                    'i',
+                    kind,
+                    options.at(View::Interface),
                 ));
             }
             StatusMenuKind::Sidebar => {
@@ -1365,6 +1415,22 @@ fn execute_action(
                 } else {
                     crate::switcher::ReturnTo::Menu
                 },
+                0,
+            )?;
+        }
+        ActionCommand::SetUi(mode) => {
+            mode.set()?;
+            run(
+                StatusMenuKind::Menu,
+                &context.pane,
+                client,
+                None,
+                0,
+                false,
+                &MenuOptions {
+                    language: options.language.clone(),
+                    ..Default::default()
+                },
             )?;
         }
         ActionCommand::Sidebar => {
@@ -1577,7 +1643,7 @@ fn validate_pane(pane: &str) -> Result<()> {
         Err("invalid pane target".into())
     }
 }
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -1804,6 +1870,7 @@ mod tests {
             ] {
                 for view in [
                     View::Root,
+                    View::Interface,
                     View::Panes,
                     View::Launch,
                     View::Configure,
@@ -1839,7 +1906,7 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["agent", "sidebar", "tmux", "host", "metrics"]
+            ["agent", "sidebar", "tmux", "host", "metrics", "interface"]
         );
         for kind in [
             StatusMenuKind::Agent,

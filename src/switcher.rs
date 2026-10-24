@@ -10,10 +10,10 @@ use clap::ValueEnum;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::ipc::{Request, call};
 use crate::model::{DisplayState, Snapshot, TmuxTarget};
@@ -356,8 +356,6 @@ fn load(paths: &Paths, server: &ServerIdentity, kind: Kind, scope: &Scope) -> Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Back,
-    Previous,
-    Next,
     Close,
     Search,
 }
@@ -375,7 +373,7 @@ struct Geometry {
 impl Geometry {
     fn new(width: u16, height: u16) -> Self {
         let header = if height >= 8 { 3 } else { 1 }.min(height);
-        let footer = if height >= 6 { 2 } else { 1 }.min(height.saturating_sub(header));
+        let footer = if height >= 10 { 4 } else { 2 }.min(height.saturating_sub(header));
         let body = height.saturating_sub(header + footer);
         let card = body.clamp(1, 2);
         Self {
@@ -389,14 +387,9 @@ impl Geometry {
     }
 
     fn footer_rect(self, index: u16) -> Rect {
-        let left = u32::from(self.width) * u32::from(index) / 4;
-        let right = u32::from(self.width) * u32::from(index + 1) / 4;
-        Rect::new(
-            left as u16,
-            self.height - self.footer,
-            (right - left) as u16,
-            self.footer,
-        )
+        let top = self.height - self.footer + self.footer * index / 2;
+        let bottom = self.height - self.footer + self.footer * (index + 1) / 2;
+        Rect::new(0, top, self.width, bottom - top)
     }
 }
 
@@ -469,10 +462,14 @@ impl List {
                     .saturating_sub(geometry.header + geometry.footer),
             ),
         ));
+        self.navigation.set_actions(&[
+            (geometry.footer_rect(0), Action::Back),
+            (geometry.footer_rect(1), Action::Close),
+        ]);
     }
 
     fn actions(&self, geometry: Geometry) -> Vec<(Rect, Action)> {
-        let mut actions: Vec<_> = [Action::Back, Action::Previous, Action::Next, Action::Close]
+        let mut actions: Vec<_> = [Action::Back, Action::Close]
             .into_iter()
             .enumerate()
             .map(|(index, action)| (geometry.footer_rect(index as u16), action))
@@ -586,54 +583,26 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
             ),
         );
     }
-    let labels = if geometry.width < 28 {
-        [
-            tr("back", "返回"),
-            tr("prev", "上页"),
-            tr("next", "下页"),
-            tr("close", "关闭"),
-        ]
-    } else if geometry.width < 32 {
-        [
-            tr("‹back", "‹返回"),
-            tr("↑prev", "↑上页"),
-            tr("↓next", "↓下页"),
-            tr("×close", "×关闭"),
-        ]
-    } else {
-        [
-            tr("‹ back", "‹ 返回"),
-            tr("↑ prev", "↑ 上页"),
-            tr("↓ next", "↓ 下页"),
-            tr("× close", "× 关闭"),
-        ]
-    };
-    for (index, label) in labels.iter().enumerate() {
+    for (index, (label, key, action)) in [
+        (tr("← Back", "← 返回"), "BSpace", Action::Back),
+        (tr("× close", "× 关闭"), "Escape", Action::Close),
+    ]
+    .iter()
+    .enumerate()
+    {
         let rect = geometry.footer_rect(index as u16);
-        let disabled = (index == 1 && list.navigation.scroll == 0)
-            || (index == 2 && end == list.visible.len());
-        let mut style = if disabled {
-            muted
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        if list.navigation.is_pressed(&Hit::Action(
-            [Action::Back, Action::Previous, Action::Next, Action::Close][index],
-        )) {
-            style = style.bg(Color::DarkGray);
+        for row in 0..rect.height {
+            frame.render_widget(
+                Paragraph::new(crate::menu::action_line(
+                    label,
+                    key,
+                    usize::from(row),
+                    rect.width,
+                    list.navigation.is_highlighted(&Hit::Action(*action)),
+                )),
+                Rect::new(rect.x, rect.y + row, rect.width, 1),
+            );
         }
-        frame.render_widget(Block::default().style(style), rect);
-        frame.render_widget(
-            Paragraph::new(*label)
-                .style(style)
-                .alignment(Alignment::Center),
-            Rect::new(
-                rect.x,
-                rect.y + u16::from(rect.height > 1),
-                rect.width,
-                1.min(rect.height),
-            ),
-        );
     }
 }
 
@@ -672,6 +641,131 @@ fn activate(
         }
     }
     Ok(entry.target)
+}
+
+pub fn select(
+    paths: &Paths,
+    server: &ServerIdentity,
+    kind: Kind,
+    pane: &str,
+    client: &str,
+    key: &str,
+) -> Result<TmuxTarget> {
+    activate(
+        paths,
+        server,
+        kind,
+        &Scope::read(server, pane, client)?,
+        key,
+    )
+}
+
+fn native_picker(
+    paths: &Paths,
+    server: &ServerIdentity,
+    kind: Kind,
+    scope: &Scope,
+    pane: &str,
+    client: &str,
+    return_to: ReturnTo,
+    page: usize,
+) -> Result<()> {
+    use crate::menu::{Item, Menu, Pager, Role};
+    use crate::status_menu::shell_quote as quote;
+    let executable = quote(&std::env::current_exe()?.to_string_lossy());
+    let base = format!(
+        "{executable} switch {} --pane {} --client {} --language {} --return-to {}",
+        kind.name(),
+        quote(pane),
+        quote(client),
+        crate::ui_language::name(),
+        return_to.name()
+    );
+    let mut items: Vec<_> = load(paths, server, kind, scope)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| Item {
+            id: entry.key.clone(),
+            label: format!(
+                "{}{} · {}",
+                if entry.current { "● " } else { "" },
+                entry.title,
+                entry.detail
+            ),
+            key: "123456789abcdefghijklmnopqrstuvwxyz"
+                .chars()
+                .nth(index)
+                .map(|key| key.to_string())
+                .unwrap_or_default(),
+            command: format!(
+                "run-shell -b {}",
+                quote(&format!("{base} --select {}", quote(&entry.key)))
+            ),
+            enabled: true,
+            role: Role::Body,
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(Item {
+            id: "empty".into(),
+            label: tr("No entries", "没有可切换的项目").into(),
+            key: String::new(),
+            command: String::new(),
+            enabled: false,
+            role: Role::Body,
+        });
+    }
+    let destination = match return_to {
+        ReturnTo::SidebarPane => String::new(),
+        ReturnTo::SidebarPopup => format!(
+            "run-shell -b {}",
+            quote(&format!(
+                "{executable} sidebar --popup --pane {} --client {}",
+                quote(pane),
+                quote(client)
+            ))
+        ),
+        _ => format!(
+            "run-shell -b {}",
+            quote(&format!(
+                "{executable} status-menu {} --pane {} --client {} --language {}{}",
+                if matches!(return_to, ReturnTo::SidebarMenu) {
+                    "sidebar"
+                } else {
+                    "tmux"
+                },
+                quote(pane),
+                quote(client),
+                crate::ui_language::name(),
+                if matches!(return_to, ReturnTo::MenuFromMain | ReturnTo::SidebarMenu) {
+                    " --from-menu"
+                } else {
+                    ""
+                }
+            ))
+        ),
+    };
+    items.push(Item {
+        id: "back".into(),
+        label: crate::menu_footer::back_label().into(),
+        key: "BSpace".into(),
+        command: destination,
+        enabled: true,
+        role: Role::Back,
+    });
+    crate::menu::display(
+        Menu {
+            title: format!("{} · {}", kind.title(), scope.label(kind)),
+            items,
+            pager: Some(Pager {
+                before_page: base,
+                after_page: String::new(),
+            }),
+        },
+        pane,
+        client,
+        page,
+    )
 }
 
 enum Outcome {
@@ -771,8 +865,14 @@ fn event_loop(
                     KeyCode::Char('q') if !list.searching => return Ok(Outcome::Close),
                     KeyCode::Enter => {
                         action = list
-                            .selected_entry()
-                            .map(|entry| Hit::Item(entry.key.clone()));
+                            .navigation
+                            .focused_action()
+                            .copied()
+                            .map(Hit::Action)
+                            .or_else(|| {
+                                list.selected_entry()
+                                    .map(|entry| Hit::Item(entry.key.clone()))
+                            });
                     }
                     KeyCode::Backspace if list.query.is_empty() && !list.searching => {
                         return Ok(Outcome::Back);
@@ -817,8 +917,6 @@ fn event_loop(
             },
             Some(Hit::Action(Action::Back)) => return Ok(Outcome::Back),
             Some(Hit::Action(Action::Close)) => return Ok(Outcome::Close),
-            Some(Hit::Action(Action::Previous)) => list.navigation.page(-1),
-            Some(Hit::Action(Action::Next)) => list.navigation.page(1),
             Some(Hit::Action(Action::Search)) => list.searching = true,
             None => {}
         }
@@ -836,9 +934,14 @@ pub fn run(
     inside: bool,
     language: Option<&str>,
     return_to: ReturnTo,
+    page: usize,
 ) -> Result<Option<TmuxTarget>> {
     crate::ui_language::set_language(language);
     let scope = Scope::read(server, pane, client)?;
+    if !inside && crate::ui::Mode::current()? == crate::ui::Mode::Old {
+        native_picker(paths, server, kind, &scope, pane, client, return_to, page)?;
+        return Ok(None);
+    }
     if !inside {
         crate::sidebar::popup(
             server,
@@ -1005,15 +1108,12 @@ mod tests {
                     Some(Hit::Item("@1".into()))
                 );
             }
-            for index in 0..4 {
+            for index in 0..2 {
                 let rect = geometry.footer_rect(index);
                 for row in rect.y..rect.bottom() {
                     assert_eq!(
                         list.navigation.hit(rect.x, row, &list.actions(geometry)),
-                        Some(Hit::Action(
-                            [Action::Back, Action::Previous, Action::Next, Action::Close]
-                                [index as usize]
-                        ))
+                        Some(Hit::Action([Action::Back, Action::Close][index as usize]))
                     );
                 }
             }

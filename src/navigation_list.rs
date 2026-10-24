@@ -15,8 +15,6 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-const WHEEL_ROWS: isize = 2;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Hit<A> {
     Item(String),
@@ -36,6 +34,8 @@ pub(crate) struct NavigationList<A> {
     pub scroll: usize,
     pub selection_visible: bool,
     pub hovered: Option<Hit<A>>,
+    actions: Vec<A>,
+    focused_action: Option<A>,
     pressed: Option<Press<A>>,
     follow_selection: bool,
 }
@@ -49,6 +49,8 @@ impl<A: Clone + Eq> Default for NavigationList<A> {
             scroll: 0,
             selection_visible: true,
             hovered: None,
+            actions: vec![],
+            focused_action: None,
             pressed: None,
             follow_selection: true,
         }
@@ -151,6 +153,7 @@ impl<A: Clone + Eq> NavigationList<A> {
     pub fn select(&mut self, index: usize) {
         if self.rows.get(index).is_some_and(Option::is_some) {
             self.selected = self.start(index);
+            self.focused_action = None;
             self.selection_visible = true;
             self.follow_selection = true;
             self.reveal_selection();
@@ -158,6 +161,32 @@ impl<A: Clone + Eq> NavigationList<A> {
     }
 
     pub fn navigate(&mut self, key: KeyCode) -> bool {
+        self.hovered = None;
+        let down = matches!(key, KeyCode::Down | KeyCode::Char('j'));
+        let up = matches!(key, KeyCode::Up | KeyCode::Char('k'));
+        if let Some(action) = &self.focused_action
+            && (down || up)
+            && let Some(index) = self.actions.iter().position(|value| value == action)
+        {
+            if down {
+                self.focused_action = self
+                    .actions
+                    .get(index + 1)
+                    .cloned()
+                    .or_else(|| Some(action.clone()));
+            } else if index > 0 {
+                self.focused_action = self.actions.get(index - 1).cloned();
+            } else if let Some(last) = self.rows.iter().rposition(Option::is_some) {
+                self.select(last);
+            }
+            self.cancel_press();
+            return true;
+        }
+        if key == KeyCode::End && !self.actions.is_empty() {
+            self.focused_action = self.actions.last().cloned();
+            self.cancel_press();
+            return true;
+        }
         let next = match key {
             KeyCode::Down | KeyCode::Char('j') => (self.selected + 1..self.rows.len())
                 .find(|index| self.rows[*index].is_some() && self.start(*index) == *index),
@@ -175,6 +204,8 @@ impl<A: Clone + Eq> NavigationList<A> {
         self.pressed = None;
         if let Some(index) = next {
             self.select(index);
+        } else if down {
+            self.focused_action = self.actions.first().cloned();
         }
         true
     }
@@ -187,6 +218,7 @@ impl<A: Clone + Eq> NavigationList<A> {
 
     pub fn page(&mut self, direction: isize) {
         self.cancel_press();
+        self.focused_action = None;
         self.scroll_by(direction * isize::try_from(self.area.height).unwrap_or(0));
         if let Some(index) = self
             .visible_rows()
@@ -204,6 +236,7 @@ impl<A: Clone + Eq> NavigationList<A> {
     pub fn blur(&mut self) {
         self.selection_visible = false;
         self.hovered = None;
+        self.focused_action = None;
         self.cancel_press();
     }
 
@@ -213,6 +246,7 @@ impl<A: Clone + Eq> NavigationList<A> {
 
     pub fn is_selected(&self, row: usize) -> bool {
         self.selection_visible
+            && self.focused_action.is_none()
             && self
                 .rows
                 .get(row)
@@ -257,10 +291,40 @@ impl<A: Clone + Eq> NavigationList<A> {
             .is_some_and(|press| !press.dragged && &press.hit == hit)
     }
 
+    /// Pinned controls participate in the same navigation order as body rows.
+    pub fn set_actions(&mut self, actions: &[(Rect, A)]) {
+        self.actions = actions
+            .iter()
+            .filter(|(area, _)| area.height > 0)
+            .map(|(_, action)| action.clone())
+            .collect();
+        if self
+            .focused_action
+            .as_ref()
+            .is_some_and(|action| !self.actions.contains(action))
+        {
+            self.focused_action = None;
+        }
+    }
+
+    pub fn focused_action(&self) -> Option<&A> {
+        self.focused_action.as_ref()
+    }
+
+    pub fn is_highlighted(&self, hit: &Hit<A>) -> bool {
+        self.is_pressed(hit)
+            || self.hovered.as_ref() == Some(hit)
+            || matches!(hit, Hit::Action(action) if self.focused_action.as_ref() == Some(action))
+    }
+
     pub fn mouse(&mut self, mouse: MouseEvent, actions: &[(Rect, A)]) -> Option<Hit<A>> {
         let hit = self.hit(mouse.column, mouse.row, actions);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.focused_action = match &hit {
+                    Some(Hit::Action(action)) => Some(action.clone()),
+                    _ => None,
+                };
                 if let Some(Hit::Item(key)) = &hit
                     && let Some(index) = self.nearest(
                         key,
@@ -296,14 +360,44 @@ impl<A: Clone + Eq> NavigationList<A> {
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 self.cancel_press();
-                self.scroll_by(if mouse.kind == MouseEventKind::ScrollDown {
-                    WHEEL_ROWS
+                if matches!(self.hovered, Some(Hit::Action(_))) {
+                    self.focused_action = None;
+                }
+                self.hovered = None;
+                self.selection_visible = true;
+                let down = mouse.kind == MouseEventKind::ScrollDown;
+                let next_item = if down {
+                    self.rows
+                        .iter()
+                        .skip(self.selected + 1)
+                        .any(Option::is_some)
                 } else {
-                    -WHEEL_ROWS
-                });
+                    self.rows.iter().take(self.selected).any(Option::is_some)
+                };
+                // A menu may end with explanatory lines, or contain only
+                // information. Keep those lines reachable before its controls.
+                let can_scroll = if down {
+                    self.visible_rows().end < self.rows.len()
+                } else {
+                    self.scroll > 0
+                };
+                if !self.actions.is_empty()
+                    && !next_item
+                    && can_scroll
+                    && (self.focused_action.is_none() || !self.rows.iter().any(Option::is_some))
+                {
+                    self.focused_action = None;
+                    self.scroll_by(if down { 1 } else { -1 });
+                    return None;
+                }
+                self.navigate(if down { KeyCode::Down } else { KeyCode::Up });
             }
             MouseEventKind::Moved => {
                 self.hovered = hit.clone();
+                self.focused_action = match &hit {
+                    Some(Hit::Action(action)) => Some(action.clone()),
+                    _ => None,
+                };
                 self.selection_visible = matches!(hit, Some(Hit::Item(_)));
                 if let Some(Hit::Item(key)) = hit
                     && let Some(index) = self.nearest(
@@ -398,11 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scrolls_without_activating_or_recentering_on_refresh() {
+    fn wheel_moves_selection_like_sidebar_and_reveals_whole_entries() {
         let mut list = list();
         assert_eq!(list.mouse(mouse(MouseEventKind::ScrollDown, 0), &[]), None);
         assert_eq!(list.scroll, 2);
-        assert_eq!(list.selected, 1);
+        assert_eq!(list.selected, 4);
         list.replace_rows(list.rows.clone());
         list.set_viewport(Rect::new(1, 2, 24, 4));
         assert_eq!(list.scroll, 2);
@@ -413,7 +507,63 @@ mod tests {
         for _ in 0..20 {
             list.mouse(mouse(MouseEventKind::ScrollUp, 3), &[]);
         }
+        assert_eq!(list.scroll, 1);
+        assert_eq!(list.selected, 1);
+    }
+
+    #[test]
+    fn fitting_list_wheel_and_hover_also_reach_pinned_controls() {
+        let mut list = list();
+        list.set_viewport(Rect::new(1, 2, 24, 10));
+        let actions = [
+            (Rect::new(1, 12, 24, 2), "back"),
+            (Rect::new(1, 14, 24, 2), "close"),
+        ];
+        list.set_actions(&actions);
+        list.mouse(mouse(MouseEventKind::ScrollDown, 3), &actions);
+        assert_eq!(list.selected, 4);
         assert_eq!(list.scroll, 0);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 3), &actions);
+        assert_eq!(list.selected, 1);
+        for _ in 0..4 {
+            list.mouse(mouse(MouseEventKind::ScrollDown, 3), &actions);
+        }
+        assert_eq!(list.focused_action(), Some(&"close"));
+        assert!(list.is_highlighted(&Hit::Action("close")));
+        list.mouse(mouse(MouseEventKind::Moved, 12), &actions);
+        assert!(list.is_highlighted(&Hit::Action("back")));
+        assert!(!list.is_highlighted(&Hit::Action("close")));
+        list.mouse(mouse(MouseEventKind::Moved, 4), &actions);
+        assert_eq!(list.focused_action(), None);
+        assert!(list.is_selected(1));
+        list.select(4);
+        list.mouse(mouse(MouseEventKind::Moved, 14), &actions);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 14), &actions);
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.focused_action(), None);
+    }
+
+    #[test]
+    fn informational_lists_remain_scrollable_before_reaching_the_close_control() {
+        let mut list = NavigationList::default();
+        list.replace_rows(vec![None; 12]);
+        list.set_viewport(Rect::new(1, 2, 24, 3));
+        let actions = [(Rect::new(1, 5, 24, 2), "close")];
+        list.set_actions(&actions);
+        for _ in 0..3 {
+            list.mouse(mouse(MouseEventKind::ScrollDown, 3), &actions);
+        }
+        assert_eq!(list.scroll, 3);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 3), &actions);
+        assert_eq!(list.scroll, 2);
+        assert_eq!(list.focused_action(), None);
+        for _ in 0..20 {
+            list.mouse(mouse(MouseEventKind::ScrollDown, 3), &actions);
+        }
+        assert_eq!(list.scroll, 9);
+        assert_eq!(list.focused_action(), Some(&"close"));
+        list.mouse(mouse(MouseEventKind::ScrollUp, 3), &actions);
+        assert_eq!(list.scroll, 8);
     }
 
     #[test]

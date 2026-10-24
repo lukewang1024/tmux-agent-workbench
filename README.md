@@ -127,6 +127,24 @@ is focused, press `?` for a centered list of plain single-key actions.
 Optional global bindings are (re)installed each time the
 plugin loads when their option is explicitly set.
 
+The classic tmux menu is the default. Choose **Interface · classic / new** in
+the combined Menu to compare it with the new Sidebar list renderer. Content,
+scope checks and callbacks are shared; switching applies to subsequent menus
+and switch lists immediately. The Sidebar itself keeps its established list
+interaction. The CLI offers the same switch:
+
+```sh
+tmux-agent-workbench ui old
+tmux-agent-workbench ui new
+tmux-agent-workbench ui toggle
+tmux-agent-workbench ui status
+```
+
+The preference is saved under `$XDG_CONFIG_HOME/tmux-agent-workbench/ui-mode`.
+The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
+The classic renderer uses native one-line tmux menus with pagination; the new
+renderer uses larger list rows and Sidebar-sized navigation popups.
+
 | Action | Option | Default | Runs |
 |---|---|---|---|
 | Pick/start a tmuxinator project | `@workbench-key-project` | unbound | Project picker |
@@ -330,9 +348,9 @@ The tmux menu starts with **Switch window**, **Switch session**, **Switch agent*
 and **Switch pane**, followed by **New session**, **New window**, **Launch agent**,
 **Panes & layout**, the installed editor, and **Detach**. Switch window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
-and running Agents have separate server-wide views. These views share Sidebar's
+and running Agents have separate server-wide views. In the new UI these views share Sidebar's
 bordered popup and two-line title/context rows, with search, paging, and a
-two-row Back/Close bar. The popup leaves terminal context visible, caps its size
+full-width Back and Close rows. The popup leaves terminal context visible, caps its size
 at 96 columns by 40 rows, and uses all available space on very small screens.
 Labels use the available cells without ellipses. Selection happens on release;
 dragging scrolls without activating. Sidebar's Session/Agent shortcuts and menu
@@ -397,10 +415,11 @@ to that collection. The source pane and client may also be supplied explicitly
 with `--pane` and `--client`.
 
 Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, Resources and
-Sidebar menus all use the same Menu component, with two-row buttons and a
+Sidebar menus all use the same Menu model. In the new UI they have two-row buttons and a
 content-sized popup capped at 60 columns. Menus share Sidebar's wheel/drag,
 keyboard and release handling; held presses never open the next menu early.
-Wheel scrolling works over the pinned footer too. Back/Close and Launch remain
+Wheel moves the selection even when the list fits, and scrolls to keep it visible.
+Hover highlights both entries and pinned controls. Back/Close and Launch remain
 visible on short screens. Information, blank and outside taps leave the menu
 open; Escape or Close dismisses it. Long Host/member lists remain scrollable
 after their shortcut keys run out.

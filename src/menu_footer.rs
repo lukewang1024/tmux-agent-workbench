@@ -18,13 +18,23 @@ pub fn key_name(key: char) -> String {
 
 pub fn close_item(back_closes: bool) -> [String; 3] {
     [
-        tr("× close", "× 关闭").into(),
+        item_label(tr("× close", "× 关闭"), "Escape"),
         key_name(if back_closes { BACK_KEY } else { '\x1b' }),
         String::new(),
     ]
 }
 
+pub(crate) fn item_label(label: &str, key: &str) -> String {
+    let hint = match key {
+        "Enter" => "enter",
+        "BSpace" => "back",
+        "Escape" => "esc",
+        _ => return label.into(),
+    };
+    format!("{label} #[align=right]({hint})#[list=on]#[list=left-marker]")
+}
+
 /// Shell providers supply display-menu arguments and reuse the same footer.
-pub fn display(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    crate::menu::display_legacy(args)
+pub fn display(args: &[String], page: usize) -> Result<(), Box<dyn std::error::Error>> {
+    crate::menu::display_legacy(args, page)
 }

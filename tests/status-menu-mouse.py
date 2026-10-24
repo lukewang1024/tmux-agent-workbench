@@ -298,6 +298,72 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         version = re.search(r'(\d+)\.(\d+)', tmux('display-message', '-p', '#{version}'))
         release_menus = version is not None and tuple(map(int, version.groups())) >= (3, 8)
+        def ui(mode='status'):
+            return subprocess.check_output([core, 'ui', mode], env=env, text=True).strip()
+        assert ui() == 'old', 'classic UI must remain the default'
+        menu = open_menu([core, 'menu', '--pane', pane, '--client', client],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Interface')
+        os.write(master, b'i')
+        wait_for_text(client_process, b'Classic', b'New', b'(back)')
+        os.write(master, b'n')
+        rendered = wait_for_text(client_process, b'CPU / resources', b'Interface')
+        assert ui() == 'new'
+        assert item_position(rendered, 'Sidebar')[1] >= item_position(rendered, 'Agent')[1] + 2
+        os.write(master, b'i')
+        wait_for_text(client_process, b'Classic', b'New', b'(back)')
+        os.write(master, b'o')
+        wait_for_text(client_process, b'CPU / resources', b'Interface')
+        assert ui() == 'old'
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(.7)
+        # A native page callback rebuilds its provider and keeps Back/Close.
+        hosts.write_text(''.join(f'classic-{index:02}\n' for index in range(50)))
+        menu = open_menu([core, 'status-menu', 'host', '--pane', pane, '--client', client],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'classic-00', b'Next')
+        os.write(master, b']')
+        rendered = wait_for_text(client_process, b'Previous', b'Next')
+        assert b'classic-00' not in screen_text(rendered)
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(.7)
+        hosts.write_text('dev-host\ntest-host\n')
+        assert ui('toggle') == 'new'
+        tmux('set-option', '-gu', '@workbench-ui')
+        assert ui() == 'new', 'saved preference did not survive clearing the server override'
+        print('PASS classic default, in-menu backend round trip, native paging and persistent CLI switch')
+
+        # These lists fit completely: wheel must still move selection. Verify
+        # SGR and legacy wheel reports through the actual attached tmux PTY.
+        choice_args = [core, 'display-menu', '--', '-c', client, '-t', pane, '-T', 'Pointer test',
+                       'Alpha', 'a', 'set-option -g @pointer-choice alpha',
+                       'Beta', 'b', 'set-option -g @pointer-choice beta']
+        for event_kind in ('wheel-down', 'wheel-up', 'legacy-wheel', 'hover', 'close-hover', 'close-hover-wheel'):
+            tmux('set-option', '-gu', '@pointer-choice')
+            menu = open_menu(choice_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu, b'Alpha', b'Beta')
+            x, y = item_position(rendered, 'Beta' if event_kind == 'hover' else 'close' if event_kind.startswith('close-hover') else 'Alpha')
+            if event_kind == 'wheel-down':
+                report = f'\x1b[<65;{x};{y}M'.encode()
+            elif event_kind == 'wheel-up':
+                report = (f'\x1b[<65;{x};{y}M\x1b[<64;{x};{y}M').encode()
+            elif event_kind == 'legacy-wheel':
+                report = b'\x1b[M' + bytes((97, x + 32, y + 32))
+            elif event_kind == 'close-hover-wheel':
+                report = f'\x1b[<35;{x};{y}M\x1b[<65;{x};{y}M'.encode()
+            else:
+                report = f'\x1b[<35;{x};{y}M'.encode()
+            os.write(master, report)
+            drain(.15)
+            assert menu.poll() is None and not tmux('show-option', '-gqv', '@pointer-choice'), event_kind
+            os.write(master, b'\r')
+            menu.wait(timeout=3)
+            expected = '' if event_kind == 'close-hover' else 'alpha' if event_kind == 'wheel-up' else 'beta'
+            assert tmux('show-option', '-gqv', '@pointer-choice') == expected, event_kind
+            drain(.3)
+        print('PASS fitting menu: SGR/legacy wheel both directions, hover selection and Close hover')
         root_args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client]
         menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'Switch window', b'Switch session', b'New session...', b'Launch agent...')
@@ -508,11 +574,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert not any(key in screen_text(rendered) for key in (b'(BSpace)', b'(Escape)', b'(Enter)')), (view, rendered)
             back_x, back_y = item_position(rendered, '← Back')
             close_x, close_y = item_position(rendered, 'close')
-            assert close_y == back_y
+            assert close_y >= back_y + 2
             back_key_x, _ = item_position(rendered, '(back)')
             close_key_x, _ = item_position(rendered, '(esc)')
-            assert item_position(rendered, '(back)')[1] == back_y + 1
-            assert item_position(rendered, '(esc)')[1] == close_y + 1
+            assert item_position(rendered, '(back)')[1] == back_y and back_key_x > back_x
+            assert item_position(rendered, '(esc)')[1] == close_y and close_key_x > close_x
             if view == 'configure':
                 launch_x, launch_y = item_position(rendered, '▶ Launch')
                 assert launch_y + 2 <= back_y
@@ -1070,8 +1136,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
-        # Disabled cwd/summary rows remain inert instead of dismissing the menu.
-        x, y = item_position(rendered, '/tmp/')
+        # The pinned model summary remains inert on a keyboard-sized screen.
+        x, y = item_position(rendered, 'daily-single')
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         rendered += drain(.15)
         assert menu.poll() is None
@@ -1079,7 +1145,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for _ in range(6):
             visible = '\n'.join(screen_rows(rendered))
             assert all(hint in visible for hint in ('(enter)', '(back)', '(esc)')), visible
-            assert item_position(rendered, '← Back')[1] == item_position(rendered, 'close')[1]
+            assert item_position(rendered, '← Back')[1] < item_position(rendered, 'close')[1]
             visited.append(visible)
             os.write(master, b']')
             # Preserve the current screen: the shared renderer only emits
@@ -1091,7 +1157,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         wait_for_text(client_process, b'choose agen')
         os.write(master, b'\x1b')
         drain()
-        print('PASS Back stays beside Close across submenu pages')
+        print('PASS Back and Close retain right-aligned shortcuts across submenu pages')
         print('PASS narrow client with paginated actions')
         write_frame(termux, {'type': 'goodbye', 'version': 2})
         termux.wait(timeout=3)

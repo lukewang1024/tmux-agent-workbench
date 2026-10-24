@@ -61,6 +61,11 @@ enum Command {
         #[arg(long)]
         client: Option<String>,
     },
+    /// Select the classic tmux UI or the shared Sidebar UI without reloading.
+    Ui {
+        #[arg(value_enum, default_value = "status")]
+        mode: tmux_agent_workbench::ui::Choice,
+    },
     /// Open a scoped Sidebar navigation view.
     Switch {
         kind: tmux_agent_workbench::switcher::Kind,
@@ -74,6 +79,10 @@ enum Command {
         language: Option<String>,
         #[arg(long, hide = true, value_enum, default_value = "menu")]
         return_to: tmux_agent_workbench::switcher::ReturnTo,
+        #[arg(long, hide = true)]
+        select: Option<String>,
+        #[arg(long, hide = true, default_value_t = 0)]
+        page: usize,
     },
     #[command(hide = true)]
     NormalizeResurrectLayout {
@@ -86,6 +95,8 @@ enum Command {
     },
     #[command(hide = true)]
     DisplayMenu {
+        #[arg(long, hide = true, default_value_t = 0)]
+        page: usize,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -1375,21 +1386,31 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             inside,
             language,
             return_to,
+            select,
+            page,
         } => {
             let server = ServerIdentity::discover()?;
             if kind == tmux_agent_workbench::switcher::Kind::Agent {
                 let _ = ensure_daemon_quiet(&paths);
             }
-            if let Some(target) = tmux_agent_workbench::switcher::run(
-                &paths,
-                &server,
-                kind,
-                &pane,
-                &client,
-                inside,
-                language.as_deref(),
-                return_to,
-            )? {
+            let target = if let Some(key) = select {
+                Some(tmux_agent_workbench::switcher::select(
+                    &paths, &server, kind, &pane, &client, &key,
+                )?)
+            } else {
+                tmux_agent_workbench::switcher::run(
+                    &paths,
+                    &server,
+                    kind,
+                    &pane,
+                    &client,
+                    inside,
+                    language.as_deref(),
+                    return_to,
+                    page,
+                )?
+            };
+            if let Some(target) = target {
                 focus_target(
                     &target.session_id,
                     Some(&format!("{}:{}", target.session_id, target.window_index)),
@@ -1400,7 +1421,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             }
         }
-        Command::DisplayMenu { args } => tmux_agent_workbench::menu_footer::display(&args)?,
+        Command::DisplayMenu { args, page } => {
+            tmux_agent_workbench::menu_footer::display(&args, page)?
+        }
+        Command::Ui { mode } => tmux_agent_workbench::ui::run(mode)?,
         Command::Menu { pane, client } => {
             tmux_agent_workbench::status_menu::open_root(pane.as_deref(), client.as_deref())?
         }

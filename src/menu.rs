@@ -11,10 +11,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::Paragraph,
 };
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -34,6 +34,7 @@ pub(crate) enum Role {
     Back,
     Primary,
     Error,
+    Summary,
     Close,
 }
 
@@ -51,6 +52,25 @@ pub(crate) struct Item {
 pub(crate) struct Menu {
     pub title: String,
     pub items: Vec<Item>,
+    pub pager: Option<Pager>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Pager {
+    pub before_page: String,
+    pub after_page: String,
+}
+
+impl Pager {
+    fn command(&self, page: usize) -> String {
+        format!(
+            "run-shell -b {}",
+            crate::status_menu::shell_quote(&format!(
+                "{} --page {page} {}",
+                self.before_page, self.after_page
+            ))
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,7 +91,138 @@ impl Drop for Exchange {
     }
 }
 
+/// The classic renderer consumes the same model and callbacks. Pagination
+/// rebuilds the provider, so no request files survive a native menu callback.
+fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<()> {
+    let server = ServerIdentity::discover()?;
+    let tmux = crate::tmux::Tmux::new(server.clone());
+    let drawing_pane = tmux
+        .client_format(client, "#{pane_id}")?
+        .ok_or("menu client disappeared")?;
+    let height: usize = tmux
+        .client_format(client, "#{client_height}")?
+        .ok_or("menu client disappeared")?
+        .parse()?;
+    let body: Vec<_> = menu
+        .items
+        .iter()
+        .filter(|item| item.role == Role::Body)
+        .collect();
+    let pinned: Vec<_> = [Role::Summary, Role::Error, Role::Primary, Role::Back]
+        .into_iter()
+        .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
+        .collect();
+    let capacity = height.saturating_sub(pinned.len() + 5).max(1);
+    let paging = body.len() > capacity && menu.pager.is_some();
+    let capacity = capacity.saturating_sub(if paging { 2 } else { 0 }).max(1);
+    let page = page.min(body.len().saturating_sub(1) / capacity);
+    let escape = |text: &str| clean(text).replace('#', "##");
+    let mut args = vec![
+        "display-menu".into(),
+        "-M".into(),
+        "-c".into(),
+        client.into(),
+        "-t".into(),
+        drawing_pane,
+        "-T".into(),
+        escape(&menu.title),
+        "-x".into(),
+        "C".into(),
+        "-y".into(),
+        "C".into(),
+    ];
+    let mode = Command::new(std::env::current_exe()?)
+        .args(["menu-mouse-mode", "--client", client])
+        .output()?;
+    if mode.status.success() && mode.stdout.starts_with(b"mouse") {
+        args.push("-O".into());
+    }
+    let mut append = |item: &Item| {
+        let label = escape(&item.label);
+        args.extend([
+            if item.enabled {
+                crate::menu_footer::item_label(&label, &item.key)
+            } else {
+                format!("-{label}")
+            },
+            if item.enabled {
+                item.key.clone()
+            } else {
+                String::new()
+            },
+            if item.enabled {
+                item.command.clone()
+            } else {
+                String::new()
+            },
+        ]);
+    };
+    for item in body.iter().skip(page * capacity).take(capacity) {
+        append(item);
+    }
+    for item in pinned {
+        append(item);
+    }
+    if paging && let Some(pager) = &menu.pager {
+        for (label, key, next, enabled) in [
+            (
+                tr("↑ Previous", "↑ 上页"),
+                "[",
+                page.saturating_sub(1),
+                page > 0,
+            ),
+            (
+                tr("↓ Next", "↓ 下页"),
+                "]",
+                page + 1,
+                (page + 1) * capacity < body.len(),
+            ),
+        ] {
+            args.extend([
+                if enabled {
+                    label.into()
+                } else {
+                    format!("-{label}")
+                },
+                key.into(),
+                if enabled {
+                    pager.command(next)
+                } else {
+                    String::new()
+                },
+            ]);
+        }
+    }
+    args.push(String::new());
+    args.extend([
+        crate::menu_footer::item_label(tr("× close", "× 关闭"), "Escape"),
+        if menu.items.iter().any(|item| item.role == Role::Back) {
+            "Escape"
+        } else {
+            "BSpace"
+        }
+        .into(),
+        String::new(),
+    ]);
+    let output = Command::new("tmux")
+        .args(server.tmux_args())
+        .args(&args)
+        .env("WORKBENCH_SOURCE_PANE", pane)
+        .output()?;
+    match output.status.code() {
+        Some(0 | 2) => Ok(()),
+        _ => Err(format!(
+            "could not display classic menu: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into()),
+    }
+}
+
 pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Result<()> {
+    if crate::ui::Mode::current()? == crate::ui::Mode::Old {
+        return display_native(&menu, pane, client, page);
+    }
     let paths = Paths::discover()?;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let request = paths
@@ -98,7 +249,10 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
     let width = menu
         .items
         .iter()
-        .filter(|item| item.enabled && item.role == Role::Body || item.role == Role::Error)
+        .filter(|item| {
+            item.enabled && item.role == Role::Body
+                || matches!(item.role, Role::Error | Role::Summary)
+        })
         .map(|item| Span::raw(&item.label).width() + Span::raw(&item.key).width() + 5)
         .max()
         .unwrap_or(28)
@@ -107,9 +261,9 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
         .items
         .iter()
         .map(|item| match item.role {
-            Role::Body => row_count(item, width),
-            Role::Primary | Role::Error => 2,
-            _ => 0,
+            Role::Body | Role::Summary => row_count(item, width),
+            Role::Primary | Role::Error | Role::Back => 2,
+            Role::Close => 0,
         })
         .sum::<usize>()
         .saturating_add(3)
@@ -171,8 +325,6 @@ pub fn run_request(path: &Path) -> Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Choose(usize),
-    Previous,
-    Next,
     Close,
 }
 
@@ -184,12 +336,25 @@ struct Layout {
     footer: u16,
     primary: u16,
     error: u16,
+    summary: u16,
     body: Rect,
 }
 impl Layout {
     fn new(width: u16, height: u16, menu: &Menu) -> Self {
         let header = 1.min(height);
-        let footer = (if height >= 4 { 2 } else { 1 }).min(height.saturating_sub(header));
+        let count = 1 + u16::from(
+            menu.items
+                .iter()
+                .any(|item| item.role == Role::Back && item.enabled),
+        );
+        let row_height = if height
+            >= header + count * 2 + u16::from(menu.items.iter().any(|item| item.role == Role::Body))
+        {
+            2
+        } else {
+            1
+        };
+        let footer = (count * row_height).min(height.saturating_sub(header));
         let mut available = height.saturating_sub(header + footer);
         let primary = if menu.items.iter().any(|item| item.role == Role::Primary) {
             available.saturating_sub(1).min(2)
@@ -203,6 +368,15 @@ impl Layout {
             0
         };
         available -= error;
+        let summary = available.saturating_sub(2).min(
+            menu.items
+                .iter()
+                .filter(|item| item.role == Role::Summary)
+                .map(|item| row_count(item, width))
+                .sum::<usize>()
+                .min(u16::MAX as usize) as u16,
+        );
+        available -= summary;
         Self {
             width,
             height,
@@ -210,11 +384,12 @@ impl Layout {
             footer,
             primary,
             error,
+            summary,
             body: Rect::new(0, header, width, available),
         }
     }
 
-    fn actions(self, menu: &Menu, rows: usize) -> Vec<(Rect, Action)> {
+    fn actions(self, menu: &Menu) -> Vec<(Rect, Action)> {
         let back = menu
             .items
             .iter()
@@ -223,26 +398,15 @@ impl Layout {
         if let Some(index) = back {
             footer.push(Action::Choose(index));
         }
-        if rows > usize::from(self.body.height) {
-            footer.extend([Action::Previous, Action::Next]);
-        }
         footer.push(Action::Close);
-        let count = footer.len() as u32;
+        let count = footer.len() as u16;
         let mut actions: Vec<_> = footer
             .into_iter()
             .enumerate()
             .map(|(index, action)| {
-                let left = u32::from(self.width) * index as u32 / count;
-                let right = u32::from(self.width) * (index as u32 + 1) / count;
-                (
-                    Rect::new(
-                        left as u16,
-                        self.height - self.footer,
-                        (right - left) as u16,
-                        self.footer,
-                    ),
-                    action,
-                )
+                let top = self.height - self.footer + self.footer * index as u16 / count;
+                let bottom = self.height - self.footer + self.footer * (index as u16 + 1) / count;
+                (Rect::new(0, top, self.width, bottom - top), action)
             })
             .collect();
         if let Some(index) = menu
@@ -250,15 +414,18 @@ impl Layout {
             .iter()
             .position(|item| item.role == Role::Primary && item.enabled)
         {
-            actions.push((
-                Rect::new(
-                    0,
-                    self.height - self.footer - self.primary,
-                    self.width,
-                    self.primary,
+            actions.insert(
+                0,
+                (
+                    Rect::new(
+                        0,
+                        self.height - self.footer - self.primary,
+                        self.width,
+                        self.primary,
+                    ),
+                    Action::Choose(index),
                 ),
-                Action::Choose(index),
-            ));
+            );
         }
         actions
     }
@@ -355,6 +522,28 @@ fn row_line(item: &Item, part: usize, width: u16, selected: bool) -> Line<'stati
     ])
 }
 
+pub(crate) fn action_line(
+    label: &str,
+    key: &str,
+    part: usize,
+    width: u16,
+    selected: bool,
+) -> Line<'static> {
+    row_line(
+        &Item {
+            id: String::new(),
+            label: label.into(),
+            key: key.into(),
+            command: String::new(),
+            enabled: true,
+            role: Role::Body,
+        },
+        part,
+        width,
+        selected,
+    )
+}
+
 fn render(
     frame: &mut ratatui::Frame,
     menu: &Menu,
@@ -371,6 +560,20 @@ fn render(
         let (item, part) = rows[index];
         row_line(&menu.items[item], part, layout.width, selected)
     });
+    let mut y = layout.height - layout.footer - layout.primary - layout.error - layout.summary;
+    let summary_end = y + layout.summary;
+    for item in menu.items.iter().filter(|item| item.role == Role::Summary) {
+        for part in 0..row_count(item, layout.width) {
+            if y == summary_end {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(row_line(item, part, layout.width, false)),
+                Rect::new(0, y, layout.width, 1),
+            );
+            y += 1;
+        }
+    }
     if let Some(error) = menu.items.iter().find(|item| item.role == Role::Error) {
         let y = layout.height - layout.footer - layout.primary - layout.error;
         let (first, rest) = split_text(&clean(&error.label), usize::from(layout.width));
@@ -387,7 +590,7 @@ fn render(
         .find(|(_, item)| item.role == Role::Primary)
     {
         let y = layout.height - layout.footer - layout.primary;
-        let pressed = navigation.is_pressed(&Hit::Action(Action::Choose(index)));
+        let pressed = navigation.is_highlighted(&Hit::Action(Action::Choose(index)));
         for row in 0..layout.primary {
             frame.render_widget(
                 Paragraph::new(row_line(item, usize::from(row), layout.width, pressed)),
@@ -399,40 +602,27 @@ fn render(
         if matches!(action, Action::Choose(index) if menu.items[*index].role == Role::Primary) {
             continue;
         }
-        let (label, hint) = match action {
-            Action::Choose(_) => (tr("← Back", "← 返回"), "(back)"),
-            Action::Previous => (tr("↑ prev", "↑ 上页"), "["),
-            Action::Next => (tr("↓ next", "↓ 下页"), "]"),
-            Action::Close => (tr("× close", "× 关闭"), "(esc)"),
+        let close = Item {
+            id: "close".into(),
+            label: tr("× close", "× 关闭").into(),
+            key: "Escape".into(),
+            command: String::new(),
+            enabled: true,
+            role: Role::Close,
         };
-        let disabled = matches!(action, Action::Previous) && navigation.scroll == 0
-            || matches!(action, Action::Next) && navigation.visible_rows().end == rows.len();
-        let mut style = if disabled {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default()
+        let item = match action {
+            Action::Choose(index) => &menu.items[*index],
+            Action::Close => &close,
         };
-        if navigation.is_pressed(&Hit::Action(*action)) {
-            style = style.bg(Color::DarkGray);
-        }
-        frame.render_widget(Block::default().style(style), *area);
-        let label = if area.height == 1 && *action == Action::Close {
-            format!("{label} {hint}")
-        } else {
-            label.into()
-        };
-        frame.render_widget(
-            Paragraph::new(label)
-                .alignment(Alignment::Center)
-                .style(style),
-            Rect::new(area.x, area.y, area.width, 1.min(area.height)),
-        );
-        if area.height > 1 {
+        for row in 0..area.height {
             frame.render_widget(
-                Paragraph::new(hint)
-                    .alignment(Alignment::Center)
-                    .style(style),
-                Rect::new(area.x, area.y + 1, area.width, 1),
+                Paragraph::new(row_line(
+                    item,
+                    usize::from(row),
+                    area.width,
+                    navigation.is_highlighted(&Hit::Action(*action)),
+                )),
+                Rect::new(area.x, area.y + row, area.width, 1),
             );
         }
     }
@@ -477,7 +667,8 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
             }
             first_frame = false;
         }
-        let actions = layout.actions(menu, rows.len());
+        let actions = layout.actions(menu);
+        navigation.set_actions(&actions);
         if dirty {
             terminal.draw(|frame| render(frame, menu, layout, &navigation, &rows, &actions))?;
             dirty = false;
@@ -501,11 +692,19 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                     KeyCode::Char(character) => Some(character.to_string()),
                     _ => None,
                 };
-                chosen = name.as_ref().and_then(|name| {
-                    menu.items
-                        .iter()
-                        .position(|item| item.enabled && item.key == *name)
-                });
+                chosen = if key.code == KeyCode::Enter && navigation.focused_action().is_some() {
+                    match navigation.focused_action() {
+                        Some(Action::Choose(index)) => Some(*index),
+                        Some(Action::Close) => return Ok(None),
+                        None => None,
+                    }
+                } else {
+                    name.as_ref().and_then(|name| {
+                        menu.items
+                            .iter()
+                            .position(|item| item.enabled && item.key == *name)
+                    })
+                };
                 if chosen.is_none() {
                     match key.code {
                         KeyCode::Backspace | KeyCode::Char('q') => return Ok(None),
@@ -524,8 +723,6 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                 Some(Hit::Item(id)) => chosen = menu.items.iter().position(|item| item.id == id),
                 Some(Hit::Action(Action::Choose(index))) => chosen = Some(index),
                 Some(Hit::Action(Action::Close)) => return Ok(None),
-                Some(Hit::Action(Action::Previous)) => navigation.page(-1),
-                Some(Hit::Action(Action::Next)) => navigation.page(1),
                 None => {}
             },
             Event::FocusLost => navigation.blur(),
@@ -576,7 +773,7 @@ fn plain_label(text: &str) -> String {
     clean(&result).trim().to_owned()
 }
 
-pub(crate) fn display_legacy(args: &[String]) -> Result<()> {
+pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
     let mut title = tr("Menu", "菜单").to_owned();
     let mut client = std::env::var("WORKBENCH_TARGET_CLIENT").ok();
     let mut pane = std::env::var("WORKBENCH_SOURCE_PANE")
@@ -673,7 +870,39 @@ pub(crate) fn display_legacy(args: &[String]) -> Result<()> {
         });
     }
     title = plain_label(&tmux.client_format(&client, &title)?.unwrap_or(title));
-    display(Menu { title, items }, &pane, &client, 0)
+    let mut pager_args = vec!["-c".into(), client.clone(), "-t".into(), pane.clone()];
+    pager_args.extend_from_slice(args);
+    if let Some(parent) = items.iter().find(|item| item.id == "parent") {
+        pager_args.extend([
+            parent.label.clone(),
+            parent.key.clone(),
+            parent.command.clone(),
+        ]);
+    }
+    let pager = Some(Pager {
+        before_page: format!(
+            "{} display-menu",
+            crate::status_menu::shell_quote(&std::env::current_exe()?.to_string_lossy())
+        ),
+        after_page: format!(
+            "-- {}",
+            pager_args
+                .iter()
+                .map(|arg| crate::status_menu::shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    });
+    display(
+        Menu {
+            title,
+            items,
+            pager,
+        },
+        &pane,
+        &client,
+        page,
+    )
 }
 
 #[cfg(test)]
@@ -696,6 +925,7 @@ mod tests {
     fn menu_body_and_pinned_controls_keep_their_entire_touch_area() {
         let menu = Menu {
             title: "test".into(),
+            pager: None,
             items: vec![
                 item("body", Role::Body),
                 item("launch", Role::Primary),
@@ -708,7 +938,7 @@ mod tests {
             let mut navigation = NavigationList::default();
             navigation.replace_rows(vec![Some("body".into()); 2]);
             navigation.set_viewport(layout.body);
-            let actions = layout.actions(&menu, 30);
+            let actions = layout.actions(&menu);
             for (area, action) in &actions {
                 assert!(area.y >= layout.body.bottom());
                 for row in area.y..area.bottom() {
@@ -740,6 +970,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn footer_uses_list_row_style_right_shortcuts_and_visible_hover() {
+        let menu = Menu {
+            title: "test".into(),
+            pager: None,
+            items: vec![
+                item("Alpha", Role::Body),
+                Item {
+                    key: "BSpace".into(),
+                    ..item("Back", Role::Back)
+                },
+            ],
+        };
+        let layout = Layout::new(40, 12, &menu);
+        let mut navigation = NavigationList::default();
+        navigation.replace_rows(vec![Some("Alpha".into()); 2]);
+        navigation.set_viewport(layout.body);
+        let actions = layout.actions(&menu);
+        navigation.set_actions(&actions);
+        let close = actions
+            .iter()
+            .find(|(_, action)| *action == Action::Close)
+            .unwrap()
+            .0;
+        navigation.mouse(
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 5,
+                row: close.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &actions,
+        );
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &menu,
+                    layout,
+                    &navigation,
+                    &[(0, 0), (0, 1)],
+                    &actions,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = |row| {
+            (0..40)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        };
+        assert!(line(close.y).contains("close") && line(close.y).ends_with("(esc)"));
+        assert!(!line(close.y + 1).contains("(esc)"));
+        assert_eq!(buffer[(5, close.y)].bg, Color::DarkGray);
+        let back = actions
+            .iter()
+            .find(|(_, action)| *action == Action::Choose(1))
+            .unwrap()
+            .0;
+        assert!(line(back.y).contains("Back") && line(back.y).ends_with("(back)"));
+        assert_ne!(buffer[(5, back.y)].bg, Color::DarkGray);
     }
 
     #[test]

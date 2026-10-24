@@ -7,6 +7,7 @@ prefix M-m / tmux-agent-workbench menu
   Tmux → window/session controls and agent launch
   Host / SSH → SSH destinations
   CPU / resources → status density and btop
+  Interface → classic tmux menus / new Sidebar lists
 
 statusbar tmux / prefix M-t
   Switch window → current Session's windows
@@ -38,14 +39,22 @@ statusbar Agent / prefix M-a
 
 All action menus use `menu::Menu`, including legacy shell providers through the
 `display-menu` adapter. Content providers supply labels, keys and callbacks;
-the component owns layout, two-row buttons and pinned navigation. Its popup
+two renderers consume the same model. The classic native tmux renderer is the
+default and retains one-line menus with pagination. Choose Interface in the
+combined Menu, or run `tmux-agent-workbench ui old|new|toggle|status`, to switch
+without reloading. The saved XDG configuration preference is overridden by
+the current server's `@workbench-ui` option when it is set.
+
+The new renderer owns layout, two-row buttons and pinned navigation. Its popup
 fits the content, with a maximum width of 60 cells, rather than using Sidebar's
 larger dimensions. Every cell of both button rows is clickable. Descriptions
 wrap within the content area. Information, title, blank and outside taps leave
 the menu open. Escape and Close dismiss it; Backspace returns to its parent
-or closes a root menu. Back/Close and Launch stay pinned while the body scrolls.
+or closes a root menu. Back, Close and Launch use full-width list rows, with
+their shortcut on the right of the label, and stay pinned while the body scrolls.
+Launch configuration summaries also stay visible near Launch when space allows.
 Wheel and drag scrolling use the same `NavigationList` as Sidebar, and `[` / `]`
-and the previous/next buttons also browse a long menu. Host and member lists
+and Page Up/Down also browse a long menu. Host and member lists
 are not limited by the number of available shortcut keys. The source pane
 stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
@@ -57,7 +66,7 @@ Launch previews read local agent-team JSON settings directly, with no process
 scan, Python startup, model lookup or cache warmup. Launch-time validation stays
 in agent-team.
 
-Pointer and touch menus execute only on release. A hold, drag, wheel movement
+New pointer and touch menus execute only on release. A hold, drag, wheel movement
 or resize cannot launch a held item. The component handles these events itself
 instead of depending on native `display-menu` mouse behavior. A selected
 callback runs only after its popup closes, allowing it to open a submenu or
@@ -116,6 +125,8 @@ terminal pagination. Fixture CLI executables and an `agent-team` boundary stub
 avoid paid model requests; this validates menu orchestration, not model quality
 or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
+The PTY tests also cover classic/new round trips, the saved preference, native
+pagination, SGR and legacy wheel reports on a fitting menu, and body/Close hover.
 
 `tests/switcher.py` exercises real 40×20, 32×12, and 24×8 PTY clients, including
 touching both card rows, held presses, swipes, search, paging, keyboard-size
@@ -126,24 +137,26 @@ it does not claim a physical handset or Android keyboard acceptance run.
 
 ## Mobile navigation and interaction review
 
-The four switch actions use filtered Sidebar views rather than tmux's tree or
-fzf. They share Sidebar's popup container, title renderer, colors and secondary
+In the new UI the four switch actions use filtered Sidebar views. They share
+Sidebar's popup container, title renderer, colors and secondary
 context row; every cell in both entry rows is clickable. The bordered popup
 uses about 90% of the client dimensions, capped at 96 columns by 40 rows, to
 keep the terminal visible around it. Clients below 36 columns or 12 rows use
 the available screen without a border. Sidebar's normal popup entry and these
 filtered views follow the same sizing policy. Labels use all available cells
 without adding an ellipsis; search matches their full, unshortened text.
-The footer's four buttons occupy two full rows, with compact captions below
-32 columns. Its previous/next controls remain visible alongside Back and Close.
+The footer uses full-width Back and Close rows with right-aligned shortcuts;
+short terminals reduce each button's height to preserve the list area.
 Tap the search line or type `/` to search; pasted Chinese text is supported.
 Arrow keys, Page Up/Down, Enter, Escape and Backspace remain available.
 
 Sidebar and all four filtered views use `navigation_list::NavigationList`.
 Views provide stable row keys, a row renderer, content bounds and action regions;
 the shared component owns wheel/drag scrolling, release activation, keyboard
-selection, hit testing, refresh anchors and resize handling. Wheel scrolling
-moves the viewport independently of selection, including over pinned controls.
+selection, hit testing, refresh anchors and resize handling. Wheel moves the
+highlight, as the original Sidebar did, and reveals the selected row when
+needed. It also works when every item fits on screen. Menu controls participate
+in the same navigation, and hover highlights both entries and controls.
 The same component also restores terminal mouse/focus/paste modes on exit.
 
 | Mobile issue | Result |
@@ -162,7 +175,7 @@ The same component also restores terminal mouse/focus/paste modes on exit.
 | Long inventories are silently truncated | Host and member lists scroll beyond their shortcut-key count |
 
 Host, Agent, launch configuration, Usage, Resources and Sidebar action menus
-all use the shared compact Menu. Navigation lists and action menus expose
+all use the shared Menu model. New navigation lists and action menus expose
 explicit Back and Close buttons and share wheel/drag/release handling.
 Returning to a popup Sidebar reselects the current Agent. Restoring its previous
 browsing position, including scroll, remains a useful follow-up for long lists.

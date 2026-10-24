@@ -33,6 +33,7 @@ pub mod switcher;
 pub mod task_title;
 pub mod terminal;
 pub mod tmux;
+pub mod ui;
 mod ui_language;
 pub mod workspace;
 
