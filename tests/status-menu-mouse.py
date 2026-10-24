@@ -330,6 +330,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         drain(.7)
         hosts.write_text('dev-host\ntest-host\n')
+        menu = open_menu([core, 'display-menu', '--', '-c', client, '-t', pane,
+                          '-T', 'Leading information', '-Information first', '', '',
+                          'Available action', 'a', 'set-option -g @leading-note-action 1'],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Information first', b'Available action')
+        os.write(master, b'a')
+        menu.wait(timeout=3)
+        assert tmux('show-option', '-gqv', '@leading-note-action') == '1'
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        drain(.3)
+        print('PASS classic menu accepts a disabled first row without treating it as an option')
         assert ui('toggle') == 'new'
         tmux('set-option', '-gu', '@workbench-ui')
         assert ui() == 'new', 'saved preference did not survive clearing the server override'
@@ -691,6 +702,17 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         wait_for_agent_actions(pane, '1')
         tmux('select-pane', '-t', pane, '-T', 'Codex idle')
         drain(0.3)
+        assert ui('old') == 'old'
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane, '--focus-agent'],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Prefill only', b'/side')
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        assert menu.returncode == 0, menu.stderr.read()
+        assert tmux('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '0'
+        drain(.7)
+        assert ui('new') == 'new'
+        print('PASS classic Agent status entry with --focus-agent renders its leading notice without an output pager')
         # Touch sends a press/release without any preceding hover/motion.
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

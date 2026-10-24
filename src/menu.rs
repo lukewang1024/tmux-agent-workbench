@@ -137,6 +137,9 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
     if mode.status.success() && mode.stdout.starts_with(b"mouse") {
         args.push("-O".into());
     }
+    // Disabled rows start with '-'. Stop option parsing before the first row,
+    // including Agent's leading prefill notice and empty-state information.
+    args.push("--".into());
     let mut append = |item: &Item| {
         let label = escape(&item.label);
         args.extend([
