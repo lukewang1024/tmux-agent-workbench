@@ -641,7 +641,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 created = next(sid for sid, name in (
                     line.split('\t', 1) for line in tmux('list-sessions', '-F', '#{session_id}\t#{session_name}').splitlines()
                 ) if name == session_name)
-                assert tmux('display-message', '-p', '-t', created + ':', '#{pane_current_path}') == str(project)
+                created_cwd = tmux('display-message', '-p', '-t', created + ':', '#{pane_current_path}')
+                assert Path(created_cwd).samefile(project), (created_cwd, str(project))
                 assert client_session(other_clients[0]) == 'audit'
                 tmux('switch-client', '-c', client, '-t', 'audit')
                 tmux('kill-session', '-t', created)

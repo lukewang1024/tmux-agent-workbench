@@ -19,6 +19,7 @@ import unicodedata
 
 from daemon_fixture import running_daemon
 
+repo = Path(__file__).resolve().parents[1]
 core = str(Path(sys.argv[1]).resolve())
 fixture = str(Path(core).parent / 'examples/codex')
 with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack() as resources:
@@ -31,6 +32,12 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         env.pop(key, None)
     for key in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = str(root / key)
+    # Back and Sidebar actions use the installed shell helpers. Supply this
+    # checkout's helpers so the fixture also works on an uninstalled machine.
+    shim = root / 'bin'
+    shim.mkdir()
+    (shim / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
+    env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     master, slave = pty.openpty()
     other_master, other_slave = pty.openpty()
     clients = []
