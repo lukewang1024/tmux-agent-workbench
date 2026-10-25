@@ -37,6 +37,14 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
     shim = root / 'bin'
     shim.mkdir()
     (shim / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
+    # Real TTYs here belong to test clients, not desktop application windows.
+    # Record any attempted OS activation without launching GUI apps in CI.
+    desktop_calls = root / 'desktop-focus-calls'
+    for name in ('osascript', 'open'):
+        helper = shim / name
+        helper.write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote(name) + ' >> ' +
+                          shlex.quote(str(desktop_calls)) + '\nprintf "found\\n"\n')
+        helper.chmod(0o755)
     env['PATH'] = str(shim) + ':' + str(repo / 'bin') + ':' + env['PATH']
     master, slave = pty.openpty()
     other_master, other_slave = pty.openpty()
@@ -297,6 +305,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 assert client_value(sibling, '#{session_name}') == 'source'
                 reset()
         print('PASS both menu modes use the same divided switch lists, search, identity guards and client isolation', flush=True)
+        assert not desktop_calls.exists(), desktop_calls.read_text()
+        print('PASS scoped switches stay in their client without desktop terminal activation', flush=True)
         # All bounded navigation panels must receive backdrop clicks, including
         # overview Sidebar and every filtered list. A hover/scroll/drag outside
         # cancels a held action; only a complete outside tap dismisses.

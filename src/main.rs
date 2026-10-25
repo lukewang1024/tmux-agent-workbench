@@ -1855,7 +1855,12 @@ fn focus_target(
             &focused_window,
         )?;
     }
-    if !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty)) {
+    // Menus already run in the invoking client. Raising a desktop terminal
+    // here can open an unrelated app or wait for macOS automation permission.
+    let within_client = source_pane.is_some() && target_client.is_some();
+    if !within_client
+        && !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty))
+    {
         activate_terminal();
     }
     Ok(())
@@ -1932,7 +1937,7 @@ fn restore_source_pane_before_jump(
             .arg("-S")
             .arg(&server.socket_path)
             .args(["select-pane", "-Z", "-t", source_pane, "-l"])
-            .status();
+            .output();
     }
     Ok(())
 }
