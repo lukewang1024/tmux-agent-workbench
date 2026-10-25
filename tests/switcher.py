@@ -64,7 +64,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         end = time.monotonic() + 8
         while not predicate():
             if time.monotonic() >= end:
-                raise AssertionError((label, screen_rows()))
+                raise AssertionError((label, screen_rows(),
+                                      tmux('list-windows', '-a', '-F', '#{session_name} #{window_id} #{window_name}')))
             drain(.05)
 
     def text(needle):
@@ -182,6 +183,16 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         left, top, width, height = content_rect()
         return [row[left:left + width] for row in screen_rows()[top:top + height]]
 
+    def row_text(row):
+        # screen_rows keeps a blank continuation cell for wide glyphs so
+        # pointer coordinates stay physical; text comparisons skip that cell.
+        result, index = '', 0
+        while index < len(row):
+            character = row[index]
+            result += character
+            index += 2 if unicodedata.east_asian_width(character) in ('W', 'F') else 1
+        return result
+
     def first_row():
         return 5 if content_rect()[3] >= 10 else 3 if content_rect()[3] >= 6 else 2
 
@@ -194,6 +205,21 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         text('Switch ' + {'window': 'windows', 'session': 'sessions', 'agent': 'agents', 'pane': 'panes'}[kind])
         drain()
         return popup
+
+    def search_list(query):
+        # Start search as a key, then wait for the rendered query. Matching a
+        # raw label can succeed on an old frame before filtering has happened.
+        os.write(master, b'/')
+        wait(lambda: row_text(visible_rows()[2]).strip() == '/', 'search mode did not open')
+        os.write(master, query.encode())
+        wait(lambda: row_text(visible_rows()[2]).strip() == '/ ' + query, 'search query did not render')
+
+    def finish_popup(popup):
+        try:
+            popup.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise AssertionError(('popup did not finish', popup.args, screen_rows(),
+                                  tmux('list-windows', '-a', '-F', '#{session_name} #{window_id} #{window_name}'))) from error
 
     def close(popup):
         os.write(master, b'\x1b')
@@ -252,14 +278,15 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 ('session', 'other', None, other, 'other'),
                 ('agent', 'other-agent-window', None, other, 'other'),
             ]:
+                print('Checking scoped search:', mode, kind, query, flush=True)
                 popup = open_list(kind)
                 rows = visible_rows()
                 assert rows[first_row() - 2].strip('─ ') == '' and '─' in rows[first_row() - 2], rows
                 assert rows[-5].strip('─ ') == '' and '─' in rows[-5], rows
-                os.write(master, ('/' + query).encode())
-                text(query)
+                search_list(query)
+                wait(lambda: query in row_text(visible_rows()[first_row() - 1]), 'filtered target did not render')
                 os.write(master, b'\r')
-                popup.wait(timeout=5)
+                finish_popup(popup)
                 wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
                      'shared switcher lost its scope or callback target in ' + mode)
                 assert client_value(sibling, '#{session_name}') == 'source'
@@ -308,9 +335,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 popups.append(popup)
                 text('Switch ' + ('sessions' if kind == 'session' else 'agents'))
                 os.write(master, b'other')
-                drain(.2)
+                wait(lambda: any('/ other' in row for row in screen_rows()), 'picker query did not render')
                 os.write(master, b'\r')
-                popup.wait(timeout=5)
+                finish_popup(popup)
                 assert popup.returncode == 0, popup.stderr.read()
                 wait(lambda: focused(session='other', pane=other), 'compatibility picker lost the target client')
                 assert client_value(sibling, '#{session_name}') == 'source'
@@ -363,8 +390,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         drain(.15)
         footer(1)
         text('window-zero')
-        os.write(master, b'/window-8')
-        text('window-8')
+        search_list('window-8')
+        wait(lambda: 'window-8' in visible_rows()[first_row() - 1], 'window search result did not render')
         os.write(master, b'\r')
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[8]), 'search result did not select last window')
@@ -380,10 +407,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         close(popup)
         popup = open_list('pane')
         output = drain(.2)
-        os.write(master, b'/hidden-sidebar')
-        text('No matching results')
+        search_list('hidden-sidebar')
+        wait(lambda: any('No matching results' in row for row in visible_rows()), 'hidden Sidebar matched the pane query')
         os.write(master, b'\x15')
-        text('pane-right')
+        wait(lambda: any('pane-right' in row for row in visible_rows()), 'cleared pane query did not restore its targets')
         tap(10, first_row() + 3)
         popup.wait(timeout=5)
         wait(lambda: focused(pane=second), 'pane card did not focus the pane')
@@ -431,8 +458,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             reset()
         resize(40, 20)
         popup = open_list('window')
-        os.write(master, b'/window-8')
-        text('window-8')
+        search_list('window-8')
+        wait(lambda: 'window-8' in visible_rows()[first_row() - 1], 'window search result did not render before resize')
         resize(24, 8)
         tap(10, first_row())
         popup.wait(timeout=5)
@@ -516,10 +543,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         tmux('link-window', '-s', 'source:0', '-t', 'linked:5')
         tmux('switch-client', '-c', client, '-t', 'linked:0')
         popup = open_list('window')
-        os.write(master, b'/window-8')
-        text('No matching results')
+        search_list('window-8')
+        wait(lambda: any('No matching results' in row for row in visible_rows()), 'linked window query escaped its session')
         os.write(master, b'\x15')
-        text('linked-only')
+        wait(lambda: any('linked-only' in row for row in visible_rows()), 'cleared linked query did not restore its target')
         tap(10, first_row() + 3)
         popup.wait(timeout=5)
         wait(lambda: focused(window=windows[0], session='linked'), 'linked window chose another Session')
@@ -529,7 +556,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         print('PASS linked windows preserve the invoking Session and client', flush=True)
         tmux('respawn-pane', '-k', '-t', other, '/bin/sh')
         popup = open_list('agent')
-        text('No running agents')
+        wait(lambda: any('No running agents' in row for row in visible_rows()), 'empty Agent state did not render')
         tap(10, first_row())
         assert popup.poll() is None and focused(window=windows[0])
         close(popup)
