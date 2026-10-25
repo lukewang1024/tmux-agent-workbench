@@ -10,9 +10,9 @@ use clap::ValueEnum;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
 use crate::ipc::{Request, call};
@@ -509,20 +509,26 @@ fn draw(frame: &mut ratatui::Frame, kind: Kind, scope: &Scope, list: &List, geom
         )
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {}   {count}", kind.title()),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))),
+        Paragraph::new(kind.title())
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         Rect::new(0, 0, geometry.width, 1),
     );
     if geometry.header >= 3 {
+        let count_width = (Span::raw(&count).width() as u16).min(geometry.width);
         frame.render_widget(
             Paragraph::new(format!(
                 " {}",
                 clean(list.error.as_deref().unwrap_or(&scope.label(kind)))
             ))
             .style(muted),
-            Rect::new(0, 1, geometry.width, 1),
+            Rect::new(0, 1, geometry.width.saturating_sub(count_width + 1), 1),
+        );
+        frame.render_widget(
+            Paragraph::new(count)
+                .alignment(Alignment::Right)
+                .style(muted),
+            Rect::new(geometry.width - count_width, 1, count_width, 1),
         );
         let query = if list.query.is_empty() && !list.searching {
             tr("/ search · tap here or type", "/ 搜索 · 点击此处或输入").into()

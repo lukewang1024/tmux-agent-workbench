@@ -11,7 +11,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -127,7 +127,7 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         "-t".into(),
         drawing_pane,
         "-T".into(),
-        escape(&menu.title),
+        format!("#[align=centre]{}", escape(&menu.title)),
         "-x".into(),
         "C".into(),
         "-y".into(),
@@ -568,7 +568,9 @@ fn render(
     actions: &[(Rect, Action)],
 ) {
     frame.render_widget(
-        Paragraph::new(clean(&menu.title)).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(clean(&menu.title))
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         Rect::new(0, 0, layout.width, layout.header.min(1)),
     );
     if layout.divider > 0 {
