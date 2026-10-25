@@ -8,8 +8,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Mode {
-    #[default]
     Old,
+    #[default]
     New,
 }
 

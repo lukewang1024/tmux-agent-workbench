@@ -39,8 +39,9 @@ statusbar Agent / prefix M-a
 
 All action menus use `menu::Menu`, including legacy shell providers through the
 `display-menu` adapter. Content providers supply labels, keys and callbacks;
-two renderers consume the same model. The classic native tmux renderer is the
-default and retains one-line menus with pagination. Choose Interface in the
+two renderers consume the same model. The new list renderer is the default;
+the classic native tmux renderer retains one-line menus with pagination and
+requires explicit selection. Choose Interface in the
 combined Menu, or run `tmux-agent-workbench ui old|new|toggle|status`, to switch
 without reloading. The saved XDG configuration preference is overridden by
 the current server's `@workbench-ui` option when it is set.

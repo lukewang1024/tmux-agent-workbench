@@ -126,7 +126,7 @@ is focused, press `?` for a centered list of plain single-key actions.
 Optional global bindings are (re)installed each time the
 plugin loads when their option is explicitly set.
 
-The classic tmux menu is the default. Choose **Interface · classic / new** in
+The new list menu is the default. Choose **Interface · classic / new** in
 the combined Menu to compare its two renderers. Buttons, order, scope checks
 and callbacks are shared. The setting changes action menus only; Sidebar and
 all four switchers always use the same list interaction. The CLI offers the
@@ -141,6 +141,7 @@ tmux-agent-workbench ui status
 
 The preference is saved under `$XDG_CONFIG_HOME/tmux-agent-workbench/ui-mode`.
 The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
+An explicitly selected classic renderer stays selected until changed again.
 The classic renderer uses native one-line tmux menus with pagination; the new
 renderer uses larger list rows. Both modes use Sidebar-sized navigation popups
 for Switch Agent, Window, Pane and Session.

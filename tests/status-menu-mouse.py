@@ -306,10 +306,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         release_menus = version is not None and tuple(map(int, version.groups())) >= (3, 8)
         def ui(mode='status'):
             return subprocess.check_output([core, 'ui', mode], env=env, text=True).strip()
-        assert ui() == 'old', 'classic UI must remain the default'
+        assert ui() == 'new', 'shared list menus must be the default without an explicit setting'
         menu = open_menu([core, 'menu', '--pane', pane, '--client', client],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu, b'Interface')
+        os.write(master, b'i')
+        wait_for_text(client_process, b'Classic', b'New', b'(back)')
+        os.write(master, b'o')
+        wait_for_text(client_process, b'CPU / resources', b'Interface')
+        assert ui() == 'old', 'classic menus must require an explicit selection'
         os.write(master, b'i')
         wait_for_text(client_process, b'Classic', b'New', b'(back)')
         os.write(master, b'n')
@@ -321,6 +326,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         os.write(master, b'o')
         wait_for_text(client_process, b'CPU / resources', b'Interface')
         assert ui() == 'old'
+        tmux('set-option', '-gu', '@workbench-ui')
+        assert ui() == 'old', 'an explicit classic preference must survive clearing the server override'
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
         drain(.7)
@@ -350,7 +357,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert ui('toggle') == 'new'
         tmux('set-option', '-gu', '@workbench-ui')
         assert ui() == 'new', 'saved preference did not survive clearing the server override'
-        print('PASS classic default, in-menu backend round trip, native paging and persistent CLI switch')
+        print('PASS new default, explicit classic selection, in-menu round trip, native paging and persistent CLI switch')
 
         # These lists fit completely: wheel must still move selection. Verify
         # SGR and legacy wheel reports through the actual attached tmux PTY.
