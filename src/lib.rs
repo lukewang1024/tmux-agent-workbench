@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod detection;
 pub mod doctor;
 pub mod hooks;
+pub mod host_metrics;
 pub mod ipc;
 pub mod layout;
 pub mod manifest;

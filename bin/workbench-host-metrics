@@ -1,18 +1,77 @@
 #!/bin/sh
-# Host metrics for tmux. No daemon/sleep; counter deltas use the previous refresh.
-# Android may deny /proc counters: report -- rather than inventing zero usage.
+# Sample only displayed metrics. Fresh snapshots are read without taking a lock.
 export LC_ALL=C
-export PATH="$PATH:/usr/sbin:/sbin:/usr/bin:/bin"
+export PATH="${PATH:-/usr/bin:/bin}:/usr/sbin:/sbin:/usr/bin:/bin"
 umask 077
 metrics_cache="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-agent-workbench/host-metrics"
-mkdir -p "$metrics_cache" || exit 1
 mode=${1:-full}
-case "$mode" in compact|standard|full|cpu) ;; *) exit 2 ;; esac
+case "$mode" in
+  cpu) requested_level=0 ;;
+  compact) requested_level=1 ;;
+  standard) requested_level=2 ;;
+  full) requested_level=3 ;;
+  *) exit 2 ;;
+esac
 now=$(date +%s)
+
+numeric()
+{
+  case $1 in ''|*[!0-9]*) return 1 ;; esac
+}
+
+load_snapshot()
+{
+  snapshot_version='' sample_time=0 sample_level=0
+  cpu=-- mem=-- disk=-- up=-- down=--
+  cpu_time=0 total=- idle=- network_time=0 iface=- rx=- tx=-
+  if [ -r "$metrics_cache/snapshot" ]; then
+    IFS=' ' read -r snapshot_version sample_time sample_level cpu mem disk up down \
+      cpu_time total idle network_time iface rx tx < "$metrics_cache/snapshot" || true
+  fi
+  if [ "$snapshot_version" != v1 ] || ! numeric "$sample_time"; then
+    snapshot_version='' sample_time=0 sample_level=0
+    cpu=-- mem=-- disk=-- up=-- down=--
+    cpu_time=0 total=- idle=- network_time=0 iface=- rx=- tx=-
+  fi
+  case "$sample_level" in 0|1|2|3) ;; *) sample_level=0; sample_time=0 ;; esac
+  numeric "$cpu_time" || cpu_time=0
+  numeric "$network_time" || network_time=0
+}
+
+fresh()
+{
+  [ "$snapshot_version" = v1 ] &&
+    [ "$((now - sample_time))" -ge 0 ] && [ "$((now - sample_time))" -lt 2 ]
+}
+
+render()
+{
+  case "$mode" in
+    cpu) printf '󰻠 %s' "$cpu" ;;
+    compact) printf '󰻠 %s 󰍛 %s' "$cpu" "$mem" ;;
+    standard) printf '󰻠 %s 󰍛 %s 󰋊 %s' "$cpu" "$mem" "$disk" ;;
+    full) printf '󰻠 %s 󰍛 %s 󰋊 %s 󰕒 %s 󰇚 %s' "$cpu" "$mem" "$disk" "$up" "$down" ;;
+  esac
+}
+
+cached()
+{
+  if [ "$snapshot_version" = v1 ]; then render
+  else cat "$metrics_cache/$mode" 2>/dev/null
+  fi
+}
+
+load_snapshot
+if fresh && [ "$sample_level" -ge "$requested_level" ]; then
+  render
+  exit 0
+fi
+mkdir -p "$metrics_cache" || exit 1
 os=$(uname -s)
-# Atomic directory lock prevents simultaneous status clients racing snapshots.
+# Atomic directory lock prevents concurrent status clients racing snapshots.
 if [ -r "$metrics_cache/lock/pid" ]; then
-  lock_pid=$(cat "$metrics_cache/lock/pid" 2>/dev/null)
+  lock_pid=''
+  IFS= read -r lock_pid < "$metrics_cache/lock/pid" || true
   case "$lock_pid" in
     ''|*[!0-9]*) ;;
     *) if ! kill -0 "$lock_pid" 2>/dev/null; then
@@ -21,9 +80,6 @@ if [ -r "$metrics_cache/lock/pid" ]; then
        fi ;;
   esac
 fi
-# A process killed between mkdir and writing pid leaves an ownerless lock.
-# Give a new owner time to publish its PID; remove only an old, empty directory.
-# rmdir fails safely if a concurrent owner has populated it in the meantime.
 if [ -d "$metrics_cache/lock" ] && [ ! -e "$metrics_cache/lock/pid" ]; then
   case "$os" in
     Darwin) lock_time=$(stat -f %m "$metrics_cache/lock" 2>/dev/null) ;;
@@ -37,104 +93,131 @@ if [ -d "$metrics_cache/lock" ] && [ ! -e "$metrics_cache/lock/pid" ]; then
   esac
 fi
 if ! mkdir "$metrics_cache/lock" 2>/dev/null; then
-  cat "$metrics_cache/$mode" 2>/dev/null
+  cached
   exit 0
 fi
-trap 'rm -f "$metrics_cache/lock/pid"; rmdir "$metrics_cache/lock" 2>/dev/null' 0
+metrics_stage="$metrics_cache/snapshot.tmp.$$"
+trap 'rm -f "$metrics_cache/lock/pid" "$metrics_stage"; rmdir "$metrics_cache/lock" 2>/dev/null' 0
 trap 'exit 1' HUP INT TERM
 printf '%s\n' "$$" > "$metrics_cache/lock/pid"
-previous_time=$(cat "$metrics_cache/time" 2>/dev/null)
-case "$previous_time" in ''|*[!0-9]*) previous_time=0 ;; esac
-if [ "$((now - previous_time))" -ge 0 ] && [ "$((now - previous_time))" -lt 2 ]; then
-  cat "$metrics_cache/$mode" 2>/dev/null
+# Another sampler may have finished while we were acquiring the lock.
+load_snapshot
+if fresh && [ "$sample_level" -ge "$requested_level" ]; then
+  render
   exit 0
 fi
-cpu=-- mem=-- disk=-- rx='' tx='' iface='' total='' idle='' sampled_rx='' sampled_tx=''
+base_fresh=0
+if fresh; then base_fresh=1; fi
 proc_root=${TMUX_METRICS_PROC_ROOT:-/proc}
-case "$os" in
-  Darwin)
-    cpu=$(top -l 1 -n 0 2>/dev/null | awk '/CPU usage:/ {gsub(/%/, "", $(NF-1)); printf "%.0f%%", 100-$(NF-1); exit}')
-    mem=$(vm_stat 2>/dev/null | awk -v total="$(sysctl -n hw.memsize 2>/dev/null)" '
-      /page size of/ {page=$8}
-      /Pages active:/ {active=$NF+0}
-      /Pages wired down:/ {wired=$NF+0}
-      /Pages occupied by compressor:/ {compressed=$NF+0}
-      END {if(total>0 && page>0) printf "%.0f%%", 100*(active+wired+compressed)*page/total}')
-    # Some macOS drivers leave netstat Ibytes frozen. Network Statistics
-    # provides live TCP/UDP deltas; exclude loopback and count summaries once.
-    # Two samples delimit a one-second interval; the first is cumulative.
-    counters=$(nettop -n -P -L 2 -s 1 -d -x -t external -J bytes_in,bytes_out 2>/dev/null | awk -F, '
-      $1=="" {sample++; next}
-      sample==2 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {rx+=$2; tx+=$3; found=1}
-      END {if(found) printf "%.0f %.0f\n", rx, tx}')
-    read -r sampled_rx sampled_tx <<EOF
+if [ "$base_fresh" -eq 0 ]; then
+  previous_total=$total previous_idle=$idle previous_cpu_time=$cpu_time
+  total=- idle=- cpu=--
+  case "$os" in
+    Darwin)
+      plugin_dir=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+      . "$plugin_dir/lib/resolve-core.sh"
+      core=$(workbench_core_path "$plugin_dir") || core=
+      counters=''
+      if [ -n "$core" ]; then
+        counters=$("$core" host-cpu-counters 2>/dev/null) || counters=''
+      fi
+      read -r total idle <<EOF
 $counters
 EOF
-    ;;
-  Linux)
-    counters=$(awk '/^cpu / {sum=0; for(i=2;i<=9;i++)sum+=$i; printf "%.0f %.0f\n", sum, $5+$6; exit}' "$proc_root/stat" 2>/dev/null)
-    read -r total idle <<EOF
+      if ! numeric "$total" || ! numeric "$idle"; then
+        total=- idle=-
+        # Compatibility with installations whose core has not been upgraded yet.
+        cpu=$(top -l 1 -n 0 2>/dev/null | awk '/CPU usage:/ {gsub(/%/, "", $(NF-1)); printf "%.0f%%", 100-$(NF-1); exit}')
+      fi
+      ;;
+    Linux)
+      counters=$(awk '/^cpu / {sum=0; for(i=2;i<=9;i++)sum+=$i; printf "%.0f %.0f\n", sum, $5+$6; exit}' "$proc_root/stat" 2>/dev/null)
+      read -r total idle <<EOF
 $counters
 EOF
-    mem=$(awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {avail=$2; found=1}
-      END {if(total>0 && found) printf "%.0f%%", 100*(total-avail)/total}' "$proc_root/meminfo" 2>/dev/null)
-    iface=$(awk '$2=="00000000" && $8=="00000000" {if(!found || $7<metric) {iface=$1; metric=$7; found=1}} END {print iface}' "$proc_root/net/route" 2>/dev/null)
-    if [ -z "$iface" ]; then
-      iface=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')
-    fi
-    if [ -n "$iface" ]; then
-      counters=$(awk -F '[: ]+' -v iface="$iface" '$2==iface {print $3, $11; exit} $1==iface {print $2, $10; exit}' "$proc_root/net/dev" 2>/dev/null)
-      read -r rx tx <<EOF
+      ;;
+  esac
+  if numeric "$total" && numeric "$idle"; then
+    cpu=$(awk -v now="$now" -v before="$previous_cpu_time" -v total="$total" -v idle="$idle" -v previous_total="$previous_total" -v previous_idle="$previous_idle" '
+      function numeric(v) {return v ~ /^[0-9]+$/}
+      BEGIN {cpu="--"; dt=now-before
+        if(dt>0 && dt<=120 && numeric(previous_total) && numeric(previous_idle) && total>previous_total && idle>=previous_idle && idle-previous_idle<=total-previous_total)
+          cpu=sprintf("%.0f%%",100*(1-(idle-previous_idle)/(total-previous_total)))
+        print cpu}')
+  fi
+  [ -n "$cpu" ] || cpu=--
+  total=${total:--} idle=${idle:--}
+  cpu_time=$now
+fi
+if [ "$requested_level" -ge 1 ] && { [ "$base_fresh" -eq 0 ] || [ "$sample_level" -lt 1 ]; }; then
+  mem=--
+  case "$os" in
+    Darwin)
+      mem=$(vm_stat 2>/dev/null | awk -v total="$(sysctl -n hw.memsize 2>/dev/null)" '
+        /page size of/ {page=$8}
+        /Pages active:/ {active=$NF+0}
+        /Pages wired down:/ {wired=$NF+0}
+        /Pages occupied by compressor:/ {compressed=$NF+0}
+        END {if(total>0 && page>0) printf "%.0f%%",100*(active+wired+compressed)*page/total}')
+      ;;
+    Linux)
+      mem=$(awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {avail=$2; found=1}
+        END {if(total>0 && found) printf "%.0f%%",100*(total-avail)/total}' "$proc_root/meminfo" 2>/dev/null)
+      ;;
+  esac
+  [ -n "$mem" ] || mem=--
+fi
+if [ "$requested_level" -ge 2 ] && { [ "$base_fresh" -eq 0 ] || [ "$sample_level" -lt 2 ]; }; then
+  disk=$(df -Pk "${TMUX_METRICS_DISK_PATH:-$HOME}" 2>/dev/null | awk 'NR>1 {value=$(NF-1)} END {if(value ~ /^[0-9]+%$/) print value}')
+  [ -n "$disk" ] || disk=--
+fi
+if [ "$requested_level" -ge 3 ] && { [ "$base_fresh" -eq 0 ] || [ "$sample_level" -lt 3 ]; }; then
+  previous_network_time=$network_time previous_iface=$iface previous_rx=$rx previous_tx=$tx
+  iface=- rx=- tx=- sampled_rx='' sampled_tx=''
+  case "$os" in
+    Darwin)
+      counters=$(nettop -n -P -L 2 -s 1 -d -x -t external -J bytes_in,bytes_out 2>/dev/null | awk -F, '
+        $1=="" {sample++; next}
+        sample==2 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {rx+=$2; tx+=$3; found=1}
+        END {if(found) printf "%.0f %.0f\n",rx,tx}')
+      read -r sampled_rx sampled_tx <<EOF
 $counters
 EOF
-    fi
-    ;;
-esac
-disk=$(df -Pk "${TMUX_METRICS_DISK_PATH:-$HOME}" 2>/dev/null | awk 'NR>1 {value=$(NF-1)} END {if(value ~ /^[0-9]+%$/) print value}')
-[ -n "$cpu" ] || cpu=--
-[ -n "$mem" ] || mem=--
-[ -n "$disk" ] || disk=--
-# Snapshot fields are data only (never sourced as shell code).
-previous=$(cat "$metrics_cache/counters" 2>/dev/null)
-values=$(awk -v now="$now" -v iface="$iface" -v rx="$rx" -v tx="$tx" -v total="$total" -v idle="$idle" -v sampled_rx="$sampled_rx" -v sampled_tx="$sampled_tx" '
-  function numeric(v) {return v ~ /^[0-9]+$/}
-  function speed(v) {
-    v/=1000000
-    if(v>=999.995) return ">999MB/s"
-    return sprintf("%.2fMB/s", v)
-  }
-  BEGIN {cpu="--"; up="--"; down="--"}
-  {dt=now-$1
-   if(dt>0 && dt<=120 && numeric(total) && numeric(idle) && numeric($5) && numeric($6) && total>$5 && idle>=$6 && idle-$6<=total-$5)
-     cpu=sprintf("%.0f%%",100*(1-(idle-$6)/(total-$5)))
-   if(dt>0 && dt<=120 && iface==$2 && numeric(rx) && numeric(tx) && numeric($3) && numeric($4) && rx>=$3 && tx>=$4) {
-     down=speed((rx-$3)/dt); up=speed((tx-$4)/dt)
-   }}
-  END {
-    if(numeric(sampled_rx) && numeric(sampled_tx)) {
-      down=speed(sampled_rx); up=speed(sampled_tx)
-    }
-    print cpu, up, down
-  }' <<EOF
-$previous
+      ;;
+    Linux)
+      iface=$(awk '$2=="00000000" && $8=="00000000" {if(!found || $7<metric) {iface=$1; metric=$7; found=1}} END {print iface}' "$proc_root/net/route" 2>/dev/null)
+      if [ -z "$iface" ]; then
+        iface=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')
+      fi
+      if [ -n "$iface" ]; then
+        counters=$(awk -F '[: ]+' -v iface="$iface" '$2==iface {print $3,$11; exit} $1==iface {print $2,$10; exit}' "$proc_root/net/dev" 2>/dev/null)
+        read -r rx tx <<EOF
+$counters
 EOF
-)
-read -r sampled_cpu up down <<EOF
-$values
+      fi
+      ;;
+  esac
+  rates=$(awk -v now="$now" -v before="$previous_network_time" -v iface="$iface" -v previous_iface="$previous_iface" -v rx="$rx" -v tx="$tx" -v previous_rx="$previous_rx" -v previous_tx="$previous_tx" -v sampled_rx="$sampled_rx" -v sampled_tx="$sampled_tx" '
+    function numeric(v) {return v ~ /^[0-9]+$/}
+    function speed(v) {v/=1000000; if(v>=999.995) return ">999MB/s"; return sprintf("%.2fMB/s",v)}
+    BEGIN {up="--"; down="--"; dt=now-before
+      if(dt>0 && dt<=120 && iface==previous_iface && numeric(rx) && numeric(tx) && numeric(previous_rx) && numeric(previous_tx) && rx>=previous_rx && tx>=previous_tx) {
+        down=speed((rx-previous_rx)/dt); up=speed((tx-previous_tx)/dt)
+      }
+      if(numeric(sampled_rx) && numeric(sampled_tx)) {down=speed(sampled_rx); up=speed(sampled_tx)}
+      print up,down}')
+  read -r up down <<EOF
+$rates
 EOF
-[ -z "$total" ] || cpu=$sampled_cpu
-printf '%s %s %s %s %s %s\n' "$now" "${iface:--}" "${rx:--}" "${tx:--}" "${total:--}" "${idle:--}" > "$metrics_cache/counters"
-# Keep the host capsule compact: one space after each icon and one space
-# between metrics. Values are already formatted to their useful precision;
-# adding fixed-width padding makes the status bar unnecessarily wide.
-# Nerd Fonts: md-cpu-64-bit, md-memory, md-harddisk, md-upload, md-download.
-printf '󰻠 %s' "$cpu" > "$metrics_cache/cpu.tmp"
-printf '󰻠 %s 󰍛 %s' "$cpu" "$mem" > "$metrics_cache/compact.tmp"
-printf '󰻠 %s 󰍛 %s 󰋊 %s' "$cpu" "$mem" "$disk" > "$metrics_cache/standard.tmp"
-printf '󰻠 %s 󰍛 %s 󰋊 %s 󰕒 %s 󰇚 %s' "$cpu" "$mem" "$disk" "$up" "$down" > "$metrics_cache/full.tmp"
-mv "$metrics_cache/cpu.tmp" "$metrics_cache/cpu"
-mv "$metrics_cache/compact.tmp" "$metrics_cache/compact"
-mv "$metrics_cache/standard.tmp" "$metrics_cache/standard"
-mv "$metrics_cache/full.tmp" "$metrics_cache/full"
-printf '%s\n' "$now" > "$metrics_cache/time"
-cat "$metrics_cache/$mode"
+  network_time=$now
+  iface=${iface:--} rx=${rx:--} tx=${tx:--}
+fi
+if [ "$base_fresh" -eq 0 ]; then sample_time=$now; sample_level=$requested_level
+elif [ "$requested_level" -gt "$sample_level" ]; then sample_level=$requested_level
+fi
+# One atomic, data-only snapshot replaces six counters/output cache files.
+printf 'v1 %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+  "$sample_time" "$sample_level" "$cpu" "$mem" "$disk" "$up" "$down" \
+  "$cpu_time" "$total" "$idle" "$network_time" "$iface" "$rx" "$tx" > "$metrics_stage"
+mv "$metrics_stage" "$metrics_cache/snapshot"
+render

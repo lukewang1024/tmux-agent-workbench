@@ -62,6 +62,28 @@ class MetricsPluginTest(unittest.TestCase):
         self.load()
         self.assertIn(str(ROOT / 'bin/workbench-host-metrics-status'), self.option('@adaptive_cpu'))
 
+    def test_cached_status_job_does_not_sample_when_disabled(self):
+        self.set_option('@workbench-host-metrics', 'off')
+        cache = Path(self.tmp.name) / 'unused-cache'
+        env = dict(self.env, XDG_CACHE_HOME=str(cache))
+        output = subprocess.check_output(['sh', str(ROOT / 'bin/workbench-host-metrics-status')], env=env)
+        self.assertEqual(output, b'')
+        self.assertFalse(cache.exists())
+
+    def test_status_preserves_mode_when_enable_option_is_unset(self):
+        self.set_option('@workbench-host-metrics-mode', 'standard')
+        cache = Path(self.tmp.name) / 'cache'
+        snapshot = cache / 'tmux-agent-workbench/host-metrics/snapshot'
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text('v1 1000 3 25% 35% 40% -- -- 1000 100 50 0 - - -\n')
+        shim = Path(self.tmp.name) / 'bin'
+        shim.mkdir()
+        (shim / 'date').write_text('#!/bin/sh\necho 1000\n')
+        (shim / 'date').chmod(0o755)
+        env = dict(self.env, XDG_CACHE_HOME=str(cache), PATH=str(shim) + ':' + os.environ['PATH'])
+        output = subprocess.check_output(['sh', str(ROOT / 'bin/workbench-host-metrics-status')], env=env, text=True)
+        self.assertEqual(output, '󰻠 25% 󰍛 35% 󰋊 40%')
+
 
 if __name__ == '__main__':
     unittest.main()

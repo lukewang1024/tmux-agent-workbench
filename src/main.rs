@@ -85,6 +85,8 @@ enum Command {
         page: usize,
     },
     #[command(hide = true)]
+    HostCpuCounters,
+    #[command(hide = true)]
     NormalizeResurrectLayout {
         path: std::path::PathBuf,
     },
@@ -1220,8 +1222,15 @@ fn termux_external_apps_enabled(path: &std::path::Path) -> bool {
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Status sampling must not create or inspect workbench state directories.
+    if matches!(&cli.command, Command::HostCpuCounters) {
+        let (total, idle) = tmux_agent_workbench::host_metrics::cpu_counters()?;
+        println!("{total} {idle}");
+        return Ok(());
+    }
     let paths = Paths::discover()?;
     match cli.command {
+        Command::HostCpuCounters => unreachable!(),
         Command::NormalizeResurrectLayout { path } => {
             let input = std::fs::read_to_string(path)?;
             print!(
