@@ -86,6 +86,15 @@ if MOCK_POPUP_STATUS=7 \
   exit 1
 fi
 
+# Socket path shortening can leave the configured shell runtime uncreated.
+# Maintenance must initialize it and release its lock if the client vanished.
+responsive_runtime=$test_root/long-runtime-parent-that-the-core-may-not-create/runtime
+[ ! -e "$responsive_runtime" ]
+XDG_RUNTIME_DIR="$responsive_runtime" PATH="$responsive_mock_bin:$PATH" \
+  "$repo/bin/workbench-responsive-maintain" "$repo/tests/fixtures/fake-responsive-core" /dev/pts/missing
+[ -d "$responsive_runtime" ]
+[ ! -d "$responsive_runtime/workbench-responsive-12345-_dev_pts_missing.lock" ]
+
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 "$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
@@ -450,10 +459,19 @@ focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}
 focus_server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
 focus_client_key=$(printf '%s' "$focus_client" | tr '/.' '__')
 focus_hook_lock=$XDG_RUNTIME_DIR/workbench-responsive-$focus_server_pid-$focus_client_key.lock
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+  printf '%s\n' 'Responsive maintenance did not initialize its shell lock directory' >&2
+  exit 1
+fi
 tries=0
 while ! mkdir "$focus_hook_lock" 2>/dev/null; do
   tries=$((tries + 1))
-  [ "$tries" -lt 100 ] || exit 1
+  # Existing maintenance can finish up to eight reconciliation rounds; macOS
+  # subprocess startup is slower than Linux. This waits only for test setup.
+  if [ "$tries" -ge 300 ]; then
+    printf 'Responsive maintenance still owns its client lock: %s\n' "$focus_hook_lock" >&2
+    exit 1
+  fi
   sleep 0.05
 done
 # jump must restore the source window's previous pane, otherwise returning to

@@ -9,6 +9,7 @@ case ${1:-} in
       *'#{window_width}'*) printf '%s\n' 140 ;;
       *'#{window_id}'*) printf '%s\n' @1 ;;
       *'#{pane_id}'*) printf '%s\n' %1 ;;
+      *'#{pid}'*) printf '%s\n' 12345 ;;
       *) exit 1 ;;
     esac
     ;;
