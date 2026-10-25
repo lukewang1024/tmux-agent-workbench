@@ -106,6 +106,10 @@ fn large_tool_result_is_consumed_but_only_lifecycle_metadata_is_forwarded() {
                 Err(error) => panic!("{error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         let request = read_request(&stream).unwrap();
         assert_eq!(request.params["session_id"], "large-result-test");
         assert_eq!(request.params["event"], "activity");

@@ -6,6 +6,7 @@
 # stanza is needed. Layer 2 can still opt out with @workbench-disable-git.
 set -eu
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tmux set-option -gq @workbench_plugin_dir "$CURRENT_DIR"
 
 # Bridge a tmux option to a global env var, only if the user actually set it —
 # leave it alone otherwise so the scripts' own `${VAR:-default}` applies.
@@ -186,6 +187,8 @@ bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open ag
   run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}' '#{pane_id}'"
 bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
   run-shell -b "$CURRENT_DIR/bin/workbench-status-popup tmux '#{client_name}' '#{pane_id}'"
+bind_tracked @workbench-key-main-menu @workbench-_bound-main-menu M-m "open combined Workbench menu" \
+  run-shell -b "$CURRENT_DIR/bin/tmux-agent-workbench-cli menu --client '#{client_name}' --pane '#{pane_id}'"
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell

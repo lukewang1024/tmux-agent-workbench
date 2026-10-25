@@ -86,9 +86,19 @@ if MOCK_POPUP_STATUS=7 \
   exit 1
 fi
 
+# Socket path shortening can leave the configured shell runtime uncreated.
+# Maintenance must initialize it and release its lock if the client vanished.
+responsive_runtime=$test_root/long-runtime-parent-that-the-core-may-not-create/runtime
+[ ! -e "$responsive_runtime" ]
+XDG_RUNTIME_DIR="$responsive_runtime" PATH="$responsive_mock_bin:$PATH" \
+  "$repo/bin/workbench-responsive-maintain" "$repo/tests/fixtures/fake-responsive-core" /dev/pts/missing
+[ -d "$responsive_runtime" ]
+[ ! -d "$responsive_runtime/workbench-responsive-12345-_dev_pts_missing.lock" ]
+
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
 "$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
+"$python_runner" "$repo/tests/switcher.py" "$binary"
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/task-title-exit.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
@@ -235,6 +245,8 @@ fi
 tmux -S "$socket" list-keys -T prefix -N | grep 'next layout without resizing sidebar$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'select pane left with responsive zoom$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'open compact tmux menu$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'open combined Workbench menu$' >/dev/null
+[ "$(tmux -S "$socket" show-option -gqv @workbench_plugin_dir)" = "$repo" ]
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \
   grep -E 'pick tmuxinator workbench project|new workspace \(feature \+ repos\)|pick agent$' >/dev/null; then
@@ -418,12 +430,9 @@ tmux -S "$socket" kill-pane -t "$target_pane"
 tmux -S "$socket" list-clients -F '#{client_session}' | \
   grep '^relay-target$' >/dev/null
 
-# Picker integration replaces only the human fzf selection. Inventory,
+# Searchable Session/Agent picker interactions are covered by switcher.py.
+# Keep this Agent available for the following focus and responsive tests.
 printf '%s\n' 'integration phase: picker'
-# process discovery, socket snapshot, and exact focus all remain real.
-mkdir -p "$test_root/picker-bin"
-cp "$repo/tests/fixtures/fake-fzf-tmux" "$test_root/picker-bin/workbench-fzf-tmux"
-chmod 755 "$test_root/picker-bin/workbench-fzf-tmux"
 tmux -S "$socket" new-session -d -s agent-pick -x 140 -y 40 \
   "$repo/target/debug/examples/codex"
 tmux -S "$socket" rename-window -t agent-pick:1 agent-pick
@@ -434,18 +443,37 @@ while ! "$binary" agent explain "$agent_pane" >/dev/null 2>&1; do
   [ "$tries" -lt 60 ] || exit 1
   sleep 0.05
 done
-WORKBENCH_PICK_MATCH=relay-target PATH=$test_root/picker-bin:$PATH \
-  "$binary" pick session
-tmux -S "$socket" list-clients -F '#{client_session}' | \
-  grep '^relay-target$' >/dev/null
-WORKBENCH_PICK_MATCH=agent-pick PATH=$test_root/picker-bin:$PATH \
-  "$binary" pick agent
-tmux -S "$socket" list-clients -F '#{pane_id}' | grep "^$agent_pane$" >/dev/null
 
 # Clicking a sidebar makes it active before the handler runs. A cross-window
 printf '%s\n' 'integration phase: local focus'
 exec 9>&2 2>"$test_root/local-focus.log"
 set -x
+# These assertions exercise focus itself, independently of responsive hooks.
+# Session/window changes trigger the same background path as resize, so stop
+# all layout producers and hold their per-client lock after existing work ends.
+for focus_hook in client-attached client-resized client-session-changed session-window-changed window-resized after-kill-pane pane-exited after-new-window; do
+  tmux -S "$socket" set-hook -gu "$focus_hook[920]"
+done
+focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
+  sort -n | sed -n '1s/^[0-9][0-9]* //p')
+focus_server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
+focus_client_key=$(printf '%s' "$focus_client" | tr '/.' '__')
+focus_hook_lock=$XDG_RUNTIME_DIR/workbench-responsive-$focus_server_pid-$focus_client_key.lock
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+  printf '%s\n' 'Responsive maintenance did not initialize its shell lock directory' >&2
+  exit 1
+fi
+tries=0
+while ! mkdir "$focus_hook_lock" 2>/dev/null; do
+  tries=$((tries + 1))
+  # Existing maintenance can finish up to eight reconciliation rounds; macOS
+  # subprocess startup is slower than Linux. This waits only for test setup.
+  if [ "$tries" -ge 300 ]; then
+    printf 'Responsive maintenance still owns its client lock: %s\n' "$focus_hook_lock" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
 # jump must restore the source window's previous pane, otherwise returning to
 # that window lands in the sidebar itself.
 tmux -S "$socket" new-session -d -s source-restore -x 140 -y 40
@@ -470,11 +498,7 @@ done
 # Keep a real second work pane: responsive maintenance removes the sidebar,
 # and tmux cannot zoom a window that contains only one remaining pane.
 tmux -S "$socket" split-window -d -t "$agent_pane"
-focus_client=$(tmux -S "$socket" list-clients -F '#{client_width} #{client_name}' | \
-  sort -n | sed -n '1s/^[0-9][0-9]* //p')
-# Disable the resize-driven path so this assertion proves focus itself owns the
-# transition instead of racing an asynchronous client-resized hook.
-tmux -S "$socket" set-hook -gu 'client-resized[920]'
+# The hook lock above also rejects late jobs queued before the hooks retired.
 tmux -S "$socket" switch-client -c "$focus_client" -t source-restore
 sleep 0.2
 if [ "$(tmux -S "$socket" display-message -p -t agent-pick '#{window_zoomed_flag}')" = 1 ]; then

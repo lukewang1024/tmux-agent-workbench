@@ -1,2 +1,5 @@
 #!/bin/sh
+case $* in
+  'sidebar --popup '*) exit "${MOCK_POPUP_STATUS:-0}" ;;
+esac
 exit 0

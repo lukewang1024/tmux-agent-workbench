@@ -10,7 +10,6 @@ use crate::server::ServerIdentity;
 pub fn run(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     let mut hard_failures = 0;
     hard_failures += check_tmux();
-    hard_failures += check_command("fzf-tmux", true, "install fzf (which provides fzf-tmux)");
     check_platform_delivery();
     match Config::load(&paths.config_file()).and_then(|_| {
         ManifestSet::load(&paths.manifests_dir()).map_err(|e| {

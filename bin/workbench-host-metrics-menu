@@ -33,5 +33,5 @@ set -- "$@" -C 0 -c "$client" -t "$pane" -b rounded \
   "$standard_line" s "run-shell -b '$script_dir/workbench-host-metrics-mode standard'" \
   "$full_line" f "run-shell -b '$script_dir/workbench-host-metrics-mode full'" \
   '' \
-  '  Open btop' b 'display-popup -E -b rounded -T " btop " -w 90% -h 90% "exec btop"'
+  '  Open btop' b "display-popup -E -c '$client' -t '$pane' -b rounded -T ' btop ' -w 90% -h 90% 'exec btop'"
 exec "$@"

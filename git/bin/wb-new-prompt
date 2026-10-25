@@ -23,7 +23,6 @@ esac
 [ $# -eq 0 ] || exit 2
 . "$dir/../../lib/resolve-session.sh"
 caller=$(workbench_resolve_pane)
-quoted_script=$(printf '%s' "$dir/wb-new-prompt" | sed "s/'/'\\\\''/g")
-set -- display-popup -t "$caller" -E -w 70% -h 7 -e "PATH=$PATH"
-[ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT" -e "WORKBENCH_TARGET_CLIENT=$WORKBENCH_TARGET_CLIENT"
-exec tmux "$@" "'$quoted_script' --read"
+direction=$(WORKBENCH_SOURCE_PANE=$caller "$cli" prompt-text --title 'New workspace' --label 'Workspace direction:') || exit 0
+[ -n "$direction" ] || exit 0
+exec "$cli" new "$direction"

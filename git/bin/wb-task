@@ -87,11 +87,10 @@ case $action in
       [ $# -eq 1 ] || { usage >&2; exit 2; }
       workbench_workspace_context
       caller=$(workbench_resolve_pane)
-      quoted_cli=$(printf '%s' "$cli" | sed "s/'/'\\\\''/g")
-      set -- display-popup -t "$caller" -E -w 70% -h 7 \
-        -e "WORKBENCH_SESSION=$wb_session" -e "PATH=$PATH"
-      [ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT"
-      exec tmux "$@" "'$quoted_cli' task prompt"
+      task=$(WORKBENCH_SESSION=$wb_session WORKBENCH_SOURCE_PANE=$caller \
+        "$cli" prompt-text --title 'New task' --label 'Task name:') || exit 0
+      [ -n "$task" ] || exit 0
+      WORKBENCH_SESSION=$wb_session exec "$cli" task new "$task"
     fi
     detach=0
     if [ "${1:-}" = --detach ]; then detach=1; shift; fi

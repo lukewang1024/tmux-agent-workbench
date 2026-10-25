@@ -1,10 +1,5 @@
 """Task isolation and temporary tools against a private, config-free tmux server."""
 import os
-import fcntl
-import pty
-import select
-import struct
-import termios
 from pathlib import Path
 import re
 import shlex
@@ -311,40 +306,15 @@ class TaskWindows(unittest.TestCase):
     def test_task_prompt_from_background_binding_creates_only_one_task(self):
         self.new('first')
         original = self.pane('first')
-        master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
-        client = subprocess.Popen([str(self.bin / 'tmux'), 'attach-session', '-t', 'direction'],
-                                  env=dict(self.env, TERM='xterm-256color'),
-                                  stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
-        client_name = ''
-        try:
-            self.wait(lambda: bool(self.tmux('list-clients', '-F', '#{client_name}')))
-            client_name = self.tmux('list-clients', '-F', '#{client_name}')
-            command = shlex.join(['env', 'TMUX_PANE=' + original,
-                                  'WORKBENCH_TARGET_CLIENT=' + client_name,
-                                  str(CLI), 'task', 'new', '--prompt'])
-            self.tmux('run-shell', '-b', command)
-            output = bytearray()
-            deadline = time.monotonic() + 8
-            while b'Task name:' not in output:
-                if time.monotonic() >= deadline:
-                    self.fail('task name popup did not open')
-                if select.select([master], [], [], .1)[0]:
-                    output.extend(os.read(master, 65536))
-            os.write(master, b'parallel task\r')
-            self.wait(lambda: 'parallel task' in self.windows())
-            self.assertEqual(self.windows(), ['first', 'parallel task'])
-            self.assertEqual(self.pane('first'), original)
-        finally:
-            # macOS may block a detached client flushing its final redraw.
-            # Release the terminal before waiting for that client to exit.
-            os.close(master)
-            os.close(slave)
-            try:
-                client.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                client.kill()
-                client.wait(timeout=5)
+        # This suite owns workflow orchestration. Real modal keyboard/touch
+        # behavior is covered by status-menu-mouse.py against the built core.
+        self.write_script('core', 'case ${1:-} in prompt-text) printf "%s\\n" "parallel task" ;; esac\n')
+        command = shlex.join(['env', 'TMUX_PANE=' + original,
+                              str(CLI), 'task', 'new', '--prompt'])
+        self.tmux('run-shell', '-b', command)
+        self.wait(lambda: 'parallel task' in self.windows())
+        self.assertEqual(self.windows(), ['first', 'parallel task'])
+        self.assertEqual(self.pane('first'), original)
 
 
 if __name__ == '__main__':

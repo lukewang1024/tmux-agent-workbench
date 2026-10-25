@@ -4,26 +4,20 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{
-    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
-    KeyCode, KeyEventKind, MouseButton, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::config::{AgentSort, Config};
 use crate::ipc::{ClientError, Request, call};
 use crate::model::{
     AgentSnapshot, ConversationSnapshot, DisplayState, SessionSnapshot, Snapshot, StateSource,
 };
+use crate::navigation_list::{Hit, NavigationList, Screen};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
 
@@ -51,7 +45,8 @@ struct SidebarViewport {
 
 impl SidebarViewport {
     fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
-        let first_row = 1 + usize::from(notice.is_some());
+        // Actions and the Agents/sort heading stay above the scrolling body.
+        let first_row = 3 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
@@ -66,20 +61,30 @@ impl SidebarViewport {
         }
     }
 
+    #[cfg(test)]
     fn row_at(self, screen_row: u16, scroll: usize, total: usize) -> Option<usize> {
-        let offset = usize::from(screen_row).checked_sub(self.first_row)?;
-        if offset >= self.row_height {
-            return None;
+        let mut list = NavigationList::<()>::default();
+        list.replace_rows((0..total).map(|index| Some(index.to_string())).collect());
+        list.set_viewport(Rect::new(
+            0,
+            self.first_row as u16,
+            1,
+            self.row_height as u16,
+        ));
+        list.scroll = scroll;
+        match list.hit(0, screen_row, &[]) {
+            Some(Hit::Item(key)) => key.parse().ok(),
+            _ => None,
         }
-        scroll.checked_add(offset).filter(|row| *row < total)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FooterButton {
+enum Action {
     New,
     Menu,
     Close,
+    Sort,
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
@@ -87,25 +92,11 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     // remote clients do not paint an initially empty fullscreen popup until a
     // later input event; entering with real rows makes the UI visible at once.
     let initial_snapshot = fetch_snapshot(&paths.socket_for_server(&server.key));
-    enable_raw_mode()?;
-    let mut output = stdout();
-    execute!(
-        output,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableFocusChange
-    )?;
-    let backend = CrosstermBackend::new(output);
-    let mut terminal = Terminal::new(backend)?;
+    let _screen = Screen::enter()?;
+    let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
+        CrosstermBackend::new(stdout()),
+    )?)?;
     let result = event_loop(&mut terminal, paths, server, initial_snapshot);
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableFocusChange
-    )?;
-    terminal.show_cursor()?;
     if let Err(error) = &result {
         let log = paths.state_dir.join("popup-actions.log");
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -121,12 +112,57 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     result
 }
 
+pub fn open_popup(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    popup(server, pane, client, &["sidebar"])
+}
+
+pub(crate) fn popup(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+    args: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::popup::open(server, pane, client, args, crate::popup::Sizing::Sidebar)
+}
+
+fn switch_return_to() -> crate::switcher::ReturnTo {
+    if popup_mode() {
+        crate::switcher::ReturnTo::SidebarPopup
+    } else {
+        crate::switcher::ReturnTo::SidebarPane
+    }
+}
+
+fn switch_list(kind: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let pane = source_pane().ok_or("sidebar source pane unavailable")?;
+    let client = current_client()?;
+    run_workbench(
+        &[
+            "switch",
+            kind,
+            "--pane",
+            &pane,
+            "--client",
+            &client,
+            "--return-to",
+            switch_return_to().name(),
+            "--language",
+            crate::ui_language::name(),
+        ],
+        true,
+    )
+}
+
 fn refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 1 } else { 5 })
 }
 
 fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<crate::popup_surface::Surface<CrosstermBackend<io::Stdout>>>,
     paths: &Paths,
     server: &ServerIdentity,
     initial_snapshot: Result<Snapshot, Box<dyn std::error::Error>>,
@@ -165,11 +201,14 @@ fn event_loop(
         .as_ref()
         .map(|snapshot| build_rows(snapshot, detailed, agent_sort))
         .unwrap_or_default();
-    let mut help_visible = false;
     let mut footer_hover = None;
-    let mut selected = 0_usize;
-    let mut selection_visible = true;
-    let mut scroll = 0_usize;
+    let mut navigation = NavigationList::<Action>::default();
+    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    if let Some(snapshot) = &snapshot
+        && let Some(index) = initial_row(&rows, snapshot, server, is_popup)
+    {
+        navigation.select(index);
+    }
     let mut disconnected = snapshot.is_none();
     let mut last_success = snapshot.as_ref().map(|_| Instant::now());
     let mut last_failure_log = Instant::now() - Duration::from_secs(10);
@@ -177,7 +216,7 @@ fn event_loop(
     let mut next_refresh = Instant::now();
     let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
     let mut dirty = true;
-    let mut initial_selection = true;
+    let mut initial_selection = snapshot.is_none();
     let mut last_content_height = usize::MAX;
     loop {
         if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
@@ -185,22 +224,15 @@ fn event_loop(
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
                 Ok(fetched) => {
-                    let selected_key = rows.get(selected).and_then(selection_key);
                     rows = build_rows(&fetched, detailed, agent_sort);
+                    navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
-                    selected = if initial_selection {
+                    if initial_selection {
                         initial_selection = false;
-                        current_agent_selection(&rows, &fetched, server)
-                            .or_else(|| nearest_selectable(&rows, 0))
-                            .unwrap_or(0)
-                    } else {
-                        selected_key
-                            .as_deref()
-                            .and_then(|key| nearest_matching_key(&rows, key, selected))
-                            .or_else(|| nearest_selectable(&rows, selected))
-                            .unwrap_or(0)
-                    };
+                        navigation
+                            .select(initial_row(&rows, &fetched, server, is_popup).unwrap_or(0));
+                    }
                     snapshot = Some(fetched);
                 }
                 Err(error) => {
@@ -235,15 +267,10 @@ fn event_loop(
             if let Some(saved) = persisted_agent_sort(paths)
                 && saved != agent_sort
             {
-                let selected_key = rows.get(selected).and_then(selection_key);
                 agent_sort = saved;
                 if let Some(snapshot) = &snapshot {
                     rows = build_rows(snapshot, detailed, agent_sort);
-                    selected = selected_key
-                        .as_deref()
-                        .and_then(|key| nearest_matching_key(&rows, key, selected))
-                        .or_else(|| nearest_selectable(&rows, selected))
-                        .unwrap_or(0);
+                    navigation.replace_rows(rows.iter().map(selection_key).collect());
                 }
                 dirty = true;
             }
@@ -251,7 +278,7 @@ fn event_loop(
 
         let size = terminal.size()?;
         let body_height = usize::from(size.height).max(1);
-        let footer_height = usize::from(popup_mode());
+        let footer_height = 2 * usize::from(popup_mode());
         let content_height = body_height.saturating_sub(footer_height);
         if content_height != last_content_height {
             last_content_height = content_height;
@@ -259,61 +286,72 @@ fn event_loop(
         }
         let notice = connection_notice(disconnected, snapshot.is_some());
         let viewport = SidebarViewport::new(content_height, rows.len(), notice);
-        let viewport_height = viewport.row_height;
+        navigation.set_viewport(Rect::new(
+            0,
+            viewport.first_row as u16,
+            size.width,
+            viewport.row_height as u16,
+        ));
         if dirty {
-            keep_visible(selected, viewport_height, rows.len(), &mut scroll);
-            let selected_key = selection_visible
-                .then(|| rows.get(selected).and_then(selection_key))
-                .flatten();
             terminal.draw(|frame| {
                 let area = frame.area();
-                let mut lines = Vec::with_capacity(body_height);
-                lines.push(render_actions(area.width, footer_hover));
-                if connection_notice(disconnected, snapshot.is_some()) == Some("disconnected") {
-                    lines.push(Line::from(Span::styled(
-                        "disconnected",
-                        Style::default().add_modifier(Modifier::DIM),
-                    )));
-                } else if rows.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "no sessions",
-                        Style::default().add_modifier(Modifier::DIM),
-                    )));
-                } else {
-                    if connection_notice(disconnected, snapshot.is_some())
-                        == Some("stale · reconnecting")
-                    {
-                        lines.push(Line::from(Span::styled(
-                            "stale · reconnecting",
-                            muted_style(),
-                        )));
-                    }
-                    let row_height = viewport.row_height;
-                    for row in rows.iter().skip(scroll).take(row_height) {
-                        lines.push(render_row(
-                            row,
-                            selected_key
-                                .as_deref()
-                                .is_some_and(|key| selection_key(row).as_deref() == Some(key)),
+                let mut header = vec![
+                    render_actions(area.width, footer_hover),
+                    render_row(
+                        &Row::AgentSection(agent_sort),
+                        footer_hover == Some(Action::Sort),
+                        area.width,
+                    ),
+                ];
+                if let Some(notice) = notice {
+                    header.push(Line::from(Span::styled(notice, muted_style())));
+                }
+                frame.render_widget(Paragraph::new(header), area);
+                crate::navigation_list::separator(
+                    frame,
+                    Rect::new(0, (viewport.first_row - 1) as u16, area.width, 1),
+                );
+                navigation.render(frame, |index, selected| {
+                    render_row(&rows[index], selected, area.width)
+                });
+                if rows.is_empty() && notice != Some("disconnected") {
+                    frame.render_widget(
+                        Paragraph::new("no sessions").style(muted_style()),
+                        Rect::new(
+                            0,
+                            viewport.first_row as u16,
                             area.width,
-                        ));
-                    }
-                    let shown = rows.len().saturating_sub(scroll).min(row_height);
-                    let hidden = rows.len().saturating_sub(shown);
-                    if hidden > 0 {
-                        lines.push(Line::from(format!("↕ {hidden} hidden")));
-                    }
+                            1.min(area.height.saturating_sub(viewport.first_row as u16)),
+                        ),
+                    );
                 }
-                lines.truncate(content_height);
-                while lines.len() < content_height {
-                    lines.push(Line::default());
+                let shown = navigation.visible_rows().len();
+                let hidden = rows.len().saturating_sub(shown);
+                if hidden > 0 && viewport.first_row + viewport.row_height < content_height {
+                    frame.render_widget(
+                        Paragraph::new(format!("↕ {hidden} hidden")),
+                        Rect::new(
+                            0,
+                            (viewport.first_row + viewport.row_height) as u16,
+                            area.width,
+                            1,
+                        ),
+                    );
                 }
-                if popup_mode() {
-                    lines.push(render_close(area.width, footer_hover));
-                }
-                frame.render_widget(Paragraph::new(lines), area);
-                if help_visible {
-                    render_help(frame, area);
+                if popup_mode() && area.height > 0 {
+                    crate::navigation_list::separator(
+                        frame,
+                        Rect::new(
+                            0,
+                            area.height.saturating_sub(2),
+                            area.width,
+                            u16::from(area.height > 1),
+                        ),
+                    );
+                    frame.render_widget(
+                        Paragraph::new(render_close(area.width, footer_hover)),
+                        Rect::new(0, area.height - 1, area.width, 1),
+                    );
                 }
             })?;
             dirty = false;
@@ -326,7 +364,9 @@ fn event_loop(
         })? {
             continue;
         }
-        let input = event::read()?;
+        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+            continue;
+        };
         if matches!(input, Event::FocusGained) || (!visible && !matches!(input, Event::FocusLost)) {
             let _ = refresh_tx.try_send(true);
             visible = true;
@@ -341,11 +381,11 @@ fn event_loop(
                 // selecting the current agent here can scroll a different row
                 // underneath the pending mouse coordinates. Initial selection
                 // is resolved when the first snapshot arrives above.
-                selection_visible = true;
+                navigation.selection_visible = true;
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                navigation.cancel_press();
                 if popup_mode()
-                    && !help_visible
                     && (key.code == KeyCode::Esc
                         || (key.modifiers.contains(event::KeyModifiers::CONTROL)
                             && matches!(key.code, KeyCode::Char('c' | 'd'))))
@@ -353,19 +393,14 @@ fn event_loop(
                     return Ok(());
                 }
                 match key.code {
-                    KeyCode::Char('?') => help_visible = !help_visible,
-                    KeyCode::Esc if help_visible => help_visible = false,
-                    _ if help_visible => {}
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        selection_visible = true;
-                        move_selection(&rows, &mut selected, 1);
+                    KeyCode::Char('?') => {
+                        if show_help()? {
+                            return Ok(());
+                        }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        selection_visible = true;
-                        move_selection(&rows, &mut selected, -1);
-                    }
+                    _ if navigation.navigate(key.code) => {}
                     KeyCode::Enter => {
-                        let navigated = activate(&rows, selected)?;
+                        let navigated = activate(&rows, navigation.selected)?;
                         if popup_mode() && navigated {
                             return Ok(());
                         }
@@ -373,25 +408,22 @@ fn event_loop(
                     KeyCode::Char('m') => {
                         if show_row_menu(
                             &rows,
-                            selected,
+                            navigation.selected,
                             Some((
                                 0,
-                                (viewport.first_row + selected.saturating_sub(scroll)) as u16,
+                                (viewport.first_row
+                                    + navigation.selected.saturating_sub(navigation.scroll))
+                                    as u16,
                             )),
                         )? {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('d') => {
-                        let selected_key = rows.get(selected).and_then(selection_key);
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
                             rows = build_rows(snapshot, detailed, agent_sort);
-                            selected = selected_key
-                                .as_deref()
-                                .and_then(|key| nearest_matching_key(&rows, key, selected))
-                                .or_else(|| nearest_selectable(&rows, selected))
-                                .unwrap_or(0);
+                            navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
                     KeyCode::Char('N') => {
@@ -409,8 +441,8 @@ fn event_loop(
                             return Ok(());
                         }
                     }
-                    KeyCode::Char('T') if selection_visible => {
-                        if new_task_selected(&rows, selected)? {
+                    KeyCode::Char('T') if navigation.selection_visible => {
+                        if new_task_selected(&rows, navigation.selected)? {
                             return Ok(());
                         }
                     }
@@ -423,12 +455,12 @@ fn event_loop(
                         }
                     }
                     KeyCode::Char('s') => {
-                        if run_workbench(&["pick", "session"], true)? {
+                        if switch_list("session")? {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('a') => {
-                        if run_workbench(&["pick", "agent"], true)? {
+                        if switch_list("agent")? {
                             return Ok(());
                         }
                     }
@@ -442,138 +474,66 @@ fn event_loop(
                 }
             }
             Event::Mouse(mouse) => {
-                if help_visible {
-                    if matches!(mouse.kind, MouseEventKind::Down(_))
-                        && !rect_contains(
-                            help_rect(Rect::new(0, 0, size.width, size.height)),
-                            mouse.column,
-                            mouse.row,
-                        )
-                    {
-                        help_visible = false;
-                    }
-                    continue;
-                }
-                match mouse.kind {
-                    MouseEventKind::Moved => {
-                        let hovered = viewport.row_at(mouse.row, scroll, rows.len());
-                        footer_hover = if mouse.row == 0 && content_height > 0 {
-                            action_button(size.width, mouse.column)
-                        } else if popup_mode()
-                            && usize::from(mouse.row) == body_height.saturating_sub(1)
-                        {
-                            close_button(size.width, mouse.column)
-                        } else {
-                            None
-                        };
-                        if let Some(row) = hovered.filter(|&row| {
-                            matches!(
-                                rows.get(row),
-                                Some(
-                                    Row::Session(_)
-                                        | Row::SessionSub(_)
-                                        | Row::Agent(_)
-                                        | Row::AgentSub(_, _)
-                                        | Row::Conversation(_, _)
-                                )
-                            )
-                        }) {
-                            selected = row;
-                            selection_visible = true;
-                        } else {
-                            selection_visible = false;
-                        }
-                    }
-                    MouseEventKind::ScrollDown => {
-                        selection_visible = true;
-                        move_selection(&rows, &mut selected, 1);
-                    }
-                    MouseEventKind::ScrollUp => {
-                        selection_visible = true;
-                        move_selection(&rows, &mut selected, -1);
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if popup_mode()
-                            && usize::from(mouse.row) == body_height.saturating_sub(1)
-                            && close_button(size.width, mouse.column).is_some()
-                        {
+                let actions = action_regions(
+                    Rect::new(0, 0, size.width, size.height),
+                    agent_sort,
+                    popup_mode(),
+                );
+                let hit = navigation.mouse(mouse, &actions);
+                let hit = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                    navigation
+                        .hit(mouse.column, mouse.row, &actions)
+                        .filter(|hit| matches!(hit, Hit::Item(_)))
+                } else {
+                    hit
+                };
+                footer_hover = match navigation.hovered {
+                    Some(Hit::Action(action)) => Some(action),
+                    _ => None,
+                };
+                match hit {
+                    Some(Hit::Action(Action::Close)) => return Ok(()),
+                    Some(Hit::Action(Action::New)) => {
+                        if run_session_picker()? {
                             return Ok(());
                         }
-                        if mouse.row == 0 && content_height > 0 {
-                            match action_button(size.width, mouse.column) {
-                                Some(FooterButton::New) => {
-                                    if run_session_picker()? {
-                                        return Ok(());
-                                    }
-                                }
-                                Some(FooterButton::Menu) => {
-                                    if show_global_menu(false, Some((mouse.column, mouse.row)))? {
-                                        return Ok(());
-                                    }
-                                }
-                                _ => {}
-                            }
-                            continue;
-                        }
-                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
-                            continue;
-                        };
-                        if let Some(Row::AgentSection(sort)) = rows.get(clicked)
-                            && agent_sort_button(size.width, *sort, mouse.column)
-                        {
-                            agent_sort = match agent_sort {
-                                AgentSort::Grouped => AgentSort::Prioritized,
-                                AgentSort::Prioritized => AgentSort::Grouped,
-                            };
-                            persist_agent_sort(paths, agent_sort)?;
-                            if let Some(snapshot) = &snapshot {
-                                rows = build_rows(snapshot, detailed, agent_sort);
-                                selected = nearest_selectable(&rows, selected).unwrap_or(0);
-                            }
-                            continue;
-                        }
-                        if matches!(
-                            rows.get(clicked),
-                            Some(
-                                Row::Session(_)
-                                    | Row::SessionSub(_)
-                                    | Row::Agent(_)
-                                    | Row::AgentSub(_, _)
-                                    | Row::Conversation(_, _)
-                            )
-                        ) {
-                            selected = clicked;
-                            let navigated = activate(&rows, selected)?;
-                            if popup_mode() && navigated {
-                                return Ok(());
-                            }
+                    }
+                    Some(Hit::Action(Action::Menu)) => {
+                        if show_global_menu(false, Some((mouse.column, mouse.row)))? {
+                            return Ok(());
                         }
                     }
-                    MouseEventKind::Down(MouseButton::Right) => {
-                        let Some(clicked) = viewport.row_at(mouse.row, scroll, rows.len()) else {
-                            continue;
+                    Some(Hit::Action(Action::Sort)) => {
+                        agent_sort = match agent_sort {
+                            AgentSort::Grouped => AgentSort::Prioritized,
+                            AgentSort::Prioritized => AgentSort::Grouped,
                         };
-                        if matches!(
-                            rows.get(clicked),
-                            Some(
-                                Row::Session(_)
-                                    | Row::SessionSub(_)
-                                    | Row::Agent(_)
-                                    | Row::AgentSub(_, _)
-                                    | Row::Conversation(_, _)
-                            )
-                        ) {
-                            selected = clicked;
-                            if show_row_menu(&rows, selected, Some((mouse.column, mouse.row)))? {
-                                return Ok(());
-                            }
+                        persist_agent_sort(paths, agent_sort)?;
+                        if let Some(snapshot) = &snapshot {
+                            rows = build_rows(snapshot, detailed, agent_sort);
+                            navigation = NavigationList::default();
+                            navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
-                    _ => {}
+                    Some(Hit::Item(_)) => {
+                        let navigated = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                            show_row_menu(
+                                &rows,
+                                navigation.selected,
+                                Some((mouse.column, mouse.row)),
+                            )?
+                        } else {
+                            activate(&rows, navigation.selected)?
+                        };
+                        if popup_mode() && navigated {
+                            return Ok(());
+                        }
+                    }
+                    None => {}
                 }
             }
             Event::FocusLost => {
-                selection_visible = false;
+                navigation.blur();
                 footer_hover = None;
             }
             _ => {}
@@ -610,7 +570,7 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 }
 
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![Row::AgentSection(agent_sort), Row::Spacer];
+    let mut rows = vec![];
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
     if agent_sort == AgentSort::Prioritized {
@@ -736,6 +696,22 @@ fn current_agent_selection(
         .rposition(|row| matches!(row, Row::Agent(agent) if agent.instance_id == instance))
 }
 
+fn initial_row(
+    rows: &[Row],
+    snapshot: &Snapshot,
+    server: &ServerIdentity,
+    popup: bool,
+) -> Option<usize> {
+    if popup {
+        // An overview opens at the top, including the first Session group.
+        // Following a lower current Agent used to hide the heading and begin
+        // in the middle of a group as soon as the popup opened.
+        rows.iter().position(|row| selection_key(row).is_some())
+    } else {
+        current_agent_selection(rows, snapshot, server)
+    }
+}
+
 fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Option<String> {
     let source = source_pane()?;
     if let Some(agent) = snapshot
@@ -794,7 +770,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             width,
             muted_style().add_modifier(Modifier::BOLD),
             muted_style(),
-            false,
+            selected,
         ),
         Row::AgentGroup(name) => Line::from(Span::styled(
             fit_text(name, usize::from(width)),
@@ -814,22 +790,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             },
             selected,
         ),
-        Row::SessionSub(session) => aligned_line(
-            format!("   {}", session_context(session)),
-            String::new(),
-            width,
-            if selected {
-                Style::default().fg(Color::Rgb(235, 235, 245))
-            } else {
-                Style::default().fg(Color::Rgb(150, 150, 170))
-            },
-            if selected {
-                Style::default().fg(Color::Rgb(235, 235, 245))
-            } else {
-                Style::default().fg(Color::Rgb(150, 150, 170))
-            },
-            selected,
-        ),
+        Row::SessionSub(session) => context_line(&session_context(session), width, selected),
         Row::Agent(agent) => {
             let title = if agent.visible && agent.state_source != StateSource::Screen {
                 Style::default()
@@ -926,7 +887,7 @@ fn source_pane() -> Option<String> {
         .filter(|pane| safe_target(pane, '%'))
 }
 
-fn button_style(button: FooterButton, hovered: Option<FooterButton>) -> Style {
+fn button_style(button: Action, hovered: Option<Action>) -> Style {
     let style = muted_style();
     if hovered == Some(button) {
         style.add_modifier(Modifier::REVERSED)
@@ -942,92 +903,78 @@ fn muted_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-fn render_actions(width: u16, hovered: Option<FooterButton>) -> Line<'static> {
+fn render_actions(width: u16, hovered: Option<Action>) -> Line<'static> {
     let gap = usize::from(width).saturating_sub(11);
     Line::from(vec![
-        Span::styled("+ new", button_style(FooterButton::New, hovered)),
+        Span::styled("+ new", button_style(Action::New, hovered)),
         Span::raw(" ".repeat(gap)),
-        Span::styled("⋯ menu", button_style(FooterButton::Menu, hovered)),
+        Span::styled("⋯ menu", button_style(Action::Menu, hovered)),
     ])
 }
 
-fn render_close(width: u16, hovered: Option<FooterButton>) -> Line<'static> {
+fn render_close(width: u16, hovered: Option<Action>) -> Line<'static> {
     let gap = usize::from(width).saturating_sub(7);
     Line::from(vec![
         Span::raw(" ".repeat(gap)),
-        Span::styled("× close", button_style(FooterButton::Close, hovered)),
+        Span::styled("× close", button_style(Action::Close, hovered)),
     ])
 }
 
-fn action_button(width: u16, column: u16) -> Option<FooterButton> {
-    if column < 5 {
-        Some(FooterButton::New)
-    } else if column >= width.saturating_sub(6) {
-        Some(FooterButton::Menu)
-    } else {
-        None
+fn action_regions(area: Rect, agent_sort: AgentSort, is_popup: bool) -> Vec<(Rect, Action)> {
+    let mut actions = vec![];
+    if area.height > 0 {
+        actions.push((Rect::new(0, 0, area.width.min(5), 1), Action::New));
+        actions.push((
+            Rect::new(area.width.saturating_sub(6), 0, area.width.min(6), 1),
+            Action::Menu,
+        ));
+        if is_popup {
+            actions.push((
+                Rect::new(
+                    area.width.saturating_sub(7),
+                    area.height - 1,
+                    area.width.min(7),
+                    1,
+                ),
+                Action::Close,
+            ));
+        }
     }
+    if area.height > 1 {
+        let width = match agent_sort {
+            AgentSort::Grouped => 7,
+            AgentSort::Prioritized => 11,
+        }
+        .min(area.width);
+        actions.push((
+            Rect::new(area.width.saturating_sub(width), 1, width, 1),
+            Action::Sort,
+        ));
+    }
+    actions
 }
 
-fn agent_sort_button(width: u16, sort: AgentSort, column: u16) -> bool {
-    let label_width = match sort {
-        AgentSort::Grouped => 7,
-        AgentSort::Prioritized => 11,
-    };
-    column >= width.saturating_sub(label_width)
+fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
+    let items = [
+        "-j/k ↑/↓ · move",
+        "-Enter · open / focus",
+        "-m · item menu",
+        "-N · projects",
+        "-i · temporary Git tool",
+        "-W · new workspace",
+        "-T · new task in selected session",
+        "-R · rebuild projects",
+        "-s / a · sessions / agents",
+        "-n · next attention",
+        "-d · details",
+        "-r · reload",
+        "-Escape / Ctrl-C / Ctrl-D · close popup",
+    ]
+    .map(|label| (label, "", String::new()));
+    show_menu("Shortcuts", None, false, &items)
 }
 
-fn close_button(width: u16, column: u16) -> Option<FooterButton> {
-    (column >= width.saturating_sub(7)).then_some(FooterButton::Close)
-}
-
-fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let popup = help_rect(area);
-    let text = vec![
-        Line::from("j/k ↑/↓  move"),
-        Line::from("⏎        open / focus"),
-        Line::from("m        item menu"),
-        Line::from("N        projects"),
-        Line::from("i        temporary Git tool"),
-        Line::from("W        new workspace"),
-        Line::from("T        new task in selected session"),
-        Line::from("R        rebuild projects"),
-        Line::from("s / a    sessions / agents"),
-        Line::from("n        next attention"),
-        Line::from("d        details"),
-        Line::from("r        reload"),
-        Line::from(""),
-        Line::from("? / esc  close help"),
-        Line::from("esc ^C ^D close popup"),
-    ];
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().title(" shortcuts ").borders(Borders::ALL))
-            .alignment(Alignment::Left),
-        popup,
-    );
-}
-
-fn help_rect(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(2).min(34).max(1);
-    let height = area.height.saturating_sub(2).min(18).max(1);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
-    column >= rect.x
-        && column < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
-}
-
-fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
+pub(crate) fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
     match kind {
         crate::model::AgentKind::Codex => "codex",
         crate::model::AgentKind::Claude => "claude",
@@ -1036,7 +983,7 @@ fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
     }
 }
 
-fn agent_topic(agent: &AgentSnapshot) -> &str {
+pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
     if let Some(name) = agent
         .thread_name
         .as_deref()
@@ -1077,7 +1024,7 @@ fn meaningful_topic(topic: &str) -> bool {
         )
 }
 
-fn agent_status(agent: &AgentSnapshot) -> String {
+pub(crate) fn agent_status(agent: &AgentSnapshot) -> String {
     if agent.display_state == DisplayState::Blocked
         && agent.base_state != crate::model::BaseState::Blocked
         && agent.hook_health == crate::model::HookHealth::Conflict
@@ -1171,13 +1118,28 @@ fn fit_text(text: &str, width: usize) -> String {
     let mut result = String::new();
     for character in text.chars() {
         result.push(character);
-        if Span::raw(result.as_str()).width() > width - 1 {
+        if Span::raw(result.as_str()).width() > width {
             result.pop();
             break;
         }
     }
-    result.push('…');
     result
+}
+
+pub(crate) fn context_line(text: &str, width: u16, selected: bool) -> Line<'static> {
+    let style = Style::default().fg(if selected {
+        Color::Rgb(235, 235, 245)
+    } else {
+        Color::Rgb(150, 150, 170)
+    });
+    aligned_line(
+        format!("   {text}"),
+        String::new(),
+        width,
+        style,
+        style,
+        selected,
+    )
 }
 
 fn aligned_line(
@@ -1190,7 +1152,7 @@ fn aligned_line(
 ) -> Line<'static> {
     let width = usize::from(width);
     let right = fit_text(&right, width);
-    let reserved = Span::raw(right.as_str()).width().saturating_add(1);
+    let reserved = Span::raw(right.as_str()).width() + usize::from(!right.is_empty());
     let left_limit = width.saturating_sub(reserved);
     let left = fit_text(&left, left_limit);
     let gap =
@@ -1216,7 +1178,7 @@ fn aligned_line(
     ])
 }
 
-fn icon_title_line(
+pub(crate) fn icon_title_line(
     icon: &str,
     title: &str,
     width: u16,
@@ -1247,7 +1209,7 @@ fn icon_title_line(
     ])
 }
 
-fn state_color(state: DisplayState) -> Color {
+pub(crate) fn state_color(state: DisplayState) -> Color {
     match state {
         DisplayState::Blocked => Color::Red,
         DisplayState::Working => Color::Yellow,
@@ -1267,7 +1229,7 @@ fn state_name(state: DisplayState) -> &'static str {
     }
 }
 
-fn glyph(state: DisplayState) -> &'static str {
+pub(crate) fn glyph(state: DisplayState) -> &'static str {
     match state {
         DisplayState::Blocked => "●",
         DisplayState::Done => "●",
@@ -1275,24 +1237,6 @@ fn glyph(state: DisplayState) -> &'static str {
         DisplayState::Idle => "○",
         DisplayState::Unknown => "·",
     }
-}
-
-fn nearest_selectable(rows: &[Row], start: usize) -> Option<usize> {
-    (start.min(rows.len().saturating_sub(1))..rows.len())
-        .find(|index| {
-            matches!(
-                rows[*index],
-                Row::Session(_) | Row::Agent(_) | Row::Conversation(_, _)
-            )
-        })
-        .or_else(|| {
-            (0..start.min(rows.len())).rev().find(|index| {
-                matches!(
-                    rows[*index],
-                    Row::Session(_) | Row::Agent(_) | Row::Conversation(_, _)
-                )
-            })
-        })
 }
 
 fn selection_key(row: &Row) -> Option<String> {
@@ -1311,38 +1255,6 @@ fn selection_key(row: &Row) -> Option<String> {
         | Row::Detail(_, _)
         | Row::Spacer => None,
     }
-}
-
-fn nearest_matching_key(rows: &[Row], key: &str, previous: usize) -> Option<usize> {
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| selection_key(row).as_deref() == Some(key))
-        .min_by_key(|(index, _)| index.abs_diff(previous))
-        .map(|(index, _)| index)
-}
-
-fn move_selection(rows: &[Row], selected: &mut usize, direction: i32) {
-    let mut index = *selected as i32 + direction;
-    while index >= 0 && (index as usize) < rows.len() {
-        if matches!(
-            rows[index as usize],
-            Row::Session(_) | Row::Agent(_) | Row::Conversation(_, _)
-        ) {
-            *selected = index as usize;
-            return;
-        }
-        index += direction;
-    }
-}
-
-fn keep_visible(selected: usize, height: usize, total: usize, scroll: &mut usize) {
-    if selected < *scroll {
-        *scroll = selected;
-    }
-    if selected >= *scroll + height {
-        *scroll = selected + 1 - height;
-    }
-    *scroll = (*scroll).min(total.saturating_sub(height));
 }
 
 fn acknowledge_attention(socket: &std::path::Path, event_id: &str) -> Result<(), ClientError> {
@@ -1466,7 +1378,11 @@ fn show_row_menu(
                     (
                         "Switch",
                         "s",
-                        format!("switch-client -t {}", session.session_id),
+                        format!(
+                            "switch-client -c {} -t {}",
+                            shell_quote(&current_client()?),
+                            session.session_id
+                        ),
                     ),
                     (
                         "New task",
@@ -1485,7 +1401,8 @@ fn show_row_menu(
                         "Rename",
                         "r",
                         format!(
-                            "command-prompt -p 'Rename session:' \"rename-session -t {} '%%'\"",
+                            "command-prompt -t {} -p 'Rename session:' \"rename-session -t {} '%%'\"",
+                            shell_quote(&current_client()?),
                             session.session_id
                         ),
                     ),
@@ -1493,7 +1410,8 @@ fn show_row_menu(
                         "Close",
                         "x",
                         format!(
-                            "confirm-before -p 'Close session?' 'kill-session -t {}'",
+                            "confirm-before -t {} -p 'Close session?' 'kill-session -t {}'",
+                            shell_quote(&current_client()?),
                             session.session_id
                         ),
                     ),
@@ -1546,7 +1464,8 @@ fn show_row_menu(
                         "Close pane",
                         "x",
                         format!(
-                            "confirm-before -p 'Close pane?' 'kill-pane -t {}'",
+                            "confirm-before -t {} -p 'Close pane?' 'kill-pane -t {}'",
+                            shell_quote(&current_client()?),
                             agent.target.pane_id
                         ),
                     ),
@@ -1570,11 +1489,31 @@ fn show_global_menu(
     if !safe_target(&sidebar_pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
+    let navigation = |kind: &str| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(format!(
+            "run-shell -b {}",
+            shell_quote(&format!(
+                "{} switch {} --pane {} --client {} --return-to {} --language {}",
+                executable,
+                kind,
+                shell_quote(&sidebar_pane),
+                shell_quote(&current_client()?),
+                switch_return_to().name(),
+                crate::ui_language::name()
+            ))
+        ))
+    };
     let mut items = vec![
         (
             "New",
             "N",
-            "run-shell -b tmux-agent-workbench pick project".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "WORKBENCH_SOURCE_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench pick project",
+                    shell_quote(&current_client()?)
+                ))
+            ),
         ),
         (
             "Temporary Git tool",
@@ -1615,16 +1554,8 @@ fn show_global_menu(
             "run-shell -b tmux-agent-workbench projects rebuild".into(),
         ),
         ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
-        (
-            "Sessions",
-            "s",
-            format!("run-shell \"{} pick session\"", executable),
-        ),
-        (
-            "Agents",
-            "a",
-            format!("run-shell \"{} pick agent\"", executable),
-        ),
+        ("Sessions", "s", navigation("session")?),
+        ("Agents", "a", navigation("agent")?),
         (
             "Next",
             "n",
@@ -1645,7 +1576,10 @@ fn show_global_menu(
     show_menu("workbench", anchor, anchor.is_some(), &items)
 }
 
-fn run_workbench(args: &[&str], clear_popup: bool) -> Result<bool, Box<dyn std::error::Error>> {
+pub(crate) fn run_workbench(
+    args: &[&str],
+    clear_popup: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     dispatch_command(&executable, args.iter().map(OsStr::new), clear_popup)
 }
@@ -1711,6 +1645,11 @@ where
     }
     Command::new(program.as_ref())
         .args(&args)
+        .env("WORKBENCH_TARGET_CLIENT", current_client()?)
+        .env(
+            "WORKBENCH_SOURCE_PANE",
+            source_pane().ok_or("sidebar source pane unavailable")?,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1773,25 +1712,22 @@ fn show_menu(
     pointer_bottom_right: bool,
     items: &[(&'static str, &'static str, String)],
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let server = ServerIdentity::discover()?;
     let pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
+    let client = current_client()?;
     let (x, y) = menu_position(anchor, pointer_bottom_right);
     let mut args = vec![
         "display-menu".to_owned(),
-        // The sidebar, rather than a tmux mouse binding, received the click.
-        // Tell tmux to handle subsequent mouse events and ignore the opening
-        // button's release so the menu remains available for a normal click.
         "-M".to_owned(),
         "-O".to_owned(),
         "-c".to_owned(),
-        current_client()?,
+        client.clone(),
         "-T".to_owned(),
         title.to_owned(),
         "-t".to_owned(),
-        pane,
+        pane.clone(),
         "-x".to_owned(),
         x,
         "-y".to_owned(),
@@ -1801,20 +1737,26 @@ fn show_menu(
         args.extend([(*label).to_owned(), (*key).to_owned(), command.clone()]);
     }
     args.push(String::new());
-    args.extend(crate::menu_footer::close_item(true));
     if popup_mode() {
-        let mut command_args: Vec<OsString> = server
-            .tmux_args()
-            .into_iter()
-            .map(|arg| arg.as_os_str().to_os_string())
-            .collect();
-        command_args.extend(args.into_iter().map(OsString::from));
-        dispatch_command("tmux", &command_args, true)
-    } else {
-        let refs: Vec<_> = args.iter().map(String::as_str).collect();
-        tmux_ui(&server, &refs)?;
-        Ok(false)
+        let parent = format!(
+            "{} sidebar --popup --pane {} --client {}",
+            shell_quote(&std::env::current_exe()?.to_string_lossy()),
+            shell_quote(&pane),
+            shell_quote(&client)
+        );
+        args.extend([
+            crate::menu_footer::back_label().into(),
+            "BSpace".into(),
+            format!("run-shell -b {}", shell_quote(&parent)),
+        ]);
     }
+    args.extend(crate::menu_footer::close_item(!popup_mode()));
+    let mut command_args = vec!["display-menu".to_owned(), "--".to_owned()];
+    command_args.extend(args.into_iter().skip(1));
+    run_workbench(
+        &command_args.iter().map(String::as_str).collect::<Vec<_>>(),
+        true,
+    )
 }
 
 fn menu_position(anchor: Option<(u16, u16)>, pointer_bottom_right: bool) -> (String, String) {
@@ -1832,21 +1774,6 @@ fn menu_position(anchor: Option<(u16, u16)>, pointer_bottom_right: bool) -> (Str
             "#{e|+:#{e|-:#{popup_pane_right},#{popup_width}},1}".into(),
             "P".into(),
         ),
-    }
-}
-
-fn tmux_ui(server: &ServerIdentity, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("tmux")
-        .args(server.tmux_args())
-        .args(args)
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_owned()
-            .into())
     }
 }
 
@@ -1902,43 +1829,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidebar_labels_use_the_full_cell_budget_without_ellipsis() {
+        assert_eq!(fit_text("中文字符", 5), "中文");
+        assert_eq!(fit_text("abcdefgh", 5), "abcde");
+        assert_eq!(fit_text("中文字符", 0), "");
+        let line = context_line("abcdefgh", 8, false);
+        assert_eq!(line.to_string(), "   abcde");
+    }
+
+    #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {
         let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
-        let viewport = SidebarViewport::new(8, rows.len(), Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(10, rows.len(), Some("stale · reconnecting"));
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
-            rows[viewport.row_at(3, 0, rows.len()).unwrap()],
+            rows[viewport.row_at(5, 0, rows.len()).unwrap()],
             "A subtitle"
         );
-        assert_eq!(rows[viewport.row_at(4, 0, rows.len()).unwrap()], "agent B");
-        assert_eq!(viewport.row_at(6, 0, rows.len()), None);
+        assert_eq!(rows[viewport.row_at(6, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(8, 0, rows.len()), None);
     }
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Six content lines: actions + banner + three rows + overflow;
+        // Eight content lines: actions + heading + banner + divider + three rows + overflow;
         // the popup footer follows and must not activate any hidden row.
-        let viewport = SidebarViewport::new(6, 20, Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(8, 20, Some("stale · reconnecting"));
         assert_eq!(viewport.row_height, 3);
         assert_eq!(viewport.row_at(0, 7, 20), None);
         assert_eq!(viewport.row_at(1, 7, 20), None);
-        assert_eq!(viewport.row_at(2, 7, 20), Some(7));
-        assert_eq!(viewport.row_at(4, 7, 20), Some(9));
-        for row in [5, 6, 7] {
+        assert_eq!(viewport.row_at(2, 7, 20), None);
+        assert_eq!(viewport.row_at(3, 7, 20), None);
+        assert_eq!(viewport.row_at(4, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(6, 7, 20), Some(9));
+        for row in [7, 8, 9] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
     }
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(5, 4, None);
-        assert_eq!(normal.row_at(4, 0, 4), Some(3));
-        let stale = SidebarViewport::new(5, 4, Some("stale · reconnecting"));
+        let normal = SidebarViewport::new(7, 4, None);
+        assert_eq!(normal.row_at(6, 0, 4), Some(3));
+        let stale = SidebarViewport::new(7, 4, Some("stale · reconnecting"));
         assert_eq!(stale.row_height, 2);
-        assert_eq!(stale.row_at(4, 0, 4), None);
-        let overflow = SidebarViewport::new(4, 10, None);
-        assert_eq!(overflow.row_at(2, 0, 10), Some(1));
-        assert_eq!(overflow.row_at(3, 0, 10), None);
+        assert_eq!(stale.row_at(6, 0, 4), None);
+        let overflow = SidebarViewport::new(6, 10, None);
+        assert_eq!(overflow.row_at(4, 0, 10), Some(1));
+        assert_eq!(overflow.row_at(5, 0, 10), None);
     }
 
     #[test]
@@ -2023,17 +1961,21 @@ mod tests {
             .iter()
             .position(|row| matches!(row, Row::Section("sessions")))
             .unwrap();
-        assert!(matches!(rows.first(), Some(Row::AgentSection(_))));
+        assert!(matches!(rows.first(), Some(Row::AgentGroup(_))));
+        assert!(!rows.iter().any(|row| matches!(row, Row::AgentSection(_))));
         assert!(matches!(rows.get(sessions - 1), Some(Row::Spacer)));
         assert!(!matches!(rows.get(sessions - 2), Some(Row::Spacer)));
     }
 
     #[test]
     fn top_actions_span_left_and_right_without_help() {
-        assert_eq!(action_button(40, 0), Some(FooterButton::New));
-        assert_eq!(action_button(40, 20), None);
-        assert_eq!(action_button(40, 34), Some(FooterButton::Menu));
-        assert_eq!(close_button(40, 33), Some(FooterButton::Close));
+        let list = NavigationList::<Action>::default();
+        let actions = action_regions(Rect::new(0, 0, 40, 20), AgentSort::Grouped, true);
+        assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::New)));
+        assert_eq!(list.hit(20, 0, &actions), None);
+        assert_eq!(list.hit(34, 0, &actions), Some(Hit::Action(Action::Menu)));
+        assert_eq!(list.hit(33, 19, &actions), Some(Hit::Action(Action::Close)));
+        assert_eq!(list.hit(38, 1, &actions), Some(Hit::Action(Action::Sort)));
     }
 
     #[test]
@@ -2354,7 +2296,12 @@ mod tests {
             Row::Agent(agent.clone()),
         ];
         let key = selection_key(&Row::Agent(agent)).unwrap();
-        assert_eq!(nearest_matching_key(&rows, &key, 2), Some(2));
+        let mut list = NavigationList::<()>::default();
+        list.replace_rows(rows.iter().map(selection_key).collect());
+        list.select(2);
+        list.replace_rows(rows.iter().map(selection_key).collect());
+        assert_eq!(selection_key(&rows[list.selected]), Some(key));
+        assert_eq!(list.selected, 2);
     }
 
     #[test]

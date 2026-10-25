@@ -8,6 +8,9 @@ case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
 [ -x "$core" ] || exit 1
 
 runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+# The core may use a shorter socket directory when XDG_RUNTIME_DIR is long.
+# Its initialization therefore does not guarantee this shell lock root exists.
+(umask 077 && mkdir -p "$runtime") || exit 0
 server_pid=$(tmux display-message -p '#{pid}')
 lock=$runtime/workbench-responsive-$server_pid-$(printf '%s' "$client" | tr '/.' '__').lock
 mkdir "$lock" 2>/dev/null || exit 0

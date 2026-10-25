@@ -8,7 +8,7 @@ Workbench v2 also discovers Codex, Claude, Trae, and OpenCode processes in
 every pane of the current tmux server and maintains one canonical attention
 snapshot. A per-server Rust daemon classifies `working`, `blocked`, `idle`, and
 `unknown`, derives unseen `done`/blocked attention, drives a responsive sidebar
-and fzf pickers, and owns focus-aware desktop/sound notification delivery. It
+and touch-friendly searchable lists, and owns focus-aware desktop/sound notification delivery. It
 does not require agents to be launched by Workbench and it never displays or
 persists prompt text by default. See the durable
 [v2 specification](docs/attention-v2.md) and
@@ -60,9 +60,8 @@ see [Install](#install).
   Defaults to `tig`; set `@workbench-git-tool` to change it.
 - **nvim** or **vim** — used only for an explicitly opened editor. Uses
   `$VISUAL`/`$EDITOR`, otherwise `nvim`, then `vim`.
-- **fzf-tmux** — hard requirement for the inspect, session, and Agent pickers.
-  Other daemon/sidebar behavior remains available if it is missing, and
-  `tmux-agent-workbench doctor` reports the dependency clearly.
+- Project, repository, Session and Agent pickers use the built-in searchable
+  list UI, with large touch targets and a pinned Close button.
 - **zoxide** — soft dependency of the picker: widens its candidate list with
   your directory-jump history. Its absence degrades the picker (fewer
   candidates), it doesn't break it.
@@ -121,10 +120,34 @@ set -g @workbench-disable-git 1
 
 ## Keybindings
 
-Workbench uses the sidebar as its control surface. By default the only global
-binding is `prefix+Tab`; once focused, press `?` for a centered list of plain
-single-key actions. Optional global bindings are (re)installed each time the
+Workbench uses the sidebar and compact Menu as its control surfaces. Press
+`prefix+Tab` for Sidebar, or `prefix Alt+m` for the combined menu; once Sidebar
+is focused, press `?` for a centered list of plain single-key actions.
+Optional global bindings are (re)installed each time the
 plugin loads when their option is explicitly set.
+
+The new list menu is the default. Choose **Interface · classic / new** in
+the combined Menu to compare its two renderers. Buttons, order, scope checks
+and callbacks are shared. The setting changes action menus only; Sidebar and
+all four switchers always use the same list interaction. The CLI offers the
+same switch:
+
+```sh
+tmux-agent-workbench ui old
+tmux-agent-workbench ui new
+tmux-agent-workbench ui toggle
+tmux-agent-workbench ui status
+```
+
+The preference is saved under `$XDG_CONFIG_HOME/tmux-agent-workbench/ui-mode`.
+The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
+An explicitly selected classic renderer stays selected until changed again.
+The classic renderer uses native one-line tmux menus with pagination; the new
+renderer uses larger list rows. Both modes use Sidebar-sized navigation popups
+for Switch Agent, Window, Pane and Session.
+Sidebar popups and all built-in selection lists close on an outside tap without
+passing it to the terminal. Project/repository pickers and workspace/task name
+dialogs use the same container and pinned Close control in either menu mode.
 
 | Action | Option | Default | Runs |
 |---|---|---|---|
@@ -134,6 +157,9 @@ plugin loads when their option is explicitly set.
 | Prompt for a new workspace | `@workbench-key-new` | unbound | Workspace name prompt |
 | New isolated task in this workspace | `@workbench-key-task` | unbound | Task name popup |
 | Toggle current-window Agent sidebar | `@workbench-key-sidebar` | `Tab` | Rust sidebar |
+| Open combined Menu | `@workbench-key-main-menu` | `M-m` | Agent / Sidebar / Tmux / Host / CPU |
+| Open tmux controls | `@workbench-key-mobile-menu` | `M-t` | Tmux menu |
+| Open Agent commands | `@workbench-key-agent-menu` | `M-a` | Agent menu |
 | Toggle all Agent sidebars | `@workbench-key-sidebar-all` | unbound | Rust sidebar |
 | Pick any session by attention | `@workbench-key-session` | unbound | session picker |
 | Pick any detected Agent | `@workbench-key-agent` | unbound | Agent picker |
@@ -153,7 +179,7 @@ grabs it at load time). Verify with the *live*, post-plugin-load table, not
 just the file:
 
 ```sh
-tmux list-keys -T prefix | grep -E '(^| )(G|M-g|M-t|M-T)( |$)'
+tmux list-keys -T prefix | grep -E '(^| )(M-a|M-m|M-t|Tab)( |$)'
 ```
 
 To rebind, set the option **before** the plugin loads (add it above
@@ -252,7 +278,8 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 
 The sidebar shows all sessions and all detected agents from the current tmux
 server in separate sections. A pinned top row keeps `new` on the left and
-`menu` on the right. Agents always appear above Sessions, on every screen size.
+`menu` on the right. The Agents heading and sort control stay pinned below it.
+Agents always appear above Sessions, on every screen size.
 Session groups in Agents follow one another without blank rows. A single blank
 row separates Agents from Sessions. Both sections use one continuous scrolling
 list, without rebuilding or sorting it on resize. Help remains available from `?`
@@ -311,8 +338,8 @@ owns sampling, caching, width defaults and the menu action. Set
 `@workbench-host-metrics off` to disable them. See [host metrics](docs/host-metrics.md)
 for mode selection, platform support and the standalone CLI.
 
-Session/Sidebar and tmux controls form the left group, followed by a gap
-and window labels. CPU, Host and Agent status remain on the right, with a flat
+Session/Sidebar and tmux controls form the left group, followed by window
+labels. CPU, Host and Agent status remain on the right, with a flat
 outer edge. tmux and Agent status open the same menus as `M-t` and `M-a`, while
 the session label performs the same responsive Sidebar toggle as `Tab`.
 Prefix remains available through the keyboard. Workbench owns their ranges and behavior;
@@ -322,13 +349,27 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu groups actions into **Launch agent**, **New window**, **Panes &
-layout**, **Switch window / session**, the installed editor, and **Detach**.
+The tmux menu starts with **Switch**, **Create**, **Kill**, **Layout**, and
+**Detach**. The first three groups start with **Agent**, **Window**, **Pane**,
+and **Session**, in that order. Kill shows its target for confirmation and
+rechecks its identity before acting. Switch Window lists only
+the source Session's windows; Switch pane lists only its Window's panes. Sessions
+and running Agents have separate server-wide views. In both menu modes these views share Sidebar's
+bordered popup and two-line title/context rows, with search, paging, and a
+full-width Back and Close rows. The popup leaves terminal context visible, caps its size
+at 96 columns by 40 rows, and uses all available space on very small screens.
+Labels use the available cells without ellipses. Selection happens on release;
+dragging scrolls without activating. Sidebar's Session/Agent shortcuts and menu
+use these same lists, and Back restores the originating Sidebar or tmux menu.
+Wheel scrolling, touch, keyboard navigation and refresh positioning share one
+list component across Sidebar and the four filtered views. New session prompts for
+a name, starts in the source pane's directory, and switches only the invoking
+client to the new session.
 Selecting an agent opens one configuration panel. Codex and Trae expose scene,
 Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
 show only Single/Team and collaboration choices. Clicking a choice refreshes
 this same panel. There is no temporary adjustment or separate review step.
-All native menus share a footer: Escape closes the menu, and Backspace returns
+All action menus share a footer: Escape closes the menu, and Backspace returns
 one level when a parent exists or closes a root menu without an extra hint.
 The launch panel keeps Launch visible on every
 page; Enter launches. Shortcuts: `d/h/b` for scenes,
@@ -374,16 +415,24 @@ menu implementation, including touch behavior and small-screen pagination.
 See [menu design and validation](docs/menus.md) for the interaction map and
 capability boundaries.
 
-Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, and Resources
-use native menus that select the row at the next click's coordinates, including
-on touch screens without hover events. The opening release is consumed before
-the menu appears. On tmux 3.8+, both pointer and touch clients select on release,
-so a held click cannot open a submenu and then dismiss it on mouse-up. Hover
-only highlights items. Older tmux keeps its pointer press-selection workaround
-for its hover bug; reliable held-click navigation requires tmux 3.8+.
-Termux clients keep release-based touch selection on older versions too.
-Escape or clicking outside dismisses the menu; keyboard shortcuts and arrow-key
-navigation remain available.
+`tmux-agent-workbench menu` and `prefix Alt+m` open a compact collection of
+Agent, Sidebar, Tmux, Host/SSH and CPU/resources controls. Each submenu returns
+to that collection. The source pane and client may also be supplied explicitly
+with `--pane` and `--client`.
+
+Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, Resources and
+Sidebar menus all use the same Menu model. In the new UI they have two-row buttons and a
+content-sized popup capped at 60 columns. Menus share Sidebar's wheel/drag,
+keyboard and release handling; held presses never open the next menu early.
+Wheel moves the selection even when the list fits, and scrolls to keep it visible.
+Hover highlights both entries and pinned controls. Back/Close and Launch remain
+visible on short screens. Information and blank taps inside the menu leave it
+open. Clicking the muted backdrop closes on release without clicking through;
+outside hover, wheel and drags leave it open. Escape or Close also dismisses it.
+Context menus dismiss when the terminal viewport changes; the scoped lists
+retain their search and resize behavior.
+Long Host/member lists remain scrollable
+after their shortcut keys run out.
 
 Set `@workbench-usage-source` to `codex`, `claude`, `trae`, or `opencode`
 (default `codex`). Set `@workbench-usage off` before the plugin loads to omit
