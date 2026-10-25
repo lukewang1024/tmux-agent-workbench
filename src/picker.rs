@@ -1,5 +1,4 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::ipc::{Request, call};
@@ -30,16 +29,22 @@ pub fn run(
         PickerKind::Session => session_lines(&snapshot),
         PickerKind::Agent => agent_lines(&snapshot),
     };
-    if lines.is_empty() {
-        return Err("no picker entries".into());
-    }
-    let selected = fzf(&lines)?;
-    let Some(selected) = selected else {
+    let title = match kind {
+        PickerKind::Session => crate::ui_language::text("Switch sessions", "切换会话"),
+        PickerKind::Agent => crate::ui_language::text("Switch agents", "切换 Agent"),
+    };
+    let labels: Vec<_> = lines
+        .iter()
+        .map(|line| line.split(DELIMITER).next().unwrap_or("").to_owned())
+        .collect();
+    let (pane, client) = context()?;
+    let Some(index) = choose_at(title, &labels, &pane, &client)? else {
         return Ok(());
     };
+    let selected = &lines[index];
     match kind {
-        PickerKind::Session => activate_session(&selected)?,
-        PickerKind::Agent => activate_agent(paths, server, &snapshot, &selected)?,
+        PickerKind::Session => activate_session(selected, &pane, &client)?,
+        PickerKind::Agent => activate_agent(paths, server, &snapshot, selected, &pane, &client)?,
     }
     Ok(())
 }
@@ -106,41 +111,100 @@ fn agent_lines(snapshot: &Snapshot) -> Vec<String> {
         .collect()
 }
 
-fn fzf(lines: &[String]) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let mut child = Command::new("workbench-fzf-tmux")
-        .args([
-            "-p",
-            "80%,70%",
-            "--",
-            "--delimiter",
-            "\u{1f}",
-            "--with-nth",
-            "1",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    {
-        let mut stdin = child.stdin.take().ok_or("fzf-tmux stdin unavailable")?;
-        for line in lines {
-            writeln!(stdin, "{line}")?;
-        }
+/// The same list/menu renderer handles project names, repository paths and
+/// snapshot pickers. Values stay with the caller; only an index crosses the UI.
+pub fn choose(title: &str, labels: &[String]) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let (pane, client) = context()?;
+    choose_at(title, labels, &pane, &client)
+}
+
+fn choose_at(
+    title: &str,
+    labels: &[String],
+    pane: &str,
+    client: &str,
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let menu = crate::menu::Menu {
+        title: title.into(),
+        items: labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| crate::menu::Item {
+                id: index.to_string(),
+                label: label.clone(),
+                key: String::new(),
+                command: String::new(),
+                enabled: true,
+                role: crate::menu::Role::Body,
+            })
+            .collect(),
+        pager: None,
+        searchable: true,
+        prompt: None,
+    };
+    Ok(crate::menu::select(&menu, pane, client, 0)?.map(|selected| selected.index))
+}
+
+pub fn prompt(title: &str, label: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let (pane, client) = context()?;
+    let menu = crate::menu::Menu {
+        title: title.into(),
+        items: vec![crate::menu::Item {
+            id: "submit".into(),
+            label: crate::ui_language::text("Create", "创建").into(),
+            key: "Enter".into(),
+            command: String::new(),
+            enabled: true,
+            role: crate::menu::Role::Primary,
+        }],
+        pager: None,
+        searchable: false,
+        prompt: Some(label.into()),
+    };
+    Ok(crate::menu::select(&menu, &pane, &client, 0)?.map(|selected| selected.input))
+}
+
+fn context() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let server = ServerIdentity::discover()?;
+    let tmux = crate::tmux::Tmux::new(server.clone());
+    let pane = std::env::var("WORKBENCH_SOURCE_PANE")
+        .or_else(|_| std::env::var("TMUX_PANE"))
+        .ok();
+    if let Ok(client) = std::env::var("WORKBENCH_TARGET_CLIENT") {
+        let pane = pane
+            .or(tmux.client_format(&client, "#{pane_id}")?)
+            .ok_or("picker client disappeared")?;
+        return Ok((pane, client));
     }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Ok(None);
+    let clients = Command::new("tmux")
+        .args(server.tmux_args())
+        .args(["list-clients", "-F", "#{client_name}\t#{pane_id}"])
+        .output()?;
+    let clients = String::from_utf8(clients.stdout)?;
+    let candidates: Vec<_> = clients
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(_, target)| pane.as_deref().is_none_or(|pane| pane == *target))
+        .collect();
+    if candidates.len() != 1 {
+        return Err("picker needs WORKBENCH_TARGET_CLIENT for an unambiguous tmux client".into());
     }
-    Ok(Some(
-        String::from_utf8(output.stdout)?.trim_end().to_owned(),
+    Ok((
+        pane.unwrap_or_else(|| candidates[0].1.into()),
+        candidates[0].0.into(),
     ))
 }
 
-fn activate_session(selected: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn activate_session(
+    selected: &str,
+    source: &str,
+    client: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let fields: Vec<_> = selected.split(DELIMITER).collect();
     if fields.len() != 4 {
         return Err("invalid session picker result".into());
     }
-    spawn_focus(fields[1], fields[2], fields[3])
+    spawn_focus(fields[1], fields[2], fields[3], source, client)
 }
 
 fn activate_agent(
@@ -148,6 +212,8 @@ fn activate_agent(
     server: &ServerIdentity,
     snapshot: &Snapshot,
     selected: &str,
+    source: &str,
+    client: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let id = selected
         .split_once(DELIMITER)
@@ -167,7 +233,7 @@ fn activate_agent(
         let _ = Command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
-            .args(["display-message", &summary])
+            .args(["display-message", "-c", client, &summary])
             .status();
         if let Some(event) = &agent.attention {
             call(
@@ -182,10 +248,18 @@ fn activate_agent(
         &agent.target.session_id,
         &agent.target.window_id,
         &agent.target.pane_id,
+        source,
+        client,
     )
 }
 
-fn spawn_focus(session: &str, window: &str, pane: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn spawn_focus(
+    session: &str,
+    window: &str,
+    pane: &str,
+    source: &str,
+    client: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new(std::env::current_exe()?)
         .args([
             "focus",
@@ -196,6 +270,10 @@ fn spawn_focus(session: &str, window: &str, pane: &str) -> Result<(), Box<dyn st
             window,
             "--pane",
             pane,
+            "--source-pane",
+            source,
+            "--client",
+            client,
         ])
         .status()?;
     if status.success() {

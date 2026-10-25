@@ -615,6 +615,8 @@ fn run_with_context(
         crate::menu::Menu {
             title,
             items,
+            searchable: false,
+            prompt: None,
             pager: Some(crate::menu::Pager {
                 before_page: base,
                 after_page: String::new(),

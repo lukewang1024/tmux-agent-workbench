@@ -35,6 +35,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         env[key] = str(root / key)
     shim = root / 'bin'
     shim.mkdir()
+    (shim / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
     hosts = root / 'hosts'
     hosts.write_text('dev-host\ntest-host\n')
     host_connected = root / 'host-connected'
@@ -213,8 +214,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         return subprocess.Popen(*args, **kwargs)
 
-    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=(), menu_footer=True):
-        output = b''
+    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=(), menu_footer=True, initial=b''):
+        output = initial
         for _ in range(40):
             output += drain(0.05)
             visible = screen_text(output) if current_screen else output
@@ -466,6 +467,128 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 os.write(master, b'\x1b')
                 drain(.7)
         print('PASS classic and new menus expose identical root groups, object order and Back destinations')
+        # Workbench-owned selection and name dialogs use the same touch UI.
+        # Stub only the external inventory/launch boundary, keeping the actual
+        # Sidebar New button, deferred popup transition, list and callbacks.
+        project_choice = root / 'project-choice'
+        tmuxinator = shim / 'tmuxinator'
+        tmuxinator.write_text('#!/bin/sh\nset -eu\ncase $1 in\n'
+                              'list) printf "projects:\\n"; i=0; while [ "$i" -lt 20 ]; do '
+                              'printf "touch-project-%02d\\n" "$i"; i=$((i + 1)); done ;;\n'
+                              'start) printf "%s\\n" "$2" > ' + shlex.quote(str(project_choice)) + ' ;;\n'
+                              '*) exit 2 ;;\nesac\n')
+        tmuxinator.chmod(0o755)
+        zoxide = shim / 'zoxide'
+        zoxide.write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote(str(project)) + '\n')
+        zoxide.chmod(0o755)
+        selector_env = dict(env, TMUX_PANE=pane, WORKBENCH_SOURCE_PANE=pane, WORKBENCH_TARGET_CLIENT=client)
+        cli = str(repo / 'bin/tmux-agent-workbench-cli')
+        for mode in ('old', 'new'):
+            ui(mode)
+            menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
+                             env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu, b'+ new', b'close', menu_footer=False)
+            x, y = item_position(rendered, '+ new')
+            os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+            rendered = wait_for_text(client_process, b'Workbench Projects', b'touch-project-00')
+            menu.wait(timeout=5)
+            assert menu.returncode == 0, menu.stderr.read()
+            assert item_position(rendered, 'touch-project-01')[1] >= item_position(rendered, 'touch-project-00')[1] + 2
+            os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+            drain(.3)
+            assert not project_choice.exists(), 'outside tap launched a project'
+            for close_kind in ('outside', 'button'):
+                menu = open_menu([cli, 'pick', 'project'], env=selector_env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rendered = wait_for_text(menu, b'Workbench Projects', b'touch-project-00')
+                if close_kind == 'outside':
+                    x, y = 1, 1
+                else:
+                    x, y = item_position(rendered, 'close')
+                    y += 1  # The padding row is part of the same large button.
+                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+                menu.wait(timeout=5)
+                assert menu.returncode == 0 and not project_choice.exists(), menu.stderr.read()
+                drain(.2)
+            menu = open_menu([cli, 'pick', 'repo'], env=selector_env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'Temporary tool')
+            os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+            menu.wait(timeout=5)
+            assert menu.returncode == 0, menu.stderr.read()
+            drain(.2)
+            menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
+                             env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'+ new', b'close', menu_footer=False)
+            os.write(master, b'?')
+            wait_for_text(client_process, b'Shortcuts', b'(back)')
+            menu.wait(timeout=5)
+            assert menu.returncode == 0, menu.stderr.read()
+            os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+            drain(.3)
+        ui('new')
+        menu = open_menu([cli, 'pick', 'project'], env=selector_env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, b'Workbench Projects', b'touch-project-00')
+        x, y = item_position(rendered, 'touch-project-00')
+        os.write(master, f'\x1b[<65;{x};{y}M\x1b[<35;{x};{y}M'.encode())
+        drain(.1)
+        assert menu.poll() is None and not project_choice.exists()
+        os.write(master, b'project-19')
+        rendered = wait_for_text(menu, b'touch-project-19', menu_footer=False, initial=rendered)
+        # Opening the phone keyboard shrinks the viewport without losing search.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 32, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        rendered = wait_for_text(menu, b'touch-project-19')
+        x, y = item_position(rendered, 'touch-project-19')
+        os.write(master, f'\x1b[<0;{x};{y + 1}M'.encode())
+        drain(.1)
+        assert menu.poll() is None and not project_choice.exists(), 'project activated before release'
+        os.write(master, f'\x1b[<0;{x};{y + 1}m'.encode())
+        menu.wait(timeout=5)
+        assert menu.returncode == 0 and project_choice.read_text().strip() == 'touch-project-19', menu.stderr.read()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        drain(.3)
+        print('PASS Sidebar New, Projects and repository lists share outside/Close dismissal, two-row touch targets, search and keyboard resize')
+        for title, label in [('New workspace', 'Workspace direction:'), ('New task', 'Task name:')]:
+            for close_kind in ('outside', 'button'):
+                menu = open_menu([core, 'prompt-text', '--title', title, '--label', label],
+                                 env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rendered = wait_for_text(menu, title.encode(), b'Create')
+                os.write(master, b'\r')  # Empty names cannot submit.
+                drain(.1)
+                assert menu.poll() is None
+                if close_kind == 'outside': x, y = 1, 1
+                else: x, y = item_position(rendered, 'close')
+                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+                menu.wait(timeout=5)
+                assert menu.returncode == 0 and menu.stdout.read() == b'', menu.stderr.read()
+                drain(.2)
+        menu = open_menu([cli, 'new', '--prompt'], env=selector_env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'New workspace', b'Create')
+        os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+        menu.wait(timeout=5)
+        assert menu.returncode == 0, menu.stderr.read()
+        drain(.2)
+        menu = open_menu([core, 'prompt-text', '--title', 'New task', '--label', 'Task name:'],
+                         env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'New task', b'Create')
+        name = "任务 O'Reilly $(literal)"
+        os.write(master, name.encode())
+        drain(.2)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 32, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        rendered = wait_for_text(menu, b'Create', b'(enter)')
+        x, y = item_position(rendered, 'Create')
+        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        menu.wait(timeout=5)
+        assert menu.returncode == 0 and menu.stdout.read().decode().strip() == name, menu.stderr.read()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
+        client_process.send_signal(signal.SIGWINCH)
+        drain(.3)
+        print('PASS workspace/task name dialogs expose touch Create/Close, ignore empty submit and preserve literal Unicode input through resize')
         create_args = root_args + ['--view', 'create']
         before_sessions = tmux('list-sessions', '-F', '#{session_id}')
         menu = open_menu(create_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

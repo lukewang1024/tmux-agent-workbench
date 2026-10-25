@@ -1,4 +1,4 @@
-//! A bounded menu and its dismissible backdrop share one client-local surface.
+//! A bounded panel and its dismissible backdrop share one client-local surface.
 //! tmux's native popup does not forward outside mouse events. Keep drawing and
 //! list coordinates local to the card while capturing those events here.
 use std::process::Command;
@@ -201,13 +201,22 @@ pub(crate) struct Surface<B> {
 
 impl<B: Backend> Surface<B> {
     pub fn from_env(backend: B) -> Result<Self, B::Error> {
-        let sizing = std::env::var("WORKBENCH_MENU_SURFACE")
+        let sizing = std::env::var("WORKBENCH_POPUP_SURFACE")
+            .or_else(|_| std::env::var("WORKBENCH_MENU_SURFACE"))
             .ok()
             .and_then(|value| {
+                if value == "sidebar" {
+                    return Some(Sizing::Sidebar);
+                }
+                let list = value.starts_with("list,");
+                let value = value.strip_prefix("list,").unwrap_or(&value);
                 value.split_once(',').and_then(|(width, height)| {
-                    Some(Sizing::Menu {
-                        width: width.parse().ok()?,
-                        height: height.parse().ok()?,
+                    let width = width.parse().ok()?;
+                    let height = height.parse().ok()?;
+                    Some(if list {
+                        Sizing::List { width, height }
+                    } else {
+                        Sizing::Menu { width, height }
                     })
                 })
             });

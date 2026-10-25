@@ -11,9 +11,6 @@ done
 dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 . "$dir/../lib/resolve-session.sh"
 . "$dir/../lib/task-context.sh"
-command -v workbench-fzf-tmux >/dev/null 2>&1 || {
-  echo 'tmux-agent-workbench pick repo: workbench-fzf-tmux not found' >&2; exit 1
-}
 mode=${1:---git}
 case $mode in --git|--editor|--shell) : ;; *) echo 'usage: tmux-agent-workbench pick repo [--git|--editor|--shell]' >&2; exit 2 ;; esac
 caller=$(workbench_resolve_pane)
@@ -32,9 +29,6 @@ else
       sed "s/^'//;s/'$//;s/''/'/g" || true
   } | awk 'NF && !seen[$0]++')
 fi
-sel=$(printf '%s\n' "$candidates" | workbench-fzf-tmux -p 80%,70% \
-  --no-sort --border-label ' temporary tool ' --prompt 'Repo › ' \
-  --bind 'tab:down,btab:up' --preview-window 'right:55%' \
-  --preview 'git -C {} log --oneline -20 2>/dev/null || ls -la {}') || exit 0
+sel=$(printf '%s\n' "$candidates" | "$dir/tmux-agent-workbench-cli" select-list --title 'Temporary tool') || exit 0
 [ -n "$sel" ] || exit 0
 exec "$dir/tmux-agent-workbench-cli" inspect "$sel" "$mode"

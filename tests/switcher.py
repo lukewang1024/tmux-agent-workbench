@@ -88,8 +88,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                          min(40, max(12, height * 9 // 10)) if border else height, border]
 
     def screen_rows():
-        # Observe tmux's actual popup position, including its border. Native
-        # menu/popup centering is not a simple half-margin on every version.
+        # Observe the shared surface's actual card position and border.
         screen = {}
         x = y = 0
         tokens = re.findall(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]|[^\x1b]',
@@ -131,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 for row in range(size[1])]
 
     def content_rect():
-        if not popup_size[2]:
+        if size[0] < 36 or size[1] < 12:
             return 0, 0, size[0], size[1]
         rows = screen_rows()
         for top, row in enumerate(rows):
@@ -140,8 +139,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             left, right = row.index('┌'), row.index('┐')
             for bottom in range(top + 1, len(rows)):
                 if rows[bottom][left] == '└' and rows[bottom][right] == '┘':
-                    assert right - left + 1 == min(size[0], popup_size[0]), rows
-                    assert bottom - top + 1 == min(size[1], popup_size[1]), rows
+                    assert right - left + 1 == min(96, max(32, size[0] * 9 // 10)), rows
+                    assert bottom - top + 1 == min(40, max(12, size[1] * 9 // 10)), rows
                     return left + 1, top + 1, right - left - 1, bottom - top - 1
         raise AssertionError(('missing Sidebar popup border', rows))
 
@@ -259,6 +258,57 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 assert client_value(sibling, '#{session_name}') == 'source'
                 reset()
         print('PASS both menu modes use the same divided switch lists, search, identity guards and client isolation', flush=True)
+        # All bounded navigation panels must receive backdrop clicks, including
+        # overview Sidebar and every filtered list. A hover/scroll/drag outside
+        # cancels a held action; only a complete outside tap dismisses.
+        tmux('bind-key', '-n', 'MouseDown1Pane', 'set-option', '-g', '@backdrop-leaked', 'yes')
+        for kind in ('window', 'session', 'agent', 'pane', 'sidebar'):
+            if kind == 'sidebar':
+                prepare_popup()
+                popup = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
+                                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                popups.append(popup)
+                text('+ new')
+                drain(.15)
+            else:
+                popup = open_list(kind)
+            os.write(master, b'\x1b[<35;1;1M\x1b[<65;1;1M')
+            drain(.1)
+            assert popup.poll() is None, (kind, 'outside hover/wheel dismissed')
+            press(10, 5)
+            os.write(master, b'\x1b[<32;1;1M\x1b[<0;1;1m')
+            drain(.1)
+            assert popup.poll() is None and focused(window=windows[0]), (kind, 'outside drag activated or closed')
+            os.write(master, b'\x1b[<0;1;1M')
+            drain(.1)
+            assert popup.poll() is None, (kind, 'closed before release')
+            os.write(master, b'\x1b[<0;1;1m')
+            popup.wait(timeout=5)
+            assert popup.returncode == 0 and focused(window=windows[0]), (kind, popup.stderr.read())
+            assert tmux('show-option', '-gqv', '@backdrop-leaked') == '', kind
+            drain(.15)
+        tmux('unbind-key', '-n', 'MouseDown1Pane')
+        print('PASS Sidebar and every filtered list dismiss on outside release without click-through', flush=True)
+        # Compatibility pick entrypoints use the same searchable touch menu,
+        # with the invoking client retained for the eventual focus operation.
+        for mode in ('old', 'new'):
+            subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
+            for kind in ('session', 'agent'):
+                drain()
+                popup = subprocess.Popen([core, 'pick', kind],
+                                         env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                popups.append(popup)
+                text('Switch ' + ('sessions' if kind == 'session' else 'agents'))
+                os.write(master, b'other')
+                drain(.2)
+                os.write(master, b'\r')
+                popup.wait(timeout=5)
+                assert popup.returncode == 0, popup.stderr.read()
+                wait(lambda: focused(session='other', pane=other), 'compatibility picker lost the target client')
+                assert client_value(sibling, '#{session_name}') == 'source'
+                reset()
+        print('PASS public Session/Agent pickers keep search, exact focus and client isolation in both menu modes', flush=True)
         # Both lines of a Sidebar entry must activate the same window, and
         # press-and-hold must not activate before release.
         for part in (0, 1):

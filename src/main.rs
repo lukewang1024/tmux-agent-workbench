@@ -105,6 +105,18 @@ enum Command {
         request: std::path::PathBuf,
     },
     #[command(hide = true)]
+    SelectList {
+        #[arg(long)]
+        title: String,
+    },
+    #[command(hide = true)]
+    PromptText {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        label: String,
+    },
+    #[command(hide = true)]
     StatusMenu {
         kind: tmux_agent_workbench::status_menu::StatusMenuKind,
         #[arg(long)]
@@ -1429,6 +1441,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             tmux_agent_workbench::status_menu::open_root(pane.as_deref(), client.as_deref())?
         }
         Command::MenuPanel { request } => tmux_agent_workbench::menu::run_request(&request)?,
+        Command::SelectList { title } => {
+            use std::io::BufRead;
+            let lines: Vec<_> = std::io::stdin()
+                .lock()
+                .lines()
+                .collect::<std::io::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|line| !line.is_empty())
+                .collect();
+            if let Some(index) = tmux_agent_workbench::picker::choose(&title, &lines)? {
+                println!("{}", lines[index]);
+            }
+        }
+        Command::PromptText { title, label } => {
+            if let Some(value) = tmux_agent_workbench::picker::prompt(&title, &label)? {
+                println!("{value}");
+            }
+        }
         Command::MenuMouseMode { client } => {
             println!("{}", menu_input_mode(&paths, &client, None));
         }

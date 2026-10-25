@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::config::{AgentSort, Config};
 use crate::ipc::{ClientError, Request, call};
@@ -93,7 +93,9 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     // later input event; entering with real rows makes the UI visible at once.
     let initial_snapshot = fetch_snapshot(&paths.socket_for_server(&server.key));
     let _screen = Screen::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
+        CrosstermBackend::new(stdout()),
+    )?)?;
     let result = event_loop(&mut terminal, paths, server, initial_snapshot);
     if let Err(error) = &result {
         let log = paths.state_dir.join("popup-actions.log");
@@ -160,7 +162,7 @@ fn refresh_interval(visible: bool) -> Duration {
 }
 
 fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<crate::popup_surface::Surface<CrosstermBackend<io::Stdout>>>,
     paths: &Paths,
     server: &ServerIdentity,
     initial_snapshot: Result<Snapshot, Box<dyn std::error::Error>>,
@@ -199,7 +201,6 @@ fn event_loop(
         .as_ref()
         .map(|snapshot| build_rows(snapshot, detailed, agent_sort))
         .unwrap_or_default();
-    let mut help_visible = false;
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
@@ -352,9 +353,6 @@ fn event_loop(
                         Rect::new(0, area.height - 1, area.width, 1),
                     );
                 }
-                if help_visible {
-                    render_help(frame, area);
-                }
             })?;
             dirty = false;
         }
@@ -366,7 +364,9 @@ fn event_loop(
         })? {
             continue;
         }
-        let input = event::read()?;
+        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+            continue;
+        };
         if matches!(input, Event::FocusGained) || (!visible && !matches!(input, Event::FocusLost)) {
             let _ = refresh_tx.try_send(true);
             visible = true;
@@ -386,7 +386,6 @@ fn event_loop(
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 navigation.cancel_press();
                 if popup_mode()
-                    && !help_visible
                     && (key.code == KeyCode::Esc
                         || (key.modifiers.contains(event::KeyModifiers::CONTROL)
                             && matches!(key.code, KeyCode::Char('c' | 'd'))))
@@ -394,9 +393,11 @@ fn event_loop(
                     return Ok(());
                 }
                 match key.code {
-                    KeyCode::Char('?') => help_visible = !help_visible,
-                    KeyCode::Esc if help_visible => help_visible = false,
-                    _ if help_visible => {}
+                    KeyCode::Char('?') => {
+                        if show_help()? {
+                            return Ok(());
+                        }
+                    }
                     _ if navigation.navigate(key.code) => {}
                     KeyCode::Enter => {
                         let navigated = activate(&rows, navigation.selected)?;
@@ -473,18 +474,6 @@ fn event_loop(
                 }
             }
             Event::Mouse(mouse) => {
-                if help_visible {
-                    if matches!(mouse.kind, MouseEventKind::Down(_))
-                        && !rect_contains(
-                            help_rect(Rect::new(0, 0, size.width, size.height)),
-                            mouse.column,
-                            mouse.row,
-                        )
-                    {
-                        help_visible = false;
-                    }
-                    continue;
-                }
                 let actions = action_regions(
                     Rect::new(0, 0, size.width, size.height),
                     agent_sort,
@@ -965,50 +954,24 @@ fn action_regions(area: Rect, agent_sort: AgentSort, is_popup: bool) -> Vec<(Rec
     actions
 }
 
-fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let popup = help_rect(area);
-    let text = vec![
-        Line::from("j/k ↑/↓  move"),
-        Line::from("⏎        open / focus"),
-        Line::from("m        item menu"),
-        Line::from("N        projects"),
-        Line::from("i        temporary Git tool"),
-        Line::from("W        new workspace"),
-        Line::from("T        new task in selected session"),
-        Line::from("R        rebuild projects"),
-        Line::from("s / a    sessions / agents"),
-        Line::from("n        next attention"),
-        Line::from("d        details"),
-        Line::from("r        reload"),
-        Line::from(""),
-        Line::from("? / esc  close help"),
-        Line::from("esc ^C ^D close popup"),
-    ];
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().title(" shortcuts ").borders(Borders::ALL))
-            .alignment(Alignment::Left),
-        popup,
-    );
-}
-
-fn help_rect(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(2).min(34).max(1);
-    let height = area.height.saturating_sub(2).min(18).max(1);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
-    column >= rect.x
-        && column < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
+fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
+    let items = [
+        "-j/k ↑/↓ · move",
+        "-Enter · open / focus",
+        "-m · item menu",
+        "-N · projects",
+        "-i · temporary Git tool",
+        "-W · new workspace",
+        "-T · new task in selected session",
+        "-R · rebuild projects",
+        "-s / a · sessions / agents",
+        "-n · next attention",
+        "-d · details",
+        "-r · reload",
+        "-Escape / Ctrl-C / Ctrl-D · close popup",
+    ]
+    .map(|label| (label, "", String::new()));
+    show_menu("Shortcuts", None, false, &items)
 }
 
 pub(crate) fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
@@ -1544,7 +1507,13 @@ fn show_global_menu(
         (
             "New",
             "N",
-            "run-shell -b tmux-agent-workbench pick project".into(),
+            format!(
+                "run-shell -b {}",
+                shell_quote(&format!(
+                    "WORKBENCH_SOURCE_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench pick project",
+                    shell_quote(&current_client()?)
+                ))
+            ),
         ),
         (
             "Temporary Git tool",
@@ -1676,6 +1645,11 @@ where
     }
     Command::new(program.as_ref())
         .args(&args)
+        .env("WORKBENCH_TARGET_CLIENT", current_client()?)
+        .env(
+            "WORKBENCH_SOURCE_PANE",
+            source_pane().ok_or("sidebar source pane unavailable")?,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

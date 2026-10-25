@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 pub(crate) enum Sizing {
     Sidebar,
     Menu { width: u16, height: u16 },
+    List { width: u16, height: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,10 @@ impl Dimensions {
             ),
             Sizing::Sidebar => (width, height),
             Sizing::Menu {
+                width: preferred_width,
+                height: preferred_height,
+            }
+            | Sizing::List {
                 width: preferred_width,
                 height: preferred_height,
             } => {
@@ -67,14 +72,16 @@ pub(crate) fn open(
         .client_format(client, "#{client_width} #{client_height}")?
         .ok_or("navigation client disappeared")?;
     let (width, height) = dimensions.split_once(' ').ok_or("invalid client size")?;
-    let size = Dimensions::new(width.parse()?, height.parse()?, sizing);
-    // tmux discards mouse events outside a display-popup. Action menus use a
-    // client-local input surface with the same bounded card drawn inside it.
+    let initial_width: u16 = width.parse()?;
+    let initial_height: u16 = height.parse()?;
+    // tmux discards mouse events outside a display-popup. All built-in panels
+    // use a client-local input surface with a bounded card drawn inside it.
     // The surface consumes the closing click instead of forwarding it to the
-    // underlying terminal. Sidebar panes/popups keep their existing container.
+    // underlying terminal. Persistent Sidebar panes do not use this surface.
     let surface = match sizing {
-        Sizing::Menu { width, height } => format!("WORKBENCH_MENU_SURFACE={width},{height} "),
-        Sizing::Sidebar => String::new(),
+        Sizing::Menu { width, height } => format!("WORKBENCH_POPUP_SURFACE={width},{height} "),
+        Sizing::List { width, height } => format!("WORKBENCH_POPUP_SURFACE=list,{width},{height} "),
+        Sizing::Sidebar => "WORKBENCH_POPUP_SURFACE=sidebar ".into(),
     };
     let shell_quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
     let command = format!(
@@ -101,21 +108,11 @@ pub(crate) fn open(
         "-y",
         "C",
         "-w",
-        &if surface.is_empty() {
-            size.width.to_string()
-        } else {
-            width.into()
-        },
+        width,
         "-h",
-        &if surface.is_empty() {
-            size.height.to_string()
-        } else {
-            height.into()
-        },
+        height,
     ]);
-    if !size.border || !surface.is_empty() {
-        popup.arg("-B");
-    }
+    popup.arg("-B");
     for variable in [
         "XDG_CONFIG_HOME",
         "XDG_STATE_HOME",
@@ -128,9 +125,7 @@ pub(crate) fn open(
             popup.args([std::ffi::OsString::from("-e"), entry]);
         }
     }
-    let status = if surface.is_empty() {
-        popup.arg(command).status()?
-    } else {
+    let status = {
         let mut child = popup.arg(command).spawn()?;
         let mut next_size_check = Instant::now() + Duration::from_millis(200);
         loop {
@@ -141,8 +136,19 @@ pub(crate) fn open(
                 next_size_check = Instant::now() + Duration::from_millis(200);
                 let current = crate::tmux::Tmux::new(server.clone())
                     .client_format(client, "#{client_width} #{client_height}")?;
-                if current.as_deref() != Some(dimensions.as_str()) {
-                    // Context menus dismiss on viewport changes. In particular,
+                let outgrew_surface = current.as_deref().is_some_and(|value| {
+                    value.split_once(' ').is_some_and(|(w, h)| {
+                        w.parse::<u16>().unwrap_or(0) > initial_width
+                            || h.parse::<u16>().unwrap_or(0) > initial_height
+                    })
+                });
+                if current.is_none()
+                    || outgrew_surface
+                    || matches!(sizing, Sizing::Menu { .. })
+                        && current.as_deref() != Some(dimensions.as_str())
+                {
+                    // Context menus dismiss on viewport changes; navigation
+                    // keeps its search and position when the viewport shrinks.
                     // tmux cannot grow a popup beyond its initial size, so a
                     // stale input surface must not leave uncaptured margins.
                     let _ = Command::new("tmux")

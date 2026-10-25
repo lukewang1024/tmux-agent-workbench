@@ -58,13 +58,14 @@ card. Escape and Close dismiss it; Backspace returns to its parent
 or closes a root menu. Back, Close and Launch use full-width list rows, with
 their shortcut on the right of the label, and stay pinned while the body scrolls.
 Launch configuration summaries also stay visible near Launch when space allows.
-The action-menu container captures a muted, in-memory snapshot of the terminal
+The shared panel container captures a muted, in-memory snapshot of the terminal
 behind its bounded card. This client-local input surface receives backdrop
 clicks that native tmux popups discard. The live terminal returns on dismissal;
 no pane, focus, or key binding is changed to implement outside dismissal.
-Action menus dismiss when the terminal viewport changes, so their backdrop
-always covers the current screen. Scoped navigation lists keep their existing
-resize handling and search state.
+Action menus dismiss when the terminal viewport changes. Navigation, searchable
+lists and name dialogs retain search/input and scrolling when the phone keyboard
+shrinks the viewport. If the client grows beyond the original input surface,
+the panel dismisses so it cannot leave an uncaptured outside margin.
 Horizontal rules separate the pinned header, scrolling body and footer in
 Sidebar popups, switchers and new menus. Divider rows do not activate actions;
 very short screens prioritize content and controls over divider rows.
@@ -196,6 +197,27 @@ all use the shared Menu model. New navigation lists and action menus expose
 explicit Back and Close buttons and share wheel/drag/release handling.
 Returning to a popup Sidebar reselects the current Agent. Restoring its previous
 browsing position, including scroll, remains a useful follow-up for long lists.
+
+### Built-in modal audit
+
+| Entry | Shared view | Touch dismissal |
+| --- | --- | --- |
+| Sidebar / responsive Sidebar | Sidebar list and panel surface | Outside tap or pinned Close |
+| Switch Agent / Window / Pane / Session | Scoped Sidebar list and panel surface | Outside tap, Back or Close |
+| Sidebar New / `pick project` | Searchable Menu with two-row items | Outside tap or pinned Close |
+| Temporary tool / `pick repo` | Searchable Menu with two-row repository paths | Outside tap or pinned Close |
+| `pick session` / `pick agent` / `agent goto` | Searchable Menu, retaining snapshot/tombstone behavior | Outside tap or pinned Close |
+| New workspace / New task | Menu text input with Create | Outside tap or pinned Close; empty input cannot submit |
+| Sidebar shortcuts and contextual/global actions | Menu model and the selected renderer | Outside tap, Back or Close |
+
+Selection lists and name dialogs use the same touch UI in both action-menu
+modes. Search accepts typed/pasted text; arrows, Tab/Shift-Tab and Page Up/Down
+browse entries. Data is returned only after the popup closes, so a project
+launch or tool never overlaps its picker. The old fzf wrappers remain available
+for compatibility but no built-in selection entrypoint depends on them.
+Repository selection shows the full searchable path across two rows; selecting
+it still opens the configured Git/editor/shell tool. Those external terminal
+applications, btop and interactive botmux commands retain their own UI.
 
 ## Scene launch policy
 

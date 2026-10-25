@@ -53,6 +53,16 @@ pub(crate) struct Menu {
     pub title: String,
     pub items: Vec<Item>,
     pub pager: Option<Pager>,
+    #[serde(default)]
+    pub searchable: bool,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Selection {
+    pub index: usize,
+    pub input: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +241,34 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
     if crate::ui::Mode::current()? == crate::ui::Mode::Old {
         return display_native(&menu, pane, client, page);
     }
+    let selected = select(&menu, pane, client, page)?;
+    if let Some(item) = selected
+        .and_then(|selection| menu.items.get(selection.index))
+        .filter(|item| item.enabled && !item.command.is_empty())
+    {
+        let mut callback = Command::new("tmux")
+            .args(ServerIdentity::discover()?.tmux_args())
+            .args(["source-file", "-t", pane, "-"])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        if let Some(mut input) = callback.stdin.take() {
+            writeln!(input, "{}", item.command)?;
+        }
+        if !callback.wait()?.success() {
+            return Err("menu action failed".into());
+        }
+    }
+    Ok(())
+}
+
+/// Selection lists always use the shared touch UI, independently of the
+/// action-menu renderer preference. The result is data, never shell code.
+pub(crate) fn select(
+    menu: &Menu,
+    pane: &str,
+    client: &str,
+    page: usize,
+) -> Result<Option<Selection>> {
     let paths = Paths::discover()?;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let request = paths
@@ -274,38 +312,24 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
             Role::Close => 0,
         })
         .sum::<usize>()
-        .saturating_add(5)
+        .saturating_add(5 + usize::from(menu.searchable) + 2 * usize::from(menu.prompt.is_some()))
         .min(u16::MAX as usize) as u16;
     crate::popup::open(
         &ServerIdentity::discover()?,
         pane,
         client,
         &["menu-panel", &exchange.request.to_string_lossy()],
-        crate::popup::Sizing::Menu { width, height },
+        if menu.searchable || menu.prompt.is_some() {
+            crate::popup::Sizing::List { width, height }
+        } else {
+            crate::popup::Sizing::Menu { width, height }
+        },
     )?;
-    let selected: Option<usize> = match fs::read(&exchange.reply) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    if let Some(item) = selected
-        .and_then(|index| menu.items.get(index))
-        .filter(|item| item.enabled && !item.command.is_empty())
-    {
-        let mut callback = Command::new("tmux")
-            .args(ServerIdentity::discover()?.tmux_args())
-            .args(["source-file", "-t", pane, "-"])
-            .stdin(Stdio::piped())
-            .spawn()?;
-        if let Some(mut input) = callback.stdin.take() {
-            writeln!(input, "{}", item.command)?;
-        }
-        let status = callback.wait()?;
-        if !status.success() {
-            return Err("menu action failed".into());
-        }
+    match fs::read(&exchange.reply) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 pub fn run_request(path: &Path) -> Result<()> {
@@ -351,7 +375,16 @@ struct Layout {
 impl Layout {
     fn new(width: u16, height: u16, menu: &Menu) -> Self {
         let divider = u16::from(height >= 6);
-        let header = (1 + divider).min(height);
+        let input_rows = if menu.prompt.is_some() {
+            if height >= 8 {
+                2
+            } else {
+                u16::from(height >= 4)
+            }
+        } else {
+            u16::from(menu.searchable && height >= 8)
+        };
+        let header = (1 + input_rows + divider).min(height);
         let count = 1 + u16::from(
             menu.items
                 .iter()
@@ -371,7 +404,7 @@ impl Layout {
         let footer = (count * row_height).min(height.saturating_sub(header));
         let mut available = height.saturating_sub(header + footer + divider);
         let primary = if menu.items.iter().any(|item| item.role == Role::Primary) {
-            available.saturating_sub(1).min(2)
+            available.saturating_sub(u16::from(has_body)).min(2)
         } else {
             0
         };
@@ -566,6 +599,7 @@ fn render(
     navigation: &NavigationList<Action>,
     rows: &[(usize, usize)],
     actions: &[(Rect, Action)],
+    query: &str,
 ) {
     frame.render_widget(
         Paragraph::new(clean(&menu.title))
@@ -573,6 +607,41 @@ fn render(
             .style(Style::default().add_modifier(Modifier::BOLD)),
         Rect::new(0, 0, layout.width, layout.header.min(1)),
     );
+    if menu.searchable && layout.header > 1 + layout.divider {
+        let search = if query.is_empty() {
+            tr("/ search · type to filter", "/ 搜索 · 输入筛选").into()
+        } else {
+            format!("/ {query}")
+        };
+        frame.render_widget(
+            Paragraph::new(search).style(Style::default().fg(Color::DarkGray)),
+            Rect::new(0, 1, layout.width, 1),
+        );
+    }
+    if let Some(label) = &menu.prompt {
+        let input_rows = layout.header.saturating_sub(1 + layout.divider);
+        if input_rows > 1 {
+            frame.render_widget(
+                Paragraph::new(label.as_str()).style(Style::default().fg(Color::DarkGray)),
+                Rect::new(0, 1, layout.width, 1),
+            );
+        }
+        if input_rows > 0 {
+            let row = input_rows;
+            frame.render_widget(
+                Paragraph::new(format!("› {query}")).scroll((
+                    0,
+                    (2 + Span::raw(query).width())
+                        .saturating_sub(usize::from(layout.width.saturating_sub(1)))
+                        .min(usize::from(u16::MAX)) as u16,
+                )),
+                Rect::new(0, row, layout.width, 1),
+            );
+            let column =
+                (2 + Span::raw(query).width()).min(usize::from(layout.width.saturating_sub(1)));
+            frame.set_cursor_position((column as u16, row));
+        }
+    }
     if layout.divider > 0 {
         crate::navigation_list::separator(frame, Rect::new(0, layout.header - 1, layout.width, 1));
         crate::navigation_list::separator(
@@ -584,6 +653,13 @@ fn render(
         let (item, part) = rows[index];
         row_line(&menu.items[item], part, layout.width, selected)
     });
+    if menu.searchable && rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(tr("No matching results", "没有匹配项"))
+                .style(Style::default().fg(Color::DarkGray)),
+            layout.body,
+        );
+    }
     let mut y = layout.body.bottom();
     let summary_end = y + layout.summary;
     for item in menu.items.iter().filter(|item| item.role == Role::Summary) {
@@ -652,7 +728,7 @@ fn render(
     }
 }
 
-fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
+fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
         CrosstermBackend::new(stdout()),
@@ -660,16 +736,36 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
     let mut navigation = NavigationList::<Action>::default();
     let mut rows = vec![];
     let mut row_width = None;
+    let mut query = String::new();
+    let mut row_query = String::new();
     let mut first_frame = true;
     let mut dirty = true;
     loop {
+        let mut prompt_menu;
+        let menu = if menu.prompt.is_some() {
+            prompt_menu = menu.clone();
+            for item in &mut prompt_menu.items {
+                if item.role == Role::Primary {
+                    item.enabled = !query.trim().is_empty();
+                }
+            }
+            &prompt_menu
+        } else {
+            menu
+        };
         let size = terminal.size()?;
-        if row_width != Some(size.width) {
+        if row_width != Some(size.width) || row_query != query {
+            let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
             rows = menu
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| item.role == Role::Body)
+                .filter(|(_, item)| {
+                    item.role == Role::Body
+                        && terms
+                            .iter()
+                            .all(|term| item.label.to_lowercase().contains(term))
+                })
                 .flat_map(|(index, item)| {
                     (0..row_count(item, size.width)).map(move |part| (index, part))
                 })
@@ -683,7 +779,12 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                     })
                     .collect(),
             );
+            if row_query != query {
+                navigation.blur();
+                navigation.select(0);
+            }
             row_width = Some(size.width);
+            row_query.clone_from(&query);
         }
         let layout = Layout::new(size.width, size.height, menu);
         navigation.set_viewport(layout.body);
@@ -696,7 +797,8 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
         let actions = layout.actions(menu);
         navigation.set_actions(&actions);
         if dirty {
-            terminal.draw(|frame| render(frame, menu, layout, &navigation, &rows, &actions))?;
+            terminal
+                .draw(|frame| render(frame, menu, layout, &navigation, &rows, &actions, &query))?;
             dirty = false;
         }
         if !event::poll(Duration::from_millis(50))? {
@@ -714,6 +816,34 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                         && matches!(key.code, KeyCode::Char('c' | 'd'))
                 {
                     return Ok(None);
+                }
+                if (menu.searchable || menu.prompt.is_some()) && key.code != KeyCode::Enter {
+                    match key.code {
+                        KeyCode::Backspace => {
+                            query.pop();
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            query.clear()
+                        }
+                        KeyCode::Char(character)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            query.push(character)
+                        }
+                        KeyCode::Tab => {
+                            navigation.navigate(KeyCode::Down);
+                        }
+                        KeyCode::BackTab => {
+                            navigation.navigate(KeyCode::Up);
+                        }
+                        code => {
+                            navigation.navigate(code);
+                        }
+                    }
+                    dirty = true;
+                    continue;
                 }
                 let name = match key.code {
                     KeyCode::Enter => Some("Enter".into()),
@@ -748,6 +878,9 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                     }
                 }
             }
+            Event::Paste(text) if menu.searchable || menu.prompt.is_some() => {
+                query.push_str(&clean(&text))
+            }
             Event::Mouse(mouse) => match navigation.mouse(mouse, &actions) {
                 Some(Hit::Item(id)) => chosen = menu.items.iter().position(|item| item.id == id),
                 Some(Hit::Action(Action::Choose(index))) => chosen = Some(index),
@@ -770,7 +903,10 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<usize>> {
                 .get(*index)
                 .is_some_and(|item| item.enabled && item.role != Role::Close)
         }) {
-            return Ok(Some(index));
+            return Ok(Some(Selection {
+                index,
+                input: query,
+            }));
         }
         dirty = true;
     }
@@ -927,6 +1063,8 @@ pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
             title,
             items,
             pager,
+            searchable: false,
+            prompt: None,
         },
         &pane,
         &client,
@@ -955,6 +1093,8 @@ mod tests {
         let menu = Menu {
             title: "test".into(),
             pager: None,
+            searchable: false,
+            prompt: None,
             items: vec![
                 item("body", Role::Body),
                 item("launch", Role::Primary),
@@ -1006,6 +1146,8 @@ mod tests {
         let menu = Menu {
             title: "test".into(),
             pager: None,
+            searchable: false,
+            prompt: None,
             items: vec![
                 item("Alpha", Role::Body),
                 Item {
@@ -1044,6 +1186,7 @@ mod tests {
                     &navigation,
                     &[(0, 0), (0, 1)],
                     &actions,
+                    "",
                 )
             })
             .unwrap();
@@ -1081,6 +1224,8 @@ mod tests {
             }
             let menu = Menu {
                 title: "test".into(),
+                searchable: false,
+                prompt: None,
                 pager: None,
                 items,
             };
@@ -1096,7 +1241,7 @@ mod tests {
             let actions = layout.actions(&menu);
             let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 10)).unwrap();
             terminal
-                .draw(|frame| render(frame, &menu, layout, &navigation, &rows, &actions))
+                .draw(|frame| render(frame, &menu, layout, &navigation, &rows, &actions, ""))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let text = buffer

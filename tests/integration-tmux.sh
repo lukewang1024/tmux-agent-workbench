@@ -421,12 +421,9 @@ tmux -S "$socket" kill-pane -t "$target_pane"
 tmux -S "$socket" list-clients -F '#{client_session}' | \
   grep '^relay-target$' >/dev/null
 
-# Picker integration replaces only the human fzf selection. Inventory,
+# Searchable Session/Agent picker interactions are covered by switcher.py.
+# Keep this Agent available for the following focus and responsive tests.
 printf '%s\n' 'integration phase: picker'
-# process discovery, socket snapshot, and exact focus all remain real.
-mkdir -p "$test_root/picker-bin"
-cp "$repo/tests/fixtures/fake-fzf-tmux" "$test_root/picker-bin/workbench-fzf-tmux"
-chmod 755 "$test_root/picker-bin/workbench-fzf-tmux"
 tmux -S "$socket" new-session -d -s agent-pick -x 140 -y 40 \
   "$repo/target/debug/examples/codex"
 tmux -S "$socket" rename-window -t agent-pick:1 agent-pick
@@ -437,13 +434,6 @@ while ! "$binary" agent explain "$agent_pane" >/dev/null 2>&1; do
   [ "$tries" -lt 60 ] || exit 1
   sleep 0.05
 done
-WORKBENCH_PICK_MATCH=relay-target PATH=$test_root/picker-bin:$PATH \
-  "$binary" pick session
-tmux -S "$socket" list-clients -F '#{client_session}' | \
-  grep '^relay-target$' >/dev/null
-WORKBENCH_PICK_MATCH=agent-pick PATH=$test_root/picker-bin:$PATH \
-  "$binary" pick agent
-tmux -S "$socket" list-clients -F '#{pane_id}' | grep "^$agent_pane$" >/dev/null
 
 # Clicking a sidebar makes it active before the handler runs. A cross-window
 printf '%s\n' 'integration phase: local focus'

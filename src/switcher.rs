@@ -722,7 +722,9 @@ fn event_loop(
         }
     });
     let _screen = Screen::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
+        CrosstermBackend::new(stdout()),
+    )?)?;
     let size = terminal.size()?;
     let geometry = Geometry::new(size.width, size.height);
     list.layout(geometry);
@@ -754,7 +756,9 @@ fn event_loop(
         if !event::poll(Duration::from_millis(50))? {
             continue;
         }
-        let input = event::read()?;
+        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+            continue;
+        };
         let mut action = None;
         match input {
             Event::Key(key) if key.kind == KeyEventKind::Press => {

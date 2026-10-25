@@ -8,7 +8,7 @@ Workbench v2 also discovers Codex, Claude, Trae, and OpenCode processes in
 every pane of the current tmux server and maintains one canonical attention
 snapshot. A per-server Rust daemon classifies `working`, `blocked`, `idle`, and
 `unknown`, derives unseen `done`/blocked attention, drives a responsive sidebar
-and fzf pickers, and owns focus-aware desktop/sound notification delivery. It
+and touch-friendly searchable lists, and owns focus-aware desktop/sound notification delivery. It
 does not require agents to be launched by Workbench and it never displays or
 persists prompt text by default. See the durable
 [v2 specification](docs/attention-v2.md) and
@@ -60,9 +60,8 @@ see [Install](#install).
   Defaults to `tig`; set `@workbench-git-tool` to change it.
 - **nvim** or **vim** — used only for an explicitly opened editor. Uses
   `$VISUAL`/`$EDITOR`, otherwise `nvim`, then `vim`.
-- **fzf-tmux** — hard requirement for the inspect, session, and Agent pickers.
-  Other daemon/sidebar behavior remains available if it is missing, and
-  `tmux-agent-workbench doctor` reports the dependency clearly.
+- Project, repository, Session and Agent pickers use the built-in searchable
+  list UI, with large touch targets and a pinned Close button.
 - **zoxide** — soft dependency of the picker: widens its candidate list with
   your directory-jump history. Its absence degrades the picker (fewer
   candidates), it doesn't break it.
@@ -145,6 +144,9 @@ The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
 The classic renderer uses native one-line tmux menus with pagination; the new
 renderer uses larger list rows. Both modes use Sidebar-sized navigation popups
 for Switch Agent, Window, Pane and Session.
+Sidebar popups and all built-in selection lists close on an outside tap without
+passing it to the terminal. Project/repository pickers and workspace/task name
+dialogs use the same container and pinned Close control in either menu mode.
 
 | Action | Option | Default | Runs |
 |---|---|---|---|
