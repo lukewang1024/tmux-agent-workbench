@@ -595,7 +595,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         assert visible_rows()[1:-1] == after_scroll, 'Sidebar refresh pulled the wheel back to its selection'
         assert focused(window=windows[0]), 'Sidebar wheel changed the client target'
         wheel(False, 20)
-        drain(.2)
+        wait(lambda: any(row.strip() == 'sessions' for row in visible_rows()),
+             'Sidebar wheel did not restore the first section heading')
         assert not any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel could not return to the start'
         for _ in range(12):
             if any('wheel-0' in row for row in visible_rows()):
