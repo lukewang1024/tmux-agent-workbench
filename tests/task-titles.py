@@ -154,6 +154,19 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert time.monotonic() < deadline
             time.sleep(.02)
 
+    def wait_visible_session(agent):
+        # A pane redraw precedes the daemon's title scan. Wait for its durable
+        # identity update before testing a one-shot hook's repair decision;
+        # a hook intentionally returns {} while that naming lock is held.
+        deadline = time.monotonic() + 8
+        while True:
+            state = json.loads(tmux('show-option', '-wqv', '-t', agent['pane'], '@workbench_task_title'))
+            visible = state.get('visible_session')
+            if visible and agent['session_id'].startswith(visible):
+                return
+            assert time.monotonic() < deadline, ('visible session did not settle', agent, state)
+            time.sleep(.05)
+
     try:
         inspection = tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'titles',
                           '-n', 'User inspection', '-P', '-F', '#{pane_id}', 'sleep', '300')
@@ -365,8 +378,10 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert fresh_state['title'] is None and fresh_state['repair_used'] is False
             assert hook(fresh, 'Stop') == {}, 'clear alone must not request a naming continuation'
             thread_title(fresh)
+            wait_visible_session(fresh)
             wait_hook_context(fresh, 'UserPromptSubmit')
-            assert hook(fresh, 'Stop')['decision'] == 'block'
+            stopped = hook(fresh, 'Stop')
+            assert stopped.get('decision') == 'block', (stopped, title(fresh))
             assert title(fresh, 'Fresh task title')['status'] == 'renamed'
             assert hook(fresh, 'SessionStart', source='clear') == {}
             assert name(fresh) == 'Fresh task title', 'a duplicate clear must not erase the new title'
@@ -383,6 +398,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             time.sleep(1.1)  # Include multiple daemon title scans before the redraw.
             assert name(after_redraw) == 'After redraw'
             thread_title(after_redraw)
+            wait_visible_session(after_redraw)
             wait_name(after_redraw, 'After redraw')
 
             automatic_clear = spawn()
