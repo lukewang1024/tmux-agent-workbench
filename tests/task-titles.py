@@ -109,6 +109,19 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 raise AssertionError(('hook session did not become ready', agent, snapshot))
             time.sleep(.05)
 
+    def wait_repair(agent):
+        # Naming hooks deliberately yield on busy locks or IPC timeouts. Require
+        # eventual delivery; the concurrent and duplicate Stop checks below
+        # separately require that only one delivered repair is ever allowed.
+        deadline = time.monotonic() + 8
+        while True:
+            output = hook(agent, 'Stop')
+            if output.get('decision') == 'block':
+                return output
+            assert output == {}, output
+            assert time.monotonic() < deadline, ('repair did not become ready', agent, title(agent))
+            time.sleep(.05)
+
     def title(agent, value=None, run_env=None, **extra):
         args = ['title', 'status'] if value is None else ['title', 'set', value]
         result = core(*args, '--pane', agent['pane'], '--session-id', agent['session_id'],
@@ -298,7 +311,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             wait_hook_context(foreground, 'SessionStart')
             wait_hook_context(foreground, 'UserPromptSubmit')
             thread_title(foreground)
-            assert hook(foreground, 'Stop')['decision'] == 'block'
+            assert wait_repair(foreground)['decision'] == 'block'
             auxiliary = dict(foreground, session_id=str(uuid.uuid4()))
             for event in ('SessionStart', 'UserPromptSubmit', 'Stop'):
                 assert hook(auxiliary, event) == {}, 'auxiliary session must not claim a title or continue'
@@ -359,13 +372,14 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 wait_hook_context(fresh_pending, 'SessionStart', source='clear')
                 assert title(fresh_pending, 'New pending task')['status'] == 'renamed'
                 assert name(fresh_pending) == 'New pending task'
+                tmux('kill-window', '-t', pending['pane'])
 
             # Clear starts a new task in the same CLI process. The previous
             # thread's OSC title can still be visible while its hook runs.
             cleared = spawn()
             wait_hook_context(cleared, 'SessionStart')
             wait_hook_context(cleared, 'UserPromptSubmit')
-            assert hook(cleared, 'Stop')['decision'] == 'block'
+            assert wait_repair(cleared)['decision'] == 'block'
             tmux('set-option', '-wu', '-t', cleared['pane'], 'automatic-rename')
             assert title(cleared, 'Previous task title')['status'] == 'renamed'
             thread_title(cleared)
@@ -380,7 +394,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             thread_title(fresh)
             wait_visible_session(fresh)
             wait_hook_context(fresh, 'UserPromptSubmit')
-            stopped = hook(fresh, 'Stop')
+            stopped = wait_repair(fresh)
             assert stopped.get('decision') == 'block', (stopped, title(fresh))
             assert title(fresh, 'Fresh task title')['status'] == 'renamed'
             assert hook(fresh, 'SessionStart', source='clear') == {}
@@ -430,6 +444,10 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert hook(human_fresh, 'SessionStart', source='clear') == {}
             wait_hook_binding(human_fresh)
             assert name(human_fresh) == 'Human keeps this title'
+            # Each clear scenario is finished. Do not keep its fixture CLI and
+            # pane in later process scans, especially on slower Intel runners.
+            for finished in (cleared, before_redraw, automatic_clear, named_clear, human_clear):
+                tmux('kill-window', '-t', finished['pane'])
             print('PASS clear resets owned titles, options and repair budgets while preserving manual names')
 
             primary = spawn()
@@ -504,7 +522,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             claude_agent = spawn(kind='claude')
             wait_hook_context(claude_agent, 'SessionStart')
             wait_hook_context(claude_agent, 'UserPromptSubmit')
-            assert hook(claude_agent, 'Stop')['decision'] == 'block'
+            assert wait_repair(claude_agent)['decision'] == 'block'
             assert title(claude_agent, 'Claude task title')['status'] == 'renamed'
 
             failed = core('title', 'set', 'Wrong target', '--pane', '%99999', '--session-id', repair['session_id'],
@@ -526,7 +544,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             new_task = dict(repair, session_id=str(uuid.uuid4()))
             clear = wait_hook_context(new_task, 'SessionStart', source='clear')
             submitted = wait_hook_context(new_task, 'UserPromptSubmit')
-            stopped = hook(new_task, 'Stop')
+            stopped = wait_repair(new_task)
             assert stopped.get('decision') == 'block', (
                 clear, submitted, stopped,
                 tmux('show-option', '-wqv', '-t', repair['pane'], '@workbench_task_title'),
