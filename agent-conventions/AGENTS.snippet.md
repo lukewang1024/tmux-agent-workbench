@@ -60,6 +60,8 @@ window name and automatic-naming options, then clears its ownership marker.
 A finished response is not an exit. Manual edits are preserved, and a verified
 same-task resume in the same pane keeps ownership until its final exit. Agents
 do not need to undo their title in a Stop hook or on every completed response.
+Clearing a Codex session starts a new task: Workbench restores the previous
+window name and automatic-naming options before naming the new task.
 
 ## Workspace sessions and task windows
 

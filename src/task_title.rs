@@ -58,6 +58,8 @@ struct TitleState {
     repair_used: bool,
     #[serde(default)]
     original_options: Option<TitleOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visible_session: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,7 +289,11 @@ fn foreground_agent(
         return Ok(agent.clone());
     };
     let latest = agent.hook_session_id.as_deref() == Some(session);
-    let verified = if let Some(prefix) = visible {
+    // SessionStart(clear) runs before Codex redraws its new thread's OSC title.
+    // The accepted hook already binds this session to the live CLI process.
+    let verified = if clear && latest {
+        true
+    } else if let Some(prefix) = visible {
         session.starts_with(prefix) && (bound.is_some() || latest)
     } else if let Some(remembered) = remembered {
         remembered == session || (clear && latest)
@@ -349,6 +355,7 @@ fn owner_state(
     // The caller must itself be a member, even when another agent owns the title.
     Owner::of(agent)?;
     Ok(TitleState {
+        visible_session: owner.session.clone(),
         owner,
         initial_name: window.name.clone(),
         title: None,
@@ -463,6 +470,125 @@ fn sync_thread_name(
     Ok(())
 }
 
+/// Restore only a title we still own, guarding against concurrent manual edits.
+/// Both task changes and process exits must restore the original naming options.
+fn restore_title(
+    server: &ServerIdentity,
+    current: &Window,
+    state: &TitleState,
+    encoded: &str,
+    finish: &str,
+) -> Result<(), String> {
+    let id = &current.id;
+    let unchanged = format!("#{{==:#{{{STATE_OPTION}}},{}}}", format_literal(encoded));
+    let (condition, commands) = if let Some(title) = state
+        .title
+        .as_deref()
+        .filter(|title| current.name == *title && !current.protected)
+    {
+        let mut commands = format!("rename-window -t {id} -- {} ; ", quote(&state.initial_name));
+        let automatic = automatic_rename(server, id)?;
+        let restore_automatic = if automatic == Some(false) {
+            state
+                .original_options
+                .as_ref()
+                .map(|options| options.automatic_rename)
+        } else {
+            // Preserve an automatic-rename change made after our rename.
+            Some(automatic)
+        };
+        if let Some(automatic) = restore_automatic {
+            match automatic {
+                Some(enabled) => commands.push_str(&format!(
+                    "set-option -w -t {id} automatic-rename {} ; ",
+                    if enabled { "on" } else { "off" }
+                )),
+                None => commands.push_str(&format!("set-option -wu -t {id} automatic-rename ; ")),
+            }
+        }
+        commands.push_str(finish);
+        (
+            format!(
+                "#{{&&:{unchanged},#{{&&:#{{==:#{{window_name}},{}}},#{{==:#{{automatic-rename}},{}}}}}}}",
+                format_literal(title),
+                if current.automatic_rename { "1" } else { "0" }
+            ),
+            commands,
+        )
+    } else {
+        (unchanged, finish.into())
+    };
+    tmux(server, &["if-shell", "-F", "-t", id, &condition, &commands])?;
+    Ok(())
+}
+
+fn reset_for_session_change(
+    paths: &Paths,
+    snapshot: &Snapshot,
+    agent: &AgentSnapshot,
+    visible_session: Option<&str>,
+) -> Result<(), String> {
+    let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+        .map_err(|error| error.to_string())?;
+    let initial = window(&server, agent)?;
+    let _lock = window_lock(paths, &server, &initial.id)?;
+    let current = window(&server, agent)?;
+    let encoded = tmux(
+        &server,
+        &["show-option", "-wqv", "-t", &current.id, STATE_OPTION],
+    )?;
+    if encoded.is_empty() {
+        return Ok(());
+    }
+    let mut previous: TitleState =
+        serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+    let owner = Owner::of(agent)?;
+    if previous.owner.pane != owner.pane
+        || previous.owner.process != owner.process
+        || current.protected
+        || current.name != previous.title.as_deref().unwrap_or(&previous.initial_name)
+    {
+        return Ok(());
+    }
+    // A truncated OSC UUID can identify a cleared thread before its first
+    // prompt produces the full SessionStart identity. Complete that binding
+    // without resetting a title or repair budget already assigned to it.
+    let completes_visible_session = previous
+        .owner
+        .session
+        .as_deref()
+        .zip(owner.session.as_deref())
+        .is_some_and(|(previous, next)| previous.len() >= 24 && next.starts_with(previous));
+    if previous.owner.same_task(&owner) || completes_visible_session {
+        previous.owner = owner;
+        if let Some(visible) = visible_session {
+            previous.visible_session = Some(visible.into());
+        }
+        return save(&server, &current, &previous);
+    }
+    let fresh = TitleState {
+        owner,
+        initial_name: previous.initial_name.clone(),
+        title: None,
+        task_seen: false,
+        repair_used: false,
+        original_options: None,
+        // A clear hook can arrive before the OSC redraw. Retain the last
+        // visible identity so the daemon does not interpret it as a switch back.
+        visible_session: visible_session
+            .map(str::to_owned)
+            .or(previous.visible_session.clone())
+            .or(previous.owner.session.clone()),
+    };
+    let finish = format!(
+        "set-option -w -t {} {} {}",
+        current.id,
+        STATE_OPTION,
+        quote(&serde_json::to_string(&fresh).map_err(|error| error.to_string())?)
+    );
+    restore_title(&server, &current, &previous, &encoded, &finish)
+}
+
 fn instruction(agent: &AgentSnapshot) -> String {
     let session = agent.hook_session_id.as_deref().unwrap_or_default();
     let codex = if agent.kind == AgentKind::Codex {
@@ -510,13 +636,17 @@ pub fn hook_output(
         let [agent] = agents.as_slice() else {
             return Err("hook has no unique live agent".into());
         };
-        let clear = payload.get("source").and_then(Value::as_str) == Some("clear");
+        let clear = event == "SessionStart"
+            && payload.get("source").and_then(Value::as_str) == Some("clear");
         let agent = foreground_agent(&snapshot, agent, Some(session), clear)?;
         let mut bound_paths = paths.clone();
         bound_paths.runtime_dir = socket
             .parent()
             .ok_or("daemon directory unavailable")?
             .into();
+        if clear {
+            reset_for_session_change(&bound_paths, &snapshot, &agent, None)?;
+        }
         if agent.thread_name.is_some() {
             sync_thread_name(&bound_paths, &snapshot, &agent, clear)?;
             return Ok(json!({}));
@@ -773,6 +903,68 @@ pub(crate) struct TitleReaper {
     next_scan: Instant,
 }
 
+fn sync_visible_session(
+    paths: &Paths,
+    snapshot: &Snapshot,
+    agent: &AgentSnapshot,
+    encoded: &str,
+    pane_title: &str,
+) -> bool {
+    if agent.exited || agent.kind != AgentKind::Codex || agent.relay_focus.is_some() {
+        return false;
+    }
+    let (Some(visible), Ok(state)) = (
+        crate::state_machine::codex_title_identity(pane_title),
+        serde_json::from_str::<TitleState>(encoded),
+    ) else {
+        return false;
+    };
+    // An OSC title inherited by a replacement process is insufficient. Only
+    // the already-bound CLI can switch its own window to another thread.
+    if state.owner.pane != agent.target.pane_id
+        || Some(&state.owner.process) != agent.process.as_ref()
+    {
+        return false;
+    }
+    let remembered = state
+        .visible_session
+        .as_deref()
+        .or(state.owner.session.as_deref());
+    let changed = remembered.is_none_or(|id| !id.starts_with(visible) && !visible.starts_with(id));
+    let hook_matches = agent
+        .hook_session_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with(visible));
+    if changed {
+        let mut foreground = agent.clone();
+        foreground.hook_session_id = agent
+            .hook_session_id
+            .as_ref()
+            .filter(|id| id.starts_with(visible))
+            .or_else(|| {
+                state
+                    .owner
+                    .session
+                    .as_ref()
+                    .filter(|id| id.starts_with(visible))
+            })
+            .cloned()
+            .or_else(|| Some(visible.into()));
+        if !hook_matches {
+            foreground.thread_name = foreground
+                .hook_session_id
+                .as_deref()
+                .and_then(crate::hooks::codex_thread_name);
+        }
+        let _ = reset_for_session_change(paths, snapshot, &foreground, Some(visible));
+        let _ = sync_thread_name(paths, snapshot, &foreground, false);
+        return true;
+    }
+    // A clear can redraw before its first prompt emits SessionStart. Keep
+    // stale hook labels from restoring the previous thread's title.
+    !hook_matches
+}
+
 impl Default for TitleReaper {
     fn default() -> Self {
         Self {
@@ -788,25 +980,39 @@ impl TitleReaper {
             return;
         }
         self.next_scan = Instant::now() + Duration::from_millis(500);
-        for agent in &snapshot.agents {
-            let _ = sync_thread_name(paths, snapshot, agent, false);
-        }
         let Ok(windows) = tmux(
             server,
             &[
-                "list-windows",
+                "list-panes",
                 "-a",
                 "-F",
-                "#{window_id}\u{1f}#{@workbench_task_title}",
+                "#{window_id}\u{1f}#{@workbench_task_title}\u{1f}#{pane_id}\u{1f}#{pane_title}",
             ],
         ) else {
             return;
         };
-        let mut seen = std::collections::HashSet::new();
-        for line in windows.lines() {
-            let Some((id, encoded)) = line.split_once('\u{1f}') else {
+        let panes: Vec<_> = windows
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.splitn(4, '\u{1f}').collect();
+                (fields.len() == 4).then_some(fields)
+            })
+            .collect();
+        for agent in &snapshot.agents {
+            if panes
+                .iter()
+                .find(|fields| fields[2] == agent.target.pane_id)
+                .is_some_and(|fields| {
+                    sync_visible_session(paths, snapshot, agent, fields[1], fields[3])
+                })
+            {
                 continue;
-            };
+            }
+            let _ = sync_thread_name(paths, snapshot, agent, false);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for fields in panes {
+            let (id, encoded) = (fields[0], fields[1]);
             if !seen.insert(id) {
                 continue;
             }
@@ -894,51 +1100,8 @@ impl TitleReaper {
                 }
             }
         }
-        let unchanged = format!("#{{==:#{{{STATE_OPTION}}},{}}}", format_literal(&encoded));
         let clear = format!("set-option -wu -t {id} {STATE_OPTION}");
-        let (condition, commands) = if owns_title {
-            let mut commands =
-                format!("rename-window -t {id} -- {} ; ", quote(&state.initial_name));
-            let automatic = automatic_rename(server, id)?;
-            let restore_automatic = if automatic == Some(false) {
-                state
-                    .original_options
-                    .as_ref()
-                    .map(|options| options.automatic_rename)
-            } else {
-                // Preserve an automatic-rename change made after our rename.
-                Some(automatic)
-            };
-            if let Some(automatic) = restore_automatic {
-                match automatic {
-                    Some(enabled) => commands.push_str(&format!(
-                        "set-option -w -t {id} automatic-rename {} ; ",
-                        if enabled { "on" } else { "off" }
-                    )),
-                    None => {
-                        commands.push_str(&format!("set-option -wu -t {id} automatic-rename ; "))
-                    }
-                }
-            }
-            commands.push_str(&clear);
-            // A manual rename or a newer naming owner between the read and
-            // this command wins. Escape literal format arguments, including
-            // punctuation in semantic names and the stored JSON record.
-            (
-                format!(
-                    "#{{&&:{unchanged},#{{&&:#{{==:#{{window_name}},{}}},#{{==:#{{automatic-rename}},{}}}}}}}",
-                    format_literal(title),
-                    if current.automatic_rename { "1" } else { "0" }
-                ),
-                commands,
-            )
-        } else {
-            // The user (or workbench manager) took over the title/options.
-            // Retire only our ownership marker, leaving their changes intact.
-            (unchanged, clear)
-        };
-        tmux(server, &["if-shell", "-F", "-t", id, &condition, &commands])?;
-        Ok(())
+        restore_title(server, &current, &state, &encoded, &clear)
     }
 }
 

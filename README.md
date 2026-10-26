@@ -811,6 +811,10 @@ windows remain protected. Task directories and IDs remain stable when labels
 change. Codex task progress is read from its configured terminal-title item;
 without an explicit progress value the sidebar omits it.
 
+Clearing a Codex session restores its owned window's previous name and automatic
+naming options, and gives the new task a fresh naming budget. Manual window
+names and titles owned by another pane remain protected.
+
 The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
 assigns a short semantic name through Workbench:
 
