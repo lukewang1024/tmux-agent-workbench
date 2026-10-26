@@ -327,6 +327,95 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert name(next_thread) == 'zsh'
             assert title(next_thread, 'Actual foreground task')['status'] == 'renamed'
 
+            # Codex redraws a cleared thread before emitting SessionStart on its
+            # first prompt. Reset immediately, including truncated OSC UUIDs.
+            for named_before_clear in (False, True):
+                pending = spawn()
+                if named_before_clear:
+                    hook(pending, 'SessionStart', thread_name='Previous pending thread')
+                    wait_name(pending, 'Previous pending thread')
+                else:
+                    wait_hook_context(pending, 'SessionStart')
+                    assert title(pending, 'Previous pending task')['status'] == 'renamed'
+                fresh_pending = dict(pending, session_id=str(uuid.uuid4()))
+                thread_title(fresh_pending)
+                wait_name(fresh_pending, 'zsh')
+                assert wait_agent(pending['pane'])['hook_session_id'] == pending['session_id']
+                pending_state = json.loads(tmux('show-option', '-wqv', '-t', pending['pane'], '@workbench_task_title'))
+                assert fresh_pending['session_id'].startswith(pending_state['owner']['session'])
+                wait_hook_context(fresh_pending, 'SessionStart', source='clear')
+                assert title(fresh_pending, 'New pending task')['status'] == 'renamed'
+                assert name(fresh_pending) == 'New pending task'
+
+            # Clear starts a new task in the same CLI process. The previous
+            # thread's OSC title can still be visible while its hook runs.
+            cleared = spawn()
+            wait_hook_context(cleared, 'SessionStart')
+            wait_hook_context(cleared, 'UserPromptSubmit')
+            assert hook(cleared, 'Stop')['decision'] == 'block'
+            tmux('set-option', '-wu', '-t', cleared['pane'], 'automatic-rename')
+            assert title(cleared, 'Previous task title')['status'] == 'renamed'
+            thread_title(cleared)
+            fresh = dict(cleared, session_id=str(uuid.uuid4()))
+            wait_hook_context(fresh, 'SessionStart', source='clear')
+            assert name(fresh) == 'zsh'
+            assert tmux('show-option', '-wqv', '-t', fresh['pane'], 'automatic-rename') == ''
+            fresh_state = json.loads(tmux('show-option', '-wqv', '-t', fresh['pane'], '@workbench_task_title'))
+            assert fresh_state['owner']['session'] == fresh['session_id']
+            assert fresh_state['title'] is None and fresh_state['repair_used'] is False
+            assert hook(fresh, 'Stop') == {}, 'clear alone must not request a naming continuation'
+            thread_title(fresh)
+            wait_hook_context(fresh, 'UserPromptSubmit')
+            assert hook(fresh, 'Stop')['decision'] == 'block'
+            assert title(fresh, 'Fresh task title')['status'] == 'renamed'
+            assert hook(fresh, 'SessionStart', source='clear') == {}
+            assert name(fresh) == 'Fresh task title', 'a duplicate clear must not erase the new title'
+
+            # Conversely, a hook may precede the OSC redraw. Its new named
+            # thread must not be reset back to the still-visible old UUID.
+            before_redraw = spawn()
+            wait_hook_context(before_redraw, 'SessionStart')
+            thread_title(before_redraw)
+            assert title(before_redraw, 'Before redraw')['status'] == 'renamed'
+            after_redraw = dict(before_redraw, session_id=str(uuid.uuid4()))
+            hook(after_redraw, 'SessionStart', source='clear', thread_name='After redraw')
+            wait_name(after_redraw, 'After redraw')
+            time.sleep(1.1)  # Include multiple daemon title scans before the redraw.
+            assert name(after_redraw) == 'After redraw'
+            thread_title(after_redraw)
+            wait_name(after_redraw, 'After redraw')
+
+            automatic_clear = spawn()
+            tmux('set-option', '-w', '-t', automatic_clear['pane'], 'automatic-rename', 'on')
+            wait_name(automatic_clear, 'codex')
+            wait_hook_context(automatic_clear, 'SessionStart')
+            assert title(automatic_clear, 'Temporarily named task')['status'] == 'renamed'
+            automatic_fresh = dict(automatic_clear, session_id=str(uuid.uuid4()))
+            wait_hook_context(automatic_fresh, 'SessionStart', source='clear')
+            wait_name(automatic_fresh, 'codex')
+            assert tmux('show-option', '-wqv', '-t', automatic_fresh['pane'], 'automatic-rename') == 'on'
+
+            named_clear = spawn()
+            hook(named_clear, 'SessionStart', thread_name='Previous thread name')
+            wait_name(named_clear, 'Previous thread name')
+            unnamed = dict(named_clear, session_id=str(uuid.uuid4()))
+            wait_hook_context(unnamed, 'SessionStart', source='clear')
+            assert name(unnamed) == 'zsh'
+            renamed = dict(unnamed, session_id=str(uuid.uuid4()))
+            assert hook(renamed, 'SessionStart', source='clear', thread_name='New thread name') == {}
+            wait_name(renamed, 'New thread name')
+            assert json.loads(tmux('show-option', '-wqv', '-t', renamed['pane'], '@workbench_task_title'))['initial_name'] == 'zsh'
+
+            human_clear = spawn()
+            wait_hook_context(human_clear, 'SessionStart')
+            assert title(human_clear, 'Agent title before manual edit')['status'] == 'renamed'
+            tmux('rename-window', '-t', human_clear['pane'], 'Human keeps this title')
+            human_fresh = dict(human_clear, session_id=str(uuid.uuid4()))
+            assert hook(human_fresh, 'SessionStart', source='clear') == {}
+            wait_hook_binding(human_fresh)
+            assert name(human_fresh) == 'Human keeps this title'
+            print('PASS clear resets owned titles, options and repair budgets while preserving manual names')
+
             primary = spawn()
             secondary = spawn(split=primary['pane'])
             assert hook(secondary, 'SessionStart') == {}, 'first hook must not steal an older agent window'
@@ -342,6 +431,9 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             tmux('select-pane', '-t', inspection)
             assert title(primary, '光标复现与验收')['status'] == 'renamed'
             assert name(primary) == '光标复现与验收'
+            secondary = dict(secondary, session_id=str(uuid.uuid4()))
+            assert hook(secondary, 'SessionStart', source='clear') == {}
+            assert name(primary) == '光标复现与验收', 'clearing another pane must preserve the owner title'
             bare_locale = dict(detached_env, LC_ALL='C')
             bare_locale.pop('LANG', None)
             assert title(primary, run_env=bare_locale)['title'] == '光标复现与验收'
@@ -379,6 +471,9 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             wait_hook_binding(managed)
             assert hook(managed, 'UserPromptSubmit') == {}
             assert title(managed, 'Rename inspection')['status'] == 'preserved'
+            managed = dict(managed, session_id=str(uuid.uuid4()))
+            assert hook(managed, 'SessionStart', source='clear') == {}
+            assert name(managed) == 'zsh'
             tmux('set-option', '-wu', '-t', managed['pane'], '@workbench_project_root')
             tmux('set-option', '-t', 'titles', '@workbench_task', '1')
             assert hook(managed, 'UserPromptSubmit') == {}
