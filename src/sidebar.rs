@@ -88,6 +88,7 @@ enum Action {
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime_identity = crate::layout::executable_identity()?;
     // Resolve the first frame before switching to the alternate screen. Some
     // remote clients do not paint an initially empty fullscreen popup until a
     // later input event; entering with real rows makes the UI visible at once.
@@ -96,7 +97,13 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
         CrosstermBackend::new(stdout()),
     )?)?;
-    let result = event_loop(&mut terminal, paths, server, initial_snapshot);
+    let result = event_loop(
+        &mut terminal,
+        paths,
+        server,
+        initial_snapshot,
+        &runtime_identity,
+    );
     if let Err(error) = &result {
         let log = paths.state_dir.join("popup-actions.log");
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -166,6 +173,7 @@ fn event_loop(
     paths: &Paths,
     server: &ServerIdentity,
     initial_snapshot: Result<Snapshot, Box<dyn std::error::Error>>,
+    runtime_identity: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
     let fetch_socket = socket.clone();
@@ -218,6 +226,7 @@ fn event_loop(
     let mut dirty = true;
     let mut initial_selection = snapshot.is_none();
     let mut last_content_height = usize::MAX;
+    let mut runtime_registered = is_popup;
     loop {
         if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
             visible = now_visible;
@@ -354,6 +363,10 @@ fn event_loop(
                     );
                 }
             })?;
+            if !runtime_registered {
+                crate::layout::register_sidebar_runtime(server, runtime_identity)?;
+                runtime_registered = true;
+            }
             dirty = false;
         }
 

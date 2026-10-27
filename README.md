@@ -96,10 +96,14 @@ tmux-agent-workbench doctor
 The POSIX installer first downloads the matching macOS/Linux x86_64/aarch64
 release and falls back to `cargo build --release` when no release asset is
 available. It installs executables under `~/.local/bin` by default, stages the
-binary before replacing it, and signs the staged Mach-O on macOS. Reload tmux
-after installation. Plugin loading never overwrites Workbench configuration or
-Agent configuration. Termux is detected explicitly and always builds for its
-native Android target. Tagged releases provide Android arm64 and x86_64 assets;
+binary before replacing it, and signs the staged Mach-O on macOS. The installer
+then hands off running daemons and resident sidebars in the current runtime
+directory. Sidebar panes retain their IDs, layout and focus, and installation
+waits for their replacement processes to render before returning. Repeating
+the handoff leaves current processes running. Reload tmux after installation
+to update key bindings and hooks. Plugin loading never overwrites Workbench
+configuration or Agent configuration. Termux is detected explicitly and always
+builds for its native Android target. Tagged releases provide Android arm64 and x86_64 assets;
 install the Termux `rust` package only when using an unreleased revision or an
 architecture without a release asset.
 
@@ -460,6 +464,7 @@ the version-1 matcher and state semantics.
 
 ```sh
 tmux-agent-workbench daemon ensure|status|stop
+tmux-agent-workbench daemon ensure --all
 tmux-agent-workbench snapshot --json
 tmux-agent-workbench resurrect save|restore
 tmux-agent-workbench agent explain %3 [--show-content]
@@ -468,6 +473,11 @@ tmux-agent-workbench config check
 tmux-agent-workbench reload
 tmux-agent-workbench doctor
 ```
+
+`daemon ensure` also hands off outdated resident sidebar processes for its
+tmux server. `--all` discovers running servers in the current runtime directory,
+so the installer can complete the handoff from a shell outside tmux. With no
+running servers it is a no-op; it never creates a tmux session.
 
 `resurrect save|restore` is the all-in-one assistant session layer for this
 plugin. Snapshot saving accepts both legacy tmux layouts and tmux 3.8 JSON

@@ -237,3 +237,9 @@ for skill in "$PLUGIN_DIR"/skills/*; do
   ln -s "$canonical" "$compat"
   echo "linked $compat -> $canonical -> $skill"
 done
+
+# A replaced executable also invalidates self-launches from resident sidebars.
+# Use the same runtime handoff as plugin startup, including outside tmux.
+if "$CORE_DIR/tmux-agent-workbench-core" daemon ensure --help 2>/dev/null | grep -q -- '--all'; then
+  "$CORE_DIR/tmux-agent-workbench-core" daemon ensure --all
+fi

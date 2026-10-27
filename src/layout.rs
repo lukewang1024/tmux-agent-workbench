@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::config::{Config, SidebarPosition};
 use crate::paths::Paths;
@@ -26,16 +28,7 @@ pub fn control(
     let server = ServerIdentity::discover()?;
     let paths = Paths::discover()?;
     seed_layout_options(&server, &Config::load(&paths.config_file())?)?;
-    let lock_path = paths
-        .runtime_dir
-        .join(format!("sidebar-create-{}.lock", server.key));
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(lock_path)?;
-    lock.lock_exclusive()?;
+    let lock = lock_layout(&paths, &server)?;
     let result = match action {
         Action::Configure => Ok(()),
         Action::Toggle => toggle(
@@ -50,6 +43,204 @@ pub fn control(
     };
     lock.unlock()?;
     result
+}
+
+fn lock_layout(paths: &Paths, server: &ServerIdentity) -> std::io::Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(
+            paths
+                .runtime_dir
+                .join(format!("sidebar-create-{}.lock", server.key)),
+        )?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+pub(crate) fn executable_identity() -> std::io::Result<String> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let metadata = std::fs::metadata("/proc/self/exe")?;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let metadata = std::fs::metadata(std::env::current_exe()?)?;
+    Ok(format!(
+        "{}:{}:{}",
+        crate::ENGINE_VERSION,
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+pub(crate) fn register_sidebar_runtime(
+    server: &ServerIdentity,
+    identity: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(pane) = std::env::var("TMUX_PANE") {
+        validate_target(&pane, '%')?;
+        tmux(
+            server,
+            &[
+                "set-option",
+                "-p",
+                "-t",
+                &pane,
+                "@workbench_sidebar_runtime",
+                &format!("{}:{identity}", std::process::id()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace only managed sidebar processes, keeping their panes and layout.
+/// The generation includes the inode, so reinstalling the same version also
+/// retires processes whose current_exe path became invalid after atomic replace.
+pub fn handoff_sidebars(
+    paths: &Paths,
+    server: &ServerIdentity,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if !server.socket_path.exists() {
+        return Ok(0);
+    }
+    let identity = executable_identity()?;
+    let executable = std::env::current_exe()?;
+    let basename = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let rows = tmux(
+        server,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\u{1f}#{pane_pid}\u{1f}#{@pane_role}\u{1f}#{@workbench_sidebar_runtime}",
+        ],
+    )?;
+    let rows: Vec<Vec<_>> = rows
+        .lines()
+        .map(|row| row.split('\u{1f}').collect())
+        .collect();
+    let pids: Vec<_> = rows
+        .iter()
+        .filter(|row| row.get(2) == Some(&"sidebar"))
+        .filter_map(|row| row.get(1)?.parse::<u32>().ok().map(Pid::from_u32))
+        .collect();
+    if pids.is_empty() {
+        return Ok(0);
+    }
+    let mut processes = System::new();
+    processes.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_cmd(UpdateKind::Always),
+    );
+    let mut outdated = Vec::new();
+    for fields in &rows {
+        let [pane, pid, role, runtime] = fields.as_slice() else {
+            continue;
+        };
+        if *role != "sidebar"
+            || !valid_target(pane, '%')
+            || pid.parse::<u32>().is_err()
+            || *runtime == format!("{pid}:{identity}")
+        {
+            continue;
+        }
+        let Some(process) = processes.process(Pid::from_u32(pid.parse()?)) else {
+            continue;
+        };
+        // tmux's displayed command name may be truncated by the OS. Verify the
+        // actual argv instead, including legacy sidebars without a marker.
+        if process.cmd().get(1).map(|arg| arg.as_os_str()) != Some(std::ffi::OsStr::new("sidebar"))
+            || !process
+                .cmd()
+                .first()
+                .and_then(|arg| std::path::Path::new(arg).file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    [
+                        basename,
+                        "tmux-agent-workbench",
+                        "tmux-agent-workbench-core",
+                    ]
+                    .contains(&name)
+                })
+        {
+            continue;
+        }
+        outdated.push((*pane, *pid));
+    }
+    if outdated.is_empty() {
+        return Ok(0);
+    }
+    // A listening IPC socket precedes the scanner's first published snapshot.
+    // Wait only when replacing UIs, without delaying unrelated client startup.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = crate::ipc::call(
+            &paths.socket_for_server(&server.key),
+            &crate::ipc::Request::new("daemon.status", serde_json::Value::Null),
+            Duration::from_millis(500),
+        )?;
+        if status["generation"]
+            .as_u64()
+            .is_some_and(|generation| generation > 0)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "daemon did not publish its initial snapshot during upgrade handoff".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _lock = lock_layout(paths, server)?;
+    let mut refreshed = 0;
+    for (pane, pid) in outdated {
+        // Revalidate in tmux's command queue: a pane repurposed since the scan
+        // must never have its replacement process killed by this handoff.
+        let condition =
+            format!("#{{&&:#{{==:#{{pane_pid}},{pid}}},#{{==:#{{@pane_role}},sidebar}}}}");
+        let respawn = format!(
+            "respawn-pane -k -t {pane} {} sidebar",
+            crate::status_menu::shell_quote(&executable.to_string_lossy())
+        );
+        tmux(
+            server,
+            &["if-shell", "-F", "-t", pane, &condition, &respawn],
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = display(
+                server,
+                pane,
+                "#{pane_pid}\u{1f}#{@pane_role}\u{1f}#{@workbench_sidebar_runtime}",
+            )?;
+            let state: Vec<_> = state.trim_end().split('\u{1f}').collect();
+            if let [current_pid, current_role, current_runtime] = state.as_slice() {
+                if *current_role != "sidebar" {
+                    break;
+                }
+                if *current_pid != pid && *current_runtime == format!("{current_pid}:{identity}") {
+                    refreshed += 1;
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    format!("sidebar {pane} did not become ready during upgrade handoff").into(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    Ok(refreshed)
 }
 
 pub fn maintain_responsive_focus(
