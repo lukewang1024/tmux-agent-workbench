@@ -36,6 +36,8 @@ pub struct Observation {
 struct Tracked {
     snapshot: AgentSnapshot,
     conversation_identity: Option<String>,
+    previous_session_id: Option<String>,
+    name_from_command: bool,
     confirmed_resume: bool,
     automatic_review_attention: Option<AttentionEvent>,
     idle_candidate_since: Option<u64>,
@@ -56,9 +58,71 @@ struct Tracked {
     seen_seq: u64,
 }
 
+impl Tracked {
+    /// All foreground-session changes pass through here, regardless of whether
+    /// they arrive from a lifecycle hook or a verified redraw in the same CLI.
+    /// Keep every session-owned value together so projections cannot retain a
+    /// name, progress or attention item belonging to the previous task.
+    fn bind_session(&mut self, session: &str) {
+        let initial_name = if self.active_hook_session_id.is_none() && self.name_from_command {
+            self.snapshot.thread_name.clone()
+        } else {
+            None
+        };
+        if !self
+            .active_hook_session_id
+            .as_deref()
+            .is_some_and(|active| same_session(active, session))
+        {
+            self.previous_session_id = self.active_hook_session_id.clone();
+            if self.conversation_identity.is_none() {
+                self.conversation_identity = self.active_hook_session_id.clone();
+            }
+            self.snapshot.thread_name = None;
+            self.name_from_command = false;
+            self.snapshot.label = format!("{:?}", self.snapshot.kind);
+            self.snapshot.task_progress = None;
+            self.snapshot.attention = None;
+            self.snapshot.reason_category = None;
+            self.snapshot.rule_id = None;
+            self.reason_fingerprint = None;
+            self.confirmed_resume = false;
+            self.automatic_review_attention = None;
+            self.seen_seq = self.attention_seq;
+            self.conflict_since_ms = None;
+            self.display_candidate = None;
+            self.confirmed_display = None;
+            self.idle_candidate_since = None;
+            self.idle_confirmations = 0;
+            self.working_candidate_since = None;
+            self.working_confirmations = 0;
+        }
+        self.active_hook_session_id = Some(session.into());
+        self.snapshot.hook_session_id = Some(session.into());
+        if let Some(name) = initial_name {
+            // A CLI can name a discovered process before its first hook binds
+            // the session. That initial binding is still the same task.
+            self.name_from_command = true;
+            self.snapshot.label = name.clone();
+            self.snapshot.thread_name = Some(name);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct StateMachine {
     agents: HashMap<String, Tracked>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeMetadata {
+    pub runtime_id: String,
+    pub attention_seq: u64,
+    pub seen_seq: u64,
+    pub hook_session_id: Option<String>,
+    pub visible_session_id: Option<String>,
+    pub previous_session_id: Option<String>,
+    pub name_from_command: bool,
 }
 
 impl StateMachine {
@@ -105,6 +169,12 @@ impl StateMachine {
         tracked.seen_seq = checkpoint.seen_seq;
         tracked.active_hook_session_id = checkpoint.hook_session_id.clone();
         tracked.snapshot.hook_session_id = checkpoint.hook_session_id.clone();
+        tracked.conversation_identity = checkpoint
+            .visible_session_id
+            .clone()
+            .or_else(|| checkpoint.hook_session_id.clone());
+        tracked.previous_session_id = checkpoint.previous_session_id.clone();
+        tracked.name_from_command = checkpoint.name_from_command;
         tracked.snapshot.thread_name = checkpoint.thread_name.clone();
         if let Some(name) = &tracked.snapshot.thread_name {
             tracked.snapshot.label = name.clone();
@@ -169,17 +239,17 @@ impl StateMachine {
             .unwrap_or_default()
     }
 
-    pub fn checkpoint_metadata(
-        &self,
-        instance_id: &str,
-    ) -> Option<(String, u64, u64, Option<String>)> {
+    pub fn checkpoint_metadata(&self, instance_id: &str) -> Option<RuntimeMetadata> {
         let tracked = self.agents.get(instance_id)?;
-        Some((
-            tracked.runtime_id.clone(),
-            tracked.attention_seq,
-            tracked.seen_seq,
-            tracked.active_hook_session_id.clone(),
-        ))
+        Some(RuntimeMetadata {
+            runtime_id: tracked.runtime_id.clone(),
+            attention_seq: tracked.attention_seq,
+            seen_seq: tracked.seen_seq,
+            hook_session_id: tracked.active_hook_session_id.clone(),
+            visible_session_id: tracked.conversation_identity.clone(),
+            previous_session_id: tracked.previous_session_id.clone(),
+            name_from_command: tracked.name_from_command,
+        })
     }
 
     pub fn observe(&mut self, observation: Observation) -> AgentSnapshot {
@@ -204,6 +274,8 @@ impl StateMachine {
             });
             Tracked {
                 conversation_identity: None,
+                previous_session_id: None,
+                name_from_command: false,
                 confirmed_resume: false,
                 automatic_review_attention: None,
                 snapshot: AgentSnapshot {
@@ -403,6 +475,11 @@ impl StateMachine {
         }
 
         let tracked = self.agents.get_mut(&instance_id).expect("hook tracked");
+        tracked.snapshot.label = tracked
+            .snapshot
+            .thread_name
+            .clone()
+            .unwrap_or(observation.label);
         tracked.snapshot.target = observation.target;
         tracked.snapshot.process = Some(observation.process);
         tracked.snapshot.visible = observation.visible;
@@ -516,12 +593,15 @@ impl StateMachine {
         // binding. Once bound, non-activating events remain unable to switch
         // the foreground thread.
         if activates || tracked.active_hook_session_id.is_none() {
-            if tracked.active_hook_session_id.as_deref() != Some(&report.session_id) {
-                tracked.snapshot.thread_name = None;
-                tracked.snapshot.task_progress = None;
-            }
-            tracked.active_hook_session_id = Some(report.session_id.clone());
-        } else if tracked.active_hook_session_id.as_deref() != Some(&report.session_id) {
+            tracked.bind_session(&report.session_id);
+        } else if tracked
+            .active_hook_session_id
+            .as_deref()
+            .is_some_and(|active| same_session(active, &report.session_id))
+        {
+            // Complete an OSC UUID prefix without resetting the fresh task.
+            tracked.bind_session(&report.session_id);
+        } else {
             return Err("event is not for the active foreground session".into());
         }
         tracked.seen_event_ids.push(report.event_id.clone());
@@ -531,7 +611,11 @@ impl StateMachine {
         tracked.last_hook_at_ms = Some(report.occurred_at_unix_ms);
         tracked.last_hook_event_at_ms = report.occurred_at_unix_ms;
         tracked.snapshot.hook_session_id = Some(report.session_id.clone());
-        if let Some(label) = &report.session_label {
+        if let Some(label) = report
+            .session_label
+            .as_ref()
+            .filter(|_| !tracked.name_from_command)
+        {
             tracked.snapshot.label = label.clone();
             tracked.snapshot.thread_name = Some(label.clone());
         }
@@ -706,16 +790,56 @@ impl StateMachine {
         Some(tracked.snapshot.clone())
     }
 
-    /// Identity evidence does not create lifecycle state or hook authority.
-    /// Require both an explicit resume argument and the attached thread title:
-    /// a new process may temporarily inherit the previous process's title.
-    pub fn observe_codex_identity(&mut self, instance_id: &str, title: &str, resume: Option<&str>) {
-        let Some(identity) = codex_title_identity(title) else {
-            return;
-        };
-        let Some(tracked) = self.agents.get_mut(instance_id) else {
-            return;
-        };
+    /// A bound CLI can redraw a cleared thread before its first prompt emits a
+    /// hook. Publish that identity through the same transition as hooks, using
+    /// screen estimates until the new thread supplies lifecycle authority.
+    /// An unbound replacement process may only inherit the previous OSC title.
+    pub fn observe_codex_identity(
+        &mut self,
+        instance_id: &str,
+        title: &str,
+        resume: Option<&str>,
+    ) -> Option<AgentSnapshot> {
+        let identity = codex_title_identity(title)?;
+        let tracked = self.agents.get_mut(instance_id)?;
+        if tracked.snapshot.kind != AgentKind::Codex || tracked.snapshot.exited {
+            return None;
+        }
+        let remembered = tracked
+            .conversation_identity
+            .as_deref()
+            .or(tracked.active_hook_session_id.as_deref());
+        let changed = remembered.is_some_and(|previous| !same_session(previous, identity));
+        // Several hooks can arrive before tmux's next inventory scan. While
+        // waiting for the current thread's first redraw, a delayed redraw of
+        // the immediately preceding hooked thread is still stale evidence.
+        let pending_redraw = remembered
+            .zip(tracked.active_hook_session_id.as_deref())
+            .is_some_and(|(visible, active)| !same_session(visible, active));
+        let delayed_previous = pending_redraw
+            && tracked
+                .previous_session_id
+                .as_deref()
+                .is_some_and(|previous| same_session(previous, identity));
+        if changed
+            && !delayed_previous
+            && tracked.active_hook_session_id.is_some()
+            && !tracked
+                .active_hook_session_id
+                .as_deref()
+                .is_some_and(|active| same_session(active, identity))
+        {
+            tracked.bind_session(identity);
+            tracked.last_hook_at_ms = None;
+            tracked.snapshot.base_state = tracked
+                .snapshot
+                .estimated_state
+                .unwrap_or(BaseState::Unknown);
+            tracked.snapshot.display_state = display_for(tracked.snapshot.base_state);
+            tracked.snapshot.state_source = StateSource::Screen;
+            tracked.snapshot.confidence = StateConfidence::Low;
+            tracked.snapshot.hook_health = HookHealth::Missing;
+        }
         tracked.conversation_identity = Some(identity.to_owned());
         tracked.confirmed_resume = resume.is_some_and(|id| id.starts_with(identity))
             && tracked
@@ -723,7 +847,9 @@ impl StateMachine {
                 .hook_session_id
                 .as_deref()
                 .is_none_or(|id| id.starts_with(identity));
+        let snapshot = tracked.snapshot.clone();
         self.retire_resumed_completions();
+        Some(snapshot)
     }
 
     fn retire_resumed_completions(&mut self) {
@@ -822,9 +948,34 @@ impl StateMachine {
 
     pub fn set_thread_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
         let tracked = self.agents.get_mut(instance)?;
+        if tracked.name_from_command {
+            return Some(tracked.snapshot.clone());
+        }
         tracked.snapshot.label = name.clone();
         tracked.snapshot.thread_name = Some(name);
         Some(tracked.snapshot.clone())
+    }
+
+    pub fn set_task_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
+        let tracked = self.agents.get_mut(instance)?;
+        tracked.name_from_command = true;
+        tracked.snapshot.label = name.clone();
+        tracked.snapshot.thread_name = Some(name.clone());
+        let window_id = tracked.snapshot.target.window_id.clone();
+        for tracked in self.agents.values_mut() {
+            if tracked.snapshot.target.window_id == window_id {
+                tracked.snapshot.target.window_name = name.clone();
+            }
+        }
+        Some(self.agents.get(instance)?.snapshot.clone())
+    }
+
+    pub fn retarget(&mut self, target: &TmuxTarget) {
+        for tracked in self.agents.values_mut() {
+            if !tracked.snapshot.exited && tracked.snapshot.target.pane_id == target.pane_id {
+                tracked.snapshot.target = target.clone();
+            }
+        }
     }
 
     pub fn next_attention(&self) -> Option<&AttentionEvent> {
@@ -935,6 +1086,13 @@ pub(crate) fn codex_title_identity(title: &str) -> Option<&str> {
         return None;
     }
     Some(id)
+}
+
+fn same_session(first: &str, second: &str) -> bool {
+    first == second
+        || (first.len() >= 29
+            && second.len() >= 29
+            && (first.starts_with(second) || second.starts_with(first)))
 }
 
 fn resumed_same_conversation(previous: &Tracked, current: &Tracked) -> bool {
@@ -1835,6 +1993,207 @@ mod tests {
             .unwrap();
         assert!(result.thread_name.is_none());
         assert!(result.task_progress.is_none());
+        assert_ne!(result.label, "Readable name");
+        assert!(result.attention.is_none());
+    }
+
+    #[test]
+    fn codex_clear_redraw_uses_the_shared_session_transition_before_any_hook() {
+        let mut machine = StateMachine::default();
+        let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+        let old = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7";
+        let new = "01a15764-7cd7-7743-9cbe-59699d1d4d8d";
+        let mut named = event("named", old, AgentEventType::Permission, 1);
+        named.session_label = Some("Previous task".into());
+        machine
+            .report_event(&agent.instance_id, &named, false)
+            .unwrap();
+        machine.set_task_progress(
+            &agent.instance_id,
+            Some(crate::model::TaskProgress {
+                completed: 2,
+                total: 5,
+            }),
+        );
+        let cleared = machine
+            .observe_codex_identity(
+                &agent.instance_id,
+                &format!("codex | Ready | {}...", &new[..32]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(cleared.hook_session_id.as_deref(), Some(&new[..32]));
+        assert!(cleared.thread_name.is_none());
+        assert_ne!(cleared.label, "Previous task");
+        assert!(cleared.task_progress.is_none());
+        assert!(cleared.attention.is_none());
+        assert!(cleared.reason_category.is_none());
+        assert_eq!(cleared.state_source, StateSource::Screen);
+        assert_eq!(cleared.hook_health, HookHealth::Missing);
+        assert_eq!(machine.snapshots(), vec![cleared]);
+        assert!(
+            machine
+                .report_event(
+                    &agent.instance_id,
+                    &event("old-stop", old, AgentEventType::Stop, 2),
+                    false
+                )
+                .is_err()
+        );
+
+        // Completing a truncated identity must retain everything assigned to
+        // the fresh task, even when its first delivered hook is only activity.
+        machine.set_thread_name(&agent.instance_id, "Fresh task".into());
+        let completed = machine
+            .report_event(
+                &agent.instance_id,
+                &event("activity", new, AgentEventType::Activity, 3),
+                false,
+            )
+            .unwrap();
+        assert_eq!(completed.thread_name.as_deref(), Some("Fresh task"));
+        assert_eq!(completed.hook_session_id.as_deref(), Some(new));
+        assert_eq!(completed.state_source, StateSource::Hook);
+    }
+
+    #[test]
+    fn clear_hook_before_redraw_does_not_switch_back_to_the_old_visible_session() {
+        let mut machine = StateMachine::default();
+        let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+        let old = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7";
+        let new = "01a15764-7cd7-7743-9cbe-59699d1d4d8d";
+        machine
+            .report_event(
+                &agent.instance_id,
+                &event("start", old, AgentEventType::SessionStart, 1),
+                false,
+            )
+            .unwrap();
+        let mut clear = event("clear", new, AgentEventType::SessionStart, 2);
+        clear.session_label = Some("New task".into());
+        machine
+            .report_event(&agent.instance_id, &clear, false)
+            .unwrap();
+        for session in [old, old, new, new] {
+            let current = machine
+                .observe_codex_identity(
+                    &agent.instance_id,
+                    &format!("codex | Ready | {session}"),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(current.hook_session_id.as_deref(), Some(new));
+            assert_eq!(current.thread_name.as_deref(), Some("New task"));
+            assert_eq!(current.state_source, StateSource::Hook);
+        }
+    }
+
+    #[test]
+    fn cli_name_survives_initial_binding_and_metadata_then_resets_with_the_session() {
+        let mut machine = StateMachine::default();
+        let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+        machine
+            .set_task_name(&agent.instance_id, "CLI task".into())
+            .unwrap();
+        let mut start = event("start", "first", AgentEventType::SessionStart, 1);
+        start.session_label = Some("Provider task".into());
+        let bound = machine
+            .report_event(&agent.instance_id, &start, false)
+            .unwrap();
+        assert_eq!(bound.thread_name.as_deref(), Some("CLI task"));
+        assert_eq!(bound.label, "CLI task");
+        let refreshed = machine
+            .set_thread_name(&agent.instance_id, "Provider refresh".into())
+            .unwrap();
+        assert_eq!(refreshed.thread_name.as_deref(), Some("CLI task"));
+        assert!(
+            machine
+                .checkpoint_metadata(&agent.instance_id)
+                .unwrap()
+                .name_from_command
+        );
+        let cleared = machine
+            .report_event(
+                &agent.instance_id,
+                &event("clear", "second", AgentEventType::SessionStart, 2),
+                false,
+            )
+            .unwrap();
+        assert!(cleared.thread_name.is_none());
+        assert!(
+            !machine
+                .checkpoint_metadata(&agent.instance_id)
+                .unwrap()
+                .name_from_command
+        );
+        let fresh = machine
+            .set_thread_name(&agent.instance_id, "Fresh provider name".into())
+            .unwrap();
+        assert_eq!(fresh.thread_name.as_deref(), Some("Fresh provider name"));
+    }
+
+    #[test]
+    fn consecutive_hooks_ignore_delayed_previous_redraws_including_after_recovery() {
+        let first = "01a153e9-75cb-7151-99f4-2ab4d9ffeed7";
+        let second = "01a15764-7cd7-7743-9cbe-59699d1d4d8d";
+        let third = "01a16780-1234-7456-9abc-0123456789ab";
+        for recover in [false, true] {
+            let mut machine = StateMachine::default();
+            let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+            machine
+                .report_event(
+                    &agent.instance_id,
+                    &event("first", first, AgentEventType::SessionStart, 1),
+                    false,
+                )
+                .unwrap();
+            machine.observe_codex_identity(
+                &agent.instance_id,
+                &format!("codex | Ready | {first}"),
+                None,
+            );
+            for (id, session, at) in [("second", second, 2), ("third", third, 3)] {
+                let mut report = event(id, session, AgentEventType::SessionStart, at);
+                report.session_label = Some(id.into());
+                machine
+                    .report_event(&agent.instance_id, &report, false)
+                    .unwrap();
+            }
+            if recover {
+                let metadata = machine.checkpoint_metadata(&agent.instance_id).unwrap();
+                let mut checkpoint = checkpoint_for(&agent);
+                checkpoint.state_source = Some(StateSource::Hook);
+                checkpoint.hook_session_id = metadata.hook_session_id;
+                checkpoint.visible_session_id = metadata.visible_session_id;
+                checkpoint.previous_session_id = metadata.previous_session_id;
+                checkpoint.thread_name = Some("third".into());
+                machine = StateMachine::default();
+                machine.observe_estimate(observation(BaseState::Idle, 4));
+                assert!(machine.restore_checkpoint(&checkpoint, 5));
+            }
+            for session in [first, second, second, third] {
+                let current = machine
+                    .observe_codex_identity(
+                        &agent.instance_id,
+                        &format!("codex | Ready | {session}"),
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(current.hook_session_id.as_deref(), Some(third));
+                assert_eq!(current.thread_name.as_deref(), Some("third"));
+            }
+            // Once the current thread has actually appeared, switching back
+            // to an earlier visible thread remains a valid identity change.
+            let resumed = machine
+                .observe_codex_identity(
+                    &agent.instance_id,
+                    &format!("codex | Ready | {second}"),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(resumed.hook_session_id.as_deref(), Some(second));
+            assert!(resumed.thread_name.is_none());
+        }
     }
 
     #[test]

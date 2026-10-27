@@ -812,18 +812,43 @@ change. Codex task progress is read from its configured terminal-title item;
 without an explicit progress value the sidebar omits it.
 
 Clearing a Codex session restores its owned window's previous name and automatic
-naming options, and gives the new task a fresh naming budget. Manual window
-names and titles owned by another pane remain protected.
+naming options, clears the previous task's agent name, progress and attention,
+and gives the new task a fresh naming budget. This also works when Codex redraws
+the new thread before its first lifecycle hook arrives. Sidebar cards and saved
+checkpoints use the same session transition, including after daemon recovery.
+Manual window names and titles owned by another pane remain protected. See
+[shared session state](docs/session-state.md) for the ownership and regression
+contract.
 
 The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
 assigns a short semantic name through Workbench:
 
 ```sh
 tmux-agent-workbench title set 'Repair cursor rendering'
+tmux-agent-workbench title set 'Repair cursor and selection rendering' --session 'Office development'
+tmux-agent-workbench title set --session 'Terminal tools'
 tmux-agent-workbench title status
 ```
 
-The command resolves the calling agent through process ancestry and verifies
+`title set` names a new task or updates a task already named by Workbench
+(`rename` remains an alias). It updates the sidebar and the tmux statusbar window
+name in one daemon operation, publish the new snapshot, and save it before
+returning success. An explicit CLI name survives provider metadata refreshes
+and daemon restarts, and is cleared when a new session starts. Manual window
+names remain protected.
+
+Session names describe a broader direction; window names describe individual
+tasks. `--session <direction>` reuses the exact existing session or creates it,
+then moves the task window there. It never renames the session from which the
+task was launched. Omit the task name to change only its session group. An agent
+can start in any session or pane: the daemon automatically breaks later
+independent agents out of a shared window, retaining their pane IDs, processes
+and working directories. Each task then has its own window and title. Supporting
+shells, dev servers and sidebars stay with the original task window; explicitly
+marked agent-team layouts stay together. Clients viewing a moving task follow
+their original pane, including when its source session loses its last window.
+
+The commands resolve the calling agent through process ancestry and verify
 the resulting name in tmux. If ancestry is hidden, use the verified `--pane`
 and `--session-id` supplied by the lifecycle hook. It never follows the focused
 client or guesses from a working directory. A live Workbench daemon is needed
@@ -845,8 +870,10 @@ sockets are blocked, skip naming and continue the task. Recreating a pane does
 not grant socket access, and naming does not require changing the session's
 sandbox or network policy.
 
-Codex and Claude lifecycle hooks remind the model only while an ordinary
-window has a default shell/process name. `SessionStart` and `UserPromptSubmit`
+Codex and Claude lifecycle hooks ask the model to choose a task name and a
+semantic session direction, supplying existing session names for reuse. They
+also request grouping on prompt submission when a task already has a name.
+`SessionStart` and `UserPromptSubmit`
 provide short context; `Stop` requests at most one naming continuation after
 a submitted task. The continuation budget is stored with the tmux window, so
 resume, compaction, duplicate hooks, and daemon restarts cannot reset it.
@@ -857,13 +884,11 @@ an auxiliary session cannot take over naming or reset the repair budget.
 If identity, tmux, or the naming lock is unavailable, the hook lets work proceed.
 This improves execution reliability; the model still chooses the semantic name.
 
-The first live interactive agent owns a shared window's name. Other agents,
-sidebars, status updates and focus changes cannot replace it. Existing
-meaningful names, manual edits, managed task windows, and legacy repository
-inspection windows are preserved. The helper deliberately does not replace
-an existing task name; an explicitly requested repurpose can use tmux's normal
-rename command. Prefer one task and one agent per ordinary window; explicitly
-requested team layouts remain intact.
+Automatic separation keeps independent agents from sharing title ownership.
+Sidebars, status updates and focus changes cannot replace a task's title.
+Existing meaningful names, manual edits, managed task windows, and legacy
+repository inspection window names are preserved. An explicit `title set`
+updates a name already owned by Workbench; manual names remain protected.
 
 When the naming owner's CLI exits, the daemon restores the pre-rename name and
 the window's previous `automatic-rename` override (including inheritance), then

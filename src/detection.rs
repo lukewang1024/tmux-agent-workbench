@@ -129,6 +129,28 @@ impl Detector {
         self.machine.acknowledge(event_id)
     }
 
+    pub fn set_task_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
+        let agent = self.machine.set_task_name(instance, name.clone())?;
+        for pane in self.panes.values_mut() {
+            if pane.target.window_id == agent.target.window_id {
+                pane.target.window_name = name.clone();
+            }
+        }
+        Some(agent)
+    }
+
+    pub fn refresh_targets(&mut self) -> Result<(), TmuxError> {
+        let panes = self.tmux.panes()?;
+        for pane in &panes {
+            self.machine.retarget(&pane.target);
+        }
+        self.panes = panes
+            .into_iter()
+            .map(|pane| (pane.target.pane_id.clone(), pane))
+            .collect();
+        Ok(())
+    }
+
     pub fn wake(&mut self) {
         self.next_process_scan = Instant::now();
         for due in self.next_capture.values_mut() {
@@ -166,7 +188,7 @@ impl Detector {
     pub fn checkpoint_metadata(
         &self,
         instance_id: &str,
-    ) -> Option<(String, u64, u64, Option<String>)> {
+    ) -> Option<crate::state_machine::RuntimeMetadata> {
         self.machine.checkpoint_metadata(instance_id)
     }
 
@@ -407,12 +429,15 @@ impl Detector {
         manifests: &ManifestSet,
         now_ms: u64,
     ) -> Result<(), TmuxError> {
-        let panes = self.tmux.panes()?;
+        let mut panes = self.tmux.panes()?;
         let roots: Vec<_> = panes.iter().map(|pane| pane.root_pid).collect();
         let agents = self
             .processes
             .agents_for_roots(&roots, &manifests.aliases());
         let interactive = self.processes.interactive_foreground_roots(&agents);
+        if crate::task_placement::isolate(self.tmux.server(), &panes, &agents, &interactive) {
+            panes = self.tmux.panes()?;
+        }
         // Presentation must not block detection if a pane disappears mid-update.
         let _ = self.tmux.publish_agent_actions(&panes, &interactive);
         for pane in &panes {
@@ -648,13 +673,17 @@ impl Detector {
             hook_session_id: metadata.and_then(|item| item.session_id.clone()),
             observed_at_ms: now_ms,
         });
-        if kind == AgentKind::Codex {
-            self.machine.observe_codex_identity(
-                &snapshot.instance_id,
-                &pane.title,
-                resume_session_id.as_deref(),
-            );
-        }
+        let snapshot = if kind == AgentKind::Codex {
+            self.machine
+                .observe_codex_identity(
+                    &snapshot.instance_id,
+                    &pane.title,
+                    resume_session_id.as_deref(),
+                )
+                .unwrap_or(snapshot)
+        } else {
+            snapshot
+        };
         if let Some(previous) = self
             .pane_instances
             .insert(pane.target.pane_id.clone(), snapshot.instance_id.clone())

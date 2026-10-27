@@ -212,6 +212,12 @@ fn report_from_payload(
         AgentEventType::Error => Some("task_error".into()),
         AgentEventType::SessionStart
             if string_field(payload, &["source", "reason"])
+                .is_some_and(|value| value.eq_ignore_ascii_case("clear")) =>
+        {
+            Some("clear".into())
+        }
+        AgentEventType::SessionStart
+            if string_field(payload, &["source", "reason"])
                 .is_some_and(|value| value.eq_ignore_ascii_case("compact")) =>
         {
             Some("compact".into())

@@ -46,14 +46,6 @@ workbench_resolve_session() (
       echo "workbench: TMUX_PANE is not present on this tmux server: $TMUX_PANE" >&2
       exit 1
     }
-  elif [ -n "${TMUX:-}" ]; then
-    # TMUX ends in the originating numeric session ID. Do not use an
-    # untargeted display-message, which can follow another attached client.
-    wb_id=${TMUX##*,}
-    case $wb_id in
-      ''|*[!0-9]*) echo 'workbench: invalid TMUX session identity; set WORKBENCH_SESSION explicitly.' >&2; exit 1 ;;
-    esac
-    wb_target=$(printf '%s\n' "$wb_sessions" | awk -v id="\$$wb_id" '$1 == id { print $1 }')
   else
     wb_pid=$$
     wb_matches=
@@ -64,6 +56,15 @@ workbench_resolve_session() (
       case $wb_pid in ''|*[!0-9]*) break ;; esac
     done
     wb_target=$(printf '%s\n' "$wb_matches" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+    if [ -z "$wb_target" ] && [ -n "${TMUX:-}" ]; then
+      # A running pane can move between sessions while its inherited TMUX
+      # value stays unchanged. Prefer live ancestry; use TMUX only as fallback.
+      wb_id=${TMUX##*,}
+      case $wb_id in
+        ''|*[!0-9]*) echo 'workbench: invalid TMUX session identity; set WORKBENCH_SESSION explicitly.' >&2; exit 1 ;;
+      esac
+      wb_target=$(printf '%s\n' "$wb_sessions" | awk -v id="\$$wb_id" '$1 == id { print $1 }')
+    fi
   fi
   if [ -n "$wb_target" ] && [ "$(printf '%s\n' "$wb_target" | wc -l)" -eq 1 ]; then
     printf '%s\n' "$wb_target"

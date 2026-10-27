@@ -90,8 +90,8 @@ with tempfile.TemporaryDirectory(prefix='workbench-title-exit-', dir='/tmp') as 
         return core('hook', 'ingest', 'codex', event,
                     data={'session_id': agent['session_id'], 'agent_pid': agent['pid'], 'cwd': root})
 
-    def title(agent, text):
-        result = core('title', 'set', '--pane', agent['pane'],
+    def title(agent, text, action='set'):
+        result = core('title', action, '--pane', agent['pane'],
                       '--session-id', agent['session_id'], text)
         assert result['status'] == 'renamed', result
 
@@ -140,6 +140,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-title-exit-', dir='/tmp') as 
             wait_for(lambda: window_name(automatic) == 'codex', 'automatic title did not settle')
             hook(automatic, 'SessionStart')
             title(automatic, 'Restore automatic naming')
+            title(automatic, 'Renamed task keeps original options', action='rename')
             os.kill(automatic['pid'], signal.SIGKILL)
             wait_for(lambda: not option(automatic) and option(automatic, 'automatic-rename') == 'on'
                      and window_name(automatic) == tmux('display-message', '-p', '-t', automatic['pane'],

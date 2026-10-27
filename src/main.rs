@@ -277,8 +277,14 @@ enum AgentCommand {
 
 #[derive(Debug, Subcommand)]
 enum TitleCommand {
+    /// Set the task name and optionally group its window in a tmux session.
+    #[command(alias = "rename")]
     Set {
-        title: String,
+        #[arg(required_unless_present = "session")]
+        title: Option<String>,
+        /// Task direction: reuse this tmux session, or create it if missing.
+        #[arg(long)]
+        session: Option<String>,
         #[arg(long)]
         pane: Option<String>,
         #[arg(long)]
@@ -1347,19 +1353,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", output);
         }
         Command::Title { command } => {
-            let (pane, session, title) = match &command {
+            let (pane, session_id, title, session) = match &command {
                 TitleCommand::Set {
                     title,
+                    session,
                     pane,
                     session_id,
-                } => (pane, session_id, Some(title.as_str())),
-                TitleCommand::Status { pane, session_id } => (pane, session_id, None),
+                } => (pane, session_id, title.as_deref(), session.as_deref()),
+                TitleCommand::Status { pane, session_id } => (pane, session_id, None, None),
             };
             let result = tmux_agent_workbench::task_title::for_caller(
                 &paths,
                 pane.as_deref(),
-                session.as_deref(),
+                session_id.as_deref(),
                 title,
+                session,
             )?;
             println!("{}", result);
         }

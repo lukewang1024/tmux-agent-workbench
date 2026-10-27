@@ -32,6 +32,7 @@ pub mod sidebar;
 pub mod state_machine;
 pub mod status_menu;
 pub mod switcher;
+mod task_placement;
 pub mod task_title;
 pub mod terminal;
 pub mod tmux;

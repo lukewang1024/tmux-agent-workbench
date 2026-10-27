@@ -34,18 +34,18 @@ retained=0
 for task_root in "$workspace"/tasks/*; do
   [ -d "$task_root" ] && [ ! -L "$task_root" ] || continue
   if workbench_clean_task "$task_root" "$force"; then
-    if tmux has-session -t "=$direction" 2>/dev/null; then
-      for window in $(tmux list-windows -t "=$direction" -F '#{window_id}'); do
-        [ "$(tmux show-option -wqv -t "$window" @workbench_task_root)" != "$task_root" ] || tmux kill-window -t "$window"
-      done
-    fi
+    for window in $(tmux list-windows -a -F '#{window_id}' 2>/dev/null | sort -u); do
+      [ "$(tmux show-option -wqv -t "$window" @workbench_task_root)" != "$task_root" ] || tmux kill-window -t "$window"
+    done
   else retained=1
   fi
 done
 if [ -d "$workspace/tasks" ]; then rmdir "$workspace/tasks" 2>/dev/null || retained=1; fi
 if [ "$retained" = 0 ]; then
   if workbench_clean_task "$workspace" "$force"; then
-    if tmux has-session -t "=$direction" 2>/dev/null; then tmux kill-session -t "=$direction"; fi
+    for window in $(tmux list-windows -a -F '#{window_id}' 2>/dev/null | sort -u); do
+      [ "$(tmux show-option -wqv -t "$window" @workbench_task_root)" != "$workspace" ] || tmux kill-window -t "$window"
+    done
   else retained=1
   fi
 fi

@@ -610,6 +610,12 @@ fn server_incarnation(server: &ServerIdentity) -> String {
 }
 
 fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
+    if let Err(error) = save_checkpoint(paths, server_key, state) {
+        eprintln!("tmux-agent-workbench: checkpoint write failed: {error}");
+    }
+}
+
+fn save_checkpoint(paths: &Paths, server_key: &str, state: &State) -> io::Result<()> {
     let mut pending = state.notifications.scheduler.pending_events();
     pending.extend(state.recovered_pending.clone());
     let delivered_event_ids = state.notifications.router.accepted_event_ids();
@@ -624,14 +630,17 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
         .iter()
         .filter_map(|agent| {
             let process = agent.process.as_ref()?;
-            let (runtime_id, attention_seq, seen_seq, hook_session_id) = state
+            let runtime = state
                 .detector
                 .checkpoint_metadata(&agent.instance_id)
-                .unwrap_or_else(|| (agent.instance_id.clone(), 0, 0, None));
+                .unwrap_or_else(|| crate::state_machine::RuntimeMetadata {
+                    runtime_id: agent.instance_id.clone(),
+                    ..Default::default()
+                });
             Some(crate::checkpoint::RuntimeCheckpoint {
                 version: 1,
                 server_incarnation: state.server_incarnation.clone(),
-                runtime_id,
+                runtime_id: runtime.runtime_id,
                 process_fingerprint: format!(
                     "{}:{}:{}",
                     process.pid, process.started_at_ticks, process.executable
@@ -640,10 +649,13 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
                 state_source: Some(agent.state_source),
                 last_hook_event_at_ms: state.detector.hook_replay_guard(&agent.instance_id).0,
                 hook_event_ids: state.detector.hook_replay_guard(&agent.instance_id).1,
-                attention_seq,
-                seen_seq,
-                hook_session_id,
+                attention_seq: runtime.attention_seq,
+                seen_seq: runtime.seen_seq,
+                hook_session_id: runtime.hook_session_id,
+                visible_session_id: runtime.visible_session_id,
+                previous_session_id: runtime.previous_session_id,
                 thread_name: agent.thread_name.clone(),
+                name_from_command: runtime.name_from_command,
                 delivered_event_ids: delivered_event_ids.clone(),
                 pending: pending.clone(),
                 recent_endpoint: recent_endpoint.clone(),
@@ -656,11 +668,7 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
         updated_unix_ms: now_unix_ms(),
         runtimes,
     };
-    if let Err(error) =
-        crate::checkpoint::store_server(&paths.checkpoint_for_server(server_key), &checkpoint)
-    {
-        eprintln!("tmux-agent-workbench: checkpoint write failed: {error}");
-    }
+    crate::checkpoint::store_server(&paths.checkpoint_for_server(server_key), &checkpoint)
 }
 
 fn publish_status_fragments(snapshot: &Snapshot) {
@@ -858,6 +866,39 @@ fn handle(
         }
         "snapshot.get" => serde_json::to_value(&*snapshot.read().expect("snapshot poisoned"))
             .map_err(|error| error.to_string()),
+        "task.title" => parse_params::<crate::task_title::TitleRequest>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            state.detector.refresh_targets().map_err(|error| error.to_string())?;
+            let mut current = state.snapshot.clone();
+            current.agents = state.detector.machine_snapshots();
+            let result = crate::task_title::apply(paths, &current, &params);
+            // Publish the actual layout even if a later naming/verification step
+            // failed. No consumer should retain a pre-move target.
+            let refreshed = state.detector.refresh_targets().map_err(|error| error.to_string());
+            if let Ok(result) = &result {
+                if result.get("status").and_then(Value::as_str) == Some("renamed") {
+                    let name = result.get("title").and_then(Value::as_str)
+                    .ok_or("name update did not return its verified title")?.to_owned();
+                    state.detector.set_task_name(&params.instance_id, name)
+                    .ok_or("named agent disappeared")?;
+                }
+            }
+            let agents = state.detector.machine_snapshots();
+            let sessions = state.detector.sessions();
+            if state.snapshot.agents != agents || state.snapshot.sessions != sessions
+                || (result.is_ok() && (params.title.is_some() || params.tmux_session.is_some())) {
+                state.snapshot.agents = agents;
+                state.snapshot.sessions = sessions;
+                state.snapshot.generation = state.snapshot.generation.saturating_add(1);
+                state.snapshot.observed_at_unix_ms = now_unix_ms();
+                let saved = save_checkpoint(paths, &server.key, &state);
+                publish_status_fragments(&state.snapshot);
+                *snapshot.write().expect("snapshot poisoned") = state.snapshot.clone();
+                saved.map_err(|error| format!("task name updated but could not save recovery state: {error}"))?;
+            }
+            refreshed?;
+            result
+        }),
         "client.register" => parse_params::<ClientRegisterParams>(request.params).and_then(|params| {
             uuid::Uuid::parse_str(&params.device_id).map_err(|_| "invalid device id")?;
             if let Some(id) = &params.terminal_id { uuid::Uuid::parse_str(id).map_err(|_| "invalid terminal id")?; }

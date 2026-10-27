@@ -22,11 +22,15 @@ pub(crate) fn accepts_terminal_input(agent: &AgentProcess) -> bool {
         true,
         ProcessRefreshKind::nothing()
             .without_tasks()
+            .with_exe(UpdateKind::Always)
             .with_cmd(UpdateKind::Always),
     );
-    system
-        .process(pid)
-        .is_some_and(|process| interactive_command(agent.kind, process.cmd()))
+    system.process(pid).is_some_and(|process| {
+        process.start_time() == agent.fingerprint.started_at_ticks
+            && process.exe().unwrap_or_else(|| Path::new(process.name()))
+                == Path::new(&agent.fingerprint.executable)
+            && interactive_command(agent.kind, process.cmd())
+    })
 }
 
 fn interactive_command(kind: AgentKind, args: &[std::ffi::OsString]) -> bool {
