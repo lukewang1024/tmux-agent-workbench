@@ -246,7 +246,11 @@ enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
-    Ensure,
+    Ensure {
+        /// Reconcile every running Workbench server in this runtime directory.
+        #[arg(long)]
+        all: bool,
+    },
     Status,
     Stop,
     #[command(hide = true)]
@@ -1517,8 +1521,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             daemon::serve(&paths, &server)?;
         }
         Command::Daemon {
-            command: DaemonCommand::Ensure,
-        } => ensure_daemon(&paths)?,
+            command: DaemonCommand::Ensure { all },
+        } => {
+            if all {
+                ensure_all_daemons(&paths)?;
+            } else {
+                ensure_daemon(&paths)?;
+            }
+        }
         Command::Daemon {
             command: DaemonCommand::Status,
         } => {
@@ -2152,9 +2162,59 @@ fn ensure_daemon_with_announcement(
     paths: &Paths,
     announce: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let server = ServerIdentity::discover()?;
+    ensure_server_runtime(paths, &server, announce)
+}
+
+fn ensure_all_daemons(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
+    let mut servers = std::collections::BTreeMap::new();
+    if let Ok(server) = ServerIdentity::discover()
+        && server.socket_path.exists()
+    {
+        servers.insert(server.key.clone(), server);
+    }
+    // --all deliberately ignores the caller's current server selector. The
+    // replaced core is shared by every server registered in this runtime.
+    for entry in fs::read_dir(&paths.runtime_dir)? {
+        let socket = entry?.path();
+        let Some(name) = socket.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("daemon-") || !name.ends_with(".sock") {
+            continue;
+        }
+        let Ok(response) = exchange(
+            &socket,
+            &Request::new("daemon.status", serde_json::Value::Null),
+            Duration::from_millis(500),
+        ) else {
+            continue;
+        };
+        if let Some(path) = response
+            .result
+            .as_ref()
+            .and_then(|value| value.get("server"))
+            .and_then(|value| value.as_str())
+            && let Ok(server) = ServerIdentity::from_socket(PathBuf::from(path))
+            && socket == paths.socket_for_server(&server.key)
+            && server.socket_path.exists()
+        {
+            servers.insert(server.key.clone(), server);
+        }
+    }
+    for server in servers.values() {
+        ensure_server_runtime(paths, server, true)?;
+    }
+    Ok(())
+}
+
+fn ensure_server_runtime(
+    paths: &Paths,
+    server: &ServerIdentity,
+    announce: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::process::CommandExt;
 
-    let server = ServerIdentity::discover()?;
     let socket = paths.socket_for_server(&server.key);
     if let Ok(response) = exchange(
         &socket,
@@ -2183,6 +2243,7 @@ fn ensure_daemon_with_announcement(
             if announce {
                 println!("daemon already running (pid {pid})");
             }
+            tmux_agent_workbench::layout::handoff_sidebars(paths, server)?;
             return Ok(());
         }
         let _ = exchange(
@@ -2214,6 +2275,7 @@ fn ensure_daemon_with_announcement(
     let mut command = ProcessCommand::new(executable);
     command
         .args(["daemon", "run"])
+        .env("TMUX_AGENT_WORKBENCH_TMUX_SOCKET", &server.socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
@@ -2239,6 +2301,7 @@ fn ensure_daemon_with_announcement(
             if announce {
                 println!("daemon running (pid {})", value["pid"]);
             }
+            tmux_agent_workbench::layout::handoff_sidebars(paths, server)?;
             return Ok(());
         }
         if Instant::now() >= deadline {

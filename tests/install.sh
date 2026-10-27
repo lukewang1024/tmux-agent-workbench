@@ -4,12 +4,14 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 sh "$repo/tests/core-selection.sh"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/workbench-install-test.XXXXXX")
+installer_runtime_root=$(mktemp -d /tmp/wb-install-run.XXXXXX)
 installer_cargo_home=${CARGO_HOME:-$HOME/.cargo}
 installer_rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
 
 cleanup()
 {
   rm -rf "$test_root"
+  rm -rf "$installer_runtime_root"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -17,6 +19,11 @@ export HOME=$test_root/home
 export CARGO_HOME=$installer_cargo_home
 export RUSTUP_HOME=$installer_rustup_home
 export XDG_DATA_HOME=$test_root/data
+export XDG_CONFIG_HOME=$test_root/config
+export XDG_STATE_HOME=$test_root/state
+export XDG_CACHE_HOME=$test_root/cache
+export XDG_RUNTIME_DIR=$installer_runtime_root
+unset TMUX TMUX_PANE TMUX_AGENT_WORKBENCH_TMUX_SOCKET TMUX_AGENT_WORKBENCH_BIN
 export TMUX_AGENT_WORKBENCH_INSTALL_SOURCE=1
 mkdir -p "$HOME" "$test_root/bin"
 
@@ -39,5 +46,8 @@ fi
 # A second run must be idempotent and must not create backup files.
 "$repo/install" "$test_root/bin" --no-git >/dev/null
 test ! -e "$test_root/bin/mux-agent~"
+for installer_socket in "$installer_runtime_root"/tmux-agent-workbench/daemon-*.sock; do
+  test ! -e "$installer_socket"
+done
 
 printf '%s\n' 'installer integration: ok'
