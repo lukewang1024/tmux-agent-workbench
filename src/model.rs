@@ -165,6 +165,9 @@ pub struct AgentSnapshot {
     pub visible: bool,
     pub manifest_version: u32,
     pub rule_id: Option<String>,
+    // Legacy wire name for the canonical foreground thread. A clear redraw
+    // may supply a UUID prefix before a hook completes it; state_source and
+    // hook_health still describe whether lifecycle authority came from hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -166,7 +166,7 @@ impl Detector {
     pub fn checkpoint_metadata(
         &self,
         instance_id: &str,
-    ) -> Option<(String, u64, u64, Option<String>)> {
+    ) -> Option<crate::state_machine::RuntimeMetadata> {
         self.machine.checkpoint_metadata(instance_id)
     }
 
@@ -648,13 +648,17 @@ impl Detector {
             hook_session_id: metadata.and_then(|item| item.session_id.clone()),
             observed_at_ms: now_ms,
         });
-        if kind == AgentKind::Codex {
-            self.machine.observe_codex_identity(
-                &snapshot.instance_id,
-                &pane.title,
-                resume_session_id.as_deref(),
-            );
-        }
+        let snapshot = if kind == AgentKind::Codex {
+            self.machine
+                .observe_codex_identity(
+                    &snapshot.instance_id,
+                    &pane.title,
+                    resume_session_id.as_deref(),
+                )
+                .unwrap_or(snapshot)
+        } else {
+            snapshot
+        };
         if let Some(previous) = self
             .pane_instances
             .insert(pane.target.pane_id.clone(), snapshot.instance_id.clone())

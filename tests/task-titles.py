@@ -366,7 +366,10 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 fresh_pending = dict(pending, session_id=str(uuid.uuid4()))
                 thread_title(fresh_pending)
                 wait_name(fresh_pending, 'zsh')
-                assert wait_agent(pending['pane'])['hook_session_id'] == pending['session_id']
+                tracked = wait_agent(pending['pane'])
+                assert fresh_pending['session_id'].startswith(tracked['hook_session_id']), tracked
+                assert not tracked.get('thread_name') and not tracked.get('task_progress'), tracked
+                assert 'Previous pending' not in tracked['label'], tracked
                 pending_state = json.loads(tmux('show-option', '-wqv', '-t', pending['pane'], '@workbench_task_title'))
                 assert fresh_pending['session_id'].startswith(pending_state['owner']['session'])
                 wait_hook_context(fresh_pending, 'SessionStart', source='clear')

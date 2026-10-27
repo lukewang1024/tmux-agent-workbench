@@ -624,14 +624,17 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
         .iter()
         .filter_map(|agent| {
             let process = agent.process.as_ref()?;
-            let (runtime_id, attention_seq, seen_seq, hook_session_id) = state
+            let runtime = state
                 .detector
                 .checkpoint_metadata(&agent.instance_id)
-                .unwrap_or_else(|| (agent.instance_id.clone(), 0, 0, None));
+                .unwrap_or_else(|| crate::state_machine::RuntimeMetadata {
+                    runtime_id: agent.instance_id.clone(),
+                    ..Default::default()
+                });
             Some(crate::checkpoint::RuntimeCheckpoint {
                 version: 1,
                 server_incarnation: state.server_incarnation.clone(),
-                runtime_id,
+                runtime_id: runtime.runtime_id,
                 process_fingerprint: format!(
                     "{}:{}:{}",
                     process.pid, process.started_at_ticks, process.executable
@@ -640,9 +643,11 @@ fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
                 state_source: Some(agent.state_source),
                 last_hook_event_at_ms: state.detector.hook_replay_guard(&agent.instance_id).0,
                 hook_event_ids: state.detector.hook_replay_guard(&agent.instance_id).1,
-                attention_seq,
-                seen_seq,
-                hook_session_id,
+                attention_seq: runtime.attention_seq,
+                seen_seq: runtime.seen_seq,
+                hook_session_id: runtime.hook_session_id,
+                visible_session_id: runtime.visible_session_id,
+                previous_session_id: runtime.previous_session_id,
                 thread_name: agent.thread_name.clone(),
                 delivered_event_ids: delivered_event_ids.clone(),
                 pending: pending.clone(),

@@ -903,66 +903,41 @@ pub(crate) struct TitleReaper {
     next_scan: Instant,
 }
 
-fn sync_visible_session(
+/// Project the detector's canonical session into tmux. Never infer a second
+/// foreground session here: sidebar, notifications and checkpoints consume the
+/// very same AgentSnapshot as window naming.
+fn sync_session(
     paths: &Paths,
     snapshot: &Snapshot,
     agent: &AgentSnapshot,
     encoded: &str,
     pane_title: &str,
-) -> bool {
+) {
     if agent.exited || agent.kind != AgentKind::Codex || agent.relay_focus.is_some() {
-        return false;
+        return;
     }
-    let (Some(visible), Ok(state)) = (
-        crate::state_machine::codex_title_identity(pane_title),
-        serde_json::from_str::<TitleState>(encoded),
-    ) else {
-        return false;
+    let Ok(state) = serde_json::from_str::<TitleState>(encoded) else {
+        return;
     };
     // An OSC title inherited by a replacement process is insufficient. Only
     // the already-bound CLI can switch its own window to another thread.
     if state.owner.pane != agent.target.pane_id
         || Some(&state.owner.process) != agent.process.as_ref()
     {
-        return false;
+        return;
     }
-    let remembered = state
-        .visible_session
-        .as_deref()
-        .or(state.owner.session.as_deref());
-    let changed = remembered.is_none_or(|id| !id.starts_with(visible) && !visible.starts_with(id));
-    let hook_matches = agent
-        .hook_session_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with(visible));
-    if changed {
-        let mut foreground = agent.clone();
-        foreground.hook_session_id = agent
+    let visible = crate::state_machine::codex_title_identity(pane_title).filter(|visible| {
+        agent
             .hook_session_id
-            .as_ref()
-            .filter(|id| id.starts_with(visible))
-            .or_else(|| {
-                state
-                    .owner
-                    .session
-                    .as_ref()
-                    .filter(|id| id.starts_with(visible))
-            })
-            .cloned()
-            .or_else(|| Some(visible.into()));
-        if !hook_matches {
-            foreground.thread_name = foreground
-                .hook_session_id
-                .as_deref()
-                .and_then(crate::hooks::codex_thread_name);
-        }
-        let _ = reset_for_session_change(paths, snapshot, &foreground, Some(visible));
-        let _ = sync_thread_name(paths, snapshot, &foreground, false);
-        return true;
+            .as_deref()
+            .is_some_and(|id| id.starts_with(visible))
+    });
+    if (visible.is_some() || agent.reason_category.as_deref() == Some("clear"))
+        && (state.owner.session != agent.hook_session_id
+            || visible.is_some_and(|id| state.visible_session.as_deref() != Some(id)))
+    {
+        let _ = reset_for_session_change(paths, snapshot, agent, visible);
     }
-    // A clear can redraw before its first prompt emits SessionStart. Keep
-    // stale hook labels from restoring the previous thread's title.
-    !hook_matches
 }
 
 impl Default for TitleReaper {
@@ -999,14 +974,11 @@ impl TitleReaper {
             })
             .collect();
         for agent in &snapshot.agents {
-            if panes
+            if let Some(fields) = panes
                 .iter()
                 .find(|fields| fields[2] == agent.target.pane_id)
-                .is_some_and(|fields| {
-                    sync_visible_session(paths, snapshot, agent, fields[1], fields[3])
-                })
             {
-                continue;
+                sync_session(paths, snapshot, agent, fields[1], fields[3]);
             }
             let _ = sync_thread_name(paths, snapshot, agent, false);
         }

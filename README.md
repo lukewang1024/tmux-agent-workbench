@@ -812,8 +812,13 @@ change. Codex task progress is read from its configured terminal-title item;
 without an explicit progress value the sidebar omits it.
 
 Clearing a Codex session restores its owned window's previous name and automatic
-naming options, and gives the new task a fresh naming budget. Manual window
-names and titles owned by another pane remain protected.
+naming options, clears the previous task's agent name, progress and attention,
+and gives the new task a fresh naming budget. This also works when Codex redraws
+the new thread before its first lifecycle hook arrives. Sidebar cards and saved
+checkpoints use the same session transition, including after daemon recovery.
+Manual window names and titles owned by another pane remain protected. See
+[shared session state](docs/session-state.md) for the ownership and regression
+contract.
 
 The plugin defaults `automatic-rename` to `off`. Once a task is clear, the agent
 assigns a short semantic name through Workbench:
