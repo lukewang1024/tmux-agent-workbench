@@ -131,17 +131,43 @@ impl StateMachine {
         checkpoint: &crate::checkpoint::RuntimeCheckpoint,
         restored_at_ms: u64,
     ) -> bool {
-        let Some(tracked) = self.agents.values_mut().find(|tracked| {
-            tracked.snapshot.process.as_ref().is_some_and(|process| {
-                let current = format!(
-                    "{}:{}:{}",
-                    process.pid, process.started_at_ticks, process.executable
-                );
-                current == checkpoint.process_fingerprint
-                    || stable_process_fingerprint(&current)
-                        == stable_process_fingerprint(&checkpoint.process_fingerprint)
-            })
-        }) else {
+        let exact = self.agents.iter().find_map(|(instance, tracked)| {
+            tracked
+                .snapshot
+                .process
+                .as_ref()
+                .is_some_and(|process| {
+                    let current = format!(
+                        "{}:{}:{}",
+                        process.pid, process.started_at_ticks, process.executable
+                    );
+                    current == checkpoint.process_fingerprint
+                })
+                .then(|| instance.clone())
+        });
+        // Process start times can have one-second precision. Never let a
+        // namespace-compatible fallback win over another agent's exact PID,
+        // and never guess between agents launched in the same second.
+        let instance = exact.or_else(|| {
+            let mut candidates = self.agents.iter().filter_map(|(instance, tracked)| {
+                tracked
+                    .snapshot
+                    .process
+                    .as_ref()
+                    .is_some_and(|process| {
+                        let current = format!(
+                            "{}:{}:{}",
+                            process.pid, process.started_at_ticks, process.executable
+                        );
+                        stable_process_fingerprint(&current)
+                            == stable_process_fingerprint(&checkpoint.process_fingerprint)
+                    })
+                    .then_some(instance)
+            });
+            let first = candidates.next()?;
+            candidates.next().is_none().then(|| first.clone())
+        });
+        let Some(tracked) = instance.and_then(|instance| self.agents.get_mut(&instance)) else {
             return false;
         };
         let previous = match checkpoint.previous_state.as_str() {
@@ -1297,6 +1323,56 @@ mod tests {
             previous_state: "idle".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn checkpoints_keep_simultaneous_agents_separate() {
+        let mut machine = StateMachine::default();
+        let first = machine.observe_estimate(observation(BaseState::Idle, 0));
+        let mut second = observation(BaseState::Idle, 0);
+        second.process.pid += 1;
+        second.target.pane_id = "%2".into();
+        let second = machine.observe_estimate(second);
+        for (agent, name) in [(&first, "first task"), (&second, "second task")] {
+            let mut checkpoint = checkpoint_for(agent);
+            checkpoint.hook_session_id = Some(name.into());
+            checkpoint.thread_name = Some(name.into());
+            checkpoint.state_source = Some(StateSource::Hook);
+            assert!(machine.restore_checkpoint(&checkpoint, 100));
+        }
+        for (agent, name) in [(&first, "first task"), (&second, "second task")] {
+            let restored = machine
+                .snapshots()
+                .into_iter()
+                .find(|item| item.instance_id == agent.instance_id)
+                .unwrap();
+            assert_eq!(restored.hook_session_id.as_deref(), Some(name));
+            assert_eq!(restored.thread_name.as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn checkpoint_pid_fallback_requires_one_candidate() {
+        let mut machine = StateMachine::default();
+        let first = machine.observe_estimate(observation(BaseState::Idle, 0));
+        let mut second = observation(BaseState::Idle, 0);
+        second.process.pid += 1;
+        second.target.pane_id = "%2".into();
+        machine.observe_estimate(second);
+        let mut checkpoint = checkpoint_for(&first);
+        checkpoint.process_fingerprint = format!(
+            "999:{}:{}",
+            first.process.as_ref().unwrap().started_at_ticks,
+            first.process.as_ref().unwrap().executable
+        );
+        checkpoint.hook_session_id = Some("other task".into());
+        assert!(!machine.restore_checkpoint(&checkpoint, 100));
+        assert!(
+            machine
+                .snapshots()
+                .iter()
+                .all(|agent| agent.hook_session_id.is_none())
+        );
     }
 
     #[test]

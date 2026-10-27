@@ -15,6 +15,7 @@ import sys
 import tempfile
 import termios
 import time
+import uuid
 
 from daemon_fixture import running_daemon
 
@@ -85,7 +86,8 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
 
     def agent_identity(server):
         return sorted((a['process']['pid'], a['process']['started_at_ticks'],
-                       a['process']['executable'], a['target']['pane_id'])
+                       a['process']['executable'], a['target']['pane_id'],
+                       a.get('hook_session_id'), a.get('thread_name'))
                       for a in snapshot(server)['agents'] if a.get('process') and not a['exited'])
 
     def sidebar_ready(server):
@@ -129,6 +131,18 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
         for index, server in enumerate(servers):
             wait_for(lambda: len(agent_identity(server)) == (2 if index == 0 else 1),
                      'agents were not detected before upgrade')
+            for agent in snapshot(server)['agents']:
+                if agent['exited']: continue
+                session = str(uuid.uuid4())
+                subprocess.run([str(core), 'hook', 'ingest', 'codex', 'SessionStart'],
+                               env=server['env'], text=True, capture_output=True, check=True,
+                               input=json.dumps({'session_id': session, 'agent_pid': agent['process']['pid'],
+                                                 'thread_name': agent['target']['window_name']}))
+                tmux(server, 'select-pane', '-t', agent['target']['pane_id'], '-T',
+                     'codex | Ready | ' + session[:28] + '...')
+            wait_for(lambda: all(a.get('hook_session_id') and a.get('thread_name')
+                                for a in snapshot(server)['agents'] if not a['exited']),
+                     'task identities were not published before upgrade')
         # Also migrate pre-handoff versions that never wrote a runtime marker.
         tmux(primary, 'set-option', '-pu', '-t', primary['sidebar'], '@workbench_sidebar_runtime')
         before = [{"panes": panes(s), "layout": layout(s), "focus": focus(s),
