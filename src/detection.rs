@@ -139,6 +139,18 @@ impl Detector {
         Some(agent)
     }
 
+    pub fn refresh_targets(&mut self) -> Result<(), TmuxError> {
+        let panes = self.tmux.panes()?;
+        for pane in &panes {
+            self.machine.retarget(&pane.target);
+        }
+        self.panes = panes
+            .into_iter()
+            .map(|pane| (pane.target.pane_id.clone(), pane))
+            .collect();
+        Ok(())
+    }
+
     pub fn wake(&mut self) {
         self.next_process_scan = Instant::now();
         for due in self.next_capture.values_mut() {
@@ -417,12 +429,15 @@ impl Detector {
         manifests: &ManifestSet,
         now_ms: u64,
     ) -> Result<(), TmuxError> {
-        let panes = self.tmux.panes()?;
+        let mut panes = self.tmux.panes()?;
         let roots: Vec<_> = panes.iter().map(|pane| pane.root_pid).collect();
         let agents = self
             .processes
             .agents_for_roots(&roots, &manifests.aliases());
         let interactive = self.processes.interactive_foreground_roots(&agents);
+        if crate::task_placement::isolate(self.tmux.server(), &panes, &agents, &interactive) {
+            panes = self.tmux.panes()?;
+        }
         // Presentation must not block detection if a pane disappears mid-update.
         let _ = self.tmux.publish_agent_actions(&panes, &interactive);
         for pane in &panes {

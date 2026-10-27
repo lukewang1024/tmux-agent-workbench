@@ -1,4 +1,4 @@
-//! Task titles are assigned once to a verified agent window. Lifecycle hooks
+//! Task titles and session groups belong to a verified agent. Lifecycle hooks
 //! request a semantic title; tmux owns the durable owner and repair budget.
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -56,6 +56,8 @@ struct TitleState {
     title: Option<String>,
     #[serde(default)]
     name_from_command: bool,
+    #[serde(default)]
+    grouped: bool,
     task_seen: bool,
     repair_used: bool,
     #[serde(default)]
@@ -78,7 +80,7 @@ struct Window {
     task_name: Option<String>,
 }
 
-fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, String> {
+pub(crate) fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, String> {
     let output = Command::new("tmux")
         .arg("-u")
         .args(server.tmux_args())
@@ -380,6 +382,7 @@ fn owner_state(
         initial_name: window.name.clone(),
         title: None,
         name_from_command: false,
+        grouped: false,
         task_seen: false,
         repair_used: false,
         original_options: None,
@@ -568,11 +571,7 @@ fn reset_for_session_change(
     let mut previous: TitleState =
         serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
     let owner = Owner::of(agent)?;
-    if previous.owner.pane != owner.pane
-        || previous.owner.process != owner.process
-        || current.protected
-        || current.name != previous.title.as_deref().unwrap_or(&previous.initial_name)
-    {
+    if previous.owner.pane != owner.pane || previous.owner.process != owner.process {
         return Ok(());
     }
     // A truncated OSC UUID can identify a cleared thread before its first
@@ -591,11 +590,18 @@ fn reset_for_session_change(
         }
         return save(&server, &current, &previous);
     }
+    let preserve_name = current.protected
+        || current.name != previous.title.as_deref().unwrap_or(&previous.initial_name);
     let fresh = TitleState {
         owner,
-        initial_name: previous.initial_name.clone(),
+        initial_name: if preserve_name {
+            current.name.clone()
+        } else {
+            previous.initial_name.clone()
+        },
         title: None,
         name_from_command: false,
+        grouped: false,
         task_seen: false,
         repair_used: false,
         original_options: None,
@@ -606,6 +612,11 @@ fn reset_for_session_change(
             .or(previous.visible_session.clone())
             .or(previous.owner.session.clone()),
     };
+    if preserve_name {
+        // A manual/managed title can stay fixed while the task and its session
+        // direction change. Rebind grouping without restoring that title.
+        return save(&server, &current, &fresh);
+    }
     let finish = format!(
         "set-option -w -t {} {} {}",
         current.id,
@@ -615,15 +626,22 @@ fn reset_for_session_change(
     restore_title(&server, &current, &previous, &encoded, &finish)
 }
 
-fn instruction(agent: &AgentSnapshot) -> String {
+fn instruction(snapshot: &Snapshot, agent: &AgentSnapshot, needs_name: bool) -> String {
     let session = agent.hook_session_id.as_deref().unwrap_or_default();
     let codex = if agent.kind == AgentKind::Codex {
         " For Codex exec_command, use sandbox_permissions=\"require_escalated\" with a naming-specific justification when the tool schema and approval policy allow it."
     } else {
         ""
     };
+    let sessions: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .map(|session| &session.session_name)
+        .collect();
+    let title = if needs_name { " '<task name>'" } else { "" };
     format!(
-        "The task's tmux window still has a default name. Choose a short meaningful task name (2–4 words or 6–12 Chinese characters) and run `tmux-agent-workbench title set --pane {} --session-id {} '<task name>'` before continuing. Workbench verifies the owner and preserves existing task names. This command needs local Unix-socket access. Choose execution permissions BEFORE the first invocation using your session's current sandbox and approval policy. When that policy blocks local sockets (including the default restricted workspace-write/read-only policy) and approvals are allowed, request approval for this exact command on the FIRST invocation.{codex} Do not first run a restricted naming attempt as a permission probe. If these sockets are already permitted, run normally. If socket access is blocked and approval is forbidden or unavailable, skip naming and continue the task. Keep this pane and its sandbox/network policy.",
+        "Once the task is clear, group it by direction and give its window a short concrete task name (2–4 words or 6–12 Chinese characters). A tmux session groups related tasks; a window represents this one task. Existing session directions: {}. Reuse a suitable existing session, or choose a concise new direction if none fits. Do not derive the direction just from the launching session or working directory. Run `tmux-agent-workbench title set{title} --session '<direction>' --pane {} --session-id {}`. Omitting the task name preserves an existing name. Workbench creates/reuses the session and moves only this task's independent window; it never renames the launching session or restarts the agent. This command needs local Unix-socket access. Choose execution permissions BEFORE the first invocation using your session's current sandbox and approval policy. When that policy blocks local sockets (including the default restricted workspace-write/read-only policy) and approvals are allowed, request approval for this exact command on the FIRST invocation.{codex} Do not first run a restricted naming attempt as a permission probe. If these sockets are already permitted, run normally. If socket access is blocked and approval is forbidden or unavailable, skip naming and continue the task. Keep this pane and its sandbox/network policy.",
+        serde_json::to_string(&sessions).unwrap_or_default(),
         quote(&agent.target.pane_id),
         quote(session)
     )
@@ -675,7 +693,6 @@ pub fn hook_output(
         }
         if agent.thread_name.is_some() {
             sync_thread_name(&bound_paths, &snapshot, &agent, clear)?;
-            return Ok(json!({}));
         }
         with_window(
             &bound_paths,
@@ -683,7 +700,17 @@ pub fn hook_output(
             &agent,
             Duration::ZERO,
             |server, current, mut state, preserved| {
-                if preserved || !state.owner.same_task(&Owner::of(&agent)?) {
+                if !state.owner.same_task(&Owner::of(&agent)?) {
+                    return Ok(json!({}));
+                }
+                let needs_name = !preserved && state.title.is_none();
+                if (!needs_name && (state.grouped || event == "SessionStart"))
+                    || !tmux(
+                        server,
+                        &["display-message", "-p", "-t", pane, "#{@agent_team}"],
+                    )?
+                    .is_empty()
+                {
                     return Ok(json!({}));
                 }
                 match event {
@@ -691,7 +718,7 @@ pub fn hook_output(
                         state.task_seen |= event == "UserPromptSubmit";
                         save(server, &current, &state)?;
                         Ok(
-                            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": instruction(&agent)}}),
+                            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": instruction(&snapshot, &agent, needs_name)}}),
                         )
                     }
                     "Stop"
@@ -705,7 +732,7 @@ pub fn hook_output(
                         state.repair_used = true;
                         save(server, &current, &state)?;
                         Ok(
-                            json!({"decision": "block", "reason": format!("{} Then finish the response. This naming repair is requested only once for this task.", instruction(&agent))}),
+                            json!({"decision": "block", "reason": format!("{} Then finish the response. This naming repair is requested only once for this task.", instruction(&snapshot, &agent, needs_name))}),
                         )
                     }
                     _ => Ok(json!({})),
@@ -746,17 +773,9 @@ pub fn for_caller(
     pane: Option<&str>,
     session: Option<&str>,
     title: Option<&str>,
+    tmux_session: Option<&str>,
 ) -> Result<Value, String> {
-    for_caller_action(paths, pane, session, title, false)
-}
-
-pub fn rename_for_caller(
-    paths: &Paths,
-    pane: Option<&str>,
-    session: Option<&str>,
-    title: &str,
-) -> Result<Value, String> {
-    for_caller_action(paths, pane, session, Some(title), true)
+    for_caller_action(paths, pane, session, title, tmux_session)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -768,7 +787,7 @@ pub(crate) struct TitleRequest {
     pub session_id: Option<String>,
     pub title: Option<String>,
     #[serde(default)]
-    pub rename: bool,
+    pub tmux_session: Option<String>,
 }
 
 fn for_caller_action(
@@ -776,10 +795,13 @@ fn for_caller_action(
     pane: Option<&str>,
     session: Option<&str>,
     title: Option<&str>,
-    rename: bool,
+    tmux_session: Option<&str>,
 ) -> Result<Value, String> {
     if let Some(title) = title {
         validate_title(title)?;
+    }
+    if let Some(session) = tmux_session {
+        crate::task_placement::validate_session(session)?;
     }
     if pane.is_some_and(|pane| {
         !pane
@@ -887,7 +909,7 @@ fn for_caller_action(
                 pane_id: agent.target.pane_id.clone(),
                 session_id: agent.hook_session_id.clone(),
                 title: title.map(str::to_owned),
-                rename,
+                tmux_session: tmux_session.map(str::to_owned),
             })
             .map_err(|error| error.to_string())?,
         ),
@@ -914,10 +936,54 @@ pub(crate) fn apply(
                 && agent.process.as_ref() == Some(&request.process)
         })
         .ok_or("agent process changed before naming; retry with its current identity")?;
-    let agent = foreground_agent(snapshot, agent, request.session_id.as_deref(), false)?;
+    let mut agent = foreground_agent(snapshot, agent, request.session_id.as_deref(), false)?;
+    // Validate every label before a layout mutation.
+    if let Some(title) = request.title.as_deref() {
+        validate_title(title)?;
+    }
+    let mut snapshot = snapshot.clone();
+    if let Some(session) = request.tmux_session.as_deref() {
+        if !crate::process::accepts_terminal_input(&crate::process::AgentProcess {
+            kind: agent.kind,
+            fingerprint: request.process.clone(),
+            resume_session_id: None,
+        }) {
+            return Err(
+                "agent process changed before grouping; retry with its current identity".into(),
+            );
+        }
+        let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+            .map_err(|error| error.to_string())?;
+        // Detection normally separates agents before publishing them. Do not
+        // move a second agent along if a pane appeared between scans.
+        if snapshot.agents.iter().any(|other| {
+            !other.exited
+                && other.relay_focus.is_none()
+                && other.target.window_id == agent.target.window_id
+                && other.instance_id != agent.instance_id
+                && other.process.as_ref().is_some_and(|process| {
+                    crate::process::accepts_terminal_input(&crate::process::AgentProcess {
+                        kind: other.kind,
+                        fingerprint: process.clone(),
+                        resume_session_id: None,
+                    })
+                })
+        }) {
+            return Err(
+                "task window still contains another agent; retry after automatic pane separation"
+                    .into(),
+            );
+        }
+        agent.target = crate::task_placement::route(&server, &agent.target.pane_id, session)?;
+        for item in &mut snapshot.agents {
+            if item.instance_id == agent.instance_id {
+                item.target = agent.target.clone();
+            }
+        }
+    }
     with_window(
         paths,
-        snapshot,
+        &snapshot,
         &agent,
         Duration::from_millis(500),
         |server, current, mut state, preserved| {
@@ -925,7 +991,7 @@ pub(crate) fn apply(
             let owned_title = !current.protected
                 && owner
                 && state.title.as_deref() == Some(current.name.as_str());
-            let preserved = preserved && !(request.rename && owned_title);
+            let preserved = preserved && !owned_title;
             let status = if preserved {
                 "preserved"
             } else if !owner {
@@ -933,15 +999,22 @@ pub(crate) fn apply(
             } else {
                 "pending"
             };
+            if request.tmux_session.is_some() && owner {
+                state.grouped = true;
+                save(server, &current, &state)?;
+            }
             let Some(title) = request.title.as_deref() else {
                 return Ok(
-                    json!({"status":status,"window_id":current.id,"title":current.name,
-                "owner_pane":state.owner.pane,"repair_used":state.repair_used}),
+                    json!({"status":if request.tmux_session.is_some() { "grouped" } else { status },
+                        "window_id":current.id,"title":current.name,"target":agent.target,
+                        "owner_pane":state.owner.pane,"repair_used":state.repair_used,"grouped":state.grouped}),
                 );
             };
             let title = validate_title(title)?;
             if preserved || !owner {
-                return Ok(json!({"status":status,"window_id":current.id,"title":current.name}));
+                return Ok(
+                    json!({"status":status,"window_id":current.id,"title":current.name,"target":agent.target}),
+                );
             }
             state.title = Some(title.into());
             state.name_from_command = true;
@@ -991,7 +1064,10 @@ pub(crate) fn apply(
             {
                 return Err("title ownership verification failed".into());
             }
-            Ok(json!({"status":"renamed","window_id":actual.id,"title":actual.name}))
+            let target = crate::task_placement::target(server, &agent.target.pane_id)?;
+            Ok(
+                json!({"status":"renamed","window_id":actual.id,"title":actual.name,"target":target}),
+            )
         },
     )
 }

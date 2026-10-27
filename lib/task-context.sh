@@ -18,8 +18,40 @@ workbench_workspace_context() {
   if [ -z "${WORKBENCH_SESSION:-}" ] && [ -n "${WORKBENCH_FEATURE:-}" ]; then
     export WORKBENCH_SESSION=$WORKBENCH_FEATURE
   fi
-  wb_session=$(workbench_resolve_session) || return 1
-  wb_workspace=$(tmux show-option -qv -t "$wb_session" @workbench_workspace_root)
+  wb_caller=$(workbench_resolve_pane 2>/dev/null || true)
+  if wb_session=$(workbench_resolve_session 2>/dev/null); then
+    :
+  elif [ -n "$wb_caller" ] && [ -n "${WORKBENCH_TASK:-}" ] && \
+       [ "$(tmux show-option -wqv -t "$wb_caller" @workbench_task_name)" = "$WORKBENCH_TASK" ] && \
+       [ -n "$(tmux show-option -wqv -t "$wb_caller" @workbench_workspace_root)" ]; then
+    # A managed agent inherits its launch session. That session may disappear
+    # after its last task moves; durable caller/task metadata still identifies it.
+    wb_session=$(WORKBENCH_SESSION= TMUX_PANE=$wb_caller workbench_resolve_session) || return 1
+  else
+    workbench_resolve_session >/dev/null
+    return 1
+  fi
+  wb_workspace=
+  if [ -n "$wb_caller" ] && [ "$(tmux display-message -p -t "$wb_caller" '#{session_id}')" = "$wb_session" ] && \
+     { [ -z "${WORKBENCH_TASK:-}" ] || [ "$(tmux show-option -wqv -t "$wb_caller" @workbench_task_name)" = "$WORKBENCH_TASK" ]; }; then
+    wb_workspace=$(tmux show-option -wqv -t "$wb_caller" @workbench_workspace_root)
+  fi
+  if [ -z "$wb_workspace" ] && [ -n "${WORKBENCH_TASK:-}" ]; then
+    for wb_candidate in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
+      if [ "$(tmux show-option -wqv -t "$wb_candidate" @workbench_task_name)" = "$WORKBENCH_TASK" ]; then
+        wb_candidate_root=$(tmux show-option -wqv -t "$wb_candidate" @workbench_workspace_root)
+        [ -n "$wb_candidate_root" ] || continue
+        if [ -n "$wb_workspace" ] && [ "$wb_workspace" != "$wb_candidate_root" ]; then
+          echo 'workbench: task name is ambiguous in this session; run from its owning pane.' >&2
+          return 1
+        fi
+        wb_workspace=$wb_candidate_root
+      fi
+    done
+  fi
+  if [ -z "$wb_workspace" ]; then
+    wb_workspace=$(tmux show-option -qv -t "$wb_session" @workbench_workspace_root)
+  fi
   if [ -z "$wb_workspace" ]; then
     wb_workspace=$(tmux display-message -p -t "$wb_session" '#{session_path}')
     wb_pool=$(CDPATH='' cd "${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}" 2>/dev/null && pwd -P) || return 1
@@ -31,6 +63,12 @@ workbench_workspace_context() {
   fi
   wb_workspace=$(CDPATH='' cd "$wb_workspace" && pwd -P) || return 1
   wb_direction=$(basename "$wb_workspace")
+  # A display group may contain tasks from different workspaces. Only a
+  # workspace's original session may adopt its legacy unnamed drivers.
+  if [ "$(tmux show-option -qv -t "$wb_session" @workbench_workspace_root)" != "$wb_workspace" ] && \
+     [ -n "$(tmux show-option -wqv -t "${wb_caller:-$wb_session}" @workbench_task_root)" ]; then
+    return 0
+  fi
   # Existing drivers become the original task without moving or restarting.
   for wb_candidate in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
     if [ -z "$(tmux show-option -wqv -t "$wb_candidate" @workbench_task_root)" ] && \
@@ -44,7 +82,7 @@ workbench_workspace_context() {
 
 workbench_task_window() {
   wb_window=
-  for wb_candidate in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
+  for wb_candidate in $(tmux list-windows -a -F '#{window_id}' | sort -u); do
     if [ "$(tmux show-option -wqv -t "$wb_candidate" @workbench_task_root)" = "$wb_task_root" ]; then
       [ -z "$wb_window" ] || {
         echo "workbench: multiple windows own task $wb_task_root" >&2
@@ -53,6 +91,9 @@ workbench_task_window() {
       wb_window=$wb_candidate
     fi
   done
+  if [ -n "$wb_window" ]; then
+    wb_session=$(tmux display-message -p -t "$wb_window" '#{session_id}')
+  fi
 }
 
 workbench_task_context() {
@@ -77,7 +118,7 @@ workbench_task_context() {
     workbench_valid_name "$wb_task" || return 1
     wb_task_root=$wb_workspace/tasks/$wb_task
     if [ "$wb_task" = "$wb_direction" ] && [ ! -d "$wb_task_root" ]; then
-      for wb_candidate in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
+      for wb_candidate in $(tmux list-windows -a -F '#{window_id}' | sort -u); do
         if [ "$(tmux show-option -wqv -t "$wb_candidate" @workbench_task_root)" = "$wb_workspace" ]; then
           wb_task_root=$wb_workspace
           break

@@ -277,17 +277,14 @@ enum AgentCommand {
 
 #[derive(Debug, Subcommand)]
 enum TitleCommand {
-    /// Name an unnamed task in the sidebar and tmux statusbar together.
+    /// Set the task name and optionally group its window in a tmux session.
+    #[command(alias = "rename")]
     Set {
-        title: String,
+        #[arg(required_unless_present = "session")]
+        title: Option<String>,
+        /// Task direction: reuse this tmux session, or create it if missing.
         #[arg(long)]
-        pane: Option<String>,
-        #[arg(long)]
-        session_id: Option<String>,
-    },
-    /// Update a task already named by Workbench in both places.
-    Rename {
-        title: String,
+        session: Option<String>,
         #[arg(long)]
         pane: Option<String>,
         #[arg(long)]
@@ -1356,35 +1353,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", output);
         }
         Command::Title { command } => {
-            let rename = matches!(&command, TitleCommand::Rename { .. });
-            let (pane, session, title) = match &command {
+            let (pane, session_id, title, session) = match &command {
                 TitleCommand::Set {
                     title,
+                    session,
                     pane,
                     session_id,
-                }
-                | TitleCommand::Rename {
-                    title,
-                    pane,
-                    session_id,
-                } => (pane, session_id, Some(title.as_str())),
-                TitleCommand::Status { pane, session_id } => (pane, session_id, None),
+                } => (pane, session_id, title.as_deref(), session.as_deref()),
+                TitleCommand::Status { pane, session_id } => (pane, session_id, None, None),
             };
-            let result = if rename {
-                tmux_agent_workbench::task_title::rename_for_caller(
-                    &paths,
-                    pane.as_deref(),
-                    session.as_deref(),
-                    title.unwrap(),
-                )?
-            } else {
-                tmux_agent_workbench::task_title::for_caller(
-                    &paths,
-                    pane.as_deref(),
-                    session.as_deref(),
-                    title,
-                )?
-            };
+            let result = tmux_agent_workbench::task_title::for_caller(
+                &paths,
+                pane.as_deref(),
+                session_id.as_deref(),
+                title,
+                session,
+            )?;
             println!("{}", result);
         }
         Command::Config {

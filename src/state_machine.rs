@@ -970,6 +970,14 @@ impl StateMachine {
         Some(self.agents.get(instance)?.snapshot.clone())
     }
 
+    pub fn retarget(&mut self, target: &TmuxTarget) {
+        for tracked in self.agents.values_mut() {
+            if !tracked.snapshot.exited && tracked.snapshot.target.pane_id == target.pane_id {
+                tracked.snapshot.target = target.clone();
+            }
+        }
+    }
+
     pub fn next_attention(&self) -> Option<&AttentionEvent> {
         self.agents
             .values()

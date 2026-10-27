@@ -20,14 +20,20 @@ When available, Workbench synchronizes it automatically; do not invent a second
 name. Task IDs, directories, and repository ownership remain fixed when a thread
 is renamed. Without thread-name metadata, the fallback naming rules below apply.
 
-Prefer one task and one agent per window. Do not start independent agents in
-multiple panes of the same window unless the user explicitly requests it or an
-opted-in team protocol requires it. Sidebars and supporting task panes are fine.
-Do not rearrange existing panes or agents merely to enforce this preference.
+Each ordinary window holds one task and one interactive agent. Workbench's
+daemon automatically separates later independent agent panes into their own
+windows. Sidebars and supporting task panes stay with their task. Explicit
+agent-team panes retain their dedicated team layout.
 
 For an ordinary agent window, once the task is clear, assign a short, meaningful
-window name from the task (roughly 2–4 words or 6–12 Chinese characters) using
-`tmux-agent-workbench title set '<task-name>'`. Workbench resolves the calling
+window name from the task (roughly 2–4 words or 6–12 Chinese characters), and
+choose a session for its broader direction, using
+`tmux-agent-workbench title set '<task-name>' --session '<direction>'`.
+Reuse an appropriate existing session; Workbench creates it if missing and
+moves the task window there. The launching session and checkout do not define
+the task's direction. Session labels group tasks; window labels name individual
+tasks. `title set` also updates an existing Workbench name. Omit the task name to
+change only its session group. Workbench resolves the calling
 agent through process ancestry. When a tool sandbox hides ancestry, use the
 verified `--pane` and `--session-id` supplied by the lifecycle hook; never use
 the human's currently selected window. `title status` explains the owner,
@@ -52,9 +58,10 @@ For supported lifecycle hooks, an unnamed ordinary window gets a short naming
 reminder on session start and prompt submission. If it is still unnamed when
 the first task ends, Workbench requests one naming continuation. This repair
 budget survives resume, compaction, and daemon restarts. Missing identity or
-unavailable tmux must not prevent the actual task from proceeding. In a shared
-window, the first live interactive agent owns its title; other agents preserve
-it. Existing meaningful names and manual changes always take precedence.
+unavailable tmux must not prevent the actual task from proceeding. Independent
+agents are separated before window ownership is assigned. Hooks also request
+session grouping after the task is submitted, even when its name is already
+known. Existing meaningful names and manual changes always take precedence.
 When the naming owner's CLI actually exits, the daemon restores the previous
 window name and automatic-naming options, then clears its ownership marker.
 A finished response is not an exit. Manual edits are preserved, and a verified
@@ -93,7 +100,9 @@ it does not create a window, launch tools, or change focus. Never reuse another
 task's worktree because it belongs to the same Git repository. Give the agent
 access to its own task directory using that agent's normal scope mechanism.
 
-In ordinary, ad-hoc sessions, do not create workbench windows implicitly. If
+In ordinary, ad-hoc sessions, task naming/grouping and automatic separation of
+independent agents are handled by Workbench. Do not create extra workbench
+windows for repository inspection. If
 code changes require isolation, create a dedicated Git worktree without changing
 the user's tmux layout, or use an explicitly requested workspace/task workflow.
 

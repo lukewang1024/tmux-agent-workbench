@@ -43,6 +43,24 @@ done
 wb_assert 'process ancestry recovers correct session' test \
   "$(cat "$WB_TEST_TMPDIR/result")" = "$expected"
 
+# A running pane retains its old TMUX value after task grouping. Live ancestry
+# must win when an agent backend strips TMUX_PANE from its tool environment.
+probe=$(tmux new-window -d -t target -n moved-probe -P -F '#{window_id}' \
+  -e "WB_RESOLVER=$dir/../lib/resolve-session.sh" \
+  -e "WB_RESULT=$WB_TEST_TMPDIR/moved-result" \
+  -e "WB_GO=$WB_TEST_TMPDIR/moved-go" \
+  -e "PATH=$PATH" \
+  'exec /bin/sh -c '\''unset TMUX_PANE WORKBENCH_SESSION; while [ ! -f "$WB_GO" ]; do sleep 0.05; done; . "$WB_RESOLVER"; workbench_resolve_session > "$WB_RESULT"'\''')
+tmux move-window -s "$probe" -t unrelated:
+touch "$WB_TEST_TMPDIR/moved-go"
+attempt=0
+while [ ! -s "$WB_TEST_TMPDIR/moved-result" ] && [ "$attempt" -lt 30 ]; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+wb_assert 'moved pane ancestry wins over inherited TMUX session' test \
+  "$(cat "$WB_TEST_TMPDIR/moved-result")" = "$(tmux display-message -p -t unrelated '#{session_id}')"
+
 # Simulate a socket denial without touching the user's actual server.
 tmux() { echo 'Operation not permitted' >&2; return 1; }
 if workbench_resolve_session >"$WB_TEST_TMPDIR/error" 2>&1; then

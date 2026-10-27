@@ -30,6 +30,7 @@ cmp "$repo/agent-conventions/AGENTS.snippet.md" "$test_root/conventions.md"
 test -f "$HOME/.agents/skills/reorganise-agents/SKILL.md"
 "$test_root/bin/tmux-agent-workbench" reorganise --help >/dev/null
 "$test_root/bin/tmux-agent-workbench" reorganize --help >/dev/null
+"$test_root/bin/tmux-agent-workbench" title set --help | grep -- '--session <SESSION>' >/dev/null
 if "$test_root/bin/tmux-agent-workbench" conventions unexpected >/dev/null 2>&1; then
   exit 1
 fi

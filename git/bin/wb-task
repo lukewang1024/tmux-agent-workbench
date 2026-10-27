@@ -100,7 +100,7 @@ case $action in
     workbench_workspace_context
     task_root=$wb_workspace/tasks/$task
     if [ "$task" = "$wb_direction" ] && [ ! -d "$task_root" ]; then
-      for legacy_window in $(tmux list-windows -t "$wb_session" -F '#{window_id}'); do
+      for legacy_window in $(tmux list-windows -a -F '#{window_id}' | sort -u); do
         if [ "$(tmux show-option -wqv -t "$legacy_window" @workbench_task_root)" = "$wb_workspace" ]; then
           task_root=$wb_workspace
           break

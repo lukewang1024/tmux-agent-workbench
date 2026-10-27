@@ -152,6 +152,33 @@ class TaskWindows(unittest.TestCase):
         self.assertEqual(self.tmux('display-message', '-p', '-t', service_two, '#{pane_dead}'), '0')
         self.assertEqual(self.tmux('display-message', '-p', '-t', first, '#{pane_active}'), '1')
 
+    def test_grouped_tasks_keep_workspaces_and_cleanup_uses_task_identity(self):
+        self.new('first', 'app')
+        self.cli('task', 'new', 'second', 'app')
+        first, second = self.pane('first'), self.pane('second')
+        workspace = self.workspaces / 'direction'
+        self.tmux('new-session', '-d', '-s', 'display-group', '-n', 'human-shell')
+        self.tmux('set-option', '-w', '-t', first, '@workbench_workspace_root', str(workspace))
+        self.tmux('move-window', '-s', first, '-t', 'display-group:')
+        self.cli('task', 'new', 'first', 'app')
+        self.assertEqual(self.tmux('display-message', '-p', '-t', first, '#{session_name}'), 'display-group')
+        self.assertEqual(self.windows(), ['second'])
+        self.cli('add', 'api', task='first', pane=first)
+        service = self.cli('run', str(self.task_root('first') / 'app'), '--', 'sleep', '300',
+                           task='first', pane=first).stdout.strip()
+        self.assertEqual(self.tmux('display-message', '-p', '-t', service, '#{window_id}'),
+                         self.tmux('display-message', '-p', '-t', first, '#{window_id}'))
+        self.cli('task', 'done', 'first')
+        self.assertFalse(self.task_root('first').exists())
+        self.assertEqual(self.tmux('list-windows', '-t', 'display-group', '-F', '#{window_name}'), 'human-shell')
+        self.tmux('set-option', '-w', '-t', second, '@workbench_workspace_root', str(workspace))
+        self.tmux('move-window', '-s', second, '-t', 'display-group:')
+        # The launch session is now gone but its inherited selectors still work.
+        self.cli('add', 'api', task='second', pane=second)
+        self.cli('done', 'direction', session=None)
+        self.assertFalse(workspace.exists())
+        self.assertEqual(self.tmux('list-windows', '-t', 'display-group', '-F', '#{window_name}'), 'human-shell')
+
     def test_temporary_tool_closes_its_pane_without_creating_a_window(self):
         self.new('first', 'app')
         caller = self.pane('first')

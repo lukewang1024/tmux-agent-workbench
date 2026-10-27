@@ -10,6 +10,7 @@ python_runner="$repo/tests/python.sh"
 "$python_runner" -B -m unittest discover -s tests -p test_host_metrics.py
 "$python_runner" -B -m unittest discover -s tests -p test_reorganise.py
 "$python_runner" -B -m unittest discover -s tests -p test_task_windows.py
+sh test/test-resolve-session.sh
 "$python_runner" -B -m unittest discover -s test -p 'test_host_metrics*.py'
 "$python_runner" tests/status-prefix-mouse.py
 cargo fmt --check

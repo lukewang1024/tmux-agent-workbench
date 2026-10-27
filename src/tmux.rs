@@ -56,6 +56,10 @@ pub struct Tmux {
 }
 
 impl Tmux {
+    pub(crate) fn server(&self) -> &ServerIdentity {
+        &self.server
+    }
+
     pub fn new(server: ServerIdentity) -> Self {
         Self { server }
     }

@@ -1386,6 +1386,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS approval and copy mode suppress agent input')
 
         window = tmux('display-message', '-p', '-t', pane, '#{window_id}')
+        # This chooser intentionally exercises a shared team layout. Ordinary
+        # independent agent panes are now separated by the daemon.
+        tmux('set-option', '-p', '-t', pane, '@agent_team', 'menu-test')
         worker = tmux('split-window', '-d', '-P', '-F', '#{pane_id}', '-t', pane, str(shim / 'codex'))
         wait_for_agent_actions(worker, '1')
         shells = [tmux('split-window', '-d', '-P', '-F', '#{pane_id}', '-t', pane, '/bin/sh') for _ in range(2)]

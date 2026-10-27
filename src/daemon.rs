@@ -868,16 +868,27 @@ fn handle(
             .map_err(|error| error.to_string()),
         "task.title" => parse_params::<crate::task_title::TitleRequest>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
+            state.detector.refresh_targets().map_err(|error| error.to_string())?;
             let mut current = state.snapshot.clone();
             current.agents = state.detector.machine_snapshots();
-            let result = crate::task_title::apply(paths, &current, &params)?;
-            if result.get("status").and_then(Value::as_str) == Some("renamed") {
-                let name = result.get("title").and_then(Value::as_str)
+            let result = crate::task_title::apply(paths, &current, &params);
+            // Publish the actual layout even if a later naming/verification step
+            // failed. No consumer should retain a pre-move target.
+            let refreshed = state.detector.refresh_targets().map_err(|error| error.to_string());
+            if let Ok(result) = &result {
+                if result.get("status").and_then(Value::as_str) == Some("renamed") {
+                    let name = result.get("title").and_then(Value::as_str)
                     .ok_or("name update did not return its verified title")?.to_owned();
-                state.detector.set_task_name(&params.instance_id, name)
+                    state.detector.set_task_name(&params.instance_id, name)
                     .ok_or("named agent disappeared")?;
-                state.snapshot.agents = state.detector.machine_snapshots();
-                state.snapshot.sessions = state.detector.sessions();
+                }
+            }
+            let agents = state.detector.machine_snapshots();
+            let sessions = state.detector.sessions();
+            if state.snapshot.agents != agents || state.snapshot.sessions != sessions
+                || (result.is_ok() && (params.title.is_some() || params.tmux_session.is_some())) {
+                state.snapshot.agents = agents;
+                state.snapshot.sessions = sessions;
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);
                 state.snapshot.observed_at_unix_ms = now_unix_ms();
                 let saved = save_checkpoint(paths, &server.key, &state);
@@ -885,7 +896,8 @@ fn handle(
                 *snapshot.write().expect("snapshot poisoned") = state.snapshot.clone();
                 saved.map_err(|error| format!("task name updated but could not save recovery state: {error}"))?;
             }
-            Ok(result)
+            refreshed?;
+            result
         }),
         "client.register" => parse_params::<ClientRegisterParams>(request.params).and_then(|params| {
             uuid::Uuid::parse_str(&params.device_id).map_err(|_| "invalid device id")?;
