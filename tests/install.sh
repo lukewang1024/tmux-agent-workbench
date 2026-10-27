@@ -50,4 +50,35 @@ for installer_socket in "$installer_runtime_root"/tmux-agent-workbench/daemon-*.
   test ! -e "$installer_socket"
 done
 
+# Release-only mode may deliberately download a pre-handoff release. Its
+# installer must retain compatibility with the older daemon command surface.
+legacy_plugin="$test_root/legacy-plugin"
+legacy_tools="$test_root/legacy-tools"
+legacy_archive="$test_root/legacy-archive"
+mkdir -p "$legacy_plugin" "$legacy_tools" "$legacy_archive"
+cp "$repo/install" "$repo/Cargo.toml" "$legacy_plugin/"
+cat > "$legacy_archive/tmux-agent-workbench" <<'SH'
+#!/bin/sh
+case "$*" in
+  --version) printf '%s\n' 'tmux-agent-workbench 2.0.0-beta.35' ;;
+  'daemon ensure --help') printf '%s\n' 'Usage: tmux-agent-workbench daemon ensure' ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$legacy_archive/tmux-agent-workbench"
+tar -czf "$test_root/legacy-release.tar.gz" -C "$legacy_archive" tmux-agent-workbench
+cat > "$legacy_tools/curl" <<'SH'
+#!/bin/sh
+cp "$WORKBENCH_TEST_RELEASE_ARCHIVE" "$4"
+SH
+cat > "$legacy_tools/codesign" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$legacy_tools/curl" "$legacy_tools/codesign"
+PATH="$legacy_tools:$PATH" WORKBENCH_TEST_RELEASE_ARCHIVE="$test_root/legacy-release.tar.gz" \
+  TMUX_AGENT_WORKBENCH_RELEASE_ONLY=1 "$legacy_plugin/install" "$test_root/legacy-bin" --no-git >/dev/null
+"$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-core" --version | \
+  grep '2.0.0-beta.35' >/dev/null
+
 printf '%s\n' 'installer integration: ok'
