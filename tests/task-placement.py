@@ -16,6 +16,7 @@ from daemon_fixture import running_daemon
 
 binary, fixture = (str(Path(arg).resolve()) for arg in sys.argv[1:])
 with tempfile.TemporaryDirectory(prefix='wb-task-placement-', dir='/tmp') as root:
+    root = str(Path(root).resolve())
     socket = root + '/tmux.sock'
     env = dict(os.environ, TERM='xterm-256color', TMUX=socket + ',0,0',
                TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket, CODEX_HOME=root + '/codex')

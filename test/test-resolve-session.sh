@@ -22,6 +22,9 @@ if WORKBENCH_SESSION=missing workbench_resolve_session >"$WB_TEST_TMPDIR/error" 
   wb_assert 'missing explicit session fails' false
 fi
 wb_assert 'missing session is diagnosed' grep -q 'explicit session not found' "$WB_TEST_TMPDIR/error"
+# POSIX bash (macOS /bin/sh) retains assignments before function calls.
+# The next case must actually exercise a caller without an explicit selector.
+unset WORKBENCH_SESSION
 if workbench_resolve_session >"$WB_TEST_TMPDIR/error" 2>&1; then
   wb_assert 'outside caller cannot guess an existing session' false
 fi
