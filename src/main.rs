@@ -277,7 +277,16 @@ enum AgentCommand {
 
 #[derive(Debug, Subcommand)]
 enum TitleCommand {
+    /// Name an unnamed task in the sidebar and tmux statusbar together.
     Set {
+        title: String,
+        #[arg(long)]
+        pane: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    /// Update a task already named by Workbench in both places.
+    Rename {
         title: String,
         #[arg(long)]
         pane: Option<String>,
@@ -1347,20 +1356,35 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", output);
         }
         Command::Title { command } => {
+            let rename = matches!(&command, TitleCommand::Rename { .. });
             let (pane, session, title) = match &command {
                 TitleCommand::Set {
+                    title,
+                    pane,
+                    session_id,
+                }
+                | TitleCommand::Rename {
                     title,
                     pane,
                     session_id,
                 } => (pane, session_id, Some(title.as_str())),
                 TitleCommand::Status { pane, session_id } => (pane, session_id, None),
             };
-            let result = tmux_agent_workbench::task_title::for_caller(
-                &paths,
-                pane.as_deref(),
-                session.as_deref(),
-                title,
-            )?;
+            let result = if rename {
+                tmux_agent_workbench::task_title::rename_for_caller(
+                    &paths,
+                    pane.as_deref(),
+                    session.as_deref(),
+                    title.unwrap(),
+                )?
+            } else {
+                tmux_agent_workbench::task_title::for_caller(
+                    &paths,
+                    pane.as_deref(),
+                    session.as_deref(),
+                    title,
+                )?
+            };
             println!("{}", result);
         }
         Command::Config {

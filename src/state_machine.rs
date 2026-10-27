@@ -37,6 +37,7 @@ struct Tracked {
     snapshot: AgentSnapshot,
     conversation_identity: Option<String>,
     previous_session_id: Option<String>,
+    name_from_command: bool,
     confirmed_resume: bool,
     automatic_review_attention: Option<AttentionEvent>,
     idle_candidate_since: Option<u64>,
@@ -63,6 +64,11 @@ impl Tracked {
     /// Keep every session-owned value together so projections cannot retain a
     /// name, progress or attention item belonging to the previous task.
     fn bind_session(&mut self, session: &str) {
+        let initial_name = if self.active_hook_session_id.is_none() && self.name_from_command {
+            self.snapshot.thread_name.clone()
+        } else {
+            None
+        };
         if !self
             .active_hook_session_id
             .as_deref()
@@ -73,6 +79,7 @@ impl Tracked {
                 self.conversation_identity = self.active_hook_session_id.clone();
             }
             self.snapshot.thread_name = None;
+            self.name_from_command = false;
             self.snapshot.label = format!("{:?}", self.snapshot.kind);
             self.snapshot.task_progress = None;
             self.snapshot.attention = None;
@@ -92,6 +99,13 @@ impl Tracked {
         }
         self.active_hook_session_id = Some(session.into());
         self.snapshot.hook_session_id = Some(session.into());
+        if let Some(name) = initial_name {
+            // A CLI can name a discovered process before its first hook binds
+            // the session. That initial binding is still the same task.
+            self.name_from_command = true;
+            self.snapshot.label = name.clone();
+            self.snapshot.thread_name = Some(name);
+        }
     }
 }
 
@@ -108,6 +122,7 @@ pub struct RuntimeMetadata {
     pub hook_session_id: Option<String>,
     pub visible_session_id: Option<String>,
     pub previous_session_id: Option<String>,
+    pub name_from_command: bool,
 }
 
 impl StateMachine {
@@ -159,6 +174,7 @@ impl StateMachine {
             .clone()
             .or_else(|| checkpoint.hook_session_id.clone());
         tracked.previous_session_id = checkpoint.previous_session_id.clone();
+        tracked.name_from_command = checkpoint.name_from_command;
         tracked.snapshot.thread_name = checkpoint.thread_name.clone();
         if let Some(name) = &tracked.snapshot.thread_name {
             tracked.snapshot.label = name.clone();
@@ -232,6 +248,7 @@ impl StateMachine {
             hook_session_id: tracked.active_hook_session_id.clone(),
             visible_session_id: tracked.conversation_identity.clone(),
             previous_session_id: tracked.previous_session_id.clone(),
+            name_from_command: tracked.name_from_command,
         })
     }
 
@@ -258,6 +275,7 @@ impl StateMachine {
             Tracked {
                 conversation_identity: None,
                 previous_session_id: None,
+                name_from_command: false,
                 confirmed_resume: false,
                 automatic_review_attention: None,
                 snapshot: AgentSnapshot {
@@ -593,7 +611,11 @@ impl StateMachine {
         tracked.last_hook_at_ms = Some(report.occurred_at_unix_ms);
         tracked.last_hook_event_at_ms = report.occurred_at_unix_ms;
         tracked.snapshot.hook_session_id = Some(report.session_id.clone());
-        if let Some(label) = &report.session_label {
+        if let Some(label) = report
+            .session_label
+            .as_ref()
+            .filter(|_| !tracked.name_from_command)
+        {
             tracked.snapshot.label = label.clone();
             tracked.snapshot.thread_name = Some(label.clone());
         }
@@ -926,9 +948,26 @@ impl StateMachine {
 
     pub fn set_thread_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
         let tracked = self.agents.get_mut(instance)?;
+        if tracked.name_from_command {
+            return Some(tracked.snapshot.clone());
+        }
         tracked.snapshot.label = name.clone();
         tracked.snapshot.thread_name = Some(name);
         Some(tracked.snapshot.clone())
+    }
+
+    pub fn set_task_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
+        let tracked = self.agents.get_mut(instance)?;
+        tracked.name_from_command = true;
+        tracked.snapshot.label = name.clone();
+        tracked.snapshot.thread_name = Some(name.clone());
+        let window_id = tracked.snapshot.target.window_id.clone();
+        for tracked in self.agents.values_mut() {
+            if tracked.snapshot.target.window_id == window_id {
+                tracked.snapshot.target.window_name = name.clone();
+            }
+        }
+        Some(self.agents.get(instance)?.snapshot.clone())
     }
 
     pub fn next_attention(&self) -> Option<&AttentionEvent> {
@@ -2039,6 +2078,50 @@ mod tests {
             assert_eq!(current.thread_name.as_deref(), Some("New task"));
             assert_eq!(current.state_source, StateSource::Hook);
         }
+    }
+
+    #[test]
+    fn cli_name_survives_initial_binding_and_metadata_then_resets_with_the_session() {
+        let mut machine = StateMachine::default();
+        let agent = machine.observe_estimate(observation(BaseState::Idle, 0));
+        machine
+            .set_task_name(&agent.instance_id, "CLI task".into())
+            .unwrap();
+        let mut start = event("start", "first", AgentEventType::SessionStart, 1);
+        start.session_label = Some("Provider task".into());
+        let bound = machine
+            .report_event(&agent.instance_id, &start, false)
+            .unwrap();
+        assert_eq!(bound.thread_name.as_deref(), Some("CLI task"));
+        assert_eq!(bound.label, "CLI task");
+        let refreshed = machine
+            .set_thread_name(&agent.instance_id, "Provider refresh".into())
+            .unwrap();
+        assert_eq!(refreshed.thread_name.as_deref(), Some("CLI task"));
+        assert!(
+            machine
+                .checkpoint_metadata(&agent.instance_id)
+                .unwrap()
+                .name_from_command
+        );
+        let cleared = machine
+            .report_event(
+                &agent.instance_id,
+                &event("clear", "second", AgentEventType::SessionStart, 2),
+                false,
+            )
+            .unwrap();
+        assert!(cleared.thread_name.is_none());
+        assert!(
+            !machine
+                .checkpoint_metadata(&agent.instance_id)
+                .unwrap()
+                .name_from_command
+        );
+        let fresh = machine
+            .set_thread_name(&agent.instance_id, "Fresh provider name".into())
+            .unwrap();
+        assert_eq!(fresh.thread_name.as_deref(), Some("Fresh provider name"));
     }
 
     #[test]

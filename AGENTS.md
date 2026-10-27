@@ -13,17 +13,3 @@
   Recovery builds the original tagged source, using only the validated
   installer fixture from main. Do not move tags or force-push branches.
 - See `docs/releasing.md` for repository settings and recovery details.
-
-# Shared agent state
-
-- Change foreground-session state in `StateMachine`, through the shared
-  `Tracked::bind_session` transition. Window titles, sidebar cards, notifications
-  and checkpoints project the same `AgentSnapshot`; presentation code must not
-  infer or maintain a separate foreground session.
-- When adding session-owned data, include its reset behavior in that transition
-  and its persistence behavior in checkpoint recovery. A UUID prefix becoming a
-  full UUID is the same session and must retain the new task's data.
-- Changes to shared session data require `tests/session-projections.py` coverage
-  across the real tmux window, rendered sidebar, snapshot and checkpoint. Cover
-  both hook/redraw orders and daemon recovery; a window-only assertion is
-  insufficient. This contract runs in the required `tests/verify.sh` checks.

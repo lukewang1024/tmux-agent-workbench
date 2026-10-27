@@ -1,5 +1,7 @@
 """A thread switch must converge across every projection of the agent state."""
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,7 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
         env.pop(key, None)
     for key in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = root + '/' + key
+    env['XDG_RUNTIME_DIR'] = root
     config = Path(env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
     config.mkdir(parents=True)
     (config / 'config.toml').write_text('[notifications]\nenabled = false\n')
@@ -68,6 +71,17 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
     def osc(session):
         pane_title('codex | Ready | ' + session[:32] + '...')
 
+    def name_command(session, value, action='set'):
+        core('title', action, value, '--pane', main, '--session-id', session)
+        # Successful command completion includes shared state publication.
+        current = agent()
+        assert current['thread_name'] == value and current['label'] == value, current
+        assert current['target']['window_name'] == value, current
+        assert tmux('display-message', '-p', '-t', main, '#{window_name}') == value
+        assert value in tmux('display-message', '-p', '-t', main,
+                             '#{E:window-status-current-format}')
+        wait(lambda: value in screen(), 'CLI name rendered in sidebar')
+
     def converged(session, name, obsolete):
         current = agent()
         if current is None or not session.startswith(current.get('hook_session_id', '!')):
@@ -107,6 +121,47 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
                                        '-t', 'projection-test'], env=env, stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             wait(lambda: agent() is not None, 'agent discovery')
+            manual = str(uuid.uuid4())
+            hook(manual)
+            name_command(manual, '统一名称 Alpha')
+            hook(manual, 'PostToolUse', thread_name='Cached provider name')
+            index = Path(env['CODEX_HOME'], 'session_index.jsonl')
+            index.parent.mkdir(parents=True, exist_ok=True)
+            index.write_text(json.dumps({'id': manual, 'thread_name': 'Cached provider name'}) + '\n')
+            time.sleep(2.2)  # Include the detector's next thread-index refresh.
+            wait(lambda: converged(manual, '统一名称 Alpha', 'Cached provider'),
+                 'CLI name survives provider metadata')
+            window = tmux('display-message', '-p', '-t', main, '#{window_id}')[1:]
+            lock, = Path(env['XDG_RUNTIME_DIR'], 'tmux-agent-workbench').glob(f'task-title-*-{window}.lock')
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with lock.open('r+') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    naming = pool.submit(name_command, manual, 'CLI after busy lock', 'rename')
+                    time.sleep(.1)
+                    fcntl.flock(held, fcntl.LOCK_UN)
+                naming.result(timeout=10)
+            checkpoint, = Path(env['XDG_STATE_HOME']).glob('tmux-agent-workbench/servers/*.json')
+            backup = checkpoint.with_suffix('.before-name')
+            checkpoint.rename(backup)
+            checkpoint.mkdir()
+            try:
+                failed = core('title', 'rename', 'Recovery write failed', '--pane', main,
+                              '--session-id', manual, check=False)
+                assert failed.returncode != 0 and 'could not save recovery state' in failed.stderr, failed
+                current = agent()
+                assert current['thread_name'] == current['target']['window_name'] == 'Recovery write failed', current
+            finally:
+                checkpoint.rmdir()
+                backup.rename(checkpoint)
+            name_command(manual, "统一名称 Beta O'Reilly", action='rename')
+            stack.close()
+            stack.enter_context(running_daemon(binary, env))
+            wait(lambda: converged(manual, "统一名称 Beta O'Reilly", 'Cached provider'),
+                 'CLI rename survives daemon recovery')
+            fresh = str(uuid.uuid4())
+            hook(fresh, source='clear')
+            wait(lambda: converged(fresh, None, '统一名称'), 'clear resets CLI name everywhere')
+            print('PASS: title set/rename updates sidebar and statusbar, persists, and clears together')
             for order in ('hook-first', 'osc-first'):
                 old, new = str(uuid.uuid4()), str(uuid.uuid4())
                 old_name = 'Obsolete ' + order

@@ -54,6 +54,8 @@ struct TitleState {
     owner: Owner,
     initial_name: String,
     title: Option<String>,
+    #[serde(default)]
+    name_from_command: bool,
     task_seen: bool,
     repair_used: bool,
     #[serde(default)]
@@ -206,6 +208,15 @@ fn automatic_rename(server: &ServerIdentity, window: &str) -> Result<Option<bool
 }
 
 fn window_lock(paths: &Paths, server: &ServerIdentity, window: &str) -> Result<File, String> {
+    window_lock_wait(paths, server, window, Duration::ZERO)
+}
+
+fn window_lock_wait(
+    paths: &Paths,
+    server: &ServerIdentity,
+    window: &str,
+    wait: Duration,
+) -> Result<File, String> {
     let lock_name = format!(
         "task-title-{}-{}.lock",
         server.key,
@@ -219,10 +230,19 @@ fn window_lock(paths: &Paths, server: &ServerIdentity, window: &str) -> Result<F
         .mode(0o600)
         .open(paths.runtime_dir.join(lock_name))
         .map_err(|error| error.to_string())?;
-    // Naming is optional UI work; never wait behind another hook or block a task.
-    lock.try_lock_exclusive()
-        .map_err(|_| "task title is being checked; retry shortly".to_owned())?;
-    Ok(lock)
+    let started = Instant::now();
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= wait {
+                    return Err("task title is being checked; retry shortly".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn state(server: &ServerIdentity, window: &Window) -> Result<Option<TitleState>, String> {
@@ -359,6 +379,7 @@ fn owner_state(
         owner,
         initial_name: window.name.clone(),
         title: None,
+        name_from_command: false,
         task_seen: false,
         repair_used: false,
         original_options: None,
@@ -369,12 +390,13 @@ fn with_window<T>(
     paths: &Paths,
     snapshot: &Snapshot,
     agent: &AgentSnapshot,
+    wait: Duration,
     action: impl FnOnce(&ServerIdentity, Window, TitleState, bool) -> Result<T, String>,
 ) -> Result<T, String> {
     let server = ServerIdentity::from_socket(snapshot.server.clone().into())
         .map_err(|error| error.to_string())?;
     let initial = window(&server, agent)?;
-    let _lock = window_lock(paths, &server, &initial.id)?;
+    let _lock = window_lock_wait(paths, &server, &initial.id, wait)?;
     let current = window(&server, agent)?;
     let previous = state(&server, &current)?;
     let preserved = current.protected
@@ -420,6 +442,9 @@ fn sync_thread_name(
     }
     let mut previous = state(&server, &current)?;
     if let Some(previous) = previous.as_mut() {
+        if previous.name_from_command && previous.title.as_deref() != Some(title) {
+            return Ok(());
+        }
         if previous.owner.pane == agent.target.pane_id
             && Some(&previous.owner.process) == agent.process.as_ref()
         {
@@ -570,6 +595,7 @@ fn reset_for_session_change(
         owner,
         initial_name: previous.initial_name.clone(),
         title: None,
+        name_from_command: false,
         task_seen: false,
         repair_used: false,
         original_options: None,
@@ -655,6 +681,7 @@ pub fn hook_output(
             &bound_paths,
             &snapshot,
             &agent,
+            Duration::ZERO,
             |server, current, mut state, preserved| {
                 if preserved || !state.owner.same_task(&Owner::of(&agent)?) {
                     return Ok(json!({}));
@@ -719,6 +746,37 @@ pub fn for_caller(
     pane: Option<&str>,
     session: Option<&str>,
     title: Option<&str>,
+) -> Result<Value, String> {
+    for_caller_action(paths, pane, session, title, false)
+}
+
+pub fn rename_for_caller(
+    paths: &Paths,
+    pane: Option<&str>,
+    session: Option<&str>,
+    title: &str,
+) -> Result<Value, String> {
+    for_caller_action(paths, pane, session, Some(title), true)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TitleRequest {
+    pub instance_id: String,
+    pub process: ProcessFingerprint,
+    pub pane_id: String,
+    pub session_id: Option<String>,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub rename: bool,
+}
+
+fn for_caller_action(
+    paths: &Paths,
+    pane: Option<&str>,
+    session: Option<&str>,
+    title: Option<&str>,
+    rename: bool,
 ) -> Result<Value, String> {
     if let Some(title) = title {
         validate_title(title)?;
@@ -803,7 +861,7 @@ pub fn for_caller(
         }
     }
     let candidates = verified;
-    let [(socket, snapshot, agent)] = candidates.as_slice() else {
+    let [(socket, _, agent)] = candidates.as_slice() else {
         if candidates.is_empty() {
             if let Some(reason) = reason {
                 return Err(reason);
@@ -819,17 +877,55 @@ pub fn for_caller(
         }
         return Err("cannot uniquely verify the caller; use --pane and --session-id from the Workbench hook, never the focused window".into());
     };
-    let mut bound_paths = paths.clone();
-    bound_paths.runtime_dir = socket
-        .parent()
-        .ok_or("daemon directory unavailable")?
-        .into();
+    call(
+        socket,
+        &Request::new(
+            "task.title",
+            serde_json::to_value(TitleRequest {
+                instance_id: agent.instance_id.clone(),
+                process: agent.process.clone().ok_or("agent process unavailable")?,
+                pane_id: agent.target.pane_id.clone(),
+                session_id: agent.hook_session_id.clone(),
+                title: title.map(str::to_owned),
+                rename,
+            })
+            .map_err(|error| error.to_string())?,
+        ),
+        Duration::from_secs(3),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// The daemon serializes this tmux update with the corresponding shared-name
+/// update and snapshot publication before replying to the command.
+pub(crate) fn apply(
+    paths: &Paths,
+    snapshot: &Snapshot,
+    request: &TitleRequest,
+) -> Result<Value, String> {
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| {
+            agent.instance_id == request.instance_id
+                && !agent.exited
+                && agent.relay_focus.is_none()
+                && agent.target.pane_id == request.pane_id
+                && agent.process.as_ref() == Some(&request.process)
+        })
+        .ok_or("agent process changed before naming; retry with its current identity")?;
+    let agent = foreground_agent(snapshot, agent, request.session_id.as_deref(), false)?;
     with_window(
-        &bound_paths,
+        paths,
         snapshot,
-        agent,
+        &agent,
+        Duration::from_millis(500),
         |server, current, mut state, preserved| {
-            let owner = state.owner.same_task(&Owner::of(agent)?);
+            let owner = state.owner.same_task(&Owner::of(&agent)?);
+            let owned_title = !current.protected
+                && owner
+                && state.title.as_deref() == Some(current.name.as_str());
+            let preserved = preserved && !(request.rename && owned_title);
             let status = if preserved {
                 "preserved"
             } else if !owner {
@@ -837,7 +933,7 @@ pub fn for_caller(
             } else {
                 "pending"
             };
-            let Some(title) = title else {
+            let Some(title) = request.title.as_deref() else {
                 return Ok(
                     json!({"status":status,"window_id":current.id,"title":current.name,
                 "owner_pane":state.owner.pane,"repair_used":state.repair_used}),
@@ -848,9 +944,12 @@ pub fn for_caller(
                 return Ok(json!({"status":status,"window_id":current.id,"title":current.name}));
             }
             state.title = Some(title.into());
-            state.original_options = Some(TitleOptions {
-                automatic_rename: automatic_rename(server, &current.id)?,
-            });
+            state.name_from_command = true;
+            if state.original_options.is_none() {
+                state.original_options = Some(TitleOptions {
+                    automatic_rename: automatic_rename(server, &current.id)?,
+                });
+            }
             let encoded = serde_json::to_string(&state).map_err(|error| error.to_string())?;
             // Guard the rename inside tmux as well as under our lock. A manual
             // rename between the read and this command always wins.
@@ -878,7 +977,7 @@ pub fn for_caller(
                     &commands,
                 ],
             )?;
-            let actual = window(server, agent)?;
+            let actual = window(server, &agent)?;
             if actual.name != title {
                 return Err(format!(
                     "window title changed concurrently; preserved {:?}",
@@ -887,7 +986,8 @@ pub fn for_caller(
             }
             let stored =
                 crate::task_title::state(server, &actual)?.ok_or("title verification failed")?;
-            if stored.title.as_deref() != Some(title) || !stored.owner.same_task(&Owner::of(agent)?)
+            if stored.title.as_deref() != Some(title)
+                || !stored.owner.same_task(&Owner::of(&agent)?)
             {
                 return Err("title ownership verification failed".into());
             }

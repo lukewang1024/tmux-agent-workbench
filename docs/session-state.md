@@ -18,19 +18,25 @@ recovery follows the same rule.
 The daemon publishes the resulting `AgentSnapshot` to the sidebar, navigation,
 notifications and checkpoints. `task_title` projects that snapshot into the
 owned tmux window. Its durable tmux option stores naming ownership, the previous
-window name, naming options and the repair budget; it must not invent another
-foreground session or substitute a locally modified snapshot.
+window name, naming options and the repair budget.
 
-When adding shared session data or a consumer:
+`tmux-agent-workbench title set <name>` names an unnamed task;
+`tmux-agent-workbench title rename <name>` updates an existing Workbench name.
+Both use the daemon's `task.title` operation. Under the same state lock, it
+verifies the live caller and window owner, updates the tmux window name, updates
+the agent name and cached window inventory, saves the checkpoint, and publishes
+the new snapshot before replying. The sidebar reads that agent name and the
+statusbar reads the updated window name. Callers perform one operation.
 
-1. Define whether the data belongs to the process or to its current session.
-2. Put session resets in `bind_session`, with checkpoint recovery where needed.
-3. Consume the canonical snapshot in presentation code.
-4. Extend the projection contract for any affected observable behavior.
+An explicit CLI name takes precedence over provider hook/index names until the
+session changes. This source flag is saved with the checkpoint, and the durable
+tmux title rejects stale provider projections. A clear resets the flag together
+with the name. A rename retains the original naming options and repair budget.
 
 `tests/session-projections.py` runs a real agent fixture and sidebar on an
-isolated tmux server. It checks the window, rendered sidebar, snapshot and
-checkpoint together for hook-before-redraw and redraw-before-hook clears, a
-newly named session, and daemon recovery. `tests/task-titles.py` separately
+isolated tmux server. It checks CLI set/rename against the actual statusbar
+format, rendered sidebar, snapshot and checkpoint, including provider refresh
+and daemon recovery. It also checks both hook/redraw orders for clear.
+`tests/task-titles.py` separately
 covers manual names, shared windows, naming budgets and process ownership.
 Both suites run through the required `sh tests/verify.sh` command.

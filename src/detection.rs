@@ -129,6 +129,16 @@ impl Detector {
         self.machine.acknowledge(event_id)
     }
 
+    pub fn set_task_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
+        let agent = self.machine.set_task_name(instance, name.clone())?;
+        for pane in self.panes.values_mut() {
+            if pane.target.window_id == agent.target.window_id {
+                pane.target.window_name = name.clone();
+            }
+        }
+        Some(agent)
+    }
+
     pub fn wake(&mut self) {
         self.next_process_scan = Instant::now();
         for due in self.next_capture.values_mut() {

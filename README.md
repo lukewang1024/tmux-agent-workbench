@@ -825,10 +825,18 @@ assigns a short semantic name through Workbench:
 
 ```sh
 tmux-agent-workbench title set 'Repair cursor rendering'
+tmux-agent-workbench title rename 'Repair cursor and selection rendering'
 tmux-agent-workbench title status
 ```
 
-The command resolves the calling agent through process ancestry and verifies
+`title set` names an unnamed task. `title rename` updates a task already named
+by Workbench. Both commands update the sidebar and the tmux statusbar window
+name in one daemon operation, publish the new snapshot, and save it before
+returning success. An explicit CLI name survives provider metadata refreshes
+and daemon restarts, and is cleared when a new session starts. Manual window
+names remain protected.
+
+The commands resolve the calling agent through process ancestry and verify
 the resulting name in tmux. If ancestry is hidden, use the verified `--pane`
 and `--session-id` supplied by the lifecycle hook. It never follows the focused
 client or guesses from a working directory. A live Workbench daemon is needed
