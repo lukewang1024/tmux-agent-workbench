@@ -1026,6 +1026,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         x, y = item_position(rendered, '/side')
+        # An open menu must survive uptime advancing. Android cannot read
+        # /proc/stat, so sysinfo's boot-time fallback used to change its guard.
+        drain(1.1)
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         menu.wait(timeout=3)
         drain(0.3)

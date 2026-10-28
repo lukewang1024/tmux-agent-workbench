@@ -13,6 +13,35 @@ pub struct AgentProcess {
     pub resume_session_id: Option<String>,
 }
 
+/// Android denies /proc/stat. sysinfo 0.37's boot-time fallback returns the
+/// current uptime, making Process::start_time() change between inventories.
+/// Use the kernel's immutable start ticks there, including for live checks.
+pub(crate) fn process_started_at(process: &Process) -> u64 {
+    #[cfg(target_os = "android")]
+    {
+        std::fs::read_to_string(format!("/proc/{}/stat", process.pid()))
+            .ok()
+            .and_then(|stat| android_start_ticks(&stat))
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        process.start_time()
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_start_ticks(stat: &str) -> Option<u64> {
+    // comm may contain spaces and ')'; field 3 starts after the final ')'.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse::<u64>()
+        .ok()
+        .filter(|ticks| *ticks > 0)
+}
+
 /// Noninteractive jobs may still contribute status, but cannot accept TUI commands.
 pub(crate) fn accepts_terminal_input(agent: &AgentProcess) -> bool {
     let pid = Pid::from_u32(agent.fingerprint.pid);
@@ -26,7 +55,8 @@ pub(crate) fn accepts_terminal_input(agent: &AgentProcess) -> bool {
             .with_cmd(UpdateKind::Always),
     );
     system.process(pid).is_some_and(|process| {
-        process.start_time() == agent.fingerprint.started_at_ticks
+        process_started_at(process) != 0
+            && process_started_at(process) == agent.fingerprint.started_at_ticks
             && process.exe().unwrap_or_else(|| Path::new(process.name()))
                 == Path::new(&agent.fingerprint.executable)
             && interactive_command(agent.kind, process.cmd())
@@ -219,7 +249,7 @@ fn find_agents(
         let Some(kind) = identify(process, aliases) else {
             continue;
         };
-        if !is_process_group_leader(process.pid().as_u32()) {
+        if !is_process_group_leader(process.pid().as_u32()) || process_started_at(process) == 0 {
             continue;
         }
         let Some((root, depth)) = nearest_root(system, process.pid(), &roots) else {
@@ -227,8 +257,12 @@ fn find_agents(
         };
         if best.get(&root).is_none_or(|(best_depth, current, _)| {
             process_candidate_precedes(
-                (depth, process.start_time(), process.pid().as_u32()),
-                (*best_depth, current.start_time(), current.pid().as_u32()),
+                (depth, process_started_at(process), process.pid().as_u32()),
+                (
+                    *best_depth,
+                    process_started_at(current),
+                    current.pid().as_u32(),
+                ),
             )
         }) {
             best.insert(root, (depth, process, kind));
@@ -245,7 +279,7 @@ fn find_agents(
                         .flatten(),
                     fingerprint: ProcessFingerprint {
                         pid: process.pid().as_u32(),
-                        started_at_ticks: process.start_time(),
+                        started_at_ticks: process_started_at(process),
                         executable: process
                             .exe()
                             .unwrap_or_else(|| Path::new(process.name()))
@@ -332,6 +366,45 @@ fn identify_token(token: &OsStr, aliases: &HashMap<String, AgentKind>) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_identity_reads_start_ticks_after_the_complete_comm_field() {
+        let tail = (4..=21)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for name in ["codex", "agent (worker) name)"] {
+            let stat = format!("123 ({name}) S {tail} 987654 23 24\n");
+            assert_eq!(super::android_start_ticks(&stat), Some(987654));
+        }
+        for stat in ["", "123 (codex) S", "123 codex S 123"] {
+            assert_eq!(super::android_start_ticks(stat), None);
+        }
+        for ticks in ["0", "-1", "invalid"] {
+            assert_eq!(
+                super::android_start_ticks(&format!("123 (codex) S {tail} {ticks}")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn process_identity_survives_independent_inventories_across_uptime_ticks() {
+        fn identity() -> u64 {
+            let pid = Pid::from_u32(std::process::id());
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing().without_tasks(),
+            );
+            process_started_at(system.process(pid).unwrap())
+        }
+        let before = identity();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_ne!(before, 0);
+        assert_eq!(before, identity());
+    }
+
     #[test]
     fn foreground_filter_excludes_background_suspended_and_defunct_jobs() {
         let rows = "10 10 10 S+\n11 11 10 S\n12 12 12 T\n13 13 13 Z\n14 0 0 S\ninvalid";

@@ -1194,10 +1194,10 @@ impl TitleReaper {
             if process.status() == sysinfo::ProcessStatus::Zombie {
                 return true;
             }
-            if process.start_time() == 0 || expected.started_at_ticks == 0 {
+            if crate::process::process_started_at(process) == 0 || expected.started_at_ticks == 0 {
                 return false;
             }
-            if process.start_time() != expected.started_at_ticks {
+            if crate::process::process_started_at(process) != expected.started_at_ticks {
                 return true;
             }
             // An exec can replace the CLI without changing its PID/start time.
@@ -1277,12 +1277,12 @@ mod tests {
                     // The fork/exec metadata may still describe the parent.
                     // Wait for the final executable before fingerprinting it.
                     if path.file_name() == Some(std::ffi::OsStr::new("sleep"))
-                        && process.start_time() != 0
+                        && crate::process::process_started_at(process) != 0
                         && process.status() != sysinfo::ProcessStatus::Zombie
                     {
                         break Some(ProcessFingerprint {
                             pid: child.id(),
-                            started_at_ticks: process.start_time(),
+                            started_at_ticks: crate::process::process_started_at(process),
                             executable: path.display().to_string(),
                         });
                     }
