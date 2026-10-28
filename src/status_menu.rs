@@ -94,6 +94,7 @@ pub enum Scene {
     Daily,
     Hard,
     Batch,
+    Computer,
 }
 impl Scene {
     fn name(self) -> &'static str {
@@ -101,6 +102,7 @@ impl Scene {
             Self::Daily => "daily",
             Self::Hard => "hard",
             Self::Batch => "batch",
+            Self::Computer => "computer",
         }
     }
     fn label(self) -> &'static str {
@@ -108,6 +110,20 @@ impl Scene {
             Self::Daily => tr("Daily development · daily", "日常开发 · daily"),
             Self::Hard => tr("Complex tasks · hard", "复杂攻坚 · hard"),
             Self::Batch => tr("Batch work · batch", "批量执行 · batch"),
+            Self::Computer => tr("Computer automation · computer", "电脑自动化 · computer"),
+        }
+    }
+
+    fn choices(tool: Tool) -> &'static [(Self, char)] {
+        match tool {
+            Tool::Codex => &[
+                (Self::Daily, 'd'),
+                (Self::Hard, 'h'),
+                (Self::Batch, 'b'),
+                (Self::Computer, 'c'),
+            ],
+            Tool::Traex => &[(Self::Daily, 'd'), (Self::Hard, 'h'), (Self::Batch, 'b')],
+            _ => &[],
         }
     }
 }
@@ -833,7 +849,7 @@ fn actions(
             actions.push(Action::note(&context.cwd));
             if matches!(options.tool, Tool::Codex | Tool::Traex) {
                 actions.push(Action::note(tr("Scene", "场景")));
-                for (scene, key) in [(Scene::Daily, 'd'), (Scene::Hard, 'h'), (Scene::Batch, 'b')] {
+                for &(scene, key) in Scene::choices(options.tool) {
                     actions.push(nav(
                         scene.name(),
                         &choice_label(scene.label(), options.scene == scene),
@@ -1439,6 +1455,17 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
         options.tool.name().into(),
     ];
     if matches!(options.tool, Tool::Codex | Tool::Traex) {
+        if !Scene::choices(options.tool)
+            .iter()
+            .any(|(scene, _)| *scene == options.scene)
+        {
+            return Err(format!(
+                "Unknown {} scene: {}",
+                options.tool.name(),
+                options.scene.name()
+            )
+            .into());
+        }
         args.extend(["--scene".into(), options.scene.name().into()]);
     }
     if options.preset.is_team() {
@@ -1850,8 +1877,8 @@ mod tests {
         }
     }
     #[test]
-    fn codex_has_three_scenes_two_modes_without_adjustments() {
-        for scene in [Scene::Daily, Scene::Hard, Scene::Batch] {
+    fn codex_has_four_scenes_two_modes_without_adjustments() {
+        for &(scene, _) in Scene::choices(Tool::Codex) {
             for preset in [Preset::Single, Preset::Team] {
                 let args = launch_argv(&MenuOptions {
                     tool: Tool::Codex,
@@ -1866,6 +1893,29 @@ mod tests {
                 );
                 assert_eq!(args.contains(&"--team".into()), preset == Preset::Team);
             }
+        }
+    }
+
+    #[test]
+    fn computer_scene_is_only_offered_for_codex() {
+        for tool in [Tool::Codex, Tool::Traex] {
+            let options = MenuOptions {
+                tool,
+                scene: Scene::Computer,
+                view: View::Configure,
+                ..Default::default()
+            };
+            let (_, choices) = actions(
+                StatusMenuKind::Tmux,
+                &options,
+                &context(None, BaseState::Idle),
+            );
+            let computer = choices.iter().find(|a| a.id == "computer");
+            assert_eq!(computer.is_some(), tool == Tool::Codex);
+            if let Some(computer) = computer {
+                assert_eq!(computer.key, 'c');
+            }
+            assert_eq!(launch_argv(&options).is_ok(), tool == Tool::Codex);
         }
     }
 

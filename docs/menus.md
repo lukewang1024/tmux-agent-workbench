@@ -222,12 +222,13 @@ applications, btop and interactive botmux commands retain their own UI.
 
 ## Scene launch policy
 
-Codex and Trae use only daily, hard and batch scenes, each in Single or Team mode.
+Codex offers daily, hard, batch and computer (电脑自动化) scenes, each in Single
+or Team mode. Trae retains daily, hard and batch.
 Agent-team owns model, effort and Fast values. Workbench forwards the scene,
 mode, with no independent model defaults or temporary adjustment selector.
 Single `s` and Team `t` are the mode shortcuts. Scene shortcuts are daily `d`,
-hard `h`, batch `b`; Native `n` and tmux `m` only appear in Team mode. All choices
-stay in the same panel, and Enter launches with the current selection. Launch
+hard `h`, batch `b`, and Codex computer `c`; Native `n` and tmux `m` only appear in
+Team mode. All choices stay in the same panel, and Enter launches with the current selection. Launch
 is pinned with Back/Close even on short terminals. Launch and configuration errors
 stay immediately above Launch on every page, survive pagination, and clear when
 a choice changes or the panel is left. Fast is scene-wide in both
