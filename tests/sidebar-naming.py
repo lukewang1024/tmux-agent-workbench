@@ -8,7 +8,7 @@ import time
 
 binary = str(Path(sys.argv[1]).resolve())
 repo = Path(__file__).resolve().parent.parent
-with tempfile.TemporaryDirectory(prefix='workbench-naming-') as root:
+with tempfile.TemporaryDirectory(prefix='wb-naming-') as root:
     socket = root + '/tmux.sock'
     env = dict(os.environ, TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,
                XDG_CONFIG_HOME=root+'/config', XDG_STATE_HOME=root+'/state',
@@ -47,6 +47,17 @@ with tempfile.TemporaryDirectory(prefix='workbench-naming-') as root:
                     '-P', '-F', '#{pane_id}', 'sleep', '120')
         wait_command(main, 'sleep')
         window = tmux('display-message', '-p', '-t', main, '#{window_id}')
+        # A queued resize hook may outlive a short-lived placeholder window.
+        retired = tmux('new-window', '-d', '-P', '-F', '#{window_id}', 'sleep', '120')
+        tmux('kill-window', '-t', retired)
+        before = tmux('list-panes', '-a', '-F', '#{window_id}:#{pane_id}:#{pane_width}x#{pane_height}')
+        stale = subprocess.run([binary, 'sidebar-control', 'maintain', retired],
+                               env=env, capture_output=True, text=True)
+        assert stale.returncode == 0 and not stale.stderr, (stale.returncode, stale.stderr)
+        assert tmux('list-panes', '-a', '-F', '#{window_id}:#{pane_id}:#{pane_width}x#{pane_height}') == before
+        malformed = subprocess.run([binary, 'sidebar-control', 'maintain', 'invalid'],
+                                   env=env, capture_output=True, text=True)
+        assert malformed.returncode != 0
         tmux('set-option', '-w', '-t', window, 'automatic-rename', 'on')
         core('sidebar-control', 'toggle', window)
         assert tmux('display-message', '-p', '-t', window, '#{pane_id}') == main
