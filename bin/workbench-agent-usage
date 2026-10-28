@@ -82,17 +82,17 @@ build_cache() {
   day=$(period_start day)
   week=$(period_start week)
   month=$(period_start month)
-  command_agent=$agent
-
   mkdir -p "$state_dir" 2>/dev/null || return
   case $agent in
-    trae)
-      command_agent=codex
-      CODEX_HOME=${TRAE_HOME:-$HOME/.trae}/cli \
-        ccusage codex daily --json --offline > "$json" 2>/dev/null || printf '{"daily":[]}' > "$json"
+    codex|trae)
+      usage_home=${CODEX_HOME:-$HOME/.codex}
+      [ "$agent" != trae ] || usage_home=${TRAE_HOME:-$HOME/.trae}/cli
+      if ! CODEX_HOME="$usage_home" ccusage codex daily --json --offline > "$json" 2>/dev/null; then
+        python3 "$script_dir/workbench-codex-usage.py" "$usage_home" > "$json" || printf '{"daily":[]}' > "$json"
+      fi
       ;;
     *)
-      ccusage "$command_agent" daily --json --offline > "$json" 2>/dev/null || printf '{"daily":[]}' > "$json"
+      ccusage "$agent" daily --json --offline > "$json" 2>/dev/null || printf '{"daily":[]}' > "$json"
       ;;
   esac
 
