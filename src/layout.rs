@@ -623,6 +623,23 @@ fn restore_main_column_ratios(
 
 fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(window, '@')?;
+    let result = maintain_window(server, window);
+    if result.is_err() {
+        // Resize/exit hooks run asynchronously. Their exact target can close
+        // before maintenance starts or between tmux commands. A retired target
+        // needs no maintenance; preserve failures for live targets and servers.
+        let windows = tmux(server, &["list-windows", "-a", "-F", "#{window_id}"])?;
+        if !windows.lines().any(|id| id == window) {
+            return Ok(());
+        }
+    }
+    result
+}
+
+fn maintain_window(
+    server: &ServerIdentity,
+    window: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     if old_sidebar_loaded(server) {
         return Ok(());
     }
