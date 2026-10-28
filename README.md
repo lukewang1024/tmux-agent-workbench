@@ -56,6 +56,9 @@ see [Install](#install).
 - **tmux >= 3.6 for interactive status/sidebar menus** (core requires >= 3.2), **git**, and the shipped `tmux-agent-workbench` binary —
   hard requirements. The installer downloads a matching macOS/Linux
   x86_64/aarch64 release, then falls back to a local Cargo build.
+- **jq** and **Python 3** — local Codex/Trae token summaries can read session logs
+  without the optional `ccusage` CLI. The reader respects `CODEX_HOME` and
+  `TRAE_HOME`, including Termux home paths.
 - **tig** or **lazygit** — used only when opening a temporary Git tool.
   Defaults to `tig`; set `@workbench-git-tool` to change it.
 - **nvim** or **vim** — used only for an explicitly opened editor. Uses
