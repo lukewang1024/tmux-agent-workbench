@@ -376,8 +376,8 @@ this same panel. There is no temporary adjustment or separate review step.
 All action menus share a footer: Escape closes the menu, and Backspace returns
 one level when a parent exists or closes a root menu without an extra hint.
 The launch panel keeps Launch visible on every
-page; Enter launches. Shortcuts: `d/h/b` for scenes,
-`s/t` for mode and `n/m` for Native/tmux.
+page; Enter launches. Shortcuts: `d/h/b` for scenes and `c` for Codex computer
+automation, `s/t` for mode and `n/m` for Native/tmux.
 
 The panel reads the actual model, effort and Fast preview from
 [agent-team](https://github.com/lukewang1024/agent-team) without making a model
@@ -388,6 +388,7 @@ does not duplicate model configuration; agent-team must be on PATH.
 agent start codex --scene daily
 agent start codex --scene hard --team
 agent start codex --scene batch --team --tmux
+agent start codex --scene computer
 agent start claude
 agent start opencode --team
 ```

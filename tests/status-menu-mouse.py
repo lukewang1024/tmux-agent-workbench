@@ -63,9 +63,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     scenes = {scene: {'model': scene + '-single', 'lead_model': scene + '-lead',
                      'effort': 'high', 'worker_model': 'worker-model',
                      'worker_effort': 'max', 'fast': scene == 'daily'}
-              for scene in ('daily', 'hard', 'batch')}
+              for scene in ('daily', 'hard', 'batch', 'computer')}
     (settings_dir / 'teams.json').write_text(json.dumps({
-        'codex': {'scenes': scenes}, 'traex': {'scenes': scenes},
+        'codex': {'scenes': scenes},
+        'traex': {'scenes': {name: settings for name, settings in scenes.items() if name != 'computer'}},
         'claude': {'team': {}}, 'opencode': {'team': {}}}))
     preview_calls = root / 'preview-calls'
     preview.write_text('from pathlib import Path\nwith Path(' + repr(str(preview_calls)) + ').open("a") as calls: calls.write("preview\\n")\n' + preview.read_text())
@@ -1184,7 +1185,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             drain(0.15)
         assert not preview_calls.exists(), 'Initial agent selection started the configuration resolver'
         latencies = []
-        for key, expected in [(b'h', b'hard-single'), (b't', b'hard-lead'), (b'b', b'batch-lead'), (b's', b'batch-single'), (b'd', b'daily-single')]:
+        for key, expected in [(b'c', b'computer-single'), (b't', b'computer-lead'), (b'h', b'hard-lead'), (b'b', b'batch-lead'), (b's', b'batch-single'), (b'd', b'daily-single')]:
             started = time.monotonic()
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -1284,7 +1285,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
-        for scene, panes, expected in [('daily', False, ['start', 'codex', '--scene', 'daily', '--team']), ('batch', True, ['start', 'codex', '--scene', 'batch', '--team', '--tmux'])]:
+        for scene, panes, expected in [
+                ('daily', False, ['start', 'codex', '--scene', 'daily', '--team']),
+                ('batch', True, ['start', 'codex', '--scene', 'batch', '--team', '--tmux']),
+                ('computer', False, ['start', 'codex', '--scene', 'computer', '--team']),
+                ('computer', True, ['start', 'codex', '--scene', 'computer', '--team', '--tmux'])]:
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu, b'Create', b'Detach')
@@ -1292,9 +1297,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 os.write(master, key)
                 wait_for_text(client_process, heading)
                 drain(0.15)
-            if scene == 'batch':
-                os.write(master, b'b')
-                wait_for_text(client_process, b'batch-single')
+            if scene != 'daily':
+                os.write(master, b'b' if scene == 'batch' else b'c')
+                wait_for_text(client_process, (scene + '-single').encode())
             os.write(master, b't')
             rendered = wait_for_text(client_process, (scene + '-lead').encode())
             assert b'Worker: worker-model' in screen_text(rendered)
@@ -1318,7 +1323,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             tmux('kill-window', '-t', next(w for w in after if w not in before))
             trace.unlink()
             drain()
-        print('PASS daily native Team and batch tmux Team launch exactly one window')
+        print('PASS daily, batch and computer native/tmux Team launch exactly one window')
 
         for tool in ('claude', 'opencode'):
             for preset, key in (('single', b's'), ('team', b't')):
