@@ -25,9 +25,9 @@ the release workflow. It creates `v<package version>` only when that tag does
 not exist. CI on PR heads, failed runs, and superseded main commits cannot tag.
 An ordinary PR without a version change does not create a release.
 
-The workflow builds all seven Rust targets and both Windows companion targets,
+The workflow builds all eight Rust targets (including static i586 musl for iSH) and both Windows companion targets,
 collects artifacts, then publishes in a single final job. New releases stay
-in draft until all eleven archive/checksum files have been uploaded. Failed
+in draft until all twelve archive/checksum files have been uploaded. Failed
 builds never become Latest. The build jobs are in the same workflow as tag
 creation because a tag pushed with GITHUB_TOKEN does not trigger another
 push workflow. GitHub Actions uses a read-only token for PR CI.

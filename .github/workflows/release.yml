@@ -58,6 +58,9 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             android: false
+          - os: ubuntu-24.04
+            target: i586-unknown-linux-musl
+            android: false
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             android: false
@@ -98,6 +101,9 @@ jobs:
           printf '[target.%s]\nlinker = "%s/toolchains/llvm/prebuilt/linux-x86_64/bin/%s"\n' \
             '${{ matrix.target }}' "$ANDROID_NDK_LATEST_HOME" '${{ matrix.android_linker }}' \
             > .cargo/config.toml
+      - name: Configure the static iSH linker
+        if: matrix.target == 'i586-unknown-linux-musl'
+        run: echo "CARGO_TARGET_I586_UNKNOWN_LINUX_MUSL_LINKER=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld" >> "$GITHUB_ENV"
       - run: cargo test --locked --target "${{ matrix.target }}"
         if: '!matrix.android'
       - run: tests/integration-tmux.sh
@@ -165,7 +171,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          test "$(find dist -type f | wc -l)" -eq 11
+          test "$(find dist -type f | wc -l)" -eq 12
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
           fi

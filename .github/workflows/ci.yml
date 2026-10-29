@@ -38,6 +38,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tmux fzf
       - run: sh tests/verify.sh
+      - name: Verify the static iSH build
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add i586-unknown-linux-musl
+          export CARGO_TARGET_I586_UNKNOWN_LINUX_MUSL_LINKER="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+          cargo test --locked --target i586-unknown-linux-musl
   intel_title_hooks:
     name: Title hooks (macos-15-intel)
     runs-on: macos-15-intel

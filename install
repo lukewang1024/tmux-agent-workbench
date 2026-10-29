@@ -56,7 +56,8 @@ mkdir -p "$BIN_DIR" "$CORE_DIR"
 # tmux-agent-workbench-<rust-target>.tar.gz; a source checkout normally falls
 # back to a local Cargo release build when the matching asset is unavailable.
 # TMUX_AGENT_WORKBENCH_RELEASE_ONLY=1 disables that fallback and always
-# installs the latest GitHub release asset.
+# installs a GitHub release asset. TMUX_AGENT_WORKBENCH_RELEASE_TAG selects
+# an exact tag, including prereleases; otherwise GitHub Latest is used.
 install_attention_binary() {
   attention_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$PLUGIN_DIR/Cargo.toml" | head -1)
   attention_termux=0
@@ -78,6 +79,9 @@ install_attention_binary() {
       Darwin-x86_64) attention_target=x86_64-apple-darwin ;;
       Linux-aarch64|Linux-arm64) attention_target=aarch64-unknown-linux-gnu ;;
       Linux-x86_64) attention_target=x86_64-unknown-linux-musl ;;
+      # iSH reports i686 but cannot execute every SSE instruction emitted
+      # by the i686 Rust target. Use the baseline without SSE, including std.
+      Linux-i686) attention_target=i586-unknown-linux-musl ;;
       *) attention_target= ;;
     esac
   fi
@@ -106,7 +110,16 @@ install_attention_binary() {
       return 1
     }
     attention_tmp=$(mktemp -d)
-    attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/latest/download/tmux-agent-workbench-$attention_target.tar.gz"
+    attention_release_tag=${TMUX_AGENT_WORKBENCH_RELEASE_TAG:-}
+    if [ -n "$attention_release_tag" ]; then
+      printf '%s\n' "$attention_release_tag" | LC_ALL=C grep -Eq '^v[0-9][0-9A-Za-z._-]*$' || {
+        echo "install: invalid TMUX_AGENT_WORKBENCH_RELEASE_TAG" >&2
+        return 1
+      }
+      attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/download/$attention_release_tag/tmux-agent-workbench-$attention_target.tar.gz"
+    else
+      attention_url="https://github.com/lukewang1024/tmux-agent-workbench/releases/latest/download/tmux-agent-workbench-$attention_target.tar.gz"
+    fi
     if curl -fsSL "$attention_url" -o "$attention_tmp/archive.tar.gz" &&
        tar -xzf "$attention_tmp/archive.tar.gz" -C "$attention_tmp" &&
        [ -x "$attention_tmp/tmux-agent-workbench" ]; then
