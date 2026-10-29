@@ -306,7 +306,8 @@ sidebar pane. Activating a session or Agent with Enter or a left click also
 closes the popup after the navigation succeeds.
 
 Agent cards show the agent thread-name on the first line, falling back to the
-tmux window title before a name is available.
+tmux window title before a name is available. If that title is generic, the card
+shows `Blank session` until the task has a name.
 The second line shows task progress (when available), workspace session name,
 status, and agent type. Grouped mode shows the session name once above its
 agents; prioritized mode keeps it on each agent card, so

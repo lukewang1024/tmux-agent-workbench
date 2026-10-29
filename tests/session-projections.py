@@ -80,7 +80,8 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
         assert tmux('display-message', '-p', '-t', main, '#{window_name}') == value
         assert value in tmux('display-message', '-p', '-t', main,
                              '#{E:window-status-current-format}')
-        wait(lambda: value in screen(), 'CLI name rendered in sidebar')
+        wait(lambda: value in screen() and 'Blank session' not in screen(),
+             'CLI name rendered in sidebar')
 
     def converged(session, name, obsolete):
         current = agent()
@@ -96,8 +97,11 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
         owned = json.loads(tmux('show-option', '-wqv', '-t', main, '@workbench_task_title'))
         if not session.startswith(owned['owner']['session']):
             return False
-        # Generic window names are rendered using the session name.
-        if (name or 'projection-test') not in screen():
+        # An unnamed agent with a generic window title has an explicit placeholder.
+        rendered = screen()
+        if (name or 'Blank session') not in rendered:
+            return False
+        if name and 'Blank session' in rendered:
             return False
         checkpoints = list(Path(env['XDG_STATE_HOME']).glob('tmux-agent-workbench/servers/*.json'))
         return any(any(session.startswith(runtime.get('hook_session_id') or '!')
@@ -121,8 +125,11 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
                                        '-t', 'projection-test'], env=env, stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             wait(lambda: agent() is not None, 'agent discovery')
+            wait(lambda: 'Blank session' in screen(), 'unnamed agent rendered in sidebar')
             manual = str(uuid.uuid4())
             hook(manual)
+            wait(lambda: agent().get('hook_session_id') == manual and 'Blank session' in screen(),
+                 'unnamed hooked session rendered in sidebar')
             name_command(manual, '统一名称 Alpha')
             hook(manual, 'PostToolUse', thread_name='Cached provider name')
             index = Path(env['CODEX_HOME'], 'session_index.jsonl')
