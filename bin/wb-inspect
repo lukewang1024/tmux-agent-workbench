@@ -14,23 +14,68 @@ dir=$(CDPATH='' cd -- "$(dirname "$self")" && pwd -P)
 . "$dir/../lib/task-context.sh"
 usage() {
   echo 'usage: tmux-agent-workbench inspect <path> [--git|--editor|--shell] [--pane]' >&2
+  echo '       tmux-agent-workbench inspect <directory> [--pane] -- <argv...>' >&2
+  echo '       Files default to the editor; --pane opens tools on the right.' >&2
+}
+quote_arg() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 case ${1:-} in -h|--help) usage; exit 0 ;; esac
 [ $# -ge 1 ] || { usage; exit 2; }
 path=$1; shift
-mode=git
+mode=
 pane_mode=0
-for arg do
-  case $arg in
+command_string=
+while [ $# -gt 0 ]; do
+  case $1 in
     --git) mode=git ;;
     --editor) mode=editor ;;
     --shell) mode=shell ;;
     --pane) pane_mode=1 ;;
     --focus|--force) : ;; # compatibility; an explicit tool request is always honoured
-    *) echo "tmux-agent-workbench inspect: unknown option: $arg" >&2; exit 2 ;;
+    --)
+      shift
+      [ $# -gt 0 ] || { usage; exit 2; }
+      [ -z "$mode" ] || {
+        echo 'tmux-agent-workbench inspect: a command cannot be combined with --git, --editor, or --shell.' >&2
+        exit 2
+      }
+      mode='command'
+      for arg do
+        quoted=$(quote_arg "$arg")
+        if [ -n "$command_string" ]; then command_string="$command_string $quoted"
+        else command_string=$quoted
+        fi
+      done
+      break
+      ;;
+    *) echo "tmux-agent-workbench inspect: unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
-path=$(CDPATH='' cd "$path" && pwd -P) || exit 1
+file=
+if [ -f "$path" ]; then
+  case $mode in
+    ''|editor) mode=editor ;;
+    *) echo 'tmux-agent-workbench inspect: file paths require the editor.' >&2; exit 2 ;;
+  esac
+  # Resolve file symlinks before checking task ownership, just as cd -P does
+  # for directories. A symlink must not open another task's checkout.
+  case $path in /*) : ;; *) path=$PWD/$path ;; esac
+  links=0
+  while [ -L "$path" ]; do
+    links=$((links + 1))
+    [ "$links" -le 40 ] || { echo 'tmux-agent-workbench inspect: too many symlinks.' >&2; exit 1; }
+    target=$(readlink "$path")
+    case $target in /*) path=$target ;; *) path=$(dirname "$path")/$target ;; esac
+  done
+  file=$(basename "$path")
+  path=$(CDPATH='' cd "$(dirname "$path")" && pwd -P) || exit 1
+  file=$path/$file
+else
+  path=$(CDPATH='' cd "$path" && pwd -P) || exit 1
+fi
+[ -n "$mode" ] || mode=git
 caller=$(workbench_resolve_pane) || exit 1
 session=$(tmux display-message -p -t "$caller" '#{session_id}')
 if [ -n "$(tmux show-option -qv -t "$session" @workbench_workspace_root)" ] || \
@@ -48,7 +93,9 @@ case $mode in
   git) command_string=$(resolve_git_tool) ;;
   editor) command_string=$(resolve_editor) ;;
   shell) command_string=${SHELL:-/bin/sh} ;;
+  command) : ;; # The argv after -- was quoted above.
 esac
+[ -z "$file" ] || command_string="$command_string -- $(quote_arg "$file")"
 if [ "$pane_mode" = 0 ]; then
   set -- display-popup -t "$caller" -E -w 90% -h 90% -d "$path" -e "PATH=$PATH"
   [ -z "${WORKBENCH_TARGET_CLIENT:-}" ] || set -- "$@" -c "$WORKBENCH_TARGET_CLIENT"
@@ -57,15 +104,28 @@ if [ "$pane_mode" = 0 ]; then
   fi
   exec tmux "$@" "$command_string"
 fi
+window=$(tmux display-message -p -t "$caller" '#{window_id}')
+# Rebalance after editor exit, preserving focus and any later manual preset.
+layout_command="$(quote_arg "$dir/workbench-layout") main-vertical"
+exit_command="if [ \"\$(tmux show-option -wqv -t $window @workbench_layout_preset)\" = main-vertical ]; then $layout_command \"\$(tmux display-message -p -t $window '#{pane_id}')\" >/dev/null; fi"
 ready=workbench-tool-$$
-set -- split-window -d -v -t "$caller" -c "$path" \
-  -e "PATH=$PATH" -e "WORKBENCH_TOOL_COMMAND=$command_string" -e "WORKBENCH_TOOL_READY=$ready" -P -F '#{pane_id}'
+set -- split-window -d -h -t "$caller" -c "$path" \
+  -e "PATH=$PATH" -e "WORKBENCH_TOOL_COMMAND=$command_string" -e "WORKBENCH_TOOL_READY=$ready" \
+  -e "WORKBENCH_TOOL_EXIT=$exit_command" -P -F '#{pane_id}'
 if [ -n "${wb_task:-}" ]; then
   set -- "$@" -e "WORKBENCH_SESSION=$wb_session" -e "WORKBENCH_TASK=$wb_task" -e "WORKBENCH_FEATURE=$wb_direction"
 fi
 pane=$(tmux "$@" \
-  'tmux wait-for "$WORKBENCH_TOOL_READY"; exec /bin/sh -c "$WORKBENCH_TOOL_COMMAND"')
+  'trap : INT
+   tmux wait-for "$WORKBENCH_TOOL_READY"
+   /bin/sh -c "$WORKBENCH_TOOL_COMMAND"
+   tmux kill-pane -t "$TMUX_PANE" \; run-shell -b "$WORKBENCH_TOOL_EXIT"')
 tmux set-option -p -t "$pane" @pane_role tool
 tmux set-option -p -t "$pane" remain-on-exit off
+# The layout helper keeps the sidebar separate from the main/tool area.
+if ! "$dir/workbench-layout" main-vertical "$caller" >/dev/null; then
+  tmux kill-pane -t "$pane"
+  exit 1
+fi
 tmux wait-for -S "$ready"
 printf '%s\n' "$pane"

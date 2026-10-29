@@ -117,22 +117,39 @@ different task.
 ## Tools, commands, and task cleanup
 
 Task windows begin with their agent. There is no inspection layout and no
-mandatory Git, editor, scratchpad, or dev-server pane. Open tools only when
-needed:
+mandatory Git, editor, scratchpad, or dev-server pane. Use `inspect` for temporary
+tools that a human needs to view or interact with: files, Git history/diffs,
+commands awaiting a password, login or confirmation, log viewers, REPLs, and
+debuggers. Open tools only when needed:
 
 ```sh
 tmux-agent-workbench inspect <own-checkout>             # temporary Git popup
-tmux-agent-workbench inspect <own-checkout> --editor    # temporary editor popup
+tmux-agent-workbench inspect <own-checkout>/README.md --pane # file in editor
+tmux-agent-workbench inspect <own-checkout> --pane -- lazygit
+tmux-agent-workbench inspect <own-checkout> --pane -- less build.log
+tmux-agent-workbench inspect <own-checkout> --pane -- <interactive-command> [args...]
 tmux-agent-workbench inspect <own-checkout> --shell --pane
 ```
 
+Use the default popup for a quick interaction. Choose `--pane` for human input,
+side-by-side reading, or observation while the agent continues working. For
+human input, use the returned pane ID to identify or focus the waiting pane
+(`tmux select-pane -t <pane-id>`), tell the user what input is needed there, and
+wait before proceeding with dependent work. Keep the pane open while input is
+pending. Pass the command and each argument separately after `--`; use an
+explicit `sh -c '...'` when shell syntax is required.
+
 Popups and tool panes close when their command exits. Close any task-owned
 resources once their use is finished; preserve the user's pre-existing panes.
+Tool panes use `main-vertical`, with the main pane on the left and supporting
+panes sharing the right column equally. The sidebar retains its position and
+width. File paths default to the editor; directory paths default to the Git tool.
 The repo picker lists the owning task's repositories when run in a task window.
 
-Run one-shot builds, tests, lint, installs, and other commands through the
-agent's execution tools, including long one-shot work. Only persistent dev
-servers in a workspace use a supporting pane:
+Run noninteractive one-shot builds, tests, lint, installs, and other commands
+through the agent's execution tools, including long one-shot work. Use `inspect`
+when human interaction is required. Persistent dev servers in a workspace use
+`run`:
 
 ```sh
 tmux-agent-workbench run --name dev <own-checkout> -- npm run dev

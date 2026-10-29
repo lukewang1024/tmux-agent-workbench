@@ -667,7 +667,22 @@ to this public API and are retained for compatibility through 2.1.
   windows launch this automatically. Agent/profile pane metadata supports handoff.
 - **`tmux-agent-workbench inspect <path> [--git|--editor|--shell] [--pane]`** — opens
   one temporary tool, in a popup by default or a supporting pane with `--pane`.
-  It creates no window and no fixed layout. Exit the tool to close it. Legacy
+  A file path opens that file in `$VISUAL` / `$EDITOR` (falling back to Neovim or
+  Vim); directories default to the Git tool. For example,
+  `tmux-agent-workbench inspect ./README.md --pane` previews the file on the right.
+  To run a particular tool, use
+  `tmux-agent-workbench inspect <directory> [--pane] -- <argv...>`, for example
+  `tmux-agent-workbench inspect . --pane -- lazygit` or
+  `tmux-agent-workbench inspect . --pane -- less build.log`. Arguments after `--`
+  are passed literally; use an explicit `sh -c '...'` for shell syntax. This
+  command form cannot be combined with `--git`, `--editor`, or `--shell`.
+  Use a popup for a quick interaction and a pane for human input, side-by-side
+  reading, or temporary log observation and debugging. For a password or login
+  prompt, identify or focus the returned pane so the user can type there.
+  Panes use `main-vertical`: the main pane stays on the left and supporting panes
+  share the right column's height, preserving the sidebar. Exit the tool to close
+  its pane and rebalance the remaining tools. A manually changed layout is kept.
+  It creates no persistent inspection window. Legacy
   `--focus`/`--force` flags are accepted without recreating inspection windows.
 - **`tmux-agent-workbench pick repo [--git|--editor|--shell]`** — selects a directory
   for a temporary tool. Within a task it lists that task's checkouts; elsewhere
@@ -815,8 +830,9 @@ Keep only this reference in your global `AGENTS.md` / `CLAUDE.md`:
 
 The installer exposes the command but does not edit your agent instruction files.
 The conventions cover stable task names, one agent per ordinary window,
-workspace membership, and dev-server task panes. Updating Workbench updates the
-rules without copying them into each tool's configuration.
+workspace membership, temporary `inspect` tools and human input, and dev-server
+task panes. Updating Workbench updates the rules without copying them into each
+tool's configuration.
 
 ### Stable task names
 

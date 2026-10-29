@@ -191,6 +191,197 @@ class TaskWindows(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.windows(), ['first'])
 
+    def test_inspect_file_defaults_to_editor_and_preserves_literal_filename(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        file = self.task_root('first') / "app/notes ' $(touch injected).md"
+        file.write_text('# Preview\n')
+        record = self.root / 'editor-args'
+        self.write_script('preview-editor',
+                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(record))}\nexec sleep 300\n')
+        tool = self.cli('inspect', str(file), '--pane', pane=caller,
+                        extra={'VISUAL': f'{self.bin / "preview-editor"} --marker',
+                               'EDITOR': 'false'}).stdout.strip()
+        self.wait(record.exists)
+        self.assertEqual(record.read_text().splitlines(),
+                         [str(file.parent), '--marker', '--', str(file)])
+        self.assertFalse((file.parent / 'injected').exists())
+        self.assertEqual(self.tmux('display-message', '-p', '-t', tool, '#{window_id}'),
+                         self.tmux('display-message', '-p', '-t', caller, '#{window_id}'))
+        self.assertEqual(self.windows(), ['first'])
+
+    def test_inspect_file_rejects_other_tasks_and_escaping_symlinks(self):
+        self.new('first', 'app')
+        self.cli('task', 'new', 'second', 'app')
+        caller = self.pane('first')
+        foreign = self.task_root('second') / 'app/file'
+        symlink = self.task_root('first') / 'app/escape.md'
+        symlink.symlink_to(foreign)
+        for path in (foreign, symlink):
+            with self.subTest(path=path):
+                result = self.cli('inspect', str(path), '--pane', pane=caller, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('not a checkout owned by task first', result.stderr)
+        result = self.cli('inspect', str(self.task_root('first') / 'app/file'),
+                          '--git', '--pane', pane=caller, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}'), caller)
+
+    def test_inspect_file_works_in_an_ordinary_session(self):
+        caller = self.tmux('new-session', '-d', '-s', 'ordinary', '-P', '-F',
+                           '#{pane_id}', 'sleep', '300')
+        file = self.root / 'outside-repo.md'
+        file.write_text('# Outside a workspace\n')
+        record = self.root / 'editor-args'
+        self.write_script('preview-editor',
+                          f'printf "%s\\n" "$@" > {shlex.quote(str(record))}\nexec sleep 300\n')
+        self.cli('inspect', str(file), '--editor', '--pane', session=None, pane=caller,
+                 extra={'VISUAL': '', 'EDITOR': str(self.bin / 'preview-editor')})
+        self.wait(record.exists)
+        self.assertEqual(record.read_text().splitlines(), ['--', str(file)])
+
+    def test_inspect_command_receives_literal_arguments_and_interactive_terminal(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        directory = self.task_root('first') / 'app'
+        record = self.root / 'command-args'
+        answer = self.root / 'command-answer'
+        self.write_script('interactive-tool',
+                          '[ -t 0 ] && [ -t 1 ]\n'
+                          '[ -n "${HTTPS_PROXY:-}" ] && [ -n "${https_proxy:-}" ]\n'
+                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(record))}\n'
+                          'printf "Waiting for input: "\n'
+                          'IFS= read -r answer\n'
+                          f'printf "%s\\n" "$answer" > {shlex.quote(str(answer))}\n')
+        args = ['space here', "quote's", '', '$(touch injected)', '; touch injected', '--pane', '预览']
+        tool = self.cli('inspect', str(directory), '--pane', '--', str(self.bin / 'interactive-tool'),
+                        *args, pane=caller, extra={'HTTPS_PROXY': 'http://test-proxy.invalid:8443',
+                                                  'https_proxy': ''}).stdout.strip()
+        self.wait(record.exists)
+        self.assertEqual(record.read_text().splitlines(), [str(directory), *args])
+        self.assertFalse((directory / 'injected').exists())
+        self.assertIn(tool, self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+        self.tmux('send-keys', '-t', tool, '-l', 'user input')
+        self.tmux('send-keys', '-t', tool, 'Enter')
+        self.wait(answer.exists)
+        self.assertEqual(answer.read_text(), 'user input\n')
+        self.wait(lambda: tool not in self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+        self.assertEqual(self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}'), caller)
+        self.assertEqual(self.windows(), ['first'])
+
+    def test_inspect_command_exit_closes_the_pane_on_success_or_failure(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        self.tmux('set-option', '-w', '-t', caller, 'remain-on-exit', 'on')
+        for status in (0, 17):
+            with self.subTest(status=status):
+                tool = self.cli('inspect', str(self.task_root('first') / 'app'), '--pane', '--',
+                                '/bin/sh', '-c', f'exit {status}', pane=caller).stdout.strip()
+                self.wait(lambda: tool not in self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+                self.assertEqual(self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}'), caller)
+
+    def test_inspect_command_rejects_invalid_modes_and_foreign_directories(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        directory = self.task_root('first') / 'app'
+        for args in (('--',), ('--git', '--', 'true'), ('--editor', '--', 'true'),
+                     ('--shell', '--', 'true')):
+            with self.subTest(args=args):
+                result = self.cli('inspect', str(directory), '--pane', *args, pane=caller, check=False)
+                self.assertEqual(result.returncode, 2)
+        result = self.cli('inspect', str(directory / 'file'), '--pane', '--', 'true',
+                          pane=caller, check=False)
+        self.assertEqual(result.returncode, 2)
+        result = self.cli('inspect', str(self.code / 'app'), '--pane', '--', 'true',
+                          pane=caller, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not a checkout owned by task first', result.stderr)
+        self.assertEqual(self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}'), caller)
+
+    def test_inspect_panes_share_right_column_and_preserve_sidebar(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        self.tmux('resize-window', '-t', caller, '-x', '200', '-y', '60')
+        directory = self.task_root('first') / 'app'
+
+        def geometry(pane):
+            return tuple(map(int, self.tmux('display-message', '-p', '-t', pane,
+                                           '#{pane_left} #{pane_top} #{pane_width} #{pane_height}').split()))
+
+        for position in ('none', 'left', 'right'):
+            with self.subTest(sidebar=position):
+                sidebar = None
+                if position != 'none':
+                    self.tmux('set-option', '-g', '@sidebar_width', '18')
+                    self.tmux('set-option', '-g', '@sidebar_position', position)
+                    args = ['split-window', '-d', '-h', '-f', '-l', '18', '-t', caller]
+                    if position == 'left':
+                        args.append('-b')
+                    sidebar = self.tmux(*args, '-P', '-F', '#{pane_id}', 'sleep', '300')
+                    self.tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+                tools = [self.cli('inspect', str(directory), '--pane', pane=caller,
+                                  extra={'WORKBENCH_GIT_TOOL': 'sleep 300'}).stdout.strip()
+                         for _ in range(3)]
+                main = geometry(caller)
+                peers = [geometry(tool) for tool in tools]
+                self.assertEqual(main[0], 19 if position == 'left' else 0)
+                self.assertEqual(main[1], 0)
+                self.assertEqual(main[3], 60)
+                self.assertTrue(all(peer[0] == main[0] + main[2] + 1 for peer in peers))
+                self.assertEqual(len({peer[2] for peer in peers}), 1)
+                self.assertLessEqual(max(peer[3] for peer in peers) - min(peer[3] for peer in peers), 1)
+                self.assertEqual(sum(peer[3] for peer in peers) + 2, main[3])
+                self.assertEqual(self.tmux('display-message', '-p', '-t', caller, '#{pane_active}'), '1')
+                if sidebar:
+                    self.assertEqual(geometry(sidebar), (0 if position == 'left' else 182, 0, 18, 60))
+                # Exiting a middle tool must rebalance the remaining column
+                # while leaving the user's focus in another preview pane.
+                self.tmux('select-pane', '-t', tools[0])
+                self.tmux('send-keys', '-t', tools[1], 'C-c')
+                self.wait(lambda: tools[1] not in self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+                self.wait(lambda: abs(geometry(tools[0])[3] - geometry(tools[2])[3]) <= 1)
+                self.assertEqual(self.tmux('display-message', '-p', '-t', tools[0], '#{pane_active}'), '1')
+                self.assertEqual(self.windows(), ['first'])
+                for tool in (tools[0], tools[2]):
+                    self.tmux('kill-pane', '-t', tool)
+                if sidebar:
+                    self.tmux('kill-pane', '-t', sidebar)
+
+    @unittest.skipUnless(shutil.which('vim'), 'Vim is required for the editor smoke test')
+    def test_quitting_vim_closes_preview_even_with_remain_on_exit(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        self.tmux('resize-window', '-t', caller, '-x', '180', '-y', '40')
+        self.tmux('set-option', '-w', '-t', caller, 'remain-on-exit', 'on')
+        file = self.task_root('first') / 'app/preview.md'
+        contents = '# Workbench Markdown preview\n'
+        file.write_text(contents)
+        tool = self.cli('inspect', str(file), '--pane', pane=caller,
+                        extra={'VISUAL': '', 'EDITOR': 'vim -Nu NONE -n -i NONE'}).stdout.strip()
+        self.wait(lambda: contents.strip() in self.tmux('capture-pane', '-p', '-t', tool))
+        self.tmux('send-keys', '-t', tool, 'Escape', ':q', 'Enter')
+        self.wait(lambda: tool not in self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+        self.assertEqual(self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}'), caller)
+        self.assertEqual(file.read_text(), contents)
+
+    def test_tool_exit_keeps_manual_layout_and_existing_tmux_hooks(self):
+        self.new('first', 'app')
+        caller = self.pane('first')
+        self.tmux('resize-window', '-t', caller, '-x', '200', '-y', '60')
+        tools = [self.cli('inspect', str(self.task_root('first') / 'app'), '--pane', pane=caller,
+                          extra={'WORKBENCH_GIT_TOOL': 'sleep 300'}).stdout.strip()
+                 for _ in range(2)]
+        self.tmux('set-hook', '-g', 'after-kill-pane[777]',
+                  f'set-option -w -t {caller} @test_existing_hook called')
+        self.call([REPO / 'bin/workbench-layout', 'even-vertical', caller])
+        self.tmux('send-keys', '-t', tools[0], 'C-c')
+        self.wait(lambda: tools[0] not in self.tmux('list-panes', '-t', caller, '-F', '#{pane_id}').splitlines())
+        self.wait(lambda: self.tmux('show-option', '-wqv', '-t', caller, '@test_existing_hook') == 'called')
+        self.assertEqual(self.tmux('show-option', '-wqv', '-t', caller, '@workbench_layout_preset'),
+                         'even-vertical')
+        for pane in (caller, tools[1]):
+            self.assertEqual(self.tmux('display-message', '-p', '-t', pane, '#{pane_left} #{pane_width}'), '0 200')
+
     def test_task_cleanup_keeps_dirty_work_and_other_tasks(self):
         self.new('first', 'app', 'api')
         self.cli('task', 'new', 'second', 'app')
