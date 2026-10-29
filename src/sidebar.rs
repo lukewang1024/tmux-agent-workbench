@@ -1011,7 +1011,7 @@ pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
     }
     let topic = agent.target.window_name.trim();
     if !meaningful_topic(topic) {
-        &agent.target.session_name
+        "Blank session"
     } else {
         topic
     }
@@ -2213,6 +2213,36 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_agent_cards_show_a_blank_session() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let mut agent = snapshot.agents[0].clone();
+        agent.target.session_name = "Terminal tools".into();
+        agent.label = "Codex".into();
+        for hook_session_id in [None, Some("thread-id".to_owned())] {
+            agent.hook_session_id = hook_session_id;
+            for window in ["", " ", "codex", "Claude", "agent", "zsh", "shell"] {
+                agent.target.window_name = window.into();
+                let first = render_row(&Row::Agent(agent.clone()), false, 40);
+                let text = first
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert!(text.contains("Blank session"), "{window:?}: {text:?}");
+                assert!(!text.contains(&agent.target.session_name));
+            }
+        }
+
+        agent.target.window_name = "Custom window".into();
+        assert_eq!(agent_topic(&agent), "Custom window");
+        agent.label = "Legacy thread".into();
+        assert_eq!(agent_topic(&agent), "Legacy thread");
+        agent.thread_name = Some("Named thread".into());
+        assert_eq!(agent_topic(&agent), "Named thread");
+    }
+
+    #[test]
     fn long_chinese_topics_and_session_names_fit_narrow_agent_cards() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
@@ -2229,7 +2259,7 @@ mod tests {
             }
         }
         agent.target.window_name.clear();
-        assert_eq!(agent_topic(&agent), agent.target.session_name);
+        assert_eq!(agent_topic(&agent), "Blank session");
     }
 
     #[test]
