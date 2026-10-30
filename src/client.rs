@@ -295,6 +295,30 @@ impl ClientRegistry {
             .ok_or_else(|| "unknown endpoint".into())
     }
 
+    pub fn opener_for_attachment(&self, attachment: &str, now_ms: u64) -> Result<String, String> {
+        let endpoint = self
+            .endpoints
+            .values()
+            .find(|endpoint| {
+                endpoint.attachment.as_deref() == Some(attachment)
+                    && endpoint.detached_at_ms.is_none()
+            })
+            .ok_or("no Workbench client is attached to this terminal")?;
+        if now_ms.saturating_sub(endpoint.last_activity_ms) > OFFLINE_AFTER_MS {
+            return Err("the invoking Workbench client is offline".into());
+        }
+        if !endpoint
+            .capabilities
+            .contains(crate::client_actions::OPEN_URL_CAPABILITY)
+        {
+            return Err(
+                "update Workbench on the client device and reconnect to enable local URL opening"
+                    .into(),
+            );
+        }
+        Ok(endpoint.id.clone())
+    }
+
     pub fn queue(&mut self, endpoint_id: &str, event: SemanticEvent) -> Result<(), String> {
         let endpoint = self
             .endpoints

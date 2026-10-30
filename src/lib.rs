@@ -1,6 +1,7 @@
 pub mod attachment;
 pub mod checkpoint;
 pub mod client;
+pub mod client_actions;
 pub mod client_lease;
 pub mod client_protocol;
 pub mod config;
