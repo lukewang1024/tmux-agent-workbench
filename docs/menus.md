@@ -6,6 +6,7 @@ prefix M-m / tmux-agent-workbench menu
   Sidebar → overview, Switch session / agent / window / pane
   Tmux → window/session controls and agent launch
   Host / SSH → SSH destinations
+  Extract → general text / paragraphs / URL / file paths / lines / words / quoted text
   CPU / resources → status density and btop
   Interface → classic tmux menus / new list menus
 
@@ -22,6 +23,7 @@ statusbar tmux / prefix M-t
     Window → current Session's windows
     Pane → current Window's panes
     Session → Sessions only
+  Extract → the same text extraction submenu as the combined Menu
   Layout → zoom, even horizontal / vertical, main-vertical, tiled
   Kill → Agent / Window / Pane / Session
     Each shows its current target and requires confirmation
@@ -43,6 +45,15 @@ statusbar Agent / prefix M-a
     lead / workers + reported status → focus member
     restore main-vertical layout
 ```
+
+Extract uses the optional `tmux-extrakto` helper on the host, installed by the
+[dotfiles profile](https://github.com/lukewang1024/dotfiles/blob/main/util/shell/tmux-extrakto).
+Update that helper together with Workbench to enable the typed selections.
+General text, paragraphs, file paths, lines, words/identifiers and single- or
+double-quoted text default to Enter to copy and Tab to insert. URL uses Enter
+to open on the invoking device and Ctrl-Y to copy. All choices retain the pane
+and client that opened the menu; changing the active pane does not retarget them.
+The same submenu is available in the classic and new menu renderers.
 
 All action menus use `menu::Menu`, including legacy shell providers through the
 `display-menu` adapter. Content providers supply labels, keys and callbacks;
