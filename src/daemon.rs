@@ -71,6 +71,7 @@ struct State {
     notification_backend: SystemBackend,
     relay_sender: RelaySender,
     clients: ClientRegistry,
+    client_actions: crate::client_actions::Actions,
     server_incarnation: String,
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
     recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
@@ -170,6 +171,28 @@ struct ClientAttachmentParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OpenUrlParams {
+    attachment: String,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlStatusParams {
+    attachment: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlResultParams {
+    endpoint_id: String,
+    request_id: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClientRememberParams {
     attachment: String,
     pane: String,
@@ -230,6 +253,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
         clients: ClientRegistry::default(),
+        client_actions: crate::client_actions::Actions::default(),
         server_incarnation,
         recovered_pending,
         recovered_runtimes,
@@ -964,7 +988,24 @@ fn handle(
             state.clients.heartbeat(&params.endpoint_id, params.activity_unix_ms)?;
             refresh_notifications(&mut state, now_unix_ms());
             let events = state.clients.take_pending(&params.endpoint_id, now_unix_ms())?;
-            Ok(json!({"accepted": true, "events": events}))
+            let attachment = state.clients.attachment(&params.endpoint_id)?.map(str::to_owned);
+            let open_urls = state.client_actions.take(&params.endpoint_id, attachment.as_deref(), now_unix_ms());
+            Ok(json!({"accepted": true, "events": events, "open_urls": open_urls}))
+        }),
+        "client.open_url" => parse_params::<OpenUrlParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            let endpoint = state.clients.opener_for_attachment(&params.attachment, now_unix_ms())?;
+            let id = state.client_actions.enqueue(&endpoint, &params.attachment, params.url, now_unix_ms())?;
+            Ok(json!({"request_id": id}))
+        }),
+        "client.open_url_status" => parse_params::<OpenUrlStatusParams>(request.params).and_then(|params| {
+            let state = state.read().expect("state poisoned");
+            serde_json::to_value(state.client_actions.status(&params.attachment, &params.request_id, now_unix_ms())?)
+                .map_err(|error| error.to_string())
+        }),
+        "client.open_url_result" => parse_params::<OpenUrlResultParams>(request.params).and_then(|params| {
+            state.write().expect("state poisoned").client_actions.complete(&params.endpoint_id, &params.request_id, params.error, now_unix_ms())?;
+            Ok(json!({"accepted": true}))
         }),
         "client.focus" => parse_params::<ClientFocusParams>(request.params).and_then(|params| {
             let focus = match params.focused { Some(true) => FocusState::Focused, Some(false) => FocusState::Unfocused, None => FocusState::Unknown };

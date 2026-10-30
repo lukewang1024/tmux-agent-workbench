@@ -584,6 +584,29 @@ event's exact session, window, and pane. Closing the SSH attachment removes the
 endpoint. No listening port, reverse tunnel, or third-party push provider is
 required.
 
+The same authenticated channel can open a web link on the invoking device:
+
+```sh
+tmux-agent-workbench client open-url --client /dev/pts/9 'https://example.com/?x=1&y=2'
+```
+
+Pass the actual `#{client_name}` from a tmux key binding. Routing uses that
+client's exact authenticated attachment, so another phone or desktop viewing
+the same session cannot receive the request. The client runs `termux-open-url`
+on Android, `open` on macOS, `xdg-open` on Linux, or the Windows URL handler
+through PowerShell in WSL. This works independently of the terminal emulator's
+OSC extensions. Only HTTP and HTTPS URLs are accepted. POSIX helpers receive
+the URL as one process argument; WSL uses a quoted PowerShell string literal.
+The command returns the local helper's success or error.
+Delivery is bounded and a timeout never retries an open automatically.
+
+Both ends need the URL-opening capability. After updating a client, reconnect
+its SSH attachment to advertise it; existing clients without the capability
+receive a clear upgrade message rather than opening on the server. Compatible
+clients negotiate a one-second control heartbeat for prompt explicit actions;
+older clients retain the previous heartbeat interval. URL requests and results
+are transient memory only and are not checkpointed or added to snapshots.
+
 Reconnects restore the last session, window, and pane for that device and
 terminal. An explicit `--session` takes precedence. History lives in the target
 tmux server, survives Workbench daemon restarts, and expires with that server;

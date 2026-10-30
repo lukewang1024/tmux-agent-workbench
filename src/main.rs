@@ -201,6 +201,12 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ClientCommand {
+    /// Open a web URL on the device that owns the invoking tmux client.
+    OpenUrl {
+        #[arg(long)]
+        client: String,
+        url: String,
+    },
     #[command(hide = true)]
     Remember {
         #[arg(long)]
@@ -444,6 +450,11 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         return Err("client channel must begin with hello".into());
     };
     uuid::Uuid::parse_str(&device_id).map_err(|_| "invalid device id")?;
+    let heartbeat_seconds = if capabilities.iter().any(|c| c == "open-url") {
+        1
+    } else {
+        15
+    };
     ensure_daemon_quiet(paths)?;
     let registration = ipc_call(
         paths,
@@ -465,7 +476,7 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         &ClientMessage::Welcome {
             version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
             endpoint_id: endpoint_id.clone(),
-            heartbeat_seconds: 15,
+            heartbeat_seconds,
             attachment_token: token.clone(),
         },
     )?;
@@ -494,6 +505,23 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!([])),
                     )?;
+                let open_urls: Vec<tmux_agent_workbench::client_actions::OpenUrl> =
+                    serde_json::from_value(
+                        result
+                            .get("open_urls")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([])),
+                    )?;
+                for action in open_urls {
+                    write_frame(
+                        std::io::stdout().lock(),
+                        &ClientMessage::OpenUrl {
+                            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+                            request_id: action.request_id,
+                            url: action.url,
+                        },
+                    )?;
+                }
                 for event in &events {
                     write_frame(
                         std::io::stdout().lock(),
@@ -569,6 +597,15 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                         error,
                     },
                 )?;
+            }
+            Ok(ClientMessage::OpenUrlResult {
+                request_id, error, ..
+            }) => {
+                client_daemon_update(
+                    paths,
+                    "client.open_url_result",
+                    serde_json::json!({"endpoint_id": endpoint_id, "request_id": request_id, "error": error}),
+                );
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -850,6 +887,7 @@ fn client_attach(
                 "sound".into(),
                 "clipboard".into(),
                 "focus".into(),
+                "open-url".into(),
             ],
         },
     )?;
@@ -863,6 +901,7 @@ fn client_attach(
     let ClientMessage::Welcome {
         attachment_token,
         endpoint_id,
+        heartbeat_seconds,
         ..
     } = welcome
     else {
@@ -890,7 +929,8 @@ fn client_attach(
             platform_notify(&notification_paths, &event.0, &event.1, &event.2, &event.3)
                 .map_err(|error| error.to_string())
         });
-    let mut next_heartbeat = Instant::now() + Duration::from_secs(15);
+    let heartbeat_interval = Duration::from_secs(u64::from(heartbeat_seconds.clamp(1, 15)));
+    let mut next_heartbeat = Instant::now() + heartbeat_interval;
     let status = loop {
         if let Some(status) = pty.child.try_wait()? {
             break status;
@@ -914,7 +954,7 @@ fn client_attach(
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        next_heartbeat = Instant::now() + Duration::from_secs(15);
+        next_heartbeat = Instant::now() + heartbeat_interval;
         if let Some(stdin) = control.child.stdin.as_mut() {
             write_frame(
                 &mut *stdin,
@@ -955,6 +995,19 @@ fn client_attach(
                         );
                     }
                     ClientMessage::HeartbeatAck { .. } => break,
+                    ClientMessage::OpenUrl {
+                        request_id, url, ..
+                    } => {
+                        let error = platform_open_url(&url).err();
+                        write_frame(
+                            &mut *stdin,
+                            &ClientMessage::OpenUrlResult {
+                                version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+                                request_id,
+                                error,
+                            },
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -1096,6 +1149,79 @@ fn validate_ssh_host(host: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Err("SSH host must not begin with '-'".into());
     }
     validate_safe_name(host, "SSH host")
+}
+
+fn platform_open_url(url: &str) -> Result<(), String> {
+    tmux_agent_workbench::client_actions::validate_url(url)?;
+    let mut command = if std::env::var_os("TERMUX_VERSION").is_some() {
+        let mut command = ProcessCommand::new("termux-open-url");
+        command.arg(url);
+        command
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        let mut command = ProcessCommand::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Start-Process -FilePath '{}'",
+                url.replace('\'', "''")
+            ));
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = ProcessCommand::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = ProcessCommand::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    let status = optional_notifications::run(&mut command, Duration::from_secs(3))
+        .map_err(|error| format!("local URL opener failed: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("local URL opener exited with {status}"))
+    }
+}
+
+fn client_open_url(
+    paths: &Paths,
+    client: &str,
+    url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tmux_agent_workbench::client_actions::validate_url(url)?;
+    let server = ServerIdentity::discover()?;
+    let attachment = tmux_agent_workbench::tmux::Tmux::new(server)
+        .client_format(client, "#{client_tty}")?
+        .filter(|s| !s.is_empty())
+        .ok_or("the invoking tmux client is not attached")?;
+    let queued = ipc_call(
+        paths,
+        "client.open_url",
+        serde_json::json!({"attachment": attachment, "url": url}),
+    )?;
+    let id = queued
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing URL request id")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = ipc_call(
+            paths,
+            "client.open_url_status",
+            serde_json::json!({"attachment": attachment, "request_id": id}),
+        )?;
+        if result.get("completed").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(error.to_owned().into());
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("client URL opening timed out; no automatic retry was sent".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn platform_clipboard_write(text: &str) -> Result<(), String> {
@@ -1250,6 +1376,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Client { command } => match command {
+            ClientCommand::OpenUrl { client, url } => client_open_url(&paths, &client, &url)?,
             ClientCommand::Remember {
                 attachment,
                 pane,
