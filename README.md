@@ -616,6 +616,12 @@ clients negotiate a one-second control heartbeat for prompt explicit actions;
 older clients retain the previous heartbeat interval. URL requests and results
 are transient memory only and are not checkpointed or added to snapshots.
 
+An established attachment stays connected when optional daemon updates fail.
+If the daemon restarts or forgets a temporarily offline client, its next heartbeat
+restores the live terminal's registration and binding. Optional failures are
+recorded in the server's private Workbench daemon log instead of being printed
+over the terminal. A superseded or closed terminal cannot reclaim a newer one.
+
 Reconnects restore the last session, window, and pane for that device and
 terminal. An explicit `--session` takes precedence. History lives in the target
 tmux server, survives Workbench daemon restarts, and expires with that server;

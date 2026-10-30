@@ -42,6 +42,7 @@ pub enum DaemonError {
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub engine_version: &'static str,
+    pub runtime_revision: u32,
     pub protocol_version: u32,
     pub server: String,
     pub pid: u32,
@@ -138,7 +139,15 @@ struct ClientBindParams {
 #[serde(deny_unknown_fields)]
 struct ClientHeartbeatParams {
     endpoint_id: String,
-    activity_unix_ms: u64,
+    // Client and daemon clocks may differ. Presence is measured locally.
+    #[serde(rename = "activity_unix_ms")]
+    _activity_unix_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientRecoverParams {
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -876,6 +885,7 @@ fn handle(
             let generation = snapshot.read().expect("snapshot poisoned").generation;
             serde_json::to_value(Status {
                 engine_version: crate::ENGINE_VERSION,
+                runtime_revision: crate::DAEMON_RUNTIME_REVISION,
                 protocol_version: crate::IPC_PROTOCOL_VERSION,
                 server: server.socket_path.display().to_string(),
                 pid: std::process::id(),
@@ -928,8 +938,12 @@ fn handle(
             if let Some(id) = &params.terminal_id { uuid::Uuid::parse_str(id).map_err(|_| "invalid terminal id")?; }
             let (endpoint_id, attachment_token, replaced_attachments) = {
                 let mut state = state.write().expect("state poisoned");
+                let endpoint_id = uuid::Uuid::new_v4().to_string();
+                let attachment_token = uuid::Uuid::new_v4().to_string();
+                // Fence the old channel before changing or detaching its state.
+                crate::client_lease::mark_owner(paths, &server.key, &params.device_id, params.terminal_id.as_deref(), &endpoint_id).map_err(|error| format!("cannot record client owner: {error}"))?;
                 let replaced_attachments = state.clients.replace_terminal(&params.device_id, params.terminal_id.as_deref());
-                let (endpoint_id, attachment_token) = state.clients.register_terminal(params.device_id, params.terminal_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+                state.clients.register_terminal_with_ids(params.device_id, params.terminal_id, params.device_label, params.kind, params.capabilities, now_unix_ms(), endpoint_id.clone(), attachment_token.clone());
                 (endpoint_id, attachment_token, replaced_attachments)
             };
             for attachment in replaced_attachments {
@@ -941,6 +955,19 @@ fn handle(
                     .status();
             }
             Ok(json!({"endpoint_id": endpoint_id, "attachment_token": attachment_token, "heartbeat_seconds": 15}))
+        }),
+        "client.recover" => parse_params::<ClientRecoverParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            let (record, attachment) = crate::client_lease::recover(paths, &server.key, &params.token)
+                .map_err(|error| format!("client recovery unavailable: {error}"))?
+                .ok_or("client control is no longer active")?;
+            let now = now_unix_ms();
+            if attachment.is_none() && now.saturating_sub(record.registered_at_ms) > crate::client::ATTACHMENT_TOKEN_TTL_MS {
+                return Err("client attachment is no longer active".into());
+            }
+            let endpoint_id = record.endpoint_id.clone();
+            state.clients.recover(&record, attachment, now);
+            Ok(json!({"endpoint_id": endpoint_id, "recovered": true}))
         }),
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
@@ -985,7 +1012,7 @@ fn handle(
         }),
         "client.heartbeat" => parse_params::<ClientHeartbeatParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
-            state.clients.heartbeat(&params.endpoint_id, params.activity_unix_ms)?;
+            state.clients.heartbeat(&params.endpoint_id, now_unix_ms())?;
             refresh_notifications(&mut state, now_unix_ms());
             let events = state.clients.take_pending(&params.endpoint_id, now_unix_ms())?;
             let attachment = state.clients.attachment(&params.endpoint_id)?.map(str::to_owned);
