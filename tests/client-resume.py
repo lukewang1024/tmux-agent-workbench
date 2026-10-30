@@ -23,6 +23,7 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
         env.pop(name, None)
     for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
         env[name] = str(root / name)
+    env['XDG_RUNTIME_DIR'] = str(root)
 
     def tmux(*args):
         return subprocess.check_output(['tmux', '-S', socket, *args], env=env, text=True).strip()
@@ -50,13 +51,24 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
         assert len(size) == 4, proc.stderr.read()
         return json.loads(proc.stdout.read(struct.unpack('>I', size)[0]))
 
+    def heartbeat(channel, activity_ms=1):
+        write_frame(channel, dict(type='heartbeat', version=2, activity_unix_ms=activity_ms))
+        while True:
+            reply = read_frame(channel)
+            if reply['type'] == 'heartbeat_ack':
+                return
+
+    def registered(client):
+        snapshot = json.loads(subprocess.check_output([core, 'snapshot', '--json'], env=env, text=True))
+        return next((item for item in snapshot['clients'] if item['attachment'] == client), None)
+
     device = str(uuid.uuid4())
     terminal_a, terminal_b = str(uuid.uuid4()), str(uuid.uuid4())
 
     def key(terminal):
         return '@workbench-resume-' + hashlib.sha256((device + '\0' + terminal).encode()).hexdigest()
 
-    def connect(terminal=None, session=None):
+    def connect(terminal=None, session=None, exclude_client=None):
         channel = None
         args = [core, 'client', 'attach']
         if terminal:
@@ -71,7 +83,8 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
         pid, master = pty.fork()
         if pid == 0:
             os.execvpe(core, args, dict(env, SSH_TTY=os.ttyname(0)))
-        client = wait_for(lambda: tmux('list-clients', '-f', '#{session_attached}', '-F', '#{client_name}'), 'client did not attach')
+        client = wait_for(lambda: next((name for name in tmux('list-clients', '-f', '#{session_attached}', '-F', '#{client_name}').splitlines()
+                                      if name != exclude_client), None), 'client did not attach')
         observed_key = '@workbench-attachment-' + hashlib.sha256(client.encode()).hexdigest()
         wait_for(lambda: json.loads(tmux('show-options', '-gqv', observed_key) or '{}').get('pane_id') == client_value(client, '#{pane_id}'),
                  'live attachment target was not observed')
@@ -141,6 +154,65 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
             assert client_value(connection[2], '#{pane_id}') == beta, (client_value(connection[2], '#{session_name} #{pane_id}'), tmux('show-options', '-gqv', '@workbench-resume-last'))
             disconnect(connection, terminal_a)
             print('PASS terminal history survives daemon restart')
+        # Keep both SSH-side processes alive across a daemon restart. Their
+        # next heartbeat must restore the exact terminal and its attachment.
+        with running_daemon(core, env):
+            connection = connect(terminal_a, 'alpha')
+            heartbeat(connection[3], 1)  # a far-behind client clock
+            entry = wait_for(lambda: registered(connection[2]), 'client was not registered')
+            assert abs(entry['activity_unix_ms'] - int(time.time() * 1000)) < 10000, entry
+        with running_daemon(core, env):
+            assert tmux('list-clients', '-F', '#{client_name}') == connection[2]
+            heartbeat(connection[3], 2**63)  # a far-ahead client clock
+            entry = wait_for(lambda: registered(connection[2]), 'client did not recover after daemon restart')
+            assert abs(entry['activity_unix_ms'] - int(time.time() * 1000)) < 10000, entry
+            assert tmux('list-clients', '-F', '#{client_name}') == connection[2]
+            fields = tmux('display-message', '-p', '-t', 'beta',
+                          '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}').split('\t')
+            target = dict(session_id=fields[0], session_name=fields[1], window_id=fields[2],
+                          window_index=int(fields[3]), window_name=fields[4], pane_id=fields[5], pane_index=int(fields[6]))
+            write_frame(connection[3], dict(type='focus_target', version=2, event_id='recovered-click', target=target))
+            wait_for(lambda: client_value(connection[2], '#{session_name} #{pane_id}') == 'beta ' + beta,
+                     'notification click did not focus the recovered attachment')
+            disconnect(connection, terminal_a)
+            print('PASS live attachment and notification focus recover after daemon restart despite client clock skew')
+        # A restart between registration and PTY binding must restore the
+        # still-live single-use token before attach-pty retries its bind.
+        with running_daemon(core, env):
+            channel = subprocess.Popen([core, 'client', 'serve'], env=env,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            write_frame(channel, dict(type='hello', version=2, device_id=device,
+                                      terminal_id=terminal_a, device_label='test', kind='termux', capabilities=[]))
+            welcome = read_frame(channel)
+        with running_daemon(core, env):
+            pid, master = pty.fork()
+            if pid == 0:
+                os.execvpe(core, [core, 'client', 'attach-pty', '--bind', welcome['attachment_token'], '--session', 'alpha'],
+                           dict(env, SSH_TTY=os.ttyname(0)))
+            client = wait_for(lambda: tmux('list-clients', '-f', '#{session_attached}', '-F', '#{client_name}'),
+                              'client did not bind after daemon restart')
+            observed_key = '@workbench-attachment-' + hashlib.sha256(client.encode()).hexdigest()
+            wait_for(lambda: json.loads(tmux('show-options', '-gqv', observed_key) or '{}').get('pane_id') == client_value(client, '#{pane_id}'),
+                     'recovered binding was not observed')
+            disconnect((pid, master, client, channel), terminal_a)
+            print('PASS registration token survives restart before PTY binding')
+        # The earlier control process is deliberately kept alive after its
+        # PTY was replaced. It cannot reclaim the newer terminal on recovery.
+        with running_daemon(core, env):
+            old = connect(terminal_a, 'alpha')
+            new = connect(terminal_a, 'beta', exclude_client=old[2])
+            os.waitpid(old[0], 0)
+            os.close(old[1])
+        with running_daemon(core, env):
+            heartbeat(old[3])
+            heartbeat(new[3])
+            wait_for(lambda: registered(new[2]), 'new terminal did not recover')
+            assert tmux('list-clients', '-F', '#{client_name}') == new[2]
+            write_frame(old[3], dict(type='goodbye', version=2))
+            _, error = old[3].communicate(timeout=5)
+            assert error == b'', error
+            disconnect(new, terminal_a)
+            print('PASS superseded control cannot reclaim or detach the newer terminal')
         before = tmux('list-sessions', '-F', '#{session_id}')
         missing = subprocess.run([core, 'client', 'attach', '--session', 'missing-session'], env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
