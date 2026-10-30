@@ -174,6 +174,11 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
             write_frame(connection[3], dict(type='focus_target', version=2, event_id='recovered-click', target=target))
             wait_for(lambda: client_value(connection[2], '#{session_name} #{pane_id}') == 'beta ' + beta,
                      'notification click did not focus the recovered attachment')
+            # tmux 3.7 can report empty detach-hook targets. Wait for the
+            # daemon's attachment observer to record the switched target before
+            # detaching; the test above checks the click independently.
+            wait_for(lambda: json.loads(tmux('show-options', '-gqv', key(terminal_a)) or '{}').get('pane_id') == beta,
+                     'recovered terminal target was not observed')
             disconnect(connection, terminal_a)
             print('PASS live attachment and notification focus recover after daemon restart despite client clock skew')
         # A restart between registration and PTY binding must restore the
