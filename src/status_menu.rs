@@ -5,6 +5,8 @@ use crate::{
     paths::Paths,
 };
 use clap::{Args, ValueEnum};
+use serde::{Deserialize, Serialize};
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -37,7 +39,8 @@ pub enum View {
     Team,
     Botmux,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Tool {
     #[default]
     Codex,
@@ -63,7 +66,8 @@ impl Tool {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Preset {
     #[default]
     Single,
@@ -89,7 +93,8 @@ impl Preset {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Scene {
     #[default]
     Daily,
@@ -195,6 +200,87 @@ impl MenuOptions {
     }
 }
 
+// Remember choices, never a cwd, session, prompt or shell command. Quick Agent
+// starts a fresh session in the invoking pane using the launcher's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LaunchSettings {
+    tool: Tool,
+    preset: Preset,
+    scene: Scene,
+    panes: bool,
+}
+
+impl LaunchSettings {
+    fn from_options(options: &MenuOptions) -> Self {
+        Self {
+            tool: options.tool,
+            preset: options.preset,
+            scene: if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                options.scene
+            } else {
+                Scene::Daily
+            },
+            panes: options.preset.is_team() && options.panes,
+        }
+    }
+
+    fn options(&self, options: &MenuOptions) -> MenuOptions {
+        MenuOptions {
+            tool: self.tool,
+            preset: self.preset,
+            scene: self.scene,
+            panes: self.panes,
+            launch_error: None,
+            ..options.clone()
+        }
+    }
+
+    fn load(paths: &Paths) -> Result<Option<Self>> {
+        match std::fs::read(paths.state_dir.join("last-agent-launch.json")) {
+            Ok(bytes) => {
+                let settings: Self = serde_json::from_slice(&bytes)?;
+                launch_argv(&settings.options(&MenuOptions::default()))?;
+                Ok(Some(settings))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, paths: &Paths) -> Result<()> {
+        std::fs::create_dir_all(&paths.state_dir)?;
+        let temporary = paths
+            .state_dir
+            .join(format!(".last-agent-launch-{}.json", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<()> {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            serde_json::to_writer(file, self)?;
+            std::fs::rename(&temporary, paths.state_dir.join("last-agent-launch.json"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn description(&self) -> String {
+        let mut parts = vec![self.tool.label(), self.preset.label()];
+        if matches!(self.tool, Tool::Codex | Tool::Traex) {
+            parts.insert(1, self.scene.name());
+        }
+        if self.preset.is_team() {
+            parts.push(if self.panes { "tmux" } else { "Native" });
+        }
+        parts.push("Auto approval");
+        parts.join(" · ")
+    }
+}
+
 // Callbacks pass through tmux format expansion as well as the shell. Keep
 // external diagnostics opaque in that path; quoting alone does not protect #{}.
 fn encode_launch_error(error: &str) -> String {
@@ -215,6 +301,7 @@ fn decode_launch_error(value: &str) -> std::result::Result<String, String> {
 struct Action {
     id: String,
     label: String,
+    subtitle: Option<String>,
     key: char,
     command: ActionCommand,
 }
@@ -232,7 +319,7 @@ enum ActionCommand {
     Usage,
     Host(String),
     Botmux(String),
-    Launch,
+    Launch(LaunchSettings),
     Focus(String),
     AgentTarget(String),
     Disabled,
@@ -261,12 +348,47 @@ impl Action {
         Self {
             id: id.into(),
             label: label.into(),
+            subtitle: None,
             key,
             command,
         }
     }
     fn note(label: &str) -> Self {
         Self::new("", label, ' ', ActionCommand::Disabled)
+    }
+}
+
+fn quick_agent(settings: Result<Option<LaunchSettings>>) -> Action {
+    let (subtitle, command) = match settings {
+        Ok(Some(settings)) => {
+            let available =
+                executable(settings.tool.name()) && settings.preset.available(settings.tool);
+            let subtitle = settings.description();
+            (
+                subtitle,
+                if available {
+                    ActionCommand::Launch(settings)
+                } else {
+                    ActionCommand::Disabled
+                },
+            )
+        }
+        Ok(None) => (
+            tr("Create an Agent first", "先创建一次 Agent 即可复用").into(),
+            ActionCommand::Disabled,
+        ),
+        Err(_) => (
+            tr(
+                "Saved combination unavailable; choose Agent",
+                "上次配置不可用，请选择 Agent",
+            )
+            .into(),
+            ActionCommand::Disabled,
+        ),
+    };
+    Action {
+        subtitle: Some(subtitle),
+        ..Action::new("quick-agent", "Quick Agent", 'q', command)
     }
 }
 
@@ -545,11 +667,11 @@ fn run_with_context(
         if let Err(error) = execute_action(selected, context, client, options, kind) {
             // This is an interactive callback: report the failure in the
             // client's status line instead of leaving a run-shell output pager.
-            if matches!(selected.command, ActionCommand::Launch) {
+            if let ActionCommand::Launch(settings) = &selected.command {
                 let next = MenuOptions {
                     view: View::Configure,
                     launch_error: Some(error.to_string()),
-                    ..options.clone()
+                    ..settings.options(options)
                 };
                 return run(kind, pane, client, None, 0, stay_open, &next);
             }
@@ -610,6 +732,7 @@ fn run_with_context(
                     action.id.clone()
                 },
                 label: action.label.clone(),
+                subtitle: action.subtitle.clone(),
                 key: if enabled && action.key != '\0' {
                     crate::menu_footer::key_name(action.key)
                 } else {
@@ -700,6 +823,7 @@ fn actions(
         }
         View::Create => {
             title = tr("Create", "创建 · Create").into();
+            actions.push(quick_agent((|| LaunchSettings::load(&Paths::discover()?))()));
             actions.extend([
                 nav("launch", "Agent", 'a', kind, options.at(View::Launch)),
                 tmux_action("new", "Window", 'w', &["new-window"]),
@@ -903,6 +1027,7 @@ fn actions(
                     ));
                 }
             }
+            actions.push(Action::note("Auto approval"));
             actions.push(Action {
                 id: "summary".into(),
                 ..Action::note("")
@@ -918,7 +1043,7 @@ fn actions(
                     "start",
                     tr("▶ Launch", "▶ 启动"),
                     '\r',
-                    ActionCommand::Launch,
+                    ActionCommand::Launch(LaunchSettings::from_options(options)),
                 ));
             } else {
                 actions.push(Action::note(tr(
@@ -1115,6 +1240,13 @@ fn actions(
             StatusMenuKind::Tmux => {
                 actions.extend([
                     nav(
+                        "create",
+                        tr("Create", "创建 · Create"),
+                        'c',
+                        kind,
+                        options.at(View::Create),
+                    ),
+                    nav(
                         "switch",
                         tr("Switch", "切换 · Switch"),
                         's',
@@ -1122,20 +1254,13 @@ fn actions(
                         options.at(View::Switch),
                     ),
                     nav(
-                        "create",
-                        tr("Create", "创建 · Create"),
-                        'c',
-                        kind,
-                        options.at(View::Create),
-                    ),
-                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
-                    nav(
                         "panes",
                         tr("Layout", "布局 · Layout"),
                         'l',
                         kind,
                         options.at(View::Panes),
                     ),
+                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
                     tmux_action("detach", "Detach", 'd', &["detach-client"]),
                 ]);
             }
@@ -1538,6 +1663,14 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
             args.push("--tmux".into());
         }
     }
+    // agent-team otherwise defaults Team to YOLO, which conflicts with Codex's
+    // automatic reviewer flag. Select auto explicitly for every tool and mode.
+    args.push("--no-yolo".into());
+    args.extend(match options.tool {
+        Tool::Codex => vec!["--approve-for-me".into()],
+        Tool::Claude | Tool::Traex => vec!["--permission-mode".into(), "auto".into()],
+        Tool::Opencode => vec!["--auto".into()],
+    });
     Ok(args)
 }
 
@@ -1780,8 +1913,9 @@ fn execute_action(
                 &format!("exec ssh-connect connect {}", shell_quote(host)),
             ])?;
         }
-        ActionCommand::Launch => {
-            let args = launch_argv(options)?;
+        ActionCommand::Launch(settings) => {
+            let options = settings.options(options);
+            let args = launch_argv(&options)?;
             if matches!(options.tool, Tool::Codex | Tool::Traex) {
                 let output = Command::new(&args[0])
                     .args(&args[1..])
@@ -1831,6 +1965,14 @@ fn execute_action(
                     options.tool.name(),
                     &command,
                 ])?;
+            }
+            if let Err(error) = (|| settings.save(&Paths::discover()?))() {
+                // The new window already exists. Do not reopen Launch and
+                // encourage an accidental duplicate when only saving failed.
+                message(
+                    client,
+                    &format!("Agent started; could not save Quick Agent: {error}"),
+                )?;
             }
         }
         ActionCommand::Focus(pane) => {
@@ -1995,7 +2137,7 @@ mod tests {
         );
     }
     #[test]
-    fn launch_combinations_are_explicit_and_do_not_override_permissions() {
+    fn every_launch_combination_uses_automatic_approval_without_yolo() {
         for tool in [Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode] {
             for preset in [Preset::Single, Preset::Team] {
                 for panes in [false, true] {
@@ -2007,13 +2149,75 @@ mod tests {
                     })
                     .unwrap();
                     assert_eq!(args.contains(&"--tmux".into()), panes && preset.is_team());
-                    assert!(
-                        args.iter()
-                            .all(|a| !a.contains("approve") && !a.contains("permission"))
-                    );
+                    assert!(args.contains(&"--no-yolo".into()));
+                    assert!(!args.contains(&"--yolo".into()));
+                    let flags: &[&str] = match tool {
+                        Tool::Codex => &["--approve-for-me"],
+                        Tool::Claude | Tool::Traex => &["--permission-mode", "auto"],
+                        Tool::Opencode => &["--auto"],
+                    };
+                    assert_eq!(&args[args.len() - flags.len()..], flags);
                 }
             }
         }
+    }
+
+    #[test]
+    fn quick_agent_remembers_choices_without_conversation_or_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: directory.path().join("config"),
+            state_dir: directory.path().join("state"),
+            cache_dir: directory.path().join("cache"),
+            runtime_dir: directory.path().join("runtime"),
+        };
+        assert!(LaunchSettings::load(&paths).unwrap().is_none());
+        assert!(matches!(
+            quick_agent(Ok(None)).command,
+            ActionCommand::Disabled
+        ));
+        let options = MenuOptions {
+            tool: Tool::Codex,
+            scene: Scene::Computer,
+            preset: Preset::Team,
+            panes: true,
+            launch_error: Some("old failure".into()),
+            ..Default::default()
+        };
+        let settings = LaunchSettings::from_options(&options);
+        settings.save(&paths).unwrap();
+        assert_eq!(
+            LaunchSettings::load(&paths).unwrap(),
+            Some(settings.clone())
+        );
+        assert!(settings.options(&options).launch_error.is_none());
+        let saved = paths.state_dir.join("last-agent-launch.json");
+        assert_eq!(
+            std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 4);
+        assert!(settings.description().contains("computer"));
+        assert!(settings.description().contains("tmux"));
+        std::fs::write(
+            &saved,
+            r#"{"tool":"codex","preset":"team","scene":"unknown","panes":true}"#,
+        )
+        .unwrap();
+        assert!(LaunchSettings::load(&paths).is_err());
+        assert!(matches!(
+            quick_agent(LaunchSettings::load(&paths)).command,
+            ActionCommand::Disabled
+        ));
+        std::fs::write(
+            &saved,
+            r#"{"tool":"traex","preset":"single","scene":"computer","panes":false}"#,
+        )
+        .unwrap();
+        assert!(LaunchSettings::load(&paths).is_err());
     }
     #[test]
     fn codex_has_four_scenes_two_modes_without_adjustments() {
@@ -2249,7 +2453,7 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["switch", "create", "kill", "panes", "detach"]
+            ["create", "switch", "panes", "kill", "detach"]
         );
         for view in [View::Switch, View::Create, View::Kill] {
             let (_, group) = actions(
@@ -2263,11 +2467,16 @@ mod tests {
             assert_eq!(
                 group
                     .iter()
+                    .filter(|action| action.id != "quick-agent")
                     .take(4)
                     .map(|action| action.label.as_str())
                     .collect::<Vec<_>>(),
                 ["Agent", "Window", "Pane", "Session"]
             );
+            if view == View::Create {
+                assert_eq!(group[0].id, "quick-agent");
+                assert!(group[0].subtitle.is_some());
+            }
             assert!(group.iter().any(|action| matches!(&action.command,
                 ActionCommand::Navigate(StatusMenuKind::Tmux, next) if action.id == "back" && next.view == View::Root)));
             assert!(

@@ -10,21 +10,22 @@ prefix M-m / tmux-agent-workbench menu
   Interface → classic tmux menus / new list menus
 
 statusbar tmux / prefix M-t
-  Switch → Agent / Window / Pane / Session
-    Agent → running Agents only
-    Window → current Session's windows
-    Pane → current Window's panes
-    Session → Sessions only
-  Create → Agent / Window / Pane / Session
+  Create → Quick Agent / Agent / Window / Pane / Session
+    Quick Agent → repeat last successful combination in the source directory
     Agent → installed tool → scene / mode / collaboration → Launch
     Window → new shell in source directory
     Pane → split below / right in source directory
     Session → name, create in source directory, enter
     Open project in VS Code (when installed)
+  Switch → Agent / Window / Pane / Session
+    Agent → running Agents only
+    Window → current Session's windows
+    Pane → current Window's panes
+    Session → Sessions only
+  Layout → zoom, even horizontal / vertical, main-vertical, tiled
   Kill → Agent / Window / Pane / Session
     Each shows its current target and requires confirmation
     Agent terminates the verified foreground Agent process only
-  Layout → zoom, even horizontal / vertical, main-vertical, tiled
   Detach → this client only
 
 statusbar Agent / prefix M-a
@@ -264,9 +265,19 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
-The tmux root menu exposes Switch (`s`), Create (`c`), Kill (`k`), Layout (`l`)
-and Detach (`d`), in that order. Switch, Create and Kill all start with Agent
-(`a`), Window (`w`), Pane (`p`) and Session (`s`). Back returns to the immediate
+The tmux root menu exposes Create (`c`), Switch (`s`), Layout (`l`), Kill (`k`)
+and Detach (`d`), in that order. Create's first item is Quick Agent (`q`),
+whose gray subtitle shows the last successful menu launch's tool, scene,
+Single/Team and Native/tmux choices. Either row starts a fresh conversation
+in the source pane's current directory. The choices are saved atomically in
+`$XDG_STATE_HOME/tmux-agent-workbench/last-agent-launch.json`; they are updated
+only after a successful launch, and missing or invalid state disables Quick
+Agent. Ordinary Agent creation remains available. All menu launches use each
+CLI's automatic approval mode and explicitly disable the launcher's default
+YOLO flags with `--no-yolo`.
+
+Create then offers Agent (`a`), Window (`w`), Pane (`p`) and Session (`s`);
+Switch and Kill start with those four objects. Back returns to the immediate
 group, including after a scoped switch list or Agent launch configuration.
 Kill shows the source target and a separate confirmation; its callback rechecks
 the pane identity, and Agent termination additionally checks the process
