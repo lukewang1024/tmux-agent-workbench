@@ -460,6 +460,27 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.as_str())
         .ok_or("daemon returned no attachment token")?
         .to_owned();
+    let server = ServerIdentity::discover()?;
+    let mut diagnostics = ClientDiagnostics::default();
+    let record = tmux_agent_workbench::client_lease::ControlRecord {
+        endpoint_id: endpoint_id.clone(),
+        device_id,
+        terminal_id,
+        device_label,
+        kind,
+        capabilities,
+        token: token.clone(),
+        registered_at_ms: now_ms(),
+    };
+    // A failed optional recovery record must not prevent the SSH attachment.
+    let _control_lease =
+        match tmux_agent_workbench::client_lease::control(paths, &server.key, &record) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                diagnostics.record(paths, "client.recovery", &error.to_string());
+                None
+            }
+        };
     write_frame(
         std::io::stdout().lock(),
         &ClientMessage::Welcome {
@@ -486,6 +507,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.heartbeat",
                     serde_json::json!({"endpoint_id": endpoint_id, "activity_unix_ms": activity_unix_ms}),
+                    &token,
+                    &mut diagnostics,
                 );
                 let events: Vec<tmux_agent_workbench::semantic::SemanticEvent> =
                     serde_json::from_value(
@@ -525,6 +548,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.focus",
                     serde_json::json!({"endpoint_id": endpoint_id, "focused": focused, "overlay_visible": false, "target": target}),
+                    &token,
+                    &mut diagnostics,
                 );
             }
             Ok(ClientMessage::EventAccepted { event_id, .. }) => {
@@ -532,6 +557,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.accepted",
                     serde_json::json!({"endpoint_id": endpoint_id, "event_id": event_id}),
+                    &token,
+                    &mut diagnostics,
                 );
             }
             Ok(ClientMessage::FocusTarget {
@@ -991,17 +1018,39 @@ fn client_attach_pty(
     let tty = std::env::var("SSH_TTY")
         .or_else(|_| std::env::var("TTY"))
         .unwrap_or_else(|_| "unknown".into());
-    let binding = ipc_call(
-        paths,
-        "client.bind",
-        serde_json::json!({"token": token, "attachment": tty}),
-    )?;
+    let bind_params = serde_json::json!({"token": token, "attachment": tty});
+    let binding = match ipc_call(paths, "client.bind", bind_params.clone()) {
+        Err(error) if daemon_remote_error(&*error, "unknown attachment token") => {
+            ipc_call(paths, "client.recover", serde_json::json!({"token": token}))?;
+            ipc_call(paths, "client.bind", bind_params)?
+        }
+        result => result?,
+    };
     // Resolve the tmux server explicitly. In a test or helper process the
     // inherited TMUX value may describe an attached client, while the
     // Workbench socket option is the authoritative server identity. Letting
     // `tmux attach-session` infer its target can switch or detach the current
     // PTY, which makes the next popup observe a vanished client.
     let server = ServerIdentity::discover()?;
+    let endpoint_id = binding
+        .get("endpoint_id")
+        .and_then(|value| value.as_str())
+        .ok_or("daemon returned no endpoint id")?;
+    // The lock is held for exactly the lifetime of the remote PTY process.
+    // Without it, recovery cannot safely associate a reused tty with a client.
+    let _binding_lease = match tmux_agent_workbench::client_lease::binding(
+        paths,
+        &server.key,
+        token,
+        endpoint_id,
+        &tty,
+    ) {
+        Ok(lease) => Some(lease),
+        Err(error) => {
+            ClientDiagnostics::default().record(paths, "client.binding", &error.to_string());
+            None
+        }
+    };
     let mut command = ProcessCommand::new("tmux");
     command.args(server.tmux_args());
     // `attach-pty` may be invoked from a helper launched inside another tmux
@@ -2051,19 +2100,72 @@ fn parse_display_state(value: &str) -> Result<DisplayState, String> {
     }
 }
 
-// After registration, daemon bookkeeping is an optional side channel. In
-// particular a busy daemon's two-second read timeout must not tear down SSH.
+#[derive(Default)]
+struct ClientDiagnostics {
+    last: HashMap<String, (String, Instant)>,
+}
+
+impl ClientDiagnostics {
+    fn record(&mut self, paths: &Paths, method: &str, error: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let now = Instant::now();
+        if self.last.get(method).is_some_and(|(previous, at)| {
+            previous == error && now.duration_since(*at) < Duration::from_secs(300)
+        }) {
+            return;
+        }
+        self.last.insert(method.to_owned(), (error.to_owned(), now));
+        let Ok(server) = ServerIdentity::discover() else {
+            return;
+        };
+        if fs::create_dir_all(&paths.state_dir).is_err() {
+            return;
+        }
+        if let Ok(mut log) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(paths.log_for_server(&server.key))
+        {
+            let _ = log.set_permissions(fs::Permissions::from_mode(0o600));
+            let _ = writeln!(log, "{} client {} skipped: {}", now_ms(), method, error);
+        }
+    }
+}
+
+fn daemon_remote_error(error: &(dyn std::error::Error + 'static), message: &str) -> bool {
+    matches!(error.downcast_ref::<tmux_agent_workbench::ipc::ClientError>(),
+        Some(tmux_agent_workbench::ipc::ClientError::Remote { code, message: actual })
+            if code == "request_failed" && actual == message)
+}
+
+// After registration, daemon bookkeeping is an optional side channel. A lost
+// registry can be rebuilt from the still-live control and PTY processes.
 fn client_daemon_update(
     paths: &Paths,
     method: &str,
     params: serde_json::Value,
+    token: &str,
+    diagnostics: &mut ClientDiagnostics,
 ) -> serde_json::Value {
-    match ipc_call(paths, method, params) {
-        Ok(result) => result,
+    let mut result = ipc_call(paths, method, params.clone());
+    if result
+        .as_ref()
+        .is_err_and(|error| daemon_remote_error(&**error, "unknown endpoint"))
+    {
+        result = match ipc_call(paths, "client.recover", serde_json::json!({"token": token})) {
+            Ok(_) => ipc_call(paths, method, params),
+            Err(error) => Err(error),
+        };
+    }
+    match result {
+        Ok(result) => {
+            diagnostics.last.remove(method);
+            result
+        }
         Err(error) => {
-            eprintln!(
-                "tmux-agent-workbench: {method} skipped; terminal remains connected: {error}"
-            );
+            diagnostics.record(paths, method, &error.to_string());
             serde_json::Value::Null
         }
     }
@@ -2233,8 +2335,14 @@ fn ensure_server_runtime(
             .and_then(|value| value.get("pid"))
             .and_then(|value| value.as_u64())
             .and_then(|value| u32::try_from(value).ok());
+        let runtime_revision = response
+            .result
+            .as_ref()
+            .and_then(|value| value.get("runtime_revision"))
+            .and_then(|value| value.as_u64());
         if response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
             && version == tmux_agent_workbench::ENGINE_VERSION
+            && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))
             && daemon_pid.is_some_and(running_executable_matches)
         {
             let pid = daemon_pid
@@ -2323,8 +2431,7 @@ fn running_executable_matches(pid: u32) -> bool {
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn running_executable_matches(_pid: u32) -> bool {
-    // Engine/protocol checks remain the portable fallback. Platforms without
-    // procfs should bump ENGINE_VERSION when the daemon method table changes.
+    // Engine/protocol/runtime-revision checks remain the portable fallback.
     true
 }
 
