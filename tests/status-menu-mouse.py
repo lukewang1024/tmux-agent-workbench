@@ -893,7 +893,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # Every submenu uses the same navigation, including Configure and
         # views with no available actions. Escape must never open its parent.
         for view in ('switch', 'create', 'create-pane', 'kill', 'kill-agent', 'kill-window', 'kill-pane', 'kill-session',
-                     'launch', 'configure', 'panes', 'more', 'team', 'botmux', 'agent-target'):
+                     'launch', 'configure', 'panes', 'more', 'reset-card', 'team', 'botmux', 'agent-target'):
             args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client, '--view', view]
             parent = (b'choose agent' if view == 'configure' else b'Create' if view in ('launch', 'create-pane')
                       else b'Kill' if view.startswith('kill-') else b'Detach')

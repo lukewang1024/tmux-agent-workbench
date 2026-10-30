@@ -982,7 +982,9 @@ fn actions(
         }
         View::Botmux => {
             title = "Botmux".into();
-            back = View::More;
+            if kind == StatusMenuKind::Agent {
+                back = View::More;
+            }
             actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
             if context.agent.is_some() {
                 if context.role.as_deref().is_some_and(|role| role != "lead") {
@@ -1957,20 +1959,25 @@ mod tests {
         assert!(reset_card_actions(&copied).is_empty());
     }
     #[test]
-    fn botmux_back_returns_to_more() {
-        let (_, actions) = actions(
-            StatusMenuKind::Agent,
-            &MenuOptions {
-                view: View::Botmux,
-                ..Default::default()
-            },
-            &context(Some(AgentKind::Codex), BaseState::Idle),
-        );
-        let back = actions.iter().find(|action| action.id == "back").unwrap();
-        assert!(matches!(
-            &back.command,
-            ActionCommand::Navigate(StatusMenuKind::Agent, options) if options.view == View::More
-        ));
+    fn botmux_back_returns_to_its_parent() {
+        for (kind, parent) in [
+            (StatusMenuKind::Agent, View::More),
+            (StatusMenuKind::Tmux, View::Root),
+        ] {
+            let (_, actions) = actions(
+                kind,
+                &MenuOptions {
+                    view: View::Botmux,
+                    ..Default::default()
+                },
+                &context(Some(AgentKind::Codex), BaseState::Idle),
+            );
+            let back = actions.iter().find(|action| action.id == "back").unwrap();
+            assert!(matches!(
+                &back.command,
+                ActionCommand::Navigate(next, options) if *next == kind && options.view == parent
+            ));
+        }
     }
     #[test]
     fn catalogs_are_provider_specific() {
