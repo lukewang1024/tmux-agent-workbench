@@ -132,6 +132,7 @@ fn choose_at(
             .map(|(index, label)| crate::menu::Item {
                 id: index.to_string(),
                 label: label.clone(),
+                subtitle: None,
                 key: String::new(),
                 command: String::new(),
                 enabled: true,
@@ -152,6 +153,7 @@ pub fn prompt(title: &str, label: &str) -> Result<Option<String>, Box<dyn std::e
         items: vec![crate::menu::Item {
             id: "submit".into(),
             label: crate::ui_language::text("Create", "创建").into(),
+            subtitle: None,
             key: "Enter".into(),
             command: String::new(),
             enabled: true,

@@ -357,9 +357,15 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu starts with **Switch**, **Create**, **Kill**, **Layout**, and
-**Detach**. The first three groups start with **Agent**, **Window**, **Pane**,
-and **Session**, in that order. Kill shows its target for confirmation and
+The tmux menu starts with **Create**, **Switch**, **Layout**, **Kill**, and
+**Detach**. Create starts with **Quick Agent** (`q`), followed by **Agent**,
+**Window**, **Pane**, and **Session**. Quick Agent repeats the last successful
+menu launch's tool, scene, Single/Team and Native/tmux choices in the current
+directory, creating a fresh conversation. Its gray second line shows that
+combination. It becomes available after the first successful menu launch;
+cancelled and failed launches leave the saved combination unchanged. Switch
+and Kill start with **Agent**, **Window**, **Pane**, and **Session**, in that
+order. Kill shows its target for confirmation and
 rechecks its identity before acting. Switch Window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
 and running Agents have separate server-wide views. In both menu modes these views share Sidebar's
@@ -397,7 +403,10 @@ agent start claude
 agent start opencode --team
 ```
 
-Workbench adds no approval-bypass flags. Single and native Team open one new
+Menu launches, including Quick Agent, use automatic approval: Codex's
+`--approve-for-me`, Claude and Trae's `--permission-mode auto`, or OpenCode's
+`--auto`. Workbench passes `--no-yolo` to the launcher so Team's default
+does not conflict with automatic review. Single and native Team open one new
 window; pane Team lets `agent-team` create its own window, with no launcher
 pane left behind. Presentation is chosen at launch and never mixed mid-session.
 
