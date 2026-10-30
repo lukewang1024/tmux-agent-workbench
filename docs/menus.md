@@ -29,9 +29,15 @@ statusbar tmux / prefix M-t
 
 statusbar Agent / prefix M-a
   actual foreground CLI + state + source pane + team role
-  frequent task commands: goal / side question / plan / compact (where supported)
+  frequent task commands: goal / side question / Codex fast (where supported)
   installed grill-me / handoff skills (prefill, no Enter)
-  More commands
+  Usage summary (current CLI)
+    Codex with codex-reset-card installed: Usage & reset cards
+    Schedule earliest available card · 5 min before expiry (skill request)
+    View / adjust scheduled tasks (skill request)
+  More
+    plan / compact / branching / status / configuration (where supported)
+    Botmux (when installed)
   Team members & progress (pane teams only)
     lead / workers + reported status → focus member
     restore main-vertical layout
@@ -103,8 +109,8 @@ parent menu.
   model request, clear a draft, submit Enter, or answer an approval themselves.
 - Codex's busy-safe subset follows the local upstream
   `codex-rs/tui/src/slash_command.rs::available_during_task`; `/fork` and
-  `/compact` require idle. The main menu prioritizes `/goal`, `/side`, `/plan`, and `/compact`.
-  Session branching, diff, status, model and permission controls live in More. Codex `/side` and `/btw` share the same handler; the menu uses only
+  `/compact` require idle. The main menu prioritizes `/goal`, `/side`, and `/fast`.
+  Planning, compaction, session branching, diff, status, model and permission controls live in More. Codex `/side` and `/btw` share the same handler; the menu uses only
   `/side` to match Codex terminology.
 - Claude's catalog follows its [interactive-mode documentation](https://code.claude.com/docs/en/interactive-mode)
   and [command reference](https://code.claude.com/docs/en/commands).
@@ -113,7 +119,7 @@ parent menu.
   not a discovery mechanism for installed plugins or custom slash commands.
 - TraeX 0.205.1's embedded command descriptions distinguish `/btw` (one-shot,
   no tools) from `/side` (an ephemeral fork). The main menu exposes `/goal`,
-  `/btw`, `/plan`, `/compact`; the distinct `/side` action lives in More.
+  `/btw`; planning, compaction and the distinct `/side` action live in More.
   Unrecognized CLIs get no guessed slash-command catalog.
 - `grill-me` and `handoff` are pinned when a `SKILL.md` exists in the active
   tool's project or global skill directories. Project discovery stops at the

@@ -33,6 +33,18 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         env.pop(key, None)
     for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = str(root / key)
+    env['HOME'] = str(root / 'home')
+    env['CODEX_HOME'] = str(root / 'home/.codex')
+    env['TRAE_HOME'] = str(root / 'home/.trae')
+    Path(env['HOME']).mkdir()
+    # Keep Usage offline and independent of the developer's real account.
+    usage_state = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench/usage'
+    usage_state.mkdir(parents=True)
+    for source in ('codex', 'claude', 'trae', 'opencode'):
+        (usage_state / source).write_text('Test D1K W2K M3K | Lpro:7d 50%L\n')
+    (usage_state / 'codex-limits.json').write_text(json.dumps({'payload': {'reset_credits': {
+        'availableCount': 1, 'credits': [{'status': 'available', 'expiresAt': int(time.time()) + 86400}],
+    }}}))
     shim = root / 'bin'
     shim.mkdir()
     (shim / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
@@ -101,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     legacy_wrapper.chmod(0o755)
     legacy_path = str(legacy_bin) + ':' + env['PATH']
     project = root / 'project'
-    for name in ('grill-me', 'handoff'):
+    for name in ('grill-me', 'handoff', 'codex-reset-card'):
         skill = project / '.agents/skills' / name
         skill.mkdir(parents=True)
         (skill / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: Menu fixture\n---\n')
@@ -124,7 +136,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # Menu callbacks run via run-shell -b after the menu process exits.
         deadline = time.monotonic() + 5
         while True:
-            content = tmux('capture-pane', '-p', '-t', target)
+            content = tmux('capture-pane', '-p', '-J', '-t', target)
             if expected in content:
                 return
             if time.monotonic() >= deadline:
@@ -1078,7 +1090,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('kill-window', '-t', other)
         drain()
         print('PASS agent action targets source pane after active window changes')
-        for key, expected in [(b'q', '$grill-me'), (b'h', '$handoff')]:
+        for key, expected in [(b'q', '$grill-me'), (b'h', '$handoff'), (b'f', '/fast')]:
             tmux('send-keys', '-t', pane, 'C-u')
             drain()
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
@@ -1086,12 +1098,23 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             rendered = wait_for_text(menu)
             assert b'/goal' in screen_text(rendered) and b'grill-me' in screen_text(rendered) and b'handoff' in screen_text(rendered)
             assert b'/fork' not in screen_text(rendered) and b'/status' not in screen_text(rendered)
+            assert b'/plan' not in screen_text(rendered) and b'/compact' not in screen_text(rendered)
+            assert b'/fast' in screen_text(rendered) and b'Botmux' not in screen_text(rendered)
             os.write(master, key)
             menu.wait(timeout=3)
             drain(0.3)
             wait_for_pane_text(expected, pane)
         tmux('send-keys', '-t', pane, 'C-u')
-        print('PASS goal and installed pinned skills on main menu; skills prefill only')
+        print('PASS shorter Agent root keeps goal, side, fast and pinned skills; actions prefill only')
+        menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'More...')
+        os.write(master, b'm')
+        wait_for_text(client_process, b'/plan', b'/compact', b'/permissions')
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(.7)
+        print('PASS Plan, Compact and permissions remain available under More')
         tmux('select-pane', '-t', pane, '-T', '⠋ Codex')
         for _ in range(60):
             snapshot = json.loads(subprocess.check_output([core, 'snapshot', '--json'], env=env))
@@ -1101,7 +1124,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
         assert b'working' in screen_text(rendered) and b'grill-me' in screen_text(rendered) and b'handoff' in screen_text(rendered)
-        assert b'/side' in screen_text(rendered) and b'/btw' not in screen_text(rendered)
+        assert b'/side' in screen_text(rendered) and b'/fast' in screen_text(rendered) and b'/btw' not in screen_text(rendered)
         os.write(master, b'q')
         menu.wait(timeout=3)
         drain(0.3)
@@ -1115,16 +1138,52 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
-        assert b'Usage summary...' in screen_text(rendered), rendered
+        assert b'Usage & reset cards...' in screen_text(rendered), rendered
         os.write(master, b'u')
         menu.wait(timeout=3)
-        wait_for_text(client_process, 'Usage · OpenCode'.encode())
-        os.write(master, b'\x1b')
-        drain(.7)
+        wait_for_text(client_process, 'Usage · Codex'.encode(), b'Schedule card', b'View / adjust')
+        assert tmux('show-option', '-gqv', '@workbench-usage-source') == 'opencode'
+        os.write(master, b's')
+        wait_for_pane_text('$codex-reset-card', pane)
+        wait_for_pane_text('task status.', pane)
+        content = tmux('capture-pane', '-p', '-J', '-t', pane)
+        assert '5 minutes' in content and 'reuse' in content
+        tmux('send-keys', '-t', pane, 'C-u')
+        drain(.3)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 80, 0, 0))
         os.kill(client_process.pid, signal.SIGWINCH)
         drain(.3)
-        print('PASS narrow Agent menu opens usage summary')
+        print('PASS narrow Usage opens the current Codex account and prefills the reset-card scheduling skill')
+        reset_env = dict(env, WORKBENCH_SOURCE_PANE=pane, WORKBENCH_USAGE_SOURCE='codex')
+        for mode in ('old', 'new'):
+            assert ui(mode) == mode
+            menu = open_menu([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
+                             env=reset_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu, b'Schedule card', b'View / adjust')
+            os.write(master, b'a')
+            menu.wait(timeout=3)
+            wait_for_pane_text('reschedule it.', pane)
+            assert '$codex-reset-card' in tmux('capture-pane', '-p', '-J', '-t', pane)
+            tmux('send-keys', '-t', pane, 'C-u')
+            drain(.3)
+        print('PASS both menu renderers expose reset-task inspection without submitting it')
+        reset_model = json.loads(subprocess.check_output(
+            [core, 'status-menu', 'agent', '--view', 'reset-card', '--pane', pane,
+             '--client', client, '--json'], env=env, text=True))
+        reset_callback = next(item['command'] for item in reset_model['items'] if item['id'] == 'reset-card-schedule')
+        reset_skill = project / '.agents/skills/codex-reset-card/SKILL.md'
+        reset_skill.rename(reset_skill.with_suffix('.disabled'))
+        missing_skill = json.loads(subprocess.check_output(
+            [core, 'status-menu', 'agent', '--view', 'reset-card', '--pane', pane,
+             '--client', client, '--json'], env=env, text=True))
+        assert not any(item['id'].startswith('reset-card-') for item in missing_skill['items'])
+        reset_skill.with_suffix('.disabled').rename(reset_skill)
+        readonly = subprocess.run(
+            [core, 'status-menu', 'agent', '--pane', pane, '--client', client,
+             '--json', '--action', '/fast'], env=env, capture_output=True)
+        assert readonly.returncode != 0
+        assert '/fast' not in tmux('capture-pane', '-p', '-t', pane)
+        print('PASS reset actions require the installed skill and JSON menu reads cannot execute commands')
         menu = open_menu([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu)
@@ -1151,6 +1210,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         drain(0.4)
         assert '/side' not in tmux('capture-pane', '-p', '-t', pane)
+        subprocess.run(['tmux', '-S', socket, 'source-file', '-t', pane, '-'],
+                       input=reset_callback + '\n', env=env, text=True, check=True)
+        drain(.4)
+        assert '$codex-reset-card' not in tmux('capture-pane', '-p', '-t', pane)
         wait_for_pane_command(pane, ('sh', 'bash', 'dash'))
         wait_for_agent_actions(pane, '0')
         menu = open_menu([str(repo / 'bin/workbench-menu'), 'agent', client, pane],
@@ -1450,7 +1513,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         tmux('kill-pane', '-t', sidebar)
         menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'agent', client, pane],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu)
+        wait_for_text(menu, b'Team members & progress...')
         os.write(master, b't')
         wait_for_text(client_process, b'worker_a')
         drain(0.2)

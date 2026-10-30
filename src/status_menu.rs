@@ -33,6 +33,7 @@ pub enum View {
     Configure,
     AgentTarget,
     More,
+    ResetCard,
     Team,
     Botmux,
 }
@@ -130,6 +131,9 @@ impl Scene {
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct MenuOptions {
+    /// Read the menu model and guarded callbacks without opening a popup.
+    #[arg(long, hide = true)]
+    pub json: bool,
     #[arg(long, hide = true)]
     pub from_menu: bool,
     #[arg(long, value_enum, default_value = "daily")]
@@ -427,6 +431,9 @@ pub fn run(
     options: &MenuOptions,
 ) -> Result<()> {
     crate::ui_language::set_language(options.language.as_deref());
+    if options.json && (action.is_some() || options.focus_agent) {
+        return Err("JSON menu reads cannot execute an action or change focus".into());
+    }
     validate_pane(pane)?;
     if kind == StatusMenuKind::Agent && options.focus_agent && action.is_none() {
         return open_agent_status(pane, client, stay_open, options);
@@ -627,21 +634,21 @@ fn run_with_context(
             }
         })
         .collect();
-    crate::menu::display(
-        crate::menu::Menu {
-            title,
-            items,
-            searchable: false,
-            prompt: None,
-            pager: Some(crate::menu::Pager {
-                before_page: base,
-                after_page: String::new(),
-            }),
-        },
-        pane,
-        client,
-        page,
-    )
+    let menu = crate::menu::Menu {
+        title,
+        items,
+        searchable: false,
+        prompt: None,
+        pager: Some(crate::menu::Pager {
+            before_page: base,
+            after_page: String::new(),
+        }),
+    };
+    if options.json {
+        println!("{}", serde_json::to_string(&menu)?);
+        return Ok(());
+    }
+    crate::menu::display(menu, pane, client, page)
 }
 
 fn nav(id: &str, label: &str, key: char, kind: StatusMenuKind, options: MenuOptions) -> Action {
@@ -975,6 +982,7 @@ fn actions(
         }
         View::Botmux => {
             title = "Botmux".into();
+            back = View::More;
             actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
             if context.agent.is_some() {
                 if context.role.as_deref().is_some_and(|role| role != "lead") {
@@ -1011,6 +1019,21 @@ fn actions(
         }
         View::More => {
             actions.extend(agent_commands(context, true));
+            if kind == StatusMenuKind::Agent && botmux_available() {
+                actions.push(nav(
+                    "botmux",
+                    "Botmux...",
+                    'b',
+                    kind,
+                    options.at(View::Botmux),
+                ));
+            }
+        }
+        View::ResetCard => {
+            title = tr("Codex reset cards", "Codex 重置卡").into();
+            if kind == StatusMenuKind::Agent {
+                actions.extend(reset_card_actions(context));
+            }
         }
         View::Root => match kind {
             StatusMenuKind::Menu => {
@@ -1132,10 +1155,20 @@ fn actions(
                         }
                     }
                 }
-                if !agent_commands(context, true).is_empty() {
+                actions.push(Action::new(
+                    "usage",
+                    if reset_card_installed(context) {
+                        tr("Usage & reset cards...", "用量与重置卡...")
+                    } else {
+                        tr("Usage summary...", "使用量总结...")
+                    },
+                    'u',
+                    ActionCommand::Usage,
+                ));
+                if !agent_commands(context, true).is_empty() || botmux_available() {
                     actions.push(nav(
                         "more",
-                        "More commands...",
+                        tr("More...", "更多..."),
                         'm',
                         kind,
                         options.at(View::More),
@@ -1174,28 +1207,6 @@ fn actions(
             }
         },
     }
-    if options.view == View::Root
-        && matches!(kind, StatusMenuKind::Agent)
-        && executable("botmux")
-        && executable("python3")
-        && executable("workbench-botmux")
-    {
-        actions.push(nav(
-            "botmux",
-            "Botmux...",
-            'f',
-            kind,
-            options.at(View::Botmux),
-        ));
-    }
-    if options.view == View::Root && matches!(kind, StatusMenuKind::Agent) {
-        actions.push(Action::new(
-            "usage",
-            tr("Usage summary...", "使用量总结..."),
-            'u',
-            ActionCommand::Usage,
-        ));
-    }
     if options.view != View::Root {
         actions.push(nav(
             "back",
@@ -1217,6 +1228,56 @@ fn actions(
         ));
     }
     (title, actions)
+}
+
+fn botmux_available() -> bool {
+    executable("botmux") && executable("python3") && executable("workbench-botmux")
+}
+
+fn reset_card_installed(context: &Context) -> bool {
+    context.agent.as_ref().is_some_and(|agent| {
+        agent.kind == AgentKind::Codex
+            && crate::menu_skills::installed(agent.kind, &context.cwd, "codex-reset-card")
+    })
+}
+
+fn reset_card_actions(context: &Context) -> Vec<Action> {
+    if !context.input_available
+        || !matches!(context.state, BaseState::Idle | BaseState::Working)
+        || !reset_card_installed(context)
+    {
+        return vec![];
+    }
+    [
+        (
+            "reset-card-schedule",
+            tr("Schedule card · 5 min before expiry", "到期前 5 分钟用卡"),
+            's',
+            tr(
+                "Schedule the earliest-expiring available Codex reset card for 5 minutes before its expiration. If a task already exists for this card, verify and reuse it. Schedule only this one card, and report the execution time, expiration and task status.",
+                "查询可用 Codex 重置卡，将最早到期的一张安排在到期前 5 分钟使用；如果已有该卡的定时任务，核对并复用。只安排这一张，完成后报告执行时间、到期时间和任务状态。",
+            ),
+        ),
+        (
+            "reset-card-manage",
+            tr("View / adjust scheduled tasks", "查看／调整定时任务"),
+            'a',
+            tr(
+                "Inspect existing Codex reset-card timers and redemption receipts. List each task's name, selected card, execution time and current status so I can cancel or reschedule it.",
+                "查询现有 Codex 重置卡定时任务及执行回执，列出任务名称、对应卡片、执行时间和当前状态，以便我取消或改期。",
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, key, request)| {
+        Action::new(
+            id,
+            label,
+            key,
+            ActionCommand::Agent(format!("$codex-reset-card {request}")),
+        )
+    })
+    .collect()
 }
 
 fn agent_title(context: &Context) -> String {
@@ -1253,21 +1314,22 @@ fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
         AgentKind::Codex => &[
             ("/goal", 'g', true, false),
             ("/side", 's', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/fast", 'f', true, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/fork", 'f', false, true),
             ("/diff", 'd', true, true),
             ("/status", 'i', true, true),
             ("/model", 'm', true, true),
-            ("/permissions", 'p', true, true),
+            ("/permissions", 'a', true, true),
         ],
         AgentKind::Claude => &[
             ("/btw", 'b', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/status", 'i', false, true),
             ("/model", 'm', false, true),
-            ("/permissions", 'p', false, true),
+            ("/permissions", 'a', false, true),
             ("/resume", 'r', false, true),
             ("/help", 'h', false, true),
         ],
@@ -1276,14 +1338,14 @@ fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
         AgentKind::Trae => &[
             ("/goal", 'g', false, false),
             ("/btw", 'b', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/side", 's', false, true),
             ("/help", 'h', false, true),
         ],
         AgentKind::Opencode => &[
             ("/sessions", 's', false, false),
-            ("/compact", 'c', false, false),
+            ("/compact", 'c', false, true),
             ("/models", 'm', false, true),
             ("/help", 'h', false, true),
             ("/details", 'd', false, true),
@@ -1639,11 +1701,25 @@ fn execute_action(
                     options.at(View::Root).route()
                 ))
             );
-            let status = Command::new("workbench-agent-usage")
+            let mut command = Command::new("workbench-agent-usage");
+            command
                 .args(["menu", client])
                 .env("WORKBENCH_MENU_PARENT", parent)
                 .env("WORKBENCH_SOURCE_PANE", &context.pane)
-                .status()?;
+                .env("WORKBENCH_USAGE_GUARD", &context.guard)
+                .env("TMUX_AGENT_WORKBENCH_LANGUAGE", crate::ui_language::name());
+            if let Some(agent) = &context.agent {
+                command.env(
+                    "WORKBENCH_USAGE_SOURCE",
+                    match agent.kind {
+                        AgentKind::Codex => "codex",
+                        AgentKind::Claude => "claude",
+                        AgentKind::Trae => "trae",
+                        AgentKind::Opencode => "opencode",
+                    },
+                );
+            }
+            let status = command.status()?;
             if !status.success() {
                 return Err("could not open usage summary".into());
             }
@@ -1837,8 +1913,64 @@ mod tests {
         let cmds = agent_commands(&context(Some(AgentKind::Codex), BaseState::Working), false);
         assert!(cmds.iter().any(|a| a.id == "/side"));
         assert!(cmds.iter().any(|a| a.id == "/goal"));
+        assert!(cmds.iter().any(|a| a.id == "/fast"));
         assert!(!cmds.iter().any(|a| a.id == "/plan" || a.id == "/compact"));
         assert!(!cmds.iter().any(|a| a.id == "/fork"));
+    }
+    #[test]
+    fn infrequent_commands_live_in_more_and_fast_is_codex_only() {
+        for kind in [
+            AgentKind::Codex,
+            AgentKind::Claude,
+            AgentKind::Trae,
+            AgentKind::Opencode,
+        ] {
+            let context = context(Some(kind), BaseState::Idle);
+            let main = agent_commands(&context, false);
+            assert!(!main.iter().any(|a| a.id == "/plan" || a.id == "/compact"));
+            assert_eq!(
+                main.iter().any(|a| a.id == "/fast"),
+                kind == AgentKind::Codex
+            );
+            let more = agent_commands(&context, true);
+            assert!(more.iter().any(|a| a.id == "/compact"));
+            if kind != AgentKind::Opencode {
+                assert!(more.iter().any(|a| a.id == "/plan"));
+            }
+        }
+    }
+    #[test]
+    fn reset_cards_require_a_codex_prompt_that_accepts_input() {
+        for kind in [
+            None,
+            Some(AgentKind::Claude),
+            Some(AgentKind::Trae),
+            Some(AgentKind::Opencode),
+        ] {
+            assert!(reset_card_actions(&context(kind, BaseState::Idle)).is_empty());
+        }
+        for state in [BaseState::Blocked, BaseState::Unknown] {
+            assert!(reset_card_actions(&context(Some(AgentKind::Codex), state)).is_empty());
+        }
+        let mut copied = context(Some(AgentKind::Codex), BaseState::Idle);
+        copied.input_available = false;
+        assert!(reset_card_actions(&copied).is_empty());
+    }
+    #[test]
+    fn botmux_back_returns_to_more() {
+        let (_, actions) = actions(
+            StatusMenuKind::Agent,
+            &MenuOptions {
+                view: View::Botmux,
+                ..Default::default()
+            },
+            &context(Some(AgentKind::Codex), BaseState::Idle),
+        );
+        let back = actions.iter().find(|action| action.id == "back").unwrap();
+        assert!(matches!(
+            &back.command,
+            ActionCommand::Navigate(StatusMenuKind::Agent, options) if options.view == View::More
+        ));
     }
     #[test]
     fn catalogs_are_provider_specific() {
@@ -2050,6 +2182,7 @@ mod tests {
                     View::Configure,
                     View::AgentTarget,
                     View::More,
+                    View::ResetCard,
                     View::Team,
                     View::Botmux,
                 ] {

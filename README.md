@@ -402,14 +402,21 @@ window; pane Team lets `agent-team` create its own window, with no launcher
 pane left behind. Presentation is chosen at launch and never mixed mid-session.
 
 The Agent menu includes **Usage summary** (`u`) to open plan limits and token
-usage, including when the narrow status bar hides the usage badge.
+usage for its current CLI, including when the narrow status bar hides the usage
+badge. Codex labels this **Usage & reset cards** when the `codex-reset-card`
+skill is installed. Its Usage menu offers **Schedule card · 5 min before expiry**
+and **View / adjust scheduled tasks**. These prefill complete requests for that
+skill in the opening Codex pane; press Enter to submit. Scheduling chooses the
+earliest-expiring available card and reuses an existing task for that card.
+The skill owns persistent scheduling and redemption receipts.
 The Host menu shows the current machine's hostname above its SSH destinations.
 
 The Agent menu belongs to the pane from which it was opened. It identifies the
 live foreground CLI from its process ancestry and offers provider-specific
-commands: goal, side question, planning and compaction where supported.
-Installed `grill-me` and `handoff` skills are pinned alongside them. Session
-branching, status and configuration commands live under **More**. Shells, background or
+commands: goal, side question and Codex Fast where supported.
+Installed `grill-me` and `handoff` skills are pinned alongside them. Planning,
+compaction, session branching, status, configuration and Botmux live under
+**More**. Shells, background or
 noninteractive agents, approval prompts, unknown states, and tmux copy mode do
 not receive slash commands. Working agents get only documented busy-safe
 shortcuts. Commands **prefill without Enter** and do not erase an existing

@@ -3,6 +3,16 @@ use crate::model::AgentKind;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn shortcuts(kind: AgentKind, cwd: &str) -> Vec<(&'static str, char, String)> {
+    discover(kind, &roots(kind, cwd))
+}
+
+pub(crate) fn installed(kind: AgentKind, cwd: &str, name: &str) -> bool {
+    roots(kind, cwd)
+        .iter()
+        .any(|root| root.join(name).join("SKILL.md").is_file())
+}
+
+fn roots(kind: AgentKind, cwd: &str) -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return vec![];
     };
@@ -53,7 +63,7 @@ pub(crate) fn shortcuts(kind: AgentKind, cwd: &str) -> Vec<(&'static str, char, 
             ]);
         }
     }
-    discover(kind, &roots)
+    roots
 }
 
 fn discover(kind: AgentKind, roots: &[PathBuf]) -> Vec<(&'static str, char, String)> {
