@@ -23,6 +23,7 @@ pub enum View {
     Root,
     Interface,
     Switch,
+    Extract,
     Create,
     CreatePane,
     Kill,
@@ -315,6 +316,7 @@ enum ActionCommand {
     SetUi(crate::ui::Mode),
     Sidebar,
     Metrics,
+    Extract(&'static str),
     Agent(String),
     Usage,
     Host(String),
@@ -810,6 +812,35 @@ fn actions(
     };
     let mut back = View::Root;
     match options.view {
+        View::Extract => {
+            title = tr("Extract", "提取 · Extract").into();
+            for (filter, label, key) in [
+                ("all", tr("General text", "通用文本"), 'a'),
+                ("paragraph", tr("Paragraphs", "段落"), 'p'),
+                ("url", "URL", 'u'),
+                ("path", tr("File paths", "文件路径"), 'f'),
+                ("line", tr("Lines", "整行"), 'l'),
+                ("word", tr("Words / identifiers", "单词 / 标识符"), 'w'),
+                ("quote", tr("Double-quoted text", "双引号文本"), 'd'),
+                ("s-quote", tr("Single-quoted text", "单引号文本"), 's'),
+            ] {
+                let mut action = Action::new(
+                    &format!("extract:{filter}"),
+                    label,
+                    key,
+                    ActionCommand::Extract(filter),
+                );
+                action.subtitle = Some(
+                    if filter == "url" {
+                        tr("Enter: open on this device", "回车：在当前设备打开")
+                    } else {
+                        tr("Enter: copy · Tab: insert", "回车：复制 · Tab：插入")
+                    }
+                    .into(),
+                );
+                actions.push(action);
+            }
+        }
         View::Switch => {
             title = tr("Switch", "切换 · Switch").into();
             for (target, id, label, key) in [
@@ -1187,6 +1218,13 @@ fn actions(
                         },
                     ));
                 }
+                actions.push(nav(
+                    "extract",
+                    tr("Extract", "提取 · Extract"),
+                    'e',
+                    kind,
+                    options.at(View::Extract),
+                ));
                 actions.push(Action::new(
                     "metrics",
                     tr("CPU / resources", "CPU / 资源"),
@@ -1252,6 +1290,13 @@ fn actions(
                         's',
                         kind,
                         options.at(View::Switch),
+                    ),
+                    nav(
+                        "extract",
+                        tr("Extract", "提取 · Extract"),
+                        'e',
+                        kind,
+                        options.at(View::Extract),
                     ),
                     nav(
                         "panes",
@@ -1779,6 +1824,40 @@ fn execute_action(
                 &context.pane,
                 client,
             )?;
+        }
+        ActionCommand::Extract(filter) => {
+            if !executable("tmux-extrakto") {
+                return message(
+                    client,
+                    tr(
+                        "Extract needs the tmux-extrakto helper installed on this host",
+                        "提取功能需要在当前主机安装 tmux-extrakto",
+                    ),
+                );
+            }
+            let mut command = Command::new("tmux-extrakto");
+            command.args(["--client", client]);
+            if *filter == "url" {
+                command.arg("--urls");
+            } else {
+                command.arg("--filter").arg(filter);
+            }
+            let output = command
+                .arg(&context.pane)
+                .current_dir(&context.cwd)
+                .output()?;
+            if !output.status.success() {
+                let detail = String::from_utf8_lossy(&output.stderr);
+                let detail = detail.trim().chars().take(512).collect::<String>();
+                return message(
+                    client,
+                    if detail.is_empty() {
+                        tr("Could not open Extract", "无法打开提取器")
+                    } else {
+                        &detail
+                    },
+                );
+            }
         }
         ActionCommand::Metrics => {
             let plugin = tmux(&["show-option", "-gqv", "@workbench_plugin_dir"])?;
@@ -2381,6 +2460,7 @@ mod tests {
                     View::Root,
                     View::Interface,
                     View::Switch,
+                    View::Extract,
                     View::Create,
                     View::CreatePane,
                     View::Kill,
@@ -2424,7 +2504,15 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["agent", "sidebar", "tmux", "host", "metrics", "interface"]
+            [
+                "agent",
+                "sidebar",
+                "tmux",
+                "host",
+                "extract",
+                "metrics",
+                "interface"
+            ]
         );
         for kind in [
             StatusMenuKind::Agent,
@@ -2453,7 +2541,7 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["create", "switch", "panes", "kill", "detach"]
+            ["create", "switch", "extract", "panes", "kill", "detach"]
         );
         for view in [View::Switch, View::Create, View::Kill] {
             let (_, group) = actions(

@@ -467,8 +467,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for mode in ('old', 'new'):
             subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
             menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Switch', b'Create', b'Kill', b'Layout', b'Detach')
-            labels = ('Create', 'Switch', 'Layout', 'Kill', 'Detach')
+            rendered = wait_for_text(menu, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
+            labels = ('Create', 'Switch', 'Extract', 'Layout', 'Kill', 'Detach')
             positions = [item_position(rendered, label)[1] for label in labels]
             assert positions == sorted(set(positions)), (positions, rendered)
             assert b'Switch window' not in screen_text(rendered)
@@ -490,6 +490,33 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 os.write(master, b'\x1b')
                 drain(.7)
         print('PASS classic and new menus expose identical root groups, object order and Back destinations')
+        extraction = root / 'extraction'
+        extraction_cwd = root / 'extraction-cwd'
+        extract_helper = shim / 'tmux-extrakto'
+        extract_helper.write_text('#!/bin/sh\npwd > ' + shlex.quote(str(extraction_cwd)) +
+                                  '\nprintf "%s\\n" "$@" > ' + shlex.quote(str(extraction) + '.new') +
+                                  '\nmv ' + shlex.quote(str(extraction) + '.new') + ' ' + shlex.quote(str(extraction)) + '\n')
+        extract_helper.chmod(0o700)
+        for mode in ('old', 'new'):
+            ui(mode)
+            for kind in ('tmux', 'menu'):
+                for key, selection in [(b'p', ['--filter', 'paragraph']), (b'u', ['--urls'])]:
+                    extraction.unlink(missing_ok=True)
+                    menu = open_menu([core, 'status-menu', kind, '--pane', pane, '--client', client],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    wait_for_text(menu, b'Extract')
+                    os.write(master, b'e')
+                    wait_for_text(client_process, b'General text', b'Paragraphs', b'URL')
+                    os.write(master, key)
+                    deadline = time.monotonic() + 5
+                    while not extraction.exists() and time.monotonic() < deadline:
+                        drain(.05)
+                    assert extraction.exists(), (mode, kind, 'extraction did not launch')
+                    assert extraction.read_text().splitlines() == ['--client', client, *selection, pane]
+                    assert Path(extraction_cwd.read_text().strip()).resolve() == Path(tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')).resolve()
+                    menu.wait(timeout=3)
+                    drain(.5)
+        print('PASS Extract in both roots and renderers retains its filter, source pane, client and directory')
         # Workbench-owned selection and name dialogs use the same touch UI.
         # Stub only the external inventory/launch boundary, keeping the actual
         # Sidebar New button, deferred popup transition, list and callbacks.
@@ -895,7 +922,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                        env=env, text=True, check=True)
         # Every submenu uses the same navigation, including Configure and
         # views with no available actions. Escape must never open its parent.
-        for view in ('switch', 'create', 'create-pane', 'kill', 'kill-agent', 'kill-window', 'kill-pane', 'kill-session',
+        for view in ('switch', 'extract', 'create', 'create-pane', 'kill', 'kill-agent', 'kill-window', 'kill-pane', 'kill-session',
                      'launch', 'configure', 'panes', 'more', 'reset-card', 'team', 'botmux', 'agent-target'):
             args = [core, 'status-menu', 'tmux', '--pane', pane, '--client', client, '--view', view]
             parent = (b'choose agent' if view == 'configure' else b'Create' if view in ('launch', 'create-pane')
