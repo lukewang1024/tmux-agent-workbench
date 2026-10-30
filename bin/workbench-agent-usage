@@ -188,7 +188,7 @@ refresh() (
 refresh_menu() {
   client=${1:-}
   case $client in ''|*[!A-Za-z0-9_./-]*) return 2 ;; esac
-  refresh "$(source_name)"
+  refresh "${WORKBENCH_USAGE_SOURCE:-$(source_name)}"
   sleep 0.1
   menu "$client"
 }
@@ -265,7 +265,7 @@ menu_quote() {
 }
 
 menu_callback() {
-  menu_command="WORKBENCH_MENU_PARENT=$(menu_quote "${WORKBENCH_MENU_PARENT:-}") WORKBENCH_SOURCE_PANE=$(menu_quote "${WORKBENCH_SOURCE_PANE:-}") WORKBENCH_TARGET_CLIENT=$(menu_quote "$client") workbench-agent-usage $1"
+  menu_command="WORKBENCH_MENU_PARENT=$(menu_quote "${WORKBENCH_MENU_PARENT:-}") WORKBENCH_SOURCE_PANE=$(menu_quote "${WORKBENCH_SOURCE_PANE:-}") WORKBENCH_USAGE_GUARD=$(menu_quote "${WORKBENCH_USAGE_GUARD:-}") WORKBENCH_USAGE_SOURCE=$(menu_quote "$agent") TMUX_AGENT_WORKBENCH_LANGUAGE=$(menu_quote "${TMUX_AGENT_WORKBENCH_LANGUAGE:-}") WORKBENCH_TARGET_CLIENT=$(menu_quote "$client") workbench-agent-usage $1"
   printf 'run-shell -b %s' "$(menu_quote "$menu_command")"
 }
 
@@ -277,7 +277,9 @@ menu() {
   if ! tmux list-clients -F '#{client_name}' 2>/dev/null | grep -Fx "$client" >/dev/null; then
     return 0
   fi
-  agent=$(source_name)
+  agent=${WORKBENCH_USAGE_SOURCE:-$(source_name)}
+  case $agent in codex|claude|trae|opencode) ;; *) return 2 ;; esac
+  WORKBENCH_SOURCE_PANE=${WORKBENCH_SOURCE_PANE:-$(tmux display-message -p -c "$client" '#{pane_id}')}
   value=$(render "$agent")
   case $agent in
     codex) name=Codex ;;
@@ -317,6 +319,7 @@ menu() {
   ')
 
   reset_rows=
+  reset_actions=
   if [ "$agent" = codex ]; then
     reset_rows=$(jq -r '
       .payload.reset_credits // empty
@@ -329,6 +332,16 @@ menu() {
          elif any(.credits[]?; .status == "available" and .expiresAt == null) then "no expiry"
          else "expiry unknown" end)
     ' "$state_dir/codex-limits.json" 2>/dev/null)
+    # Read the same guarded actions as the Agent menu. Source selection alone
+    # cannot offer reset actions for a shell, another CLI or a missing skill.
+    . "$script_dir/../lib/resolve-core.sh"
+    if reset_core=$(workbench_core_path "$script_dir/..") && [ -n "$WORKBENCH_SOURCE_PANE" ]; then
+      set -- "$reset_core" status-menu agent --view reset-card \
+        --pane "$WORKBENCH_SOURCE_PANE" --client "$client" --json
+      [ -z "${WORKBENCH_USAGE_GUARD:-}" ] || set -- "$@" --guard "$WORKBENCH_USAGE_GUARD"
+      reset_actions=$("$@" 2>/dev/null |
+        jq -c '.items[] | select(.enabled and (.id == "reset-card-schedule" or .id == "reset-card-manage"))' 2>/dev/null)
+    fi
   fi
 
   codex_mark=' '; claude_mark=' '; trae_mark=' '; opencode_mark=' '
@@ -365,6 +378,18 @@ EOF
 $reset_rows
 EOF
   fi
+  if [ -n "$reset_actions" ]; then
+    set -- "$@" ''
+    while IFS= read -r reset_action; do
+      [ -n "$reset_action" ] || continue
+      set -- "$@" \
+        "$(printf '%s\n' "$reset_action" | jq -r '.label')" \
+        "$(printf '%s\n' "$reset_action" | jq -r '.key')" \
+        "$(printf '%s\n' "$reset_action" | jq -r '.command')"
+    done <<EOF
+$reset_actions
+EOF
+  fi
   menu_status=0
   "$@" \
     '' \
@@ -390,7 +415,7 @@ choose_source() {
   # The old menu closes after executing its item. Reopen after that close has
   # completed so selection behaves like an in-place source switch.
   sleep 0.1
-  menu "${2:-}"
+  WORKBENCH_USAGE_SOURCE=$1 menu "${2:-}"
 }
 
 focus() {
