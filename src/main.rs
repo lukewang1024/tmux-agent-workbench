@@ -7,7 +7,6 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -911,7 +910,7 @@ fn client_attach(
             }
         }
         if Instant::now() < next_heartbeat {
-            thread::sleep(Duration::from_millis(100));
+            tmux_agent_workbench::compat::sleep(Duration::from_millis(100));
             continue;
         }
         next_heartbeat = Instant::now() + Duration::from_secs(15);
@@ -2213,8 +2212,6 @@ fn ensure_server_runtime(
     server: &ServerIdentity,
     announce: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::process::CommandExt;
-
     let socket = paths.socket_for_server(&server.key);
     if let Ok(response) = exchange(
         &socket,
@@ -2258,7 +2255,7 @@ fn ensure_server_runtime(
         );
         let deadline = Instant::now() + Duration::from_secs(2);
         while socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(25));
+            tmux_agent_workbench::compat::sleep(Duration::from_millis(25));
         }
         if socket.exists() {
             return Err("old daemon did not exit during upgrade handoff".into());
@@ -2272,23 +2269,13 @@ fn ensure_server_runtime(
         .append(true)
         .mode(0o600)
         .open(paths.log_for_server(&server.key))?;
-    let mut command = ProcessCommand::new(executable);
+    let mut command = detached_command(&executable, tmux_agent_workbench::compat::is_ish());
     command
         .args(["daemon", "run"])
         .env("TMUX_AGENT_WORKBENCH_TMUX_SOCKET", &server.socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
-    // tmux owns and reaps run-shell jobs. Put the long-lived daemon in its own
-    // session so it survives the short `daemon ensure` launcher job.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     command.spawn()?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -2307,8 +2294,30 @@ fn ensure_server_runtime(
         if Instant::now() >= deadline {
             return Err("daemon did not become ready within 3 seconds".into());
         }
-        thread::sleep(Duration::from_millis(25));
+        tmux_agent_workbench::compat::sleep(Duration::from_millis(25));
     }
+}
+
+fn detached_command(executable: &std::path::Path, ish: bool) -> ProcessCommand {
+    use std::os::unix::process::CommandExt;
+    if ish {
+        // Rust's pre_exec fork path uses facilities missing from old iSH.
+        // Alpine's BusyBox setsid performs the same detachment through spawn.
+        let mut command = ProcessCommand::new("setsid");
+        command.arg(executable);
+        return command;
+    }
+    let mut command = ProcessCommand::new(executable);
+    // tmux reaps its launcher jobs; the daemon must own a separate session.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2331,6 +2340,17 @@ fn running_executable_matches(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn ish_daemon_launcher_owns_its_session_without_pre_exec() {
+        let mut command = detached_command(std::path::Path::new("/bin/sh"), true);
+        let status = command
+            .args(["-c", "test \"$(ps -o sid= -p $$ | tr -d ' ')\" = \"$$\""])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn release_menus_require_hover_safe_tmux() {

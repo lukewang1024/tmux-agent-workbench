@@ -2,6 +2,7 @@ pub mod attachment;
 pub mod checkpoint;
 pub mod client;
 pub mod client_protocol;
+pub mod compat;
 pub mod config;
 pub mod daemon;
 pub mod detection;

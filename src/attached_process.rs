@@ -1,5 +1,4 @@
 use std::process::Child;
-use std::thread;
 use std::time::{Duration, Instant};
 
 /// A connection subprocess must never outlive the attach invocation that owns
@@ -28,7 +27,7 @@ impl Drop for AttachedProcess {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
                 return;
             }
-            thread::sleep(Duration::from_millis(10));
+            tmux_agent_workbench::compat::sleep(Duration::from_millis(10));
         }
         let _ = self.child.kill();
         let _ = self.child.wait();

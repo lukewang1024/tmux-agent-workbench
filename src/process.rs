@@ -400,7 +400,7 @@ mod tests {
             process_started_at(system.process(pid).unwrap())
         }
         let before = identity();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        crate::compat::sleep(std::time::Duration::from_millis(1100));
         assert_ne!(before, 0);
         assert_eq!(before, identity());
     }
@@ -461,7 +461,7 @@ mod tests {
             if Instant::now() >= deadline {
                 break false;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            crate::compat::sleep(Duration::from_millis(10));
         };
         let _ = child.kill();
         let _ = child.wait();
@@ -523,7 +523,7 @@ mod tests {
             if ready || std::time::Instant::now() >= deadline {
                 break found;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            crate::compat::sleep(std::time::Duration::from_millis(10));
         };
         // Always reap the child, including when an assertion below fails.
         child.kill().unwrap();
