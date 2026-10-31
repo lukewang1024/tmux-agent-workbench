@@ -14,8 +14,9 @@ fi
 # Use the same menu baseline on Linux and macOS. Homebrew may already ship a
 # newer release with different native menu input semantics.
 if [ "$(uname -s)" = Darwin ]; then
-  export PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-  export PATH="$(brew --prefix bison)/bin:$PATH"
+  PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  PATH="$(brew --prefix bison)/bin:$PATH"
+  export PKG_CONFIG_PATH PATH
 fi
 tar -xzf "$ci_tmux_root/tmux.tar.gz" -C "$ci_tmux_root"
 cd "$ci_tmux_root/tmux-3.7c"
