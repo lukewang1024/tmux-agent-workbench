@@ -19,6 +19,8 @@ fi
 "$python_runner" tests/status-prefix-mouse.py
 cargo fmt --check
 cargo test --locked
+"$python_runner" tests/client-open-url.py
+"$python_runner" tests/client-open-url-routing.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-daemon-timeouts.py
 "$python_runner" tests/client-notifications.py
 "$python_runner" tests/client-resume.py target/debug/tmux-agent-workbench

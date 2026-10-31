@@ -42,6 +42,8 @@ pub(crate) enum Role {
 pub(crate) struct Item {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
     pub key: String,
     pub command: String,
     pub enabled: bool,
@@ -123,7 +125,12 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
         .collect();
     let capacity = height
-        .saturating_sub(pinned.len() + 5 + usize::from(!pinned.is_empty()))
+        .saturating_sub(
+            pinned.len()
+                + body.iter().filter(|item| item.subtitle.is_some()).count()
+                + 5
+                + usize::from(!pinned.is_empty()),
+        )
         .max(1);
     let paging = body.len() > capacity && menu.pager.is_some();
     let capacity = capacity.saturating_sub(if paging { 2 } else { 0 }).max(1);
@@ -171,6 +178,21 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
                 String::new()
             },
         ]);
+        if let Some(subtitle) = &item.subtitle {
+            args.extend([
+                format!(
+                    "{}#[fg=colour8]  {}#[default]",
+                    if item.enabled { "" } else { "-" },
+                    escape(subtitle)
+                ),
+                String::new(),
+                if item.enabled {
+                    item.command.clone()
+                } else {
+                    String::new()
+                },
+            ]);
+        }
     };
     for item in body.iter().skip(page * capacity).take(capacity) {
         append(&mut args, item);
@@ -299,7 +321,14 @@ pub(crate) fn select(
             item.enabled && item.role == Role::Body
                 || matches!(item.role, Role::Error | Role::Summary)
         })
-        .map(|item| Span::raw(&item.label).width() + Span::raw(&item.key).width() + 5)
+        .map(|item| {
+            (Span::raw(&item.label).width() + Span::raw(&item.key).width()).max(
+                item.subtitle
+                    .as_deref()
+                    .map(|s| Span::raw(s).width())
+                    .unwrap_or(0),
+            ) + 5
+        })
         .max()
         .unwrap_or(28)
         .clamp(28, 56) as u16;
@@ -505,7 +534,7 @@ fn split_text(text: &str, width: usize) -> (String, String) {
 }
 
 fn row_count(item: &Item, width: u16) -> usize {
-    if item.enabled {
+    if item.enabled || item.subtitle.is_some() {
         return 2;
     }
     let mut rest = clean(&item.label);
@@ -540,11 +569,21 @@ fn row_line(item: &Item, part: usize, width: u16, selected: bool) -> Line<'stati
     };
     let mut rest = clean(&item.label);
     let mut text = String::new();
-    for line in 0..=part {
-        let budget = usize::from(width).saturating_sub(2 + if line == 0 { reserved } else { 0 });
-        (text, rest) = split_text(&rest, budget);
+    if let Some(subtitle) = &item.subtitle {
+        let label = if part == 0 { &item.label } else { subtitle };
+        text = split_text(
+            &clean(label),
+            usize::from(width).saturating_sub(2 + if part == 0 { reserved } else { 0 }),
+        )
+        .0;
+    } else {
+        for line in 0..=part {
+            let budget =
+                usize::from(width).saturating_sub(2 + if line == 0 { reserved } else { 0 });
+            (text, rest) = split_text(&rest, budget);
+        }
     }
-    let style = if selected {
+    let mut style = if selected {
         Style::default()
             .fg(Color::White)
             .bg(Color::DarkGray)
@@ -554,6 +593,15 @@ fn row_line(item: &Item, part: usize, width: u16, selected: bool) -> Line<'stati
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    if part > 0 && item.subtitle.is_some() {
+        style = style
+            .fg(if selected {
+                Color::Gray
+            } else {
+                Color::DarkGray
+            })
+            .remove_modifier(Modifier::BOLD);
+    }
     let hint = if part == 0 && item.enabled {
         hint
     } else {
@@ -581,6 +629,7 @@ pub(crate) fn action_line(
         &Item {
             id: String::new(),
             label: label.into(),
+            subtitle: None,
             key: key.into(),
             command: String::new(),
             enabled: true,
@@ -705,6 +754,7 @@ fn render(
         let close = Item {
             id: "close".into(),
             label: tr("× close", "× 关闭").into(),
+            subtitle: None,
             key: "Escape".into(),
             command: String::new(),
             enabled: true,
@@ -1014,6 +1064,7 @@ pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
         items.push(Item {
             id: format!("item:{}", items.len()),
             label,
+            subtitle: None,
             key,
             command,
             enabled,
@@ -1028,6 +1079,7 @@ pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
         items.push(Item {
             id: "parent".into(),
             label: crate::menu_footer::back_label().into(),
+            subtitle: None,
             key: "BSpace".into(),
             command,
             enabled: true,
@@ -1081,6 +1133,7 @@ mod tests {
         Item {
             id: id.into(),
             label: id.into(),
+            subtitle: None,
             key: String::new(),
             command: String::new(),
             enabled: role != Role::Error,
@@ -1278,6 +1331,36 @@ mod tests {
         };
         assert!(row_count(&note, 10) > 1);
         assert!(!row_line(&note, 0, 10, false).to_string().contains("(a)"));
+    }
+
+    #[test]
+    fn subtitles_are_gray_on_the_second_row_of_the_same_button() {
+        let button = Item {
+            subtitle: Some("Codex · daily · Single".into()),
+            key: "q".into(),
+            ..item("Quick Agent", Role::Body)
+        };
+        assert_eq!(row_count(&button, 50), 2);
+        let title = row_line(&button, 0, 50, false);
+        let subtitle = row_line(&button, 1, 50, false);
+        assert!(title.to_string().contains("Quick Agent"));
+        assert!(title.to_string().contains("(q)"));
+        assert!(subtitle.to_string().contains("Codex · daily · Single"));
+        assert!(!subtitle.to_string().contains("(q)"));
+        assert_eq!(subtitle.spans[1].style.fg, Some(Color::DarkGray));
+        let selected = row_line(&button, 1, 50, true);
+        assert_eq!(selected.spans[1].style.fg, Some(Color::Gray));
+        assert_eq!(selected.spans[1].style.bg, Some(Color::DarkGray));
+        assert_eq!(
+            row_count(
+                &Item {
+                    enabled: false,
+                    ..button
+                },
+                50
+            ),
+            2
+        );
     }
 
     #[test]

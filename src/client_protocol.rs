@@ -79,6 +79,16 @@ pub enum ClientMessage {
         text: Option<String>,
         error: Option<String>,
     },
+    OpenUrl {
+        version: u32,
+        request_id: String,
+        url: String,
+    },
+    OpenUrlResult {
+        version: u32,
+        request_id: String,
+        error: Option<String>,
+    },
     Goodbye {
         version: u32,
     },
@@ -100,6 +110,8 @@ impl ClientMessage {
             | Self::ClipboardRead { version, .. }
             | Self::ClipboardWrite { version, .. }
             | Self::ClipboardResult { version, .. }
+            | Self::OpenUrl { version, .. }
+            | Self::OpenUrlResult { version, .. }
             | Self::Goodbye { version } => *version,
         };
         if version != crate::CLIENT_PROTOCOL_VERSION {
@@ -107,6 +119,9 @@ impl ClientMessage {
         }
         if let Self::ClipboardWrite { text, .. } = self {
             validate_clipboard(text)?;
+        }
+        if let Self::OpenUrl { url, .. } = self {
+            crate::client_actions::validate_url(url)?;
         }
         if let Self::ClipboardResult {
             text: Some(text), ..
@@ -186,6 +201,27 @@ mod tests {
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &message).unwrap();
         assert_eq!(read_frame(bytes.as_slice()).unwrap(), message);
+    }
+
+    #[test]
+    fn open_url_actions_round_trip_and_reject_non_web_targets() {
+        let message = ClientMessage::OpenUrl {
+            version: crate::CLIENT_PROTOCOL_VERSION,
+            request_id: "request".into(),
+            url: "https://example.com/?x=1&y=2#part".into(),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).unwrap();
+        assert_eq!(read_frame(bytes.as_slice()).unwrap(), message);
+        assert!(
+            ClientMessage::OpenUrl {
+                version: crate::CLIENT_PROTOCOL_VERSION,
+                request_id: "request".into(),
+                url: "file:///tmp/script".into(),
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

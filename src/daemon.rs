@@ -42,6 +42,7 @@ pub enum DaemonError {
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub engine_version: &'static str,
+    pub runtime_revision: u32,
     pub protocol_version: u32,
     pub server: String,
     pub pid: u32,
@@ -71,6 +72,7 @@ struct State {
     notification_backend: SystemBackend,
     relay_sender: RelaySender,
     clients: ClientRegistry,
+    client_actions: crate::client_actions::Actions,
     server_incarnation: String,
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
     recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
@@ -137,7 +139,15 @@ struct ClientBindParams {
 #[serde(deny_unknown_fields)]
 struct ClientHeartbeatParams {
     endpoint_id: String,
-    activity_unix_ms: u64,
+    // Client and daemon clocks may differ. Presence is measured locally.
+    #[serde(rename = "activity_unix_ms")]
+    _activity_unix_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientRecoverParams {
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +176,28 @@ struct ClientDetachParams {
 #[serde(deny_unknown_fields)]
 struct ClientAttachmentParams {
     endpoint_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlParams {
+    attachment: String,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlStatusParams {
+    attachment: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlResultParams {
+    endpoint_id: String,
+    request_id: String,
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +262,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
         clients: ClientRegistry::default(),
+        client_actions: crate::client_actions::Actions::default(),
         server_incarnation,
         recovered_pending,
         recovered_runtimes,
@@ -856,6 +889,7 @@ fn handle(
             let generation = snapshot.read().expect("snapshot poisoned").generation;
             serde_json::to_value(Status {
                 engine_version: crate::ENGINE_VERSION,
+                runtime_revision: crate::DAEMON_RUNTIME_REVISION,
                 protocol_version: crate::IPC_PROTOCOL_VERSION,
                 server: server.socket_path.display().to_string(),
                 pid: std::process::id(),
@@ -908,8 +942,12 @@ fn handle(
             if let Some(id) = &params.terminal_id { uuid::Uuid::parse_str(id).map_err(|_| "invalid terminal id")?; }
             let (endpoint_id, attachment_token, replaced_attachments) = {
                 let mut state = state.write().expect("state poisoned");
+                let endpoint_id = uuid::Uuid::new_v4().to_string();
+                let attachment_token = uuid::Uuid::new_v4().to_string();
+                // Fence the old channel before changing or detaching its state.
+                crate::client_lease::mark_owner(paths, &server.key, &params.device_id, params.terminal_id.as_deref(), &endpoint_id).map_err(|error| format!("cannot record client owner: {error}"))?;
                 let replaced_attachments = state.clients.replace_terminal(&params.device_id, params.terminal_id.as_deref());
-                let (endpoint_id, attachment_token) = state.clients.register_terminal(params.device_id, params.terminal_id, params.device_label, params.kind, params.capabilities, now_unix_ms());
+                state.clients.register_terminal_with_ids(params.device_id, params.terminal_id, params.device_label, params.kind, params.capabilities, now_unix_ms(), endpoint_id.clone(), attachment_token.clone());
                 (endpoint_id, attachment_token, replaced_attachments)
             };
             for attachment in replaced_attachments {
@@ -921,6 +959,19 @@ fn handle(
                     .status();
             }
             Ok(json!({"endpoint_id": endpoint_id, "attachment_token": attachment_token, "heartbeat_seconds": 15}))
+        }),
+        "client.recover" => parse_params::<ClientRecoverParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            let (record, attachment) = crate::client_lease::recover(paths, &server.key, &params.token)
+                .map_err(|error| format!("client recovery unavailable: {error}"))?
+                .ok_or("client control is no longer active")?;
+            let now = now_unix_ms();
+            if attachment.is_none() && now.saturating_sub(record.registered_at_ms) > crate::client::ATTACHMENT_TOKEN_TTL_MS {
+                return Err("client attachment is no longer active".into());
+            }
+            let endpoint_id = record.endpoint_id.clone();
+            state.clients.recover(&record, attachment, now);
+            Ok(json!({"endpoint_id": endpoint_id, "recovered": true}))
         }),
         "client.bind" => parse_params::<ClientBindParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
@@ -965,10 +1016,27 @@ fn handle(
         }),
         "client.heartbeat" => parse_params::<ClientHeartbeatParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
-            state.clients.heartbeat(&params.endpoint_id, params.activity_unix_ms)?;
+            state.clients.heartbeat(&params.endpoint_id, now_unix_ms())?;
             refresh_notifications(&mut state, now_unix_ms());
             let events = state.clients.take_pending(&params.endpoint_id, now_unix_ms())?;
-            Ok(json!({"accepted": true, "events": events}))
+            let attachment = state.clients.attachment(&params.endpoint_id)?.map(str::to_owned);
+            let open_urls = state.client_actions.take(&params.endpoint_id, attachment.as_deref(), now_unix_ms());
+            Ok(json!({"accepted": true, "events": events, "open_urls": open_urls}))
+        }),
+        "client.open_url" => parse_params::<OpenUrlParams>(request.params).and_then(|params| {
+            let mut state = state.write().expect("state poisoned");
+            let endpoint = state.clients.opener_for_attachment(&params.attachment, now_unix_ms())?;
+            let id = state.client_actions.enqueue(&endpoint, &params.attachment, params.url, now_unix_ms())?;
+            Ok(json!({"request_id": id}))
+        }),
+        "client.open_url_status" => parse_params::<OpenUrlStatusParams>(request.params).and_then(|params| {
+            let state = state.read().expect("state poisoned");
+            serde_json::to_value(state.client_actions.status(&params.attachment, &params.request_id, now_unix_ms())?)
+                .map_err(|error| error.to_string())
+        }),
+        "client.open_url_result" => parse_params::<OpenUrlResultParams>(request.params).and_then(|params| {
+            state.write().expect("state poisoned").client_actions.complete(&params.endpoint_id, &params.request_id, params.error, now_unix_ms())?;
+            Ok(json!({"accepted": true}))
         }),
         "client.focus" => parse_params::<ClientFocusParams>(request.params).and_then(|params| {
             let focus = match params.focused { Some(true) => FocusState::Focused, Some(false) => FocusState::Unfocused, None => FocusState::Unknown };

@@ -51,6 +51,56 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
+    /// Rebuild an endpoint from independently locked control and PTY leases.
+    /// The daemon checks the current terminal owner before calling this.
+    pub fn recover(
+        &mut self,
+        record: &crate::client_lease::ControlRecord,
+        attachment: Option<String>,
+        now_ms: u64,
+    ) {
+        if self.endpoints.contains_key(&record.endpoint_id) {
+            return;
+        }
+        // Retire stale registry entries, but do not detach a tty during
+        // recovery: a transport address can have been reused in the meantime.
+        self.replace_terminal(&record.device_id, record.terminal_id.as_deref());
+        if let Some(attachment) = &attachment {
+            self.retire_attachment(attachment, &record.endpoint_id);
+        }
+        self.endpoints.insert(
+            record.endpoint_id.clone(),
+            Endpoint {
+                id: record.endpoint_id.clone(),
+                device_id: record.device_id.clone(),
+                terminal_id: record.terminal_id.clone(),
+                device_label: record.device_label.clone(),
+                kind: record.kind.clone(),
+                capabilities: record.capabilities.iter().cloned().collect(),
+                focus: FocusState::Unknown,
+                overlay_visible: false,
+                active_target: None,
+                attachment: attachment.clone(),
+                previous_attachment: None,
+                last_activity_ms: now_ms,
+                detached_at_ms: None,
+                pending: Vec::new(),
+            },
+        );
+        if attachment.is_none() {
+            self.bind_tokens.insert(
+                record.token.clone(),
+                BindToken {
+                    endpoint_id: record.endpoint_id.clone(),
+                    expires_ms: record
+                        .registered_at_ms
+                        .saturating_add(ATTACHMENT_TOKEN_TTL_MS),
+                    used: false,
+                },
+            );
+        }
+    }
+
     pub fn register(
         &mut self,
         device_id: String,
@@ -73,6 +123,31 @@ impl ClientRegistry {
     ) -> (String, String) {
         let endpoint_id = Uuid::new_v4().to_string();
         let token = Uuid::new_v4().to_string();
+        self.register_terminal_with_ids(
+            device_id,
+            terminal_id,
+            device_label,
+            kind,
+            capabilities,
+            now_ms,
+            endpoint_id.clone(),
+            token.clone(),
+        );
+        (endpoint_id, token)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_terminal_with_ids(
+        &mut self,
+        device_id: String,
+        terminal_id: Option<String>,
+        device_label: String,
+        kind: String,
+        capabilities: Vec<String>,
+        now_ms: u64,
+        endpoint_id: String,
+        token: String,
+    ) {
         self.endpoints.insert(
             endpoint_id.clone(),
             Endpoint {
@@ -100,41 +175,45 @@ impl ClientRegistry {
                 used: false,
             },
         );
-        (endpoint_id, token)
     }
 
     pub fn bind(&mut self, token: &str, attachment: String, now_ms: u64) -> Result<String, String> {
         let bind = self
             .bind_tokens
-            .get_mut(token)
+            .get(token)
             .ok_or("unknown attachment token")?;
         if bind.used || now_ms > bind.expires_ms {
             return Err("expired or used attachment token".into());
         }
+        let endpoint_id = bind.endpoint_id.clone();
+        self.retire_attachment(&attachment, &endpoint_id);
+        let endpoint = self
+            .endpoints
+            .get_mut(&endpoint_id)
+            .ok_or("endpoint is no longer online")?;
+        self.bind_tokens.get_mut(token).expect("token exists").used = true;
+        endpoint.attachment = Some(attachment);
+        endpoint.detached_at_ms = None;
+        endpoint.last_activity_ms = now_ms;
+        Ok(endpoint.id.clone())
+    }
+
+    fn retire_attachment(&mut self, attachment: &str, endpoint_id: &str) {
         // PTY names are reusable transport addresses, not terminal identities.
         // A later bind must retire stale associations before a detach hook can
         // attribute this tty's last pane to another terminal's history.
         for (id, old) in &mut self.endpoints {
-            if id != &bind.endpoint_id {
-                if old.previous_attachment.as_deref() == Some(&attachment) {
+            if id != endpoint_id {
+                if old.previous_attachment.as_deref() == Some(attachment) {
                     old.previous_attachment = None;
                 }
-                if old.attachment.as_deref() == Some(&attachment) {
+                if old.attachment.as_deref() == Some(attachment) {
                     old.attachment = None;
                     old.active_target = None;
                     old.focus = FocusState::Unknown;
                 }
             }
         }
-        let endpoint = self
-            .endpoints
-            .get_mut(&bind.endpoint_id)
-            .ok_or("endpoint is no longer online")?;
-        bind.used = true;
-        endpoint.attachment = Some(attachment);
-        endpoint.detached_at_ms = None;
-        endpoint.last_activity_ms = now_ms;
-        Ok(endpoint.id.clone())
     }
 
     pub fn heartbeat(&mut self, endpoint_id: &str, now_ms: u64) -> Result<(), String> {
@@ -214,6 +293,30 @@ impl ClientRegistry {
             .get(endpoint_id)
             .map(|endpoint| endpoint.attachment.as_deref())
             .ok_or_else(|| "unknown endpoint".into())
+    }
+
+    pub fn opener_for_attachment(&self, attachment: &str, now_ms: u64) -> Result<String, String> {
+        let endpoint = self
+            .endpoints
+            .values()
+            .find(|endpoint| {
+                endpoint.attachment.as_deref() == Some(attachment)
+                    && endpoint.detached_at_ms.is_none()
+            })
+            .ok_or("no Workbench client is attached to this terminal")?;
+        if now_ms.saturating_sub(endpoint.last_activity_ms) > OFFLINE_AFTER_MS {
+            return Err("the invoking Workbench client is offline".into());
+        }
+        if !endpoint
+            .capabilities
+            .contains(crate::client_actions::OPEN_URL_CAPABILITY)
+        {
+            return Err(
+                "update Workbench on the client device and reconnect to enable local URL opening"
+                    .into(),
+            );
+        }
+        Ok(endpoint.id.clone())
     }
 
     pub fn queue(&mut self, endpoint_id: &str, event: SemanticEvent) -> Result<(), String> {
@@ -516,6 +619,49 @@ mod tests {
         assert_eq!(registry.attachment(&id).unwrap(), None);
         registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
         assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/7"));
+    }
+
+    #[test]
+    fn expired_endpoint_can_recover_its_live_binding_without_crossing_ttys() {
+        let mut registry = ClientRegistry::default();
+        let (id, token) = registry.register_terminal(
+            "device".into(),
+            Some("terminal".into()),
+            "phone".into(),
+            "termux".into(),
+            vec!["notification".into()],
+            0,
+        );
+        registry.bind(&token, "/dev/pts/7".into(), 1).unwrap();
+        registry.prune(OFFLINE_AFTER_MS + 2);
+        assert!(registry.heartbeat(&id, OFFLINE_AFTER_MS + 3).is_err());
+        let (other, other_token) = registry.register(
+            "other".into(),
+            "other".into(),
+            "macos".into(),
+            vec![],
+            OFFLINE_AFTER_MS + 3,
+        );
+        registry
+            .bind(&other_token, "/dev/pts/7".into(), OFFLINE_AFTER_MS + 4)
+            .unwrap();
+        let record = crate::client_lease::ControlRecord {
+            endpoint_id: id.clone(),
+            device_id: "device".into(),
+            terminal_id: Some("terminal".into()),
+            device_label: "phone".into(),
+            kind: "termux".into(),
+            capabilities: vec!["notification".into()],
+            token,
+            registered_at_ms: 0,
+        };
+        registry.recover(&record, Some("/dev/pts/7".into()), OFFLINE_AFTER_MS + 5);
+        assert_eq!(registry.attachment(&id).unwrap(), Some("/dev/pts/7"));
+        assert_eq!(registry.attachment(&other).unwrap(), None);
+        assert_eq!(
+            registry.ranked("notification", OFFLINE_AFTER_MS + 5)[0].id,
+            id
+        );
     }
 
     #[test]

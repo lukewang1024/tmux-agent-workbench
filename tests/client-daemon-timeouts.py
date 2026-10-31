@@ -52,7 +52,7 @@ class DaemonTimeouts(unittest.TestCase):
                         if method == "daemon.status":
                             ready.wait(5)
                             version = next(line.split('"')[1] for line in (repo / "Cargo.toml").read_text().splitlines() if line.startswith("version ="))
-                            result = dict(engine_version=version, pid=process.pid)
+                            result = dict(engine_version=version, runtime_revision=1, pid=process.pid)
                         elif method == "client.register":
                             time.sleep(2.5)  # startup must also survive a busy scan
                             result = dict(endpoint_id=endpoint, attachment_token=str(uuid.uuid4()))
@@ -111,8 +111,12 @@ class DaemonTimeouts(unittest.TestCase):
                 send("goodbye")
                 _, error = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 0, error.decode())
+                self.assertEqual(error, b"", "optional failures must not paint over the terminal")
+                log = root / "XDG_STATE_HOME" / "tmux-agent-workbench" / ("daemon-" + key + ".log")
+                diagnostic = log.read_bytes()
+                self.assertEqual(log.stat().st_mode & 0o777, 0o600)
                 for method in ("client.heartbeat", "client.focus", "client.accepted"):
-                    self.assertIn((method + " skipped").encode(), error)
+                    self.assertIn((method + " skipped").encode(), diagnostic)
                     self.assertIn(method, delayed)
             finally:
                 if process.poll() is None:

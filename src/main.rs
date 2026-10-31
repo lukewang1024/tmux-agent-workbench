@@ -200,6 +200,12 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ClientCommand {
+    /// Open a web URL on the device that owns the invoking tmux client.
+    OpenUrl {
+        #[arg(long)]
+        client: String,
+        url: String,
+    },
     #[command(hide = true)]
     Remember {
         #[arg(long)]
@@ -443,6 +449,11 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         return Err("client channel must begin with hello".into());
     };
     uuid::Uuid::parse_str(&device_id).map_err(|_| "invalid device id")?;
+    let heartbeat_seconds = if capabilities.iter().any(|c| c == "open-url") {
+        1
+    } else {
+        15
+    };
     ensure_daemon_quiet(paths)?;
     let registration = ipc_call(
         paths,
@@ -459,12 +470,33 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.as_str())
         .ok_or("daemon returned no attachment token")?
         .to_owned();
+    let server = ServerIdentity::discover()?;
+    let mut diagnostics = ClientDiagnostics::default();
+    let record = tmux_agent_workbench::client_lease::ControlRecord {
+        endpoint_id: endpoint_id.clone(),
+        device_id,
+        terminal_id,
+        device_label,
+        kind,
+        capabilities,
+        token: token.clone(),
+        registered_at_ms: now_ms(),
+    };
+    // A failed optional recovery record must not prevent the SSH attachment.
+    let _control_lease =
+        match tmux_agent_workbench::client_lease::control(paths, &server.key, &record) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                diagnostics.record(paths, "client.recovery", &error.to_string());
+                None
+            }
+        };
     write_frame(
         std::io::stdout().lock(),
         &ClientMessage::Welcome {
             version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
             endpoint_id: endpoint_id.clone(),
-            heartbeat_seconds: 15,
+            heartbeat_seconds,
             attachment_token: token.clone(),
         },
     )?;
@@ -485,6 +517,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.heartbeat",
                     serde_json::json!({"endpoint_id": endpoint_id, "activity_unix_ms": activity_unix_ms}),
+                    &token,
+                    &mut diagnostics,
                 );
                 let events: Vec<tmux_agent_workbench::semantic::SemanticEvent> =
                     serde_json::from_value(
@@ -493,6 +527,23 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!([])),
                     )?;
+                let open_urls: Vec<tmux_agent_workbench::client_actions::OpenUrl> =
+                    serde_json::from_value(
+                        result
+                            .get("open_urls")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([])),
+                    )?;
+                for action in open_urls {
+                    write_frame(
+                        std::io::stdout().lock(),
+                        &ClientMessage::OpenUrl {
+                            version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+                            request_id: action.request_id,
+                            url: action.url,
+                        },
+                    )?;
+                }
                 for event in &events {
                     write_frame(
                         std::io::stdout().lock(),
@@ -524,6 +575,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.focus",
                     serde_json::json!({"endpoint_id": endpoint_id, "focused": focused, "overlay_visible": false, "target": target}),
+                    &token,
+                    &mut diagnostics,
                 );
             }
             Ok(ClientMessage::EventAccepted { event_id, .. }) => {
@@ -531,6 +584,8 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                     paths,
                     "client.accepted",
                     serde_json::json!({"endpoint_id": endpoint_id, "event_id": event_id}),
+                    &token,
+                    &mut diagnostics,
                 );
             }
             Ok(ClientMessage::FocusTarget {
@@ -568,6 +623,17 @@ fn client_serve(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
                         error,
                     },
                 )?;
+            }
+            Ok(ClientMessage::OpenUrlResult {
+                request_id, error, ..
+            }) => {
+                client_daemon_update(
+                    paths,
+                    "client.open_url_result",
+                    serde_json::json!({"endpoint_id": endpoint_id, "request_id": request_id, "error": error}),
+                    &token,
+                    &mut diagnostics,
+                );
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -849,6 +915,7 @@ fn client_attach(
                 "sound".into(),
                 "clipboard".into(),
                 "focus".into(),
+                "open-url".into(),
             ],
         },
     )?;
@@ -862,6 +929,7 @@ fn client_attach(
     let ClientMessage::Welcome {
         attachment_token,
         endpoint_id,
+        heartbeat_seconds,
         ..
     } = welcome
     else {
@@ -889,7 +957,8 @@ fn client_attach(
             platform_notify(&notification_paths, &event.0, &event.1, &event.2, &event.3)
                 .map_err(|error| error.to_string())
         });
-    let mut next_heartbeat = Instant::now() + Duration::from_secs(15);
+    let heartbeat_interval = Duration::from_secs(u64::from(heartbeat_seconds.clamp(1, 15)));
+    let mut next_heartbeat = Instant::now() + heartbeat_interval;
     let status = loop {
         if let Some(status) = pty.child.try_wait()? {
             break status;
@@ -913,7 +982,7 @@ fn client_attach(
             tmux_agent_workbench::compat::sleep(Duration::from_millis(100));
             continue;
         }
-        next_heartbeat = Instant::now() + Duration::from_secs(15);
+        next_heartbeat = Instant::now() + heartbeat_interval;
         if let Some(stdin) = control.child.stdin.as_mut() {
             write_frame(
                 &mut *stdin,
@@ -954,6 +1023,19 @@ fn client_attach(
                         );
                     }
                     ClientMessage::HeartbeatAck { .. } => break,
+                    ClientMessage::OpenUrl {
+                        request_id, url, ..
+                    } => {
+                        let error = platform_open_url(&url).err();
+                        write_frame(
+                            &mut *stdin,
+                            &ClientMessage::OpenUrlResult {
+                                version: tmux_agent_workbench::CLIENT_PROTOCOL_VERSION,
+                                request_id,
+                                error,
+                            },
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -990,17 +1072,39 @@ fn client_attach_pty(
     let tty = std::env::var("SSH_TTY")
         .or_else(|_| std::env::var("TTY"))
         .unwrap_or_else(|_| "unknown".into());
-    let binding = ipc_call(
-        paths,
-        "client.bind",
-        serde_json::json!({"token": token, "attachment": tty}),
-    )?;
+    let bind_params = serde_json::json!({"token": token, "attachment": tty});
+    let binding = match ipc_call(paths, "client.bind", bind_params.clone()) {
+        Err(error) if daemon_remote_error(&*error, "unknown attachment token") => {
+            ipc_call(paths, "client.recover", serde_json::json!({"token": token}))?;
+            ipc_call(paths, "client.bind", bind_params)?
+        }
+        result => result?,
+    };
     // Resolve the tmux server explicitly. In a test or helper process the
     // inherited TMUX value may describe an attached client, while the
     // Workbench socket option is the authoritative server identity. Letting
     // `tmux attach-session` infer its target can switch or detach the current
     // PTY, which makes the next popup observe a vanished client.
     let server = ServerIdentity::discover()?;
+    let endpoint_id = binding
+        .get("endpoint_id")
+        .and_then(|value| value.as_str())
+        .ok_or("daemon returned no endpoint id")?;
+    // The lock is held for exactly the lifetime of the remote PTY process.
+    // Without it, recovery cannot safely associate a reused tty with a client.
+    let _binding_lease = match tmux_agent_workbench::client_lease::binding(
+        paths,
+        &server.key,
+        token,
+        endpoint_id,
+        &tty,
+    ) {
+        Ok(lease) => Some(lease),
+        Err(error) => {
+            ClientDiagnostics::default().record(paths, "client.binding", &error.to_string());
+            None
+        }
+    };
     let mut command = ProcessCommand::new("tmux");
     command.args(server.tmux_args());
     // `attach-pty` may be invoked from a helper launched inside another tmux
@@ -1095,6 +1199,79 @@ fn validate_ssh_host(host: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Err("SSH host must not begin with '-'".into());
     }
     validate_safe_name(host, "SSH host")
+}
+
+fn platform_open_url(url: &str) -> Result<(), String> {
+    tmux_agent_workbench::client_actions::validate_url(url)?;
+    let mut command = if std::env::var_os("TERMUX_VERSION").is_some() {
+        let mut command = ProcessCommand::new("termux-open-url");
+        command.arg(url);
+        command
+    } else if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        let mut command = ProcessCommand::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Start-Process -FilePath '{}'",
+                url.replace('\'', "''")
+            ));
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = ProcessCommand::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = ProcessCommand::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    let status = optional_notifications::run(&mut command, Duration::from_secs(3))
+        .map_err(|error| format!("local URL opener failed: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("local URL opener exited with {status}"))
+    }
+}
+
+fn client_open_url(
+    paths: &Paths,
+    client: &str,
+    url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tmux_agent_workbench::client_actions::validate_url(url)?;
+    let server = ServerIdentity::discover()?;
+    let attachment = tmux_agent_workbench::tmux::Tmux::new(server)
+        .client_format(client, "#{client_tty}")?
+        .filter(|s| !s.is_empty())
+        .ok_or("the invoking tmux client is not attached")?;
+    let queued = ipc_call(
+        paths,
+        "client.open_url",
+        serde_json::json!({"attachment": attachment, "url": url}),
+    )?;
+    let id = queued
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing URL request id")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = ipc_call(
+            paths,
+            "client.open_url_status",
+            serde_json::json!({"attachment": attachment, "request_id": id}),
+        )?;
+        if result.get("completed").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(error.to_owned().into());
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("client URL opening timed out; no automatic retry was sent".into());
+        }
+        tmux_agent_workbench::compat::sleep(Duration::from_millis(50));
+    }
 }
 
 fn platform_clipboard_write(text: &str) -> Result<(), String> {
@@ -1249,6 +1426,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Client { command } => match command {
+            ClientCommand::OpenUrl { client, url } => client_open_url(&paths, &client, &url)?,
             ClientCommand::Remember {
                 attachment,
                 pane,
@@ -2050,19 +2228,72 @@ fn parse_display_state(value: &str) -> Result<DisplayState, String> {
     }
 }
 
-// After registration, daemon bookkeeping is an optional side channel. In
-// particular a busy daemon's two-second read timeout must not tear down SSH.
+#[derive(Default)]
+struct ClientDiagnostics {
+    last: HashMap<String, (String, Instant)>,
+}
+
+impl ClientDiagnostics {
+    fn record(&mut self, paths: &Paths, method: &str, error: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let now = Instant::now();
+        if self.last.get(method).is_some_and(|(previous, at)| {
+            previous == error && now.duration_since(*at) < Duration::from_secs(300)
+        }) {
+            return;
+        }
+        self.last.insert(method.to_owned(), (error.to_owned(), now));
+        let Ok(server) = ServerIdentity::discover() else {
+            return;
+        };
+        if fs::create_dir_all(&paths.state_dir).is_err() {
+            return;
+        }
+        if let Ok(mut log) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(paths.log_for_server(&server.key))
+        {
+            let _ = log.set_permissions(fs::Permissions::from_mode(0o600));
+            let _ = writeln!(log, "{} client {} skipped: {}", now_ms(), method, error);
+        }
+    }
+}
+
+fn daemon_remote_error(error: &(dyn std::error::Error + 'static), message: &str) -> bool {
+    matches!(error.downcast_ref::<tmux_agent_workbench::ipc::ClientError>(),
+        Some(tmux_agent_workbench::ipc::ClientError::Remote { code, message: actual })
+            if code == "request_failed" && actual == message)
+}
+
+// After registration, daemon bookkeeping is an optional side channel. A lost
+// registry can be rebuilt from the still-live control and PTY processes.
 fn client_daemon_update(
     paths: &Paths,
     method: &str,
     params: serde_json::Value,
+    token: &str,
+    diagnostics: &mut ClientDiagnostics,
 ) -> serde_json::Value {
-    match ipc_call(paths, method, params) {
-        Ok(result) => result,
+    let mut result = ipc_call(paths, method, params.clone());
+    if result
+        .as_ref()
+        .is_err_and(|error| daemon_remote_error(&**error, "unknown endpoint"))
+    {
+        result = match ipc_call(paths, "client.recover", serde_json::json!({"token": token})) {
+            Ok(_) => ipc_call(paths, method, params),
+            Err(error) => Err(error),
+        };
+    }
+    match result {
+        Ok(result) => {
+            diagnostics.last.remove(method);
+            result
+        }
         Err(error) => {
-            eprintln!(
-                "tmux-agent-workbench: {method} skipped; terminal remains connected: {error}"
-            );
+            diagnostics.record(paths, method, &error.to_string());
             serde_json::Value::Null
         }
     }
@@ -2230,8 +2461,14 @@ fn ensure_server_runtime(
             .and_then(|value| value.get("pid"))
             .and_then(|value| value.as_u64())
             .and_then(|value| u32::try_from(value).ok());
+        let runtime_revision = response
+            .result
+            .as_ref()
+            .and_then(|value| value.get("runtime_revision"))
+            .and_then(|value| value.as_u64());
         if response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
             && version == tmux_agent_workbench::ENGINE_VERSION
+            && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))
             && daemon_pid.is_some_and(running_executable_matches)
         {
             let pid = daemon_pid
@@ -2332,8 +2569,7 @@ fn running_executable_matches(pid: u32) -> bool {
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn running_executable_matches(_pid: u32) -> bool {
-    // Engine/protocol checks remain the portable fallback. Platforms without
-    // procfs should bump ENGINE_VERSION when the daemon method table changes.
+    // Engine/protocol/runtime-revision checks remain the portable fallback.
     true
 }
 

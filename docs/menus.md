@@ -6,36 +6,54 @@ prefix M-m / tmux-agent-workbench menu
   Sidebar → overview, Switch session / agent / window / pane
   Tmux → window/session controls and agent launch
   Host / SSH → SSH destinations
+  Extract → general text / paragraphs / URL / file paths / lines / words / quoted text
   CPU / resources → status density and btop
   Interface → classic tmux menus / new list menus
 
 statusbar tmux / prefix M-t
-  Switch → Agent / Window / Pane / Session
-    Agent → running Agents only
-    Window → current Session's windows
-    Pane → current Window's panes
-    Session → Sessions only
-  Create → Agent / Window / Pane / Session
+  Create → Quick Agent / Agent / Window / Pane / Session
+    Quick Agent → repeat last successful combination in the source directory
     Agent → installed tool → scene / mode / collaboration → Launch
     Window → new shell in source directory
     Pane → split below / right in source directory
     Session → name, create in source directory, enter
     Open project in VS Code (when installed)
+  Switch → Agent / Window / Pane / Session
+    Agent → running Agents only
+    Window → current Session's windows
+    Pane → current Window's panes
+    Session → Sessions only
+  Extract → the same text extraction submenu as the combined Menu
+  Layout → zoom, even horizontal / vertical, main-vertical, tiled
   Kill → Agent / Window / Pane / Session
     Each shows its current target and requires confirmation
     Agent terminates the verified foreground Agent process only
-  Layout → zoom, even horizontal / vertical, main-vertical, tiled
   Detach → this client only
 
 statusbar Agent / prefix M-a
   actual foreground CLI + state + source pane + team role
-  frequent task commands: goal / side question / plan / compact (where supported)
+  frequent task commands: goal / side question / Codex fast (where supported)
   installed grill-me / handoff skills (prefill, no Enter)
-  More commands
+  Usage summary (current CLI)
+    Codex with codex-reset-card installed: Usage & reset cards
+    Schedule earliest available card · 5 min before expiry (skill request)
+    View / adjust scheduled tasks (skill request)
+  More
+    plan / compact / branching / status / configuration (where supported)
+    Botmux (when installed)
   Team members & progress (pane teams only)
     lead / workers + reported status → focus member
     restore main-vertical layout
 ```
+
+Extract uses the optional `tmux-extrakto` helper on the host, installed by the
+[dotfiles profile](https://github.com/lukewang1024/dotfiles/blob/main/util/shell/tmux-extrakto).
+Update that helper together with Workbench to enable the typed selections.
+General text, paragraphs, file paths, lines, words/identifiers and single- or
+double-quoted text default to Enter to copy and Tab to insert. URL uses Enter
+to open on the invoking device and Ctrl-Y to copy. All choices retain the pane
+and client that opened the menu; changing the active pane does not retarget them.
+The same submenu is available in the classic and new menu renderers.
 
 All action menus use `menu::Menu`, including legacy shell providers through the
 `display-menu` adapter. Content providers supply labels, keys and callbacks;
@@ -103,8 +121,8 @@ parent menu.
   model request, clear a draft, submit Enter, or answer an approval themselves.
 - Codex's busy-safe subset follows the local upstream
   `codex-rs/tui/src/slash_command.rs::available_during_task`; `/fork` and
-  `/compact` require idle. The main menu prioritizes `/goal`, `/side`, `/plan`, and `/compact`.
-  Session branching, diff, status, model and permission controls live in More. Codex `/side` and `/btw` share the same handler; the menu uses only
+  `/compact` require idle. The main menu prioritizes `/goal`, `/side`, and `/fast`.
+  Planning, compaction, session branching, diff, status, model and permission controls live in More. Codex `/side` and `/btw` share the same handler; the menu uses only
   `/side` to match Codex terminology.
 - Claude's catalog follows its [interactive-mode documentation](https://code.claude.com/docs/en/interactive-mode)
   and [command reference](https://code.claude.com/docs/en/commands).
@@ -113,7 +131,7 @@ parent menu.
   not a discovery mechanism for installed plugins or custom slash commands.
 - TraeX 0.205.1's embedded command descriptions distinguish `/btw` (one-shot,
   no tools) from `/side` (an ephemeral fork). The main menu exposes `/goal`,
-  `/btw`, `/plan`, `/compact`; the distinct `/side` action lives in More.
+  `/btw`; planning, compaction and the distinct `/side` action live in More.
   Unrecognized CLIs get no guessed slash-command catalog.
 - `grill-me` and `handoff` are pinned when a `SKILL.md` exists in the active
   tool's project or global skill directories. Project discovery stops at the
@@ -258,9 +276,19 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
-The tmux root menu exposes Switch (`s`), Create (`c`), Kill (`k`), Layout (`l`)
-and Detach (`d`), in that order. Switch, Create and Kill all start with Agent
-(`a`), Window (`w`), Pane (`p`) and Session (`s`). Back returns to the immediate
+The tmux root menu exposes Create (`c`), Switch (`s`), Layout (`l`), Kill (`k`)
+and Detach (`d`), in that order. Create's first item is Quick Agent (`q`),
+whose gray subtitle shows the last successful menu launch's tool, scene,
+Single/Team and Native/tmux choices. Either row starts a fresh conversation
+in the source pane's current directory. The choices are saved atomically in
+`$XDG_STATE_HOME/tmux-agent-workbench/last-agent-launch.json`; they are updated
+only after a successful launch, and missing or invalid state disables Quick
+Agent. Ordinary Agent creation remains available. All menu launches use each
+CLI's automatic approval mode and explicitly disable the launcher's default
+YOLO flags with `--no-yolo`.
+
+Create then offers Agent (`a`), Window (`w`), Pane (`p`) and Session (`s`);
+Switch and Kill start with those four objects. Back returns to the immediate
 group, including after a scoped switch list or Agent launch configuration.
 Kill shows the source target and a separate confirmation; its callback rechecks
 the pane identity, and Agent termination additionally checks the process

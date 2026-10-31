@@ -5,6 +5,8 @@ use crate::{
     paths::Paths,
 };
 use clap::{Args, ValueEnum};
+use serde::{Deserialize, Serialize};
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -21,6 +23,7 @@ pub enum View {
     Root,
     Interface,
     Switch,
+    Extract,
     Create,
     CreatePane,
     Kill,
@@ -33,10 +36,12 @@ pub enum View {
     Configure,
     AgentTarget,
     More,
+    ResetCard,
     Team,
     Botmux,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Tool {
     #[default]
     Codex,
@@ -62,7 +67,8 @@ impl Tool {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Preset {
     #[default]
     Single,
@@ -88,7 +94,8 @@ impl Preset {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Scene {
     #[default]
     Daily,
@@ -130,6 +137,9 @@ impl Scene {
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct MenuOptions {
+    /// Read the menu model and guarded callbacks without opening a popup.
+    #[arg(long, hide = true)]
+    pub json: bool,
     #[arg(long, hide = true)]
     pub from_menu: bool,
     #[arg(long, value_enum, default_value = "daily")]
@@ -191,6 +201,87 @@ impl MenuOptions {
     }
 }
 
+// Remember choices, never a cwd, session, prompt or shell command. Quick Agent
+// starts a fresh session in the invoking pane using the launcher's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LaunchSettings {
+    tool: Tool,
+    preset: Preset,
+    scene: Scene,
+    panes: bool,
+}
+
+impl LaunchSettings {
+    fn from_options(options: &MenuOptions) -> Self {
+        Self {
+            tool: options.tool,
+            preset: options.preset,
+            scene: if matches!(options.tool, Tool::Codex | Tool::Traex) {
+                options.scene
+            } else {
+                Scene::Daily
+            },
+            panes: options.preset.is_team() && options.panes,
+        }
+    }
+
+    fn options(&self, options: &MenuOptions) -> MenuOptions {
+        MenuOptions {
+            tool: self.tool,
+            preset: self.preset,
+            scene: self.scene,
+            panes: self.panes,
+            launch_error: None,
+            ..options.clone()
+        }
+    }
+
+    fn load(paths: &Paths) -> Result<Option<Self>> {
+        match std::fs::read(paths.state_dir.join("last-agent-launch.json")) {
+            Ok(bytes) => {
+                let settings: Self = serde_json::from_slice(&bytes)?;
+                launch_argv(&settings.options(&MenuOptions::default()))?;
+                Ok(Some(settings))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, paths: &Paths) -> Result<()> {
+        std::fs::create_dir_all(&paths.state_dir)?;
+        let temporary = paths
+            .state_dir
+            .join(format!(".last-agent-launch-{}.json", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<()> {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            serde_json::to_writer(file, self)?;
+            std::fs::rename(&temporary, paths.state_dir.join("last-agent-launch.json"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn description(&self) -> String {
+        let mut parts = vec![self.tool.label(), self.preset.label()];
+        if matches!(self.tool, Tool::Codex | Tool::Traex) {
+            parts.insert(1, self.scene.name());
+        }
+        if self.preset.is_team() {
+            parts.push(if self.panes { "tmux" } else { "Native" });
+        }
+        parts.push("Auto approval");
+        parts.join(" · ")
+    }
+}
+
 // Callbacks pass through tmux format expansion as well as the shell. Keep
 // external diagnostics opaque in that path; quoting alone does not protect #{}.
 fn encode_launch_error(error: &str) -> String {
@@ -211,6 +302,7 @@ fn decode_launch_error(value: &str) -> std::result::Result<String, String> {
 struct Action {
     id: String,
     label: String,
+    subtitle: Option<String>,
     key: char,
     command: ActionCommand,
 }
@@ -224,11 +316,12 @@ enum ActionCommand {
     SetUi(crate::ui::Mode),
     Sidebar,
     Metrics,
+    Extract(&'static str),
     Agent(String),
     Usage,
     Host(String),
     Botmux(String),
-    Launch,
+    Launch(LaunchSettings),
     Focus(String),
     AgentTarget(String),
     Disabled,
@@ -257,12 +350,47 @@ impl Action {
         Self {
             id: id.into(),
             label: label.into(),
+            subtitle: None,
             key,
             command,
         }
     }
     fn note(label: &str) -> Self {
         Self::new("", label, ' ', ActionCommand::Disabled)
+    }
+}
+
+fn quick_agent(settings: Result<Option<LaunchSettings>>) -> Action {
+    let (subtitle, command) = match settings {
+        Ok(Some(settings)) => {
+            let available =
+                executable(settings.tool.name()) && settings.preset.available(settings.tool);
+            let subtitle = settings.description();
+            (
+                subtitle,
+                if available {
+                    ActionCommand::Launch(settings)
+                } else {
+                    ActionCommand::Disabled
+                },
+            )
+        }
+        Ok(None) => (
+            tr("Create an Agent first", "先创建一次 Agent 即可复用").into(),
+            ActionCommand::Disabled,
+        ),
+        Err(_) => (
+            tr(
+                "Saved combination unavailable; choose Agent",
+                "上次配置不可用，请选择 Agent",
+            )
+            .into(),
+            ActionCommand::Disabled,
+        ),
+    };
+    Action {
+        subtitle: Some(subtitle),
+        ..Action::new("quick-agent", "Quick Agent", 'q', command)
     }
 }
 
@@ -427,6 +555,9 @@ pub fn run(
     options: &MenuOptions,
 ) -> Result<()> {
     crate::ui_language::set_language(options.language.as_deref());
+    if options.json && (action.is_some() || options.focus_agent) {
+        return Err("JSON menu reads cannot execute an action or change focus".into());
+    }
     validate_pane(pane)?;
     if kind == StatusMenuKind::Agent && options.focus_agent && action.is_none() {
         return open_agent_status(pane, client, stay_open, options);
@@ -538,11 +669,11 @@ fn run_with_context(
         if let Err(error) = execute_action(selected, context, client, options, kind) {
             // This is an interactive callback: report the failure in the
             // client's status line instead of leaving a run-shell output pager.
-            if matches!(selected.command, ActionCommand::Launch) {
+            if let ActionCommand::Launch(settings) = &selected.command {
                 let next = MenuOptions {
                     view: View::Configure,
                     launch_error: Some(error.to_string()),
-                    ..options.clone()
+                    ..settings.options(options)
                 };
                 return run(kind, pane, client, None, 0, stay_open, &next);
             }
@@ -603,6 +734,7 @@ fn run_with_context(
                     action.id.clone()
                 },
                 label: action.label.clone(),
+                subtitle: action.subtitle.clone(),
                 key: if enabled && action.key != '\0' {
                     crate::menu_footer::key_name(action.key)
                 } else {
@@ -627,21 +759,21 @@ fn run_with_context(
             }
         })
         .collect();
-    crate::menu::display(
-        crate::menu::Menu {
-            title,
-            items,
-            searchable: false,
-            prompt: None,
-            pager: Some(crate::menu::Pager {
-                before_page: base,
-                after_page: String::new(),
-            }),
-        },
-        pane,
-        client,
-        page,
-    )
+    let menu = crate::menu::Menu {
+        title,
+        items,
+        searchable: false,
+        prompt: None,
+        pager: Some(crate::menu::Pager {
+            before_page: base,
+            after_page: String::new(),
+        }),
+    };
+    if options.json {
+        println!("{}", serde_json::to_string(&menu)?);
+        return Ok(());
+    }
+    crate::menu::display(menu, pane, client, page)
 }
 
 fn nav(id: &str, label: &str, key: char, kind: StatusMenuKind, options: MenuOptions) -> Action {
@@ -680,6 +812,35 @@ fn actions(
     };
     let mut back = View::Root;
     match options.view {
+        View::Extract => {
+            title = tr("Extract", "提取 · Extract").into();
+            for (filter, label, key) in [
+                ("all", tr("General text", "通用文本"), 'a'),
+                ("paragraph", tr("Paragraphs", "段落"), 'p'),
+                ("url", "URL", 'u'),
+                ("path", tr("File paths", "文件路径"), 'f'),
+                ("line", tr("Lines", "整行"), 'l'),
+                ("word", tr("Words / identifiers", "单词 / 标识符"), 'w'),
+                ("quote", tr("Double-quoted text", "双引号文本"), 'd'),
+                ("s-quote", tr("Single-quoted text", "单引号文本"), 's'),
+            ] {
+                let mut action = Action::new(
+                    &format!("extract:{filter}"),
+                    label,
+                    key,
+                    ActionCommand::Extract(filter),
+                );
+                action.subtitle = Some(
+                    if filter == "url" {
+                        tr("Enter: open on this device", "回车：在当前设备打开")
+                    } else {
+                        tr("Enter: copy · Tab: insert", "回车：复制 · Tab：插入")
+                    }
+                    .into(),
+                );
+                actions.push(action);
+            }
+        }
         View::Switch => {
             title = tr("Switch", "切换 · Switch").into();
             for (target, id, label, key) in [
@@ -693,6 +854,7 @@ fn actions(
         }
         View::Create => {
             title = tr("Create", "创建 · Create").into();
+            actions.push(quick_agent((|| LaunchSettings::load(&Paths::discover()?))()));
             actions.extend([
                 nav("launch", "Agent", 'a', kind, options.at(View::Launch)),
                 tmux_action("new", "Window", 'w', &["new-window"]),
@@ -896,6 +1058,7 @@ fn actions(
                     ));
                 }
             }
+            actions.push(Action::note("Auto approval"));
             actions.push(Action {
                 id: "summary".into(),
                 ..Action::note("")
@@ -911,7 +1074,7 @@ fn actions(
                     "start",
                     tr("▶ Launch", "▶ 启动"),
                     '\r',
-                    ActionCommand::Launch,
+                    ActionCommand::Launch(LaunchSettings::from_options(options)),
                 ));
             } else {
                 actions.push(Action::note(tr(
@@ -975,6 +1138,9 @@ fn actions(
         }
         View::Botmux => {
             title = "Botmux".into();
+            if kind == StatusMenuKind::Agent {
+                back = View::More;
+            }
             actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
             if context.agent.is_some() {
                 if context.role.as_deref().is_some_and(|role| role != "lead") {
@@ -1011,6 +1177,21 @@ fn actions(
         }
         View::More => {
             actions.extend(agent_commands(context, true));
+            if kind == StatusMenuKind::Agent && botmux_available() {
+                actions.push(nav(
+                    "botmux",
+                    "Botmux...",
+                    'b',
+                    kind,
+                    options.at(View::Botmux),
+                ));
+            }
+        }
+        View::ResetCard => {
+            title = tr("Codex reset cards", "Codex 重置卡").into();
+            if kind == StatusMenuKind::Agent {
+                actions.extend(reset_card_actions(context));
+            }
         }
         View::Root => match kind {
             StatusMenuKind::Menu => {
@@ -1037,6 +1218,13 @@ fn actions(
                         },
                     ));
                 }
+                actions.push(nav(
+                    "extract",
+                    tr("Extract", "提取 · Extract"),
+                    'e',
+                    kind,
+                    options.at(View::Extract),
+                ));
                 actions.push(Action::new(
                     "metrics",
                     tr("CPU / resources", "CPU / 资源"),
@@ -1090,6 +1278,13 @@ fn actions(
             StatusMenuKind::Tmux => {
                 actions.extend([
                     nav(
+                        "create",
+                        tr("Create", "创建 · Create"),
+                        'c',
+                        kind,
+                        options.at(View::Create),
+                    ),
+                    nav(
                         "switch",
                         tr("Switch", "切换 · Switch"),
                         's',
@@ -1097,13 +1292,12 @@ fn actions(
                         options.at(View::Switch),
                     ),
                     nav(
-                        "create",
-                        tr("Create", "创建 · Create"),
-                        'c',
+                        "extract",
+                        tr("Extract", "提取 · Extract"),
+                        'e',
                         kind,
-                        options.at(View::Create),
+                        options.at(View::Extract),
                     ),
-                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
                     nav(
                         "panes",
                         tr("Layout", "布局 · Layout"),
@@ -1111,6 +1305,7 @@ fn actions(
                         kind,
                         options.at(View::Panes),
                     ),
+                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
                     tmux_action("detach", "Detach", 'd', &["detach-client"]),
                 ]);
             }
@@ -1132,10 +1327,20 @@ fn actions(
                         }
                     }
                 }
-                if !agent_commands(context, true).is_empty() {
+                actions.push(Action::new(
+                    "usage",
+                    if reset_card_installed(context) {
+                        tr("Usage & reset cards...", "用量与重置卡...")
+                    } else {
+                        tr("Usage summary...", "使用量总结...")
+                    },
+                    'u',
+                    ActionCommand::Usage,
+                ));
+                if !agent_commands(context, true).is_empty() || botmux_available() {
                     actions.push(nav(
                         "more",
-                        "More commands...",
+                        tr("More...", "更多..."),
                         'm',
                         kind,
                         options.at(View::More),
@@ -1174,28 +1379,6 @@ fn actions(
             }
         },
     }
-    if options.view == View::Root
-        && matches!(kind, StatusMenuKind::Agent)
-        && executable("botmux")
-        && executable("python3")
-        && executable("workbench-botmux")
-    {
-        actions.push(nav(
-            "botmux",
-            "Botmux...",
-            'f',
-            kind,
-            options.at(View::Botmux),
-        ));
-    }
-    if options.view == View::Root && matches!(kind, StatusMenuKind::Agent) {
-        actions.push(Action::new(
-            "usage",
-            tr("Usage summary...", "使用量总结..."),
-            'u',
-            ActionCommand::Usage,
-        ));
-    }
     if options.view != View::Root {
         actions.push(nav(
             "back",
@@ -1217,6 +1400,56 @@ fn actions(
         ));
     }
     (title, actions)
+}
+
+fn botmux_available() -> bool {
+    executable("botmux") && executable("python3") && executable("workbench-botmux")
+}
+
+fn reset_card_installed(context: &Context) -> bool {
+    context.agent.as_ref().is_some_and(|agent| {
+        agent.kind == AgentKind::Codex
+            && crate::menu_skills::installed(agent.kind, &context.cwd, "codex-reset-card")
+    })
+}
+
+fn reset_card_actions(context: &Context) -> Vec<Action> {
+    if !context.input_available
+        || !matches!(context.state, BaseState::Idle | BaseState::Working)
+        || !reset_card_installed(context)
+    {
+        return vec![];
+    }
+    [
+        (
+            "reset-card-schedule",
+            tr("Schedule card · 5 min before expiry", "到期前 5 分钟用卡"),
+            's',
+            tr(
+                "Schedule the earliest-expiring available Codex reset card for 5 minutes before its expiration. If a task already exists for this card, verify and reuse it. Schedule only this one card, and report the execution time, expiration and task status.",
+                "查询可用 Codex 重置卡，将最早到期的一张安排在到期前 5 分钟使用；如果已有该卡的定时任务，核对并复用。只安排这一张，完成后报告执行时间、到期时间和任务状态。",
+            ),
+        ),
+        (
+            "reset-card-manage",
+            tr("View / adjust scheduled tasks", "查看／调整定时任务"),
+            'a',
+            tr(
+                "Inspect existing Codex reset-card timers and redemption receipts. List each task's name, selected card, execution time and current status so I can cancel or reschedule it.",
+                "查询现有 Codex 重置卡定时任务及执行回执，列出任务名称、对应卡片、执行时间和当前状态，以便我取消或改期。",
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, key, request)| {
+        Action::new(
+            id,
+            label,
+            key,
+            ActionCommand::Agent(format!("$codex-reset-card {request}")),
+        )
+    })
+    .collect()
 }
 
 fn agent_title(context: &Context) -> String {
@@ -1253,21 +1486,22 @@ fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
         AgentKind::Codex => &[
             ("/goal", 'g', true, false),
             ("/side", 's', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/fast", 'f', true, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/fork", 'f', false, true),
             ("/diff", 'd', true, true),
             ("/status", 'i', true, true),
             ("/model", 'm', true, true),
-            ("/permissions", 'p', true, true),
+            ("/permissions", 'a', true, true),
         ],
         AgentKind::Claude => &[
             ("/btw", 'b', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/status", 'i', false, true),
             ("/model", 'm', false, true),
-            ("/permissions", 'p', false, true),
+            ("/permissions", 'a', false, true),
             ("/resume", 'r', false, true),
             ("/help", 'h', false, true),
         ],
@@ -1276,14 +1510,14 @@ fn catalog(kind: AgentKind) -> &'static [(&'static str, char, bool, bool)] {
         AgentKind::Trae => &[
             ("/goal", 'g', false, false),
             ("/btw", 'b', true, false),
-            ("/plan", 'p', false, false),
-            ("/compact", 'c', false, false),
+            ("/plan", 'p', false, true),
+            ("/compact", 'c', false, true),
             ("/side", 's', false, true),
             ("/help", 'h', false, true),
         ],
         AgentKind::Opencode => &[
             ("/sessions", 's', false, false),
-            ("/compact", 'c', false, false),
+            ("/compact", 'c', false, true),
             ("/models", 'm', false, true),
             ("/help", 'h', false, true),
             ("/details", 'd', false, true),
@@ -1474,6 +1708,14 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
             args.push("--tmux".into());
         }
     }
+    // agent-team otherwise defaults Team to YOLO, which conflicts with Codex's
+    // automatic reviewer flag. Select auto explicitly for every tool and mode.
+    args.push("--no-yolo".into());
+    args.extend(match options.tool {
+        Tool::Codex => vec!["--approve-for-me".into()],
+        Tool::Claude | Tool::Traex => vec!["--permission-mode".into(), "auto".into()],
+        Tool::Opencode => vec!["--auto".into()],
+    });
     Ok(args)
 }
 
@@ -1583,6 +1825,40 @@ fn execute_action(
                 client,
             )?;
         }
+        ActionCommand::Extract(filter) => {
+            if !executable("tmux-extrakto") {
+                return message(
+                    client,
+                    tr(
+                        "Extract needs the tmux-extrakto helper installed on this host",
+                        "提取功能需要在当前主机安装 tmux-extrakto",
+                    ),
+                );
+            }
+            let mut command = Command::new("tmux-extrakto");
+            command.args(["--client", client]);
+            if *filter == "url" {
+                command.arg("--urls");
+            } else {
+                command.arg("--filter").arg(filter);
+            }
+            let output = command
+                .arg(&context.pane)
+                .current_dir(&context.cwd)
+                .output()?;
+            if !output.status.success() {
+                let detail = String::from_utf8_lossy(&output.stderr);
+                let detail = detail.trim().chars().take(512).collect::<String>();
+                return message(
+                    client,
+                    if detail.is_empty() {
+                        tr("Could not open Extract", "无法打开提取器")
+                    } else {
+                        &detail
+                    },
+                );
+            }
+        }
         ActionCommand::Metrics => {
             let plugin = tmux(&["show-option", "-gqv", "@workbench_plugin_dir"])?;
             let script = std::path::Path::new(&plugin).join("bin/workbench-host-metrics-menu");
@@ -1639,11 +1915,25 @@ fn execute_action(
                     options.at(View::Root).route()
                 ))
             );
-            let status = Command::new("workbench-agent-usage")
+            let mut command = Command::new("workbench-agent-usage");
+            command
                 .args(["menu", client])
                 .env("WORKBENCH_MENU_PARENT", parent)
                 .env("WORKBENCH_SOURCE_PANE", &context.pane)
-                .status()?;
+                .env("WORKBENCH_USAGE_GUARD", &context.guard)
+                .env("TMUX_AGENT_WORKBENCH_LANGUAGE", crate::ui_language::name());
+            if let Some(agent) = &context.agent {
+                command.env(
+                    "WORKBENCH_USAGE_SOURCE",
+                    match agent.kind {
+                        AgentKind::Codex => "codex",
+                        AgentKind::Claude => "claude",
+                        AgentKind::Trae => "trae",
+                        AgentKind::Opencode => "opencode",
+                    },
+                );
+            }
+            let status = command.status()?;
             if !status.success() {
                 return Err("could not open usage summary".into());
             }
@@ -1702,8 +1992,9 @@ fn execute_action(
                 &format!("exec ssh-connect connect {}", shell_quote(host)),
             ])?;
         }
-        ActionCommand::Launch => {
-            let args = launch_argv(options)?;
+        ActionCommand::Launch(settings) => {
+            let options = settings.options(options);
+            let args = launch_argv(&options)?;
             if matches!(options.tool, Tool::Codex | Tool::Traex) {
                 let output = Command::new(&args[0])
                     .args(&args[1..])
@@ -1753,6 +2044,14 @@ fn execute_action(
                     options.tool.name(),
                     &command,
                 ])?;
+            }
+            if let Err(error) = (|| settings.save(&Paths::discover()?))() {
+                // The new window already exists. Do not reopen Launch and
+                // encourage an accidental duplicate when only saving failed.
+                message(
+                    client,
+                    &format!("Agent started; could not save Quick Agent: {error}"),
+                )?;
             }
         }
         ActionCommand::Focus(pane) => {
@@ -1837,8 +2136,69 @@ mod tests {
         let cmds = agent_commands(&context(Some(AgentKind::Codex), BaseState::Working), false);
         assert!(cmds.iter().any(|a| a.id == "/side"));
         assert!(cmds.iter().any(|a| a.id == "/goal"));
+        assert!(cmds.iter().any(|a| a.id == "/fast"));
         assert!(!cmds.iter().any(|a| a.id == "/plan" || a.id == "/compact"));
         assert!(!cmds.iter().any(|a| a.id == "/fork"));
+    }
+    #[test]
+    fn infrequent_commands_live_in_more_and_fast_is_codex_only() {
+        for kind in [
+            AgentKind::Codex,
+            AgentKind::Claude,
+            AgentKind::Trae,
+            AgentKind::Opencode,
+        ] {
+            let context = context(Some(kind), BaseState::Idle);
+            let main = agent_commands(&context, false);
+            assert!(!main.iter().any(|a| a.id == "/plan" || a.id == "/compact"));
+            assert_eq!(
+                main.iter().any(|a| a.id == "/fast"),
+                kind == AgentKind::Codex
+            );
+            let more = agent_commands(&context, true);
+            assert!(more.iter().any(|a| a.id == "/compact"));
+            if kind != AgentKind::Opencode {
+                assert!(more.iter().any(|a| a.id == "/plan"));
+            }
+        }
+    }
+    #[test]
+    fn reset_cards_require_a_codex_prompt_that_accepts_input() {
+        for kind in [
+            None,
+            Some(AgentKind::Claude),
+            Some(AgentKind::Trae),
+            Some(AgentKind::Opencode),
+        ] {
+            assert!(reset_card_actions(&context(kind, BaseState::Idle)).is_empty());
+        }
+        for state in [BaseState::Blocked, BaseState::Unknown] {
+            assert!(reset_card_actions(&context(Some(AgentKind::Codex), state)).is_empty());
+        }
+        let mut copied = context(Some(AgentKind::Codex), BaseState::Idle);
+        copied.input_available = false;
+        assert!(reset_card_actions(&copied).is_empty());
+    }
+    #[test]
+    fn botmux_back_returns_to_its_parent() {
+        for (kind, parent) in [
+            (StatusMenuKind::Agent, View::More),
+            (StatusMenuKind::Tmux, View::Root),
+        ] {
+            let (_, actions) = actions(
+                kind,
+                &MenuOptions {
+                    view: View::Botmux,
+                    ..Default::default()
+                },
+                &context(Some(AgentKind::Codex), BaseState::Idle),
+            );
+            let back = actions.iter().find(|action| action.id == "back").unwrap();
+            assert!(matches!(
+                &back.command,
+                ActionCommand::Navigate(next, options) if *next == kind && options.view == parent
+            ));
+        }
     }
     #[test]
     fn catalogs_are_provider_specific() {
@@ -1856,7 +2216,7 @@ mod tests {
         );
     }
     #[test]
-    fn launch_combinations_are_explicit_and_do_not_override_permissions() {
+    fn every_launch_combination_uses_automatic_approval_without_yolo() {
         for tool in [Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode] {
             for preset in [Preset::Single, Preset::Team] {
                 for panes in [false, true] {
@@ -1868,13 +2228,75 @@ mod tests {
                     })
                     .unwrap();
                     assert_eq!(args.contains(&"--tmux".into()), panes && preset.is_team());
-                    assert!(
-                        args.iter()
-                            .all(|a| !a.contains("approve") && !a.contains("permission"))
-                    );
+                    assert!(args.contains(&"--no-yolo".into()));
+                    assert!(!args.contains(&"--yolo".into()));
+                    let flags: &[&str] = match tool {
+                        Tool::Codex => &["--approve-for-me"],
+                        Tool::Claude | Tool::Traex => &["--permission-mode", "auto"],
+                        Tool::Opencode => &["--auto"],
+                    };
+                    assert_eq!(&args[args.len() - flags.len()..], flags);
                 }
             }
         }
+    }
+
+    #[test]
+    fn quick_agent_remembers_choices_without_conversation_or_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: directory.path().join("config"),
+            state_dir: directory.path().join("state"),
+            cache_dir: directory.path().join("cache"),
+            runtime_dir: directory.path().join("runtime"),
+        };
+        assert!(LaunchSettings::load(&paths).unwrap().is_none());
+        assert!(matches!(
+            quick_agent(Ok(None)).command,
+            ActionCommand::Disabled
+        ));
+        let options = MenuOptions {
+            tool: Tool::Codex,
+            scene: Scene::Computer,
+            preset: Preset::Team,
+            panes: true,
+            launch_error: Some("old failure".into()),
+            ..Default::default()
+        };
+        let settings = LaunchSettings::from_options(&options);
+        settings.save(&paths).unwrap();
+        assert_eq!(
+            LaunchSettings::load(&paths).unwrap(),
+            Some(settings.clone())
+        );
+        assert!(settings.options(&options).launch_error.is_none());
+        let saved = paths.state_dir.join("last-agent-launch.json");
+        assert_eq!(
+            std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 4);
+        assert!(settings.description().contains("computer"));
+        assert!(settings.description().contains("tmux"));
+        std::fs::write(
+            &saved,
+            r#"{"tool":"codex","preset":"team","scene":"unknown","panes":true}"#,
+        )
+        .unwrap();
+        assert!(LaunchSettings::load(&paths).is_err());
+        assert!(matches!(
+            quick_agent(LaunchSettings::load(&paths)).command,
+            ActionCommand::Disabled
+        ));
+        std::fs::write(
+            &saved,
+            r#"{"tool":"traex","preset":"single","scene":"computer","panes":false}"#,
+        )
+        .unwrap();
+        assert!(LaunchSettings::load(&paths).is_err());
     }
     #[test]
     fn codex_has_four_scenes_two_modes_without_adjustments() {
@@ -2038,6 +2460,7 @@ mod tests {
                     View::Root,
                     View::Interface,
                     View::Switch,
+                    View::Extract,
                     View::Create,
                     View::CreatePane,
                     View::Kill,
@@ -2050,6 +2473,7 @@ mod tests {
                     View::Configure,
                     View::AgentTarget,
                     View::More,
+                    View::ResetCard,
                     View::Team,
                     View::Botmux,
                 ] {
@@ -2080,7 +2504,15 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["agent", "sidebar", "tmux", "host", "metrics", "interface"]
+            [
+                "agent",
+                "sidebar",
+                "tmux",
+                "host",
+                "extract",
+                "metrics",
+                "interface"
+            ]
         );
         for kind in [
             StatusMenuKind::Agent,
@@ -2109,7 +2541,7 @@ mod tests {
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["switch", "create", "kill", "panes", "detach"]
+            ["create", "switch", "extract", "panes", "kill", "detach"]
         );
         for view in [View::Switch, View::Create, View::Kill] {
             let (_, group) = actions(
@@ -2123,11 +2555,16 @@ mod tests {
             assert_eq!(
                 group
                     .iter()
+                    .filter(|action| action.id != "quick-agent")
                     .take(4)
                     .map(|action| action.label.as_str())
                     .collect::<Vec<_>>(),
                 ["Agent", "Window", "Pane", "Session"]
             );
+            if view == View::Create {
+                assert_eq!(group[0].id, "quick-agent");
+                assert!(group[0].subtitle.is_some());
+            }
             assert!(group.iter().any(|action| matches!(&action.command,
                 ActionCommand::Navigate(StatusMenuKind::Tmux, next) if action.id == "back" && next.view == View::Root)));
             assert!(

@@ -67,7 +67,9 @@ pub(crate) fn run(command: &mut Command, timeout: Duration) -> io::Result<ExitSt
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline => {
+                tmux_agent_workbench::compat::sleep(Duration::from_millis(10))
+            }
             result => {
                 unsafe {
                     libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);

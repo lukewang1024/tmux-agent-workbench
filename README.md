@@ -360,9 +360,15 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu starts with **Switch**, **Create**, **Kill**, **Layout**, and
-**Detach**. The first three groups start with **Agent**, **Window**, **Pane**,
-and **Session**, in that order. Kill shows its target for confirmation and
+The tmux menu starts with **Create**, **Switch**, **Layout**, **Kill**, and
+**Detach**. Create starts with **Quick Agent** (`q`), followed by **Agent**,
+**Window**, **Pane**, and **Session**. Quick Agent repeats the last successful
+menu launch's tool, scene, Single/Team and Native/tmux choices in the current
+directory, creating a fresh conversation. Its gray second line shows that
+combination. It becomes available after the first successful menu launch;
+cancelled and failed launches leave the saved combination unchanged. Switch
+and Kill start with **Agent**, **Window**, **Pane**, and **Session**, in that
+order. Kill shows its target for confirmation and
 rechecks its identity before acting. Switch Window lists only
 the source Session's windows; Switch pane lists only its Window's panes. Sessions
 and running Agents have separate server-wide views. In both menu modes these views share Sidebar's
@@ -400,19 +406,29 @@ agent start claude
 agent start opencode --team
 ```
 
-Workbench adds no approval-bypass flags. Single and native Team open one new
+Menu launches, including Quick Agent, use automatic approval: Codex's
+`--approve-for-me`, Claude and Trae's `--permission-mode auto`, or OpenCode's
+`--auto`. Workbench passes `--no-yolo` to the launcher so Team's default
+does not conflict with automatic review. Single and native Team open one new
 window; pane Team lets `agent-team` create its own window, with no launcher
 pane left behind. Presentation is chosen at launch and never mixed mid-session.
 
 The Agent menu includes **Usage summary** (`u`) to open plan limits and token
-usage, including when the narrow status bar hides the usage badge.
+usage for its current CLI, including when the narrow status bar hides the usage
+badge. Codex labels this **Usage & reset cards** when the `codex-reset-card`
+skill is installed. Its Usage menu offers **Schedule card · 5 min before expiry**
+and **View / adjust scheduled tasks**. These prefill complete requests for that
+skill in the opening Codex pane; press Enter to submit. Scheduling chooses the
+earliest-expiring available card and reuses an existing task for that card.
+The skill owns persistent scheduling and redemption receipts.
 The Host menu shows the current machine's hostname above its SSH destinations.
 
 The Agent menu belongs to the pane from which it was opened. It identifies the
 live foreground CLI from its process ancestry and offers provider-specific
-commands: goal, side question, planning and compaction where supported.
-Installed `grill-me` and `handoff` skills are pinned alongside them. Session
-branching, status and configuration commands live under **More**. Shells, background or
+commands: goal, side question and Codex Fast where supported.
+Installed `grill-me` and `handoff` skills are pinned alongside them. Planning,
+compaction, session branching, status, configuration and Botmux live under
+**More**. Shells, background or
 noninteractive agents, approval prompts, unknown states, and tmux copy mode do
 not receive slash commands. Working agents get only documented busy-safe
 shortcuts. Commands **prefill without Enter** and do not erase an existing
@@ -579,6 +595,35 @@ uses that control channel to switch the attached remote tmux client to the
 event's exact session, window, and pane. Closing the SSH attachment removes the
 endpoint. No listening port, reverse tunnel, or third-party push provider is
 required.
+
+The same authenticated channel can open a web link on the invoking device:
+
+```sh
+tmux-agent-workbench client open-url --client /dev/pts/9 'https://example.com/?x=1&y=2'
+```
+
+Pass the actual `#{client_name}` from a tmux key binding. Routing uses that
+client's exact authenticated attachment, so another phone or desktop viewing
+the same session cannot receive the request. The client runs `termux-open-url`
+on Android, `open` on macOS, `xdg-open` on Linux, or the Windows URL handler
+through PowerShell in WSL. This works independently of the terminal emulator's
+OSC extensions. Only HTTP and HTTPS URLs are accepted. POSIX helpers receive
+the URL as one process argument; WSL uses a quoted PowerShell string literal.
+The command returns the local helper's success or error.
+Delivery is bounded and a timeout never retries an open automatically.
+
+Both ends need the URL-opening capability. After updating a client, reconnect
+its SSH attachment to advertise it; existing clients without the capability
+receive a clear upgrade message rather than opening on the server. Compatible
+clients negotiate a one-second control heartbeat for prompt explicit actions;
+older clients retain the previous heartbeat interval. URL requests and results
+are transient memory only and are not checkpointed or added to snapshots.
+
+An established attachment stays connected when optional daemon updates fail.
+If the daemon restarts or forgets a temporarily offline client, its next heartbeat
+restores the live terminal's registration and binding. Optional failures are
+recorded in the server's private Workbench daemon log instead of being printed
+over the terminal. A superseded or closed terminal cannot reclaim a newer one.
 
 Reconnects restore the last session, window, and pane for that device and
 terminal. An explicit `--session` takes precedence. History lives in the target

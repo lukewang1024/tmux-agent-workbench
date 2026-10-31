@@ -25,7 +25,7 @@ workflow: new [--prompt] task new|list|done add done promote inspect run prune p
 agents:   agent start|list|goto|next|profiles|handoff
 layout:   reorganise batch-worker|snapshot|apply|restore
 titles:   title set [task-name] [--session <direction>] | title status
-clients:  attach, client serve|status|setup
+clients:  attach, client serve|status|setup|open-url
 ui:       menu, ui old|new|toggle|status, sidebar, popup, switch window|session|agent|pane, pick repo|project|session|agent
 tmux:     resurrect save|restore
 system:   conventions, status, doctor, config, hooks, daemon
