@@ -240,7 +240,7 @@ fn window_lock_wait(
                 if started.elapsed() >= wait {
                     return Err("task title is being checked; retry shortly".into());
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                crate::compat::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(error.to_string()),
         }
@@ -1291,7 +1291,7 @@ mod tests {
             if Instant::now() >= deadline {
                 break None;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            crate::compat::sleep(Duration::from_millis(10));
         };
         let observations = identity.as_ref().map(|identity| {
             let live = !reaper.exited(identity);

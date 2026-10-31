@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -116,8 +116,7 @@ pub fn exchange(
         path: socket.display().to_string(),
         source,
     })?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    let mut stream = crate::compat::unix_io(&mut stream, timeout)?;
     write_message(&mut stream, request)?;
 
     let mut line = String::new();
@@ -125,22 +124,20 @@ pub fn exchange(
     Ok(serde_json::from_str(&line)?)
 }
 
-pub fn read_request(stream: &UnixStream) -> Result<Request, io::Error> {
+pub fn read_request(stream: impl Read) -> Result<Request, io::Error> {
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
     serde_json::from_str(&line).map_err(io::Error::other)
 }
 
-pub fn write_response(mut stream: &UnixStream, response: &Response) -> Result<(), io::Error> {
+pub fn write_response(mut stream: impl Write, response: &Response) -> Result<(), io::Error> {
     write_message(&mut stream, response)
 }
 
-pub(crate) fn prepare_connection(stream: &UnixStream) -> io::Result<()> {
-    // macOS inherits O_NONBLOCK from the listener. Worker threads use blocking
-    // framed I/O; otherwise a response can stop after the socket's first buffer.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))
+pub(crate) fn prepare_connection(
+    stream: &mut UnixStream,
+) -> io::Result<crate::compat::TimedIo<&mut UnixStream>> {
+    crate::compat::unix_io(stream, Duration::from_secs(2))
 }
 
 // Serialize once: serde's small writes must not each become a socket syscall.
@@ -170,17 +167,25 @@ mod tests {
             )
             .unwrap()
         });
-        let (stream, _) = listener.accept().unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
         // Exercise the inherited macOS mode on every CI platform.
         stream.set_nonblocking(true).unwrap();
-        prepare_connection(&stream).unwrap();
+        let mut stream = prepare_connection(&mut stream).unwrap();
         assert_eq!(
             unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
-            0
+            if crate::compat::is_ish() {
+                libc::O_NONBLOCK
+            } else {
+                0
+            }
         );
-        let request = read_request(&stream).unwrap();
+        let request = read_request(&mut stream).unwrap();
         let response = serde_json::json!({"snapshot": "x".repeat(128 * 1024)});
-        write_response(&stream, &Response::success(request.id, response.clone())).unwrap();
+        write_response(
+            &mut stream,
+            &Response::success(request.id, response.clone()),
+        )
+        .unwrap();
         assert_eq!(client.join().unwrap(), response);
     }
 

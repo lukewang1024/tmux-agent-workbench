@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::io;
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -174,7 +173,7 @@ impl Tmux {
                 let _ = child.wait();
                 return Err(TmuxError::Timeout(timeout.as_millis() as u64));
             }
-            thread::sleep(Duration::from_millis(5));
+            crate::compat::sleep(Duration::from_millis(5));
         }
     }
 

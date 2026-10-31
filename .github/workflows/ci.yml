@@ -36,8 +36,20 @@ jobs:
           sh .github/scripts/install-ci-tmux.sh
       - name: Install test dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install tmux fzf
+        run: |
+          brew install fzf libevent ncurses bison pkgconf utf8proc jemalloc
+          sh .github/scripts/install-ci-tmux.sh
       - run: sh tests/verify.sh
+      - name: Use the iSH-validated compiler
+        if: runner.os == 'Linux'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: i586-unknown-linux-musl
+      - name: Verify the static iSH build
+        if: runner.os == 'Linux'
+        run: |
+          export CARGO_TARGET_I586_UNKNOWN_LINUX_MUSL_LINKER="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+          cargo test --locked --target i586-unknown-linux-musl
   intel_title_hooks:
     name: Title hooks (macos-15-intel)
     runs-on: macos-15-intel

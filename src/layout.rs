@@ -198,7 +198,7 @@ pub fn handoff_sidebars(
                 "daemon did not publish its initial snapshot during upgrade handoff".into(),
             );
         }
-        std::thread::sleep(Duration::from_millis(25));
+        crate::compat::sleep(Duration::from_millis(25));
     }
     let _lock = lock_layout(paths, server)?;
     let mut refreshed = 0;
@@ -237,7 +237,7 @@ pub fn handoff_sidebars(
                     format!("sidebar {pane} did not become ready during upgrade handoff").into(),
                 );
             }
-            std::thread::sleep(Duration::from_millis(25));
+            crate::compat::sleep(Duration::from_millis(25));
         }
     }
     Ok(refreshed)

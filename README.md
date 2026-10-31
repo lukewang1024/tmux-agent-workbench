@@ -55,7 +55,7 @@ see [Install](#install).
 
 - **tmux >= 3.6 for interactive status/sidebar menus** (core requires >= 3.2), **git**, and the shipped `tmux-agent-workbench` binary —
   hard requirements. The installer downloads a matching macOS/Linux
-  x86_64/aarch64 release, then falls back to a local Cargo build.
+  x86_64/aarch64 or iSH i586 musl release, then falls back to a local Cargo build.
 - **jq** and **Python 3** — local Codex/Trae token summaries can read session logs
   without the optional `ccusage` CLI. The reader respects `CODEX_HOME` and
   `TRAE_HOME`, including Termux home paths.
@@ -97,7 +97,7 @@ tmux-agent-workbench doctor
 ```
 
 The POSIX installer first downloads the matching macOS/Linux x86_64/aarch64
-release and falls back to `cargo build --release` when no release asset is
+or iSH i586 musl release and falls back to `cargo build --release` when no release asset is
 available. It installs executables under `~/.local/bin` by default, stages the
 binary before replacing it, and signs the staged Mach-O on macOS. The installer
 then hands off running daemons and resident sidebars in the current runtime
@@ -108,7 +108,10 @@ to update key bindings and hooks. Plugin loading never overwrites Workbench
 configuration or Agent configuration. Termux is detected explicitly and always
 builds for its native Android target. Tagged releases provide Android arm64 and x86_64 assets;
 install the Termux `rust` package only when using an unreleased revision or an
-architecture without a release asset.
+architecture without a release asset. iSH uses the static i586 musl asset to avoid unsupported SSE instructions;
+no Rust compiler is needed inside the emulator. Android notification setup
+remains specific to Termux. Set `TMUX_AGENT_WORKBENCH_RELEASE_TAG=v<version>`
+with release-only mode to select an exact prerelease instead of GitHub Latest.
 
 The public CLI, tmux plugin, status menus and sidebar launchers share one core
 selection rule: prefer the installed core over any binary left under

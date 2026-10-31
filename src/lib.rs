@@ -4,6 +4,7 @@ pub mod client;
 pub mod client_actions;
 pub mod client_lease;
 pub mod client_protocol;
+pub mod compat;
 pub mod config;
 pub mod daemon;
 pub mod detection;

@@ -515,9 +515,11 @@ class TaskWindows(unittest.TestCase):
         self.assertTrue(self.task_root(name).is_dir())
         self.assertFalse((self.root / 'injected').exists())
         text = (self.root / 'config/tmuxinator/direction.yml').read_text()
-        commands = [line.strip()[2:][1:-1].replace("''", "'")
+        commands = [shlex.split(line.strip()[2:][1:-1].replace("''", "'"))
                     for line in text.splitlines() if line.startswith('        - ')]
-        self.assertCountEqual([shlex.split(command)[-1] for command in commands], ['first', name])
+        # Glob order depends on the runner locale; both names must remain
+        # literal arguments regardless of which task sorts last.
+        self.assertCountEqual([args[-1] for args in commands], ['first', name])
 
 
     def test_task_prompt_from_background_binding_creates_only_one_task(self):
