@@ -369,8 +369,19 @@ impl NotificationBackend for SystemBackend {
             let _ = style;
             spawn_linux_notification(&title, &body, agent)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        Err("desktop notifications are unsupported on this platform".into())
+        #[cfg(target_os = "android")]
+        {
+            // Android currently has no desktop notification adapter. Treat
+            // that channel as intentionally omitted so a successful sound
+            // does not get replayed on every daemon pass while retrying it.
+            let _ = (agent, title, body, style);
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+        {
+            let _ = (agent, title, body, style);
+            Err("desktop notifications are unsupported on this platform".into())
+        }
     }
 }
 
