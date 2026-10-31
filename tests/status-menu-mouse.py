@@ -468,6 +468,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
             menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
+            if mode == 'old':
+                # A release outside a native menu must not dismiss it before
+                # the user can move the pointer to an item.
+                os.write(master, b'\x1b[<0;1;1M\x1b[<0;1;1m')
+                drain(.2)
+                assert menu.poll() is None, 'unselected mouse release dismissed the native menu'
             labels = ('Create', 'Switch', 'Extract', 'Layout', 'Kill', 'Detach')
             positions = [item_position(rendered, label)[1] for label in labels]
             assert positions == sorted(set(positions)), (positions, rendered)

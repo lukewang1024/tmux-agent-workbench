@@ -153,7 +153,9 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
     let mode = Command::new(std::env::current_exe()?)
         .args(["menu-mouse-mode", "--client", client])
         .output()?;
-    if mode.status.success() && mode.stdout.starts_with(b"mouse") {
+    let input_mode = String::from_utf8_lossy(&mode.stdout);
+    // A release with no selected row should not dismiss the native menu.
+    if mode.status.success() && matches!(input_mode.trim(), "mouse" | "release") {
         args.push("-O".into());
     }
     // Disabled rows start with '-'. Stop option parsing before the first row,
