@@ -83,8 +83,14 @@ jobs:
           VALIDATION_REF: ${{ needs.prepare.outputs.validation }}
         run: git show "$VALIDATION_REF:tests/core-selection.sh" > tests/core-selection.sh
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.target != 'i586-unknown-linux-musl'
         with:
           targets: ${{ matrix.target }}
+      - name: Use the iSH-validated compiler
+        if: matrix.target == 'i586-unknown-linux-musl'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: i586-unknown-linux-musl
       - name: Install runtime test dependencies (Linux)
         if: runner.os == 'Linux' && !matrix.android
         run: |

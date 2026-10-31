@@ -28,6 +28,9 @@ the release workflow. It creates `v<package version>` only when that tag does
 not exist. CI on PR heads, failed runs, and superseded main commits cannot tag.
 An ordinary PR without a version change does not create a release.
 
+The iSH i586 target uses Rust 1.95.0 in CI and release, matching the tested
+App Store emulator build; other targets continue to use stable Rust.
+
 The workflow builds all eight Rust targets (including static i586 musl for iSH) and both Windows companion targets,
 collects artifacts, then publishes in a single final job. New releases stay
 in draft until all twelve archive/checksum files have been uploaded. Failed
