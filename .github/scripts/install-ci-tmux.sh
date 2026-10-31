@@ -14,7 +14,7 @@ fi
 # Use the same menu baseline on Linux and macOS. Homebrew may already ship a
 # newer release with different native menu input semantics.
 if [ "$(uname -s)" = Darwin ]; then
-  PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig:$(brew --prefix jemalloc)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
   PATH="$(brew --prefix bison)/bin:$PATH"
   export PKG_CONFIG_PATH PATH
 fi
@@ -22,7 +22,7 @@ tar -xzf "$ci_tmux_root/tmux.tar.gz" -C "$ci_tmux_root"
 cd "$ci_tmux_root/tmux-3.7c"
 ci_tmux_prefix=${RUNNER_TEMP:?}/workbench-tmux-install
 if [ "$(uname -s)" = Darwin ]; then
-  ./configure --prefix="$ci_tmux_prefix" --enable-utf8proc
+  ./configure --prefix="$ci_tmux_prefix" --enable-utf8proc --enable-jemalloc
 else
   ./configure --prefix="$ci_tmux_prefix"
 fi

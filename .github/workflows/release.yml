@@ -94,7 +94,7 @@ jobs:
       - name: Install runtime test dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install fzf libevent ncurses bison pkgconf utf8proc
+          brew install fzf libevent ncurses bison pkgconf utf8proc jemalloc
           sh .github/scripts/install-ci-tmux.sh
       - name: Configure Android NDK linker
         if: matrix.android
