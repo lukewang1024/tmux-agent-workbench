@@ -124,11 +124,13 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .into_iter()
         .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
         .collect();
+    // Leave seven rows of slack: tmux versions differ in native menu height
+    // accounting and silently omit menus that do not fit.
     let capacity = height
         .saturating_sub(
             pinned.len()
                 + body.iter().filter(|item| item.subtitle.is_some()).count()
-                + 5
+                + 12
                 + usize::from(!pinned.is_empty()),
         )
         .max(1);
@@ -153,7 +155,9 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
     let mode = Command::new(std::env::current_exe()?)
         .args(["menu-mouse-mode", "--client", client])
         .output()?;
-    if mode.status.success() && mode.stdout.starts_with(b"mouse") {
+    let input_mode = String::from_utf8_lossy(&mode.stdout);
+    // A release with no selected row should not dismiss the native menu.
+    if mode.status.success() && matches!(input_mode.trim(), "mouse" | "release") {
         args.push("-O".into());
     }
     // Disabled rows start with '-'. Stop option parsing before the first row,

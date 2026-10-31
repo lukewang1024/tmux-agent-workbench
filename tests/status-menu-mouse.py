@@ -245,6 +245,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 raise AssertionError((
                     'menu exited before rendering', proc.returncode, proc.stderr.read(),
                     'tmux probe', probe.returncode, probe.stdout, probe.stderr,
+                    'client size', tmux('display-message', '-p', '-c', client,
+                                        '#{client_width}x#{client_height}'),
+                    'terminal output', output[-2000:],
                 ))
         raise AssertionError(('menu did not render', visible))
 
@@ -468,6 +471,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
             menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
+            if mode == 'old' and release_menus:
+                # A release outside a native menu must not dismiss it before
+                # the user can move the pointer to an item.
+                x, y = item_position(rendered, 'Create')
+                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;1;1m'.encode())
+                drain(.2)
+                assert menu.poll() is None, 'unselected mouse release dismissed the native menu'
             labels = ('Create', 'Switch', 'Extract', 'Layout', 'Kill', 'Detach')
             positions = [item_position(rendered, label)[1] for label in labels]
             assert positions == sorted(set(positions)), (positions, rendered)
