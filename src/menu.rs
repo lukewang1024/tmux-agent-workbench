@@ -124,13 +124,13 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .into_iter()
         .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
         .collect();
-    // Leave two rows of slack: tmux versions differ slightly in native menu
-    // height accounting and silently omit menus that do not fit.
+    // Leave seven rows of slack: tmux versions differ in native menu height
+    // accounting and silently omit menus that do not fit.
     let capacity = height
         .saturating_sub(
             pinned.len()
                 + body.iter().filter(|item| item.subtitle.is_some()).count()
-                + 7
+                + 12
                 + usize::from(!pinned.is_empty()),
         )
         .max(1);

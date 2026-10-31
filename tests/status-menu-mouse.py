@@ -245,6 +245,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 raise AssertionError((
                     'menu exited before rendering', proc.returncode, proc.stderr.read(),
                     'tmux probe', probe.returncode, probe.stdout, probe.stderr,
+                    'client size', tmux('display-message', '-p', '-c', client,
+                                        '#{client_width}x#{client_height}'),
+                    'terminal output', output[-2000:],
                 ))
         raise AssertionError(('menu did not render', visible))
 
