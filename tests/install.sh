@@ -81,4 +81,59 @@ PATH="$legacy_tools:$PATH" WORKBENCH_TEST_RELEASE_ARCHIVE="$test_root/legacy-rel
 "$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-core" --version | \
   grep '2.0.0-beta.35' >/dev/null
 
+# An iSH source checkout must select a static 32-bit release without Cargo.
+# Use fresh data so an installed host binary cannot hide a wrong target.
+ish_plugin="$test_root/ish-plugin"
+ish_tools="$test_root/ish-tools"
+ish_archive="$test_root/ish-archive"
+mkdir -p "$ish_plugin" "$ish_tools" "$ish_archive"
+cp "$repo/install" "$repo/Cargo.toml" "$ish_plugin/"
+ish_version=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$repo/Cargo.toml" | head -1)
+cat > "$ish_archive/tmux-agent-workbench" <<SH
+#!/bin/sh
+case \$* in
+  --version) printf '%s\n' 'tmux-agent-workbench $ish_version' ;;
+  'daemon ensure --help') printf '%s\n' 'Usage: tmux-agent-workbench daemon ensure' ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ish_archive/tmux-agent-workbench"
+tar -czf "$test_root/ish-release.tar.gz" -C "$ish_archive" tmux-agent-workbench
+cat > "$ish_tools/uname" <<'SH'
+#!/bin/sh
+case $1 in
+  -s) printf '%s\n' Linux ;;
+  -m) printf '%s\n' i686 ;;
+  -o) printf '%s\n' GNU/Linux ;;
+  *) exit 2 ;;
+esac
+SH
+cat > "$ish_tools/curl" <<'SH'
+#!/bin/sh
+case $2 in
+  */releases/download/v*/tmux-agent-workbench-i586-unknown-linux-musl.tar.gz) ;;
+  *) printf 'unexpected iSH release URL: %s\n' "$2" >&2; exit 1 ;;
+esac
+cp "$WORKBENCH_TEST_RELEASE_ARCHIVE" "$4"
+SH
+cat > "$ish_tools/cargo" <<'SH'
+#!/bin/sh
+printf '%s\n' 'iSH installation attempted a native Cargo build' >&2
+exit 1
+SH
+chmod +x "$ish_tools/uname" "$ish_tools/curl" "$ish_tools/cargo"
+(
+  unset TERMUX_VERSION PREFIX TMUX_AGENT_WORKBENCH_INSTALL_SOURCE
+  export XDG_DATA_HOME="$test_root/ish-data"
+  export PATH="$ish_tools:$PATH"
+  export WORKBENCH_TEST_RELEASE_ARCHIVE="$test_root/ish-release.tar.gz"
+  "$ish_plugin/install" "$test_root/ish-bin" --no-git >/dev/null
+  "$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-core" --version | grep "$ish_version" >/dev/null
+  # The updater passes its selected prerelease; GitHub Latest can lack iSH.
+  export TMUX_AGENT_WORKBENCH_RELEASE_ONLY=1
+  export TMUX_AGENT_WORKBENCH_RELEASE_TAG="v$ish_version"
+  "$ish_plugin/install" "$test_root/ish-bin" --no-git >/dev/null
+  "$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-core" --version | grep "$ish_version" >/dev/null
+)
+
 printf '%s\n' 'installer integration: ok'

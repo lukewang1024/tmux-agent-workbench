@@ -335,7 +335,7 @@ fn serve_loop(
             update_snapshot(&scan_state, &scan_snapshot, &scan_paths, &scan_server.key);
             let snapshot = scan_snapshot.read().expect("snapshot poisoned").clone();
             title_reaper.tick(&scan_paths, &scan_server, &snapshot);
-            thread::sleep(Duration::from_millis(50));
+            crate::compat::sleep(Duration::from_millis(50));
         }
     });
 
@@ -361,17 +361,21 @@ fn serve_loop(
                         let started = Instant::now();
                         // A stalled or malformed client is connection-local and
                         // must not hold up snapshots for every other sidebar.
-                        let request = crate::ipc::prepare_connection(&stream)
-                            .and_then(|()| read_request(&stream));
-                        let response = match request {
-                            Ok(request) => handle(
-                                request, &state, &snapshot, &shutdown, &metrics, &paths, &server,
-                            ),
-                            Err(error) => {
-                                Response::error(String::new(), "invalid_request", error.to_string())
-                            }
-                        };
-                        let _ = write_response(&stream, &response);
+                        let mut stream = stream;
+                        if let Ok(mut stream) = crate::ipc::prepare_connection(&mut stream) {
+                            let response = match read_request(&mut stream) {
+                                Ok(request) => handle(
+                                    request, &state, &snapshot, &shutdown, &metrics, &paths,
+                                    &server,
+                                ),
+                                Err(error) => Response::error(
+                                    String::new(),
+                                    "invalid_request",
+                                    error.to_string(),
+                                ),
+                            };
+                            let _ = write_response(&mut stream, &response);
+                        }
                         metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                         if started.elapsed() >= Duration::from_millis(250) {
                             metrics.slow.fetch_add(1, Ordering::Relaxed);
@@ -382,7 +386,7 @@ fn serve_loop(
                 Err(error) => return Err(error.into()),
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        crate::compat::sleep(Duration::from_millis(50));
     }
     shutdown.store(true, Ordering::Relaxed);
     Ok(())

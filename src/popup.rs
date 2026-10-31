@@ -158,7 +158,7 @@ pub(crate) fn open(
                     break child.wait()?;
                 }
             }
-            std::thread::sleep(Duration::from_millis(20));
+            crate::compat::sleep(Duration::from_millis(20));
         }
     };
     if !status.success() && !matches!(status.code(), Some(129 | 130)) {

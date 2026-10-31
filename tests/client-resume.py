@@ -60,7 +60,9 @@ with tempfile.TemporaryDirectory(prefix='workbench-resume-') as root:
 
     def registered(client):
         snapshot = json.loads(subprocess.check_output([core, 'snapshot', '--json'], env=env, text=True))
-        return next((item for item in snapshot['clients'] if item['attachment'] == client), None)
+        # Empty snapshots omit clients; registration also precedes PTY binding.
+        return next((item for item in snapshot.get('clients', [])
+                     if item.get('attachment') == client), None)
 
     device = str(uuid.uuid4())
     terminal_a, terminal_b = str(uuid.uuid4()), str(uuid.uuid4())

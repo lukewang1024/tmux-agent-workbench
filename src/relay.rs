@@ -144,8 +144,7 @@ fn send_event(outbound: &Outbound, event: &RelayEvent) -> Result<(), String> {
         .map_err(|_| "invalid relay address")?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|error| error.to_string())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(1)))
+    let mut stream = crate::compat::tcp_io(&mut stream, Duration::from_secs(1), None)
         .map_err(|e| e.to_string())?;
     write!(stream, "POST /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", outbound.token, body.len()).map_err(|e| e.to_string())?;
     stream.write_all(&body).map_err(|e| e.to_string())?;
@@ -276,18 +275,15 @@ fn handle_connection<B: NotificationBackend>(
     config: &Config,
     backend: &mut B,
 ) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|e| e.to_string())?;
-    let request = read_http(stream).map_err(|error| {
-        let _ = write_http(stream, error.status, &error.message);
+    let mut stream =
+        crate::compat::tcp_io(stream, Duration::from_secs(2), Some(Duration::from_secs(2)))
+            .map_err(|e| e.to_string())?;
+    let request = read_http(&mut stream).map_err(|error| {
+        let _ = write_http(&mut stream, error.status, &error.message);
         error.message
     })?;
     if request.method != "POST" || request.path != "/v1/events" {
-        write_http(stream, 404, "not found").map_err(|e| e.to_string())?;
+        write_http(&mut stream, 404, "not found").map_err(|e| e.to_string())?;
         return Ok(());
     }
     let store = load_store(store_path).map_err(|error| error.to_string())?;
@@ -296,7 +292,7 @@ fn handle_connection<B: NotificationBackend>(
         .iter()
         .find(|pairing| constant_time_eq(&pairing.token, &request.token))
     else {
-        write_http(stream, 401, "unauthorized").map_err(|e| e.to_string())?;
+        write_http(&mut stream, 401, "unauthorized").map_err(|e| e.to_string())?;
         return Ok(());
     };
     if !limits
@@ -304,30 +300,30 @@ fn handle_connection<B: NotificationBackend>(
         .or_insert_with(TokenBucket::new)
         .allow(Instant::now())
     {
-        write_http(stream, 429, "rate limited").map_err(|e| e.to_string())?;
+        write_http(&mut stream, 429, "rate limited").map_err(|e| e.to_string())?;
         return Ok(());
     }
     let event: RelayEvent = match serde_json::from_slice(&request.body) {
         Ok(event) => event,
         Err(error) => {
-            write_http(stream, 400, "invalid JSON").map_err(|e| e.to_string())?;
+            write_http(&mut stream, 400, "invalid JSON").map_err(|e| e.to_string())?;
             return Err(error.to_string());
         }
     };
     if let Err(error) = validate_event(&event, &pairing.remote_id) {
-        write_http(stream, 400, &error).map_err(|e| e.to_string())?;
+        write_http(&mut stream, 400, &error).map_err(|e| e.to_string())?;
         return Ok(());
     }
     let now = now_ms();
     seen.retain(|_, observed| now.saturating_sub(*observed) < 24 * 60 * 60 * 1_000);
     if seen.contains_key(&event.event_id) {
-        write_http(stream, 202, "duplicate").map_err(|e| e.to_string())?;
+        write_http(&mut stream, 202, "duplicate").map_err(|e| e.to_string())?;
         return Ok(());
     }
     let event_id = event.event_id.clone();
     deliver_event(event, config, backend)?;
     seen.insert(event_id, now);
-    write_http(stream, 202, "accepted").map_err(|e| e.to_string())?;
+    write_http(&mut stream, 202, "accepted").map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -893,7 +889,7 @@ struct HttpError {
     message: String,
 }
 
-fn read_http(stream: &mut TcpStream) -> Result<HttpRequest, HttpError> {
+fn read_http(stream: &mut impl Read) -> Result<HttpRequest, HttpError> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 2048];
     let header_end;
@@ -984,7 +980,7 @@ fn read_http(stream: &mut TcpStream) -> Result<HttpRequest, HttpError> {
     })
 }
 
-fn write_http(stream: &mut TcpStream, status: u16, message: &str) -> std::io::Result<()> {
+fn write_http(stream: &mut impl Write, status: u16, message: &str) -> std::io::Result<()> {
     let reason = match status {
         202 => "Accepted",
         400 => "Bad Request",
