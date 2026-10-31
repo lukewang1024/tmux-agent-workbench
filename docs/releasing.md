@@ -5,8 +5,11 @@ Rust tests, isolated tmux integration, relay pairing, and the installer.
 CI repeats the same command on Ubuntu and Apple Silicon macOS for every PR
 and main push. Intel macOS also runs the title-hook integration and process
 identity unit tests before tagging; the release repeats all native checks.
-Linux CI pins tmux 3.7c with its official SHA-256; Ubuntu 24.04's bundled
-tmux 3.4 lacks the existing menu mouse flags. macOS uses Homebrew tmux.
+Linux and Apple Silicon macOS CI build tmux 3.7c with its official SHA-256.
+Ubuntu 24.04's bundled tmux 3.4 lacks the existing menu mouse flags, while
+Homebrew may already ship a newer menu implementation. The macOS source
+build uses Homebrew libevent, ncurses, utf8proc and jemalloc. Intel title-hook
+coverage also checks the current Homebrew tmux.
 The stable aggregate check is named **CI gate**; a failed, skipped, or cancelled
 platform prevents it from passing.
 
