@@ -1549,10 +1549,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                           '--view', 'configure', '--language', 'zh'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        rendered = wait_for_text(menu, '日常开发'.encode(), '模式'.encode(), '启动'.encode(),
-                                 absent=(b'Daily development',))
+        # Remote category names keep the source's language; static controls
+        # follow the selected UI language.
+        rendered = wait_for_text(menu, 'GPT-6.1 Sol'.encode(), '模式'.encode(), '启动'.encode())
         assert '模式'.encode() in screen_text(rendered) and '启动'.encode() in screen_text(rendered)
-        assert b'Daily development' not in '\n'.join(screen_rows(rendered)).encode()
         os.write(master, b't')
         rendered = wait_for_text(client_process, '主代理'.encode())
         if '原生子代理'.encode() not in screen_text(rendered):
