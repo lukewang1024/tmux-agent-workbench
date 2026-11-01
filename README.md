@@ -382,30 +382,33 @@ Wheel scrolling, touch, keyboard navigation and refresh positioning share one
 list component across Sidebar and the four filtered views. New session prompts for
 a name, starts in the source pane's directory, and switches only the invoking
 client to the new session.
-Selecting an agent opens one configuration panel. Codex and Trae expose scene,
-Single/Team and (for Team) Native/tmux choices together; Claude and OpenCode
-show only Single/Team and collaboration choices. Clicking a choice refreshes
-this same panel. There is no temporary adjustment or separate review step.
-All action menus share a footer: Escape closes the menu, and Backspace returns
-one level when a parent exists or closes a root menu without an extra hint.
-The launch panel keeps Launch visible on every
-page; Enter launches. Shortcuts: `d/h/b` for scenes and `c` for Codex computer
-automation, `s/t` for mode and `n/m` for Native/tmux.
+Selecting an agent opens one configuration panel. Codex recommendations are
+loaded dynamically from the active CodexRadar cache. The menu shows the first
+four distinct categories in remote order and keeps the newest numeric model
+version in each category. When recommendations exist, the first one is selected
+on entry and the Codex defaults choice is hidden. Without recommendations, the
+menu offers Codex defaults. Trae keeps its daily, hard and batch scenes. All
+tools expose Single/Team and, for Team, Native/tmux choices in the same panel.
+Codex Fast remains off unless explicitly passed with `--fast` to the launcher.
 
-The panel reads the actual model, effort and Fast preview from
-[agent-team](https://github.com/lukewang1024/agent-team) without making a model
-request. Errors appear inside the panel and preserve its selections. Workbench
-does not duplicate model configuration; agent-team must be on PATH.
+The panel previews the selected model and effort from the CodexRadar cache; it
+does not query a model catalog. Opening Create Agent → Codex prepares the cache
+once, with asynchronous daily refresh after the first successful fetch. Workbench
+does not duplicate model configuration; agent-team resolves recommendation IDs
+and falls back to Codex defaults if an ID is missing.
 
 ```sh
-agent start codex --scene daily
-agent start codex --scene hard --team
-agent start codex --scene batch --team --tmux
-agent start codex --scene computer
+agent start codex --recommendation <ID>
+agent start codex --recommendation <ID> --team
+agent start codex --recommendation <ID> --team --tmux
+agent start codex --team
+agent start traex --scene daily
 agent start claude
 agent start opencode --team
 ```
 
+Dynamic Codex recommendation rows use numbered shortcuts. Trae scene shortcuts
+remain `d/h/b`; `s/t` selects mode and `n/m` selects Native/tmux.
 Menu launches, including Quick Agent, use automatic approval: Codex's
 `--approve-for-me`, Claude and Trae's `--permission-mode auto`, or OpenCode's
 `--auto`. Workbench passes `--no-yolo` to the launcher so Team's default
