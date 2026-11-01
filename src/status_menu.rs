@@ -677,11 +677,12 @@ fn run_with_context(
         match preparation {
             Ok(output) if output.status.success() => {
                 let recommendations = codex_radar_menu_recommendations();
-                let recommendation_is_available = next.recommendation.as_deref().is_some_and(|id| {
-                    recommendations.iter().any(|item| {
-                        item.get("id").and_then(serde_json::Value::as_str) == Some(id)
-                    })
-                });
+                let recommendation_is_available =
+                    next.recommendation.as_deref().is_some_and(|id| {
+                        recommendations.iter().any(|item| {
+                            item.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                        })
+                    });
                 if !recommendation_is_available {
                     next.recommendation = recommendations
                         .first()
@@ -1868,10 +1869,7 @@ fn codex_radar_model_version(model: &str) -> Vec<u64> {
     while end < bytes.len() {
         if bytes[end].is_ascii_digit() {
             end += 1;
-        } else if bytes[end] == b'.'
-            && end + 1 < bytes.len()
-            && bytes[end + 1].is_ascii_digit()
-        {
+        } else if bytes[end] == b'.' && end + 1 < bytes.len() && bytes[end + 1].is_ascii_digit() {
             end += 1;
         } else {
             break;
