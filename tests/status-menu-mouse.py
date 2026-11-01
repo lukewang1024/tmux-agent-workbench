@@ -874,7 +874,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     ('Create', b'Session'),
                     ('(a)', b'choose agent'),
                     ('Codex', b'gpt-6.1-sol'),
-                    ('Background automation', b'gpt-5.6-luna'),
+                    ('Background automation', b'gpt-6-luna'),
                     ('\u2190 Back', b'choose agent'),
                 ):
                     x, y = item_position(rendered, label)
@@ -1304,9 +1304,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert not preview_calls.exists(), 'Initial agent selection started the configuration resolver'
         latencies = []
         for key, expected in [(b'3', b'gpt-6.1-terra'), (b't', b'gpt-6.1-terra'),
-                              (b'4', b'gpt-6-astra'), (b'5', b'gpt-5.6-luna'),
-                              (b'6', b'gpt-6-luna'), (b'8', b'gpt-5.6-sol'),
-                              (b's', b'gpt-5.6-sol'), (b'2', b'gpt-6.1-sol')]:
+                              (b'4', b'gpt-6-astra'), (b'5', b'gpt-6-luna'),
+                              (b's', b'gpt-6-luna'), (b'2', b'gpt-6.1-sol')]:
             started = time.monotonic()
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -1462,8 +1461,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for recommendation_id, shortcut, model, panes, expected in [
                 ('pick-daily-sol-high', None, 'gpt-6.1-sol', False,
                  ['start', 'codex', '--recommendation', 'pick-daily-sol-high', '--team']),
-                ('pick-background-luna-max', b'5', 'gpt-5.6-luna', True,
-                 ['start', 'codex', '--recommendation', 'pick-background-luna-max', '--team', '--tmux']),
+                ('pick-background-gpt6-luna-max', b'5', 'gpt-6-luna', True,
+                 ['start', 'codex', '--recommendation', 'pick-background-gpt6-luna-max', '--team', '--tmux']),
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', False,
                  ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team']),
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True,
