@@ -1355,7 +1355,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ui(mode)
             menu = open_menu([core, 'status-menu', 'tmux', '--pane', quick_source, '--client', client,
                               '--view', 'create'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'GPT-6.1 Sol', b'Auto approval')
+            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'GPT-6.1 Sol', b'Single')
             x, y = item_position(rendered, 'Quick Agent')
             before = tmux('list-windows', '-F', '#{window_id}').splitlines()
             # The gray subtitle is part of the same action in both renderers.
