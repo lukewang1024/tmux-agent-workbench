@@ -454,11 +454,15 @@ impl<A: Clone + Eq> NavigationList<A> {
     }
 }
 
-pub(crate) struct Screen;
+pub(crate) struct Screen {
+    popup: bool,
+}
 impl Screen {
     pub fn enter() -> Result<Self, Box<dyn std::error::Error>> {
         enable_raw_mode()?;
-        let guard = Self;
+        let guard = Self {
+            popup: std::env::var_os("WORKBENCH_POPUP").is_some(),
+        };
         execute!(
             stdout(),
             EnterAlternateScreen,
@@ -472,14 +476,27 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableFocusChange,
-            DisableBracketedPaste,
-            crossterm::cursor::Show
-        );
+        if self.popup {
+            // tmux owns the popup's lifetime and restores the underlying pane's
+            // mouse mode when it removes the popup. Keep capture enabled until
+            // then so the closing click cannot reach the terminal underneath.
+            let _ = execute!(
+                stdout(),
+                LeaveAlternateScreen,
+                DisableFocusChange,
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
+        } else {
+            let _ = execute!(
+                stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableFocusChange,
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
+        }
     }
 }
 
