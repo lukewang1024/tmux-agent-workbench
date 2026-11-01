@@ -7,7 +7,10 @@ use crate::{
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::process::Command;
+
+const CODEX_RADAR_MENU_CATEGORY_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusMenuKind {
@@ -123,12 +126,7 @@ impl Scene {
 
     fn choices(tool: Tool) -> &'static [(Self, char)] {
         match tool {
-            Tool::Codex => &[
-                (Self::Daily, 'd'),
-                (Self::Hard, 'h'),
-                (Self::Batch, 'b'),
-                (Self::Computer, 'c'),
-            ],
+            Tool::Codex => &[],
             Tool::Traex => &[(Self::Daily, 'd'), (Self::Hard, 'h'), (Self::Batch, 'b')],
             _ => &[],
         }
@@ -142,8 +140,12 @@ pub struct MenuOptions {
     pub json: bool,
     #[arg(long, hide = true)]
     pub from_menu: bool,
+    #[arg(long, hide = true)]
+    radar_prepared: bool,
     #[arg(long, value_enum, default_value = "daily")]
     pub scene: Scene,
+    #[arg(long, hide = true, value_parser = parse_recommendation_id)]
+    pub recommendation: Option<String>,
     #[arg(long, hide = true, value_parser = decode_launch_error)]
     pub launch_error: Option<String>,
     #[arg(long, value_enum, default_value = "root")]
@@ -166,11 +168,21 @@ pub struct MenuOptions {
 impl MenuOptions {
     fn route(&self) -> String {
         let mut route = format!(
-            "--view {} --tool {} --preset {} --scene {}{}{} --language {}{}",
+            "--view {} --tool {} --preset {}{}{}{}{} --language {}{}",
             self.view.to_possible_value().unwrap().get_name(),
             self.tool.name(),
             self.preset.name(),
-            self.scene.name(),
+            if self.tool == Tool::Traex {
+                format!(" --scene {}", self.scene.name())
+            } else {
+                String::new()
+            },
+            self.recommendation
+                .as_deref()
+                .filter(|_| self.tool == Tool::Codex)
+                .filter(|value| valid_recommendation_id(value))
+                .map(|value| format!(" --recommendation {value}"))
+                .unwrap_or_default(),
             if self.panes { " --panes" } else { "" },
             self.input_mode
                 .as_ref()
@@ -186,6 +198,9 @@ impl MenuOptions {
         );
         if self.from_menu {
             route.push_str(" --from-menu");
+        }
+        if self.radar_prepared {
+            route.push_str(" --radar-prepared");
         }
         route
     }
@@ -207,7 +222,10 @@ impl MenuOptions {
 struct LaunchSettings {
     tool: Tool,
     preset: Preset,
-    scene: Scene,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scene: Option<Scene>,
+    #[serde(default)]
+    recommendation: Option<String>,
     panes: bool,
 }
 
@@ -216,10 +234,11 @@ impl LaunchSettings {
         Self {
             tool: options.tool,
             preset: options.preset,
-            scene: if matches!(options.tool, Tool::Codex | Tool::Traex) {
-                options.scene
+            scene: (options.tool == Tool::Traex).then_some(options.scene),
+            recommendation: if options.tool == Tool::Codex {
+                options.recommendation.clone()
             } else {
-                Scene::Daily
+                None
             },
             panes: options.preset.is_team() && options.panes,
         }
@@ -229,7 +248,8 @@ impl LaunchSettings {
         MenuOptions {
             tool: self.tool,
             preset: self.preset,
-            scene: self.scene,
+            scene: self.scene.unwrap_or_default(),
+            recommendation: self.recommendation.clone(),
             panes: self.panes,
             launch_error: None,
             ..options.clone()
@@ -270,14 +290,29 @@ impl LaunchSettings {
     }
 
     fn description(&self) -> String {
-        let mut parts = vec![self.tool.label(), self.preset.label()];
-        if matches!(self.tool, Tool::Codex | Tool::Traex) {
-            parts.insert(1, self.scene.name());
+        let mut parts = vec![self.tool.label().to_owned(), self.preset.label().to_owned()];
+        if self.tool == Tool::Codex {
+            parts.insert(
+                1,
+                self.recommendation
+                    .as_deref()
+                    .and_then(|id| codex_radar_recommendation(id))
+                    .and_then(|item| {
+                        item.get("label")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| tr("Codex defaults", "Codex 默认值").into()),
+            );
+        } else if self.tool == Tool::Traex {
+            if let Some(scene) = self.scene {
+                parts.insert(1, scene.name().into());
+            }
         }
         if self.preset.is_team() {
-            parts.push(if self.panes { "tmux" } else { "Native" });
+            parts.push(if self.panes { "tmux" } else { "Native" }.into());
         }
-        parts.push("Auto approval");
+        parts.push("Auto approval".into());
         parts.join(" · ")
     }
 }
@@ -629,6 +664,47 @@ fn run_with_context(
     {
         return message(client, "Pane or agent changed. Reopen the menu.");
     }
+    let prepared_options = if !options.json
+        && options.view == View::Configure
+        && options.tool == Tool::Codex
+        && !options.radar_prepared
+    {
+        let preparation = Command::new("agent-team")
+            .args(["recommendations", "prepare"])
+            .output();
+        let mut next = options.clone();
+        next.radar_prepared = true;
+        match preparation {
+            Ok(output) if output.status.success() => {
+                let recommendations = codex_radar_menu_recommendations();
+                let recommendation_is_available = next.recommendation.as_deref().is_some_and(|id| {
+                    recommendations.iter().any(|item| {
+                        item.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                    })
+                });
+                if !recommendation_is_available {
+                    next.recommendation = recommendations
+                        .first()
+                        .and_then(|item| item.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            Ok(output) => {
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                next.launch_error = Some(if detail.is_empty() {
+                    "Could not prepare Codex recommendations".into()
+                } else {
+                    detail
+                });
+            }
+            Err(error) => next.launch_error = Some(error.to_string()),
+        }
+        Some(next)
+    } else {
+        None
+    };
+    let options = prepared_options.as_ref().unwrap_or(options);
     let (title, mut actions) = actions(kind, options, context);
     if let Some(id) = action {
         let Some(selected) = actions
@@ -992,6 +1068,7 @@ fn actions(
                             preset: Preset::Single,
                             panes: false,
                             scene: Scene::Daily,
+                            recommendation: None,
                             launch_error: None,
                             ..options.at(View::Configure)
                         },
@@ -1009,7 +1086,70 @@ fn actions(
             title = format!("{} {}", tr("Launch", "启动"), options.tool.label());
             back = View::Launch;
             actions.push(Action::note(&context.cwd));
-            if matches!(options.tool, Tool::Codex | Tool::Traex) {
+            if options.tool == Tool::Codex {
+                let recommendations = codex_radar_menu_recommendations();
+                if recommendations.is_empty() {
+                    actions.push(Action::note(tr(
+                        "CodexRadar recommendations unavailable · using Codex defaults",
+                        "CodexRadar 推荐暂不可用 · 将使用 Codex 默认值",
+                    )));
+                    actions.push(nav(
+                        "recommendation:default",
+                        &choice_label(
+                            tr(
+                                "Codex defaults · native model and effort",
+                                "Codex 默认值 · 使用原生模型与档位",
+                            ),
+                            true,
+                        ),
+                        list_shortcut(0),
+                        kind,
+                        MenuOptions {
+                            recommendation: None,
+                            launch_error: None,
+                            ..options.at(View::Configure)
+                        },
+                    ));
+                } else {
+                    actions.push(Action::note(tr(
+                        "CodexRadar recommendations",
+                        "CodexRadar 站长推荐",
+                    )));
+                }
+                for (index, recommendation) in recommendations.iter().enumerate() {
+                    let Some(id) = recommendation.get("id").and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let Some(label) = recommendation
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if !valid_recommendation_id(id) {
+                        continue;
+                    }
+                    let key = list_shortcut(index + 1);
+                    if key == '\0' {
+                        continue;
+                    }
+                    actions.push(nav(
+                        &format!("recommendation:{id}"),
+                        &choice_label(
+                            &sanitize_remote_label(label),
+                            options.recommendation.as_deref() == Some(id),
+                        ),
+                        key,
+                        kind,
+                        MenuOptions {
+                            recommendation: Some(id.into()),
+                            launch_error: None,
+                            ..options.at(View::Configure)
+                        },
+                    ));
+                }
+            } else if options.tool == Tool::Traex {
                 actions.push(Action::note(tr("Scene", "场景")));
                 for &(scene, key) in Scene::choices(options.tool) {
                     actions.push(nav(
@@ -1563,29 +1703,64 @@ fn choice_label(label: &str, selected: bool) -> String {
     format!("{} {label}", if selected { "●" } else { "○" })
 }
 
-// Preview only the fields shown in the panel from the launcher's local JSON.
-// No CLI startup, process discovery, model catalog lookup, or cache on this path.
+// Preview fields from the launcher's local JSON and the active CodexRadar cache.
+// Preparing the cache happens once when the interactive Codex Configure view opens.
 // The launcher remains responsible for validation and the actual launch plan.
 fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
+    let team = options.preset.is_team();
+    if options.tool == Tool::Codex {
+        let mut config = serde_json::Map::new();
+        if let Some(id) = options.recommendation.as_deref() {
+            if let Some(recommendation) = codex_radar_recommendation(id) {
+                for key in ["model", "effort"] {
+                    if let Some(value) = recommendation.get(key).and_then(serde_json::Value::as_str)
+                    {
+                        config.insert(key.into(), serde_json::Value::String(value.into()));
+                    }
+                }
+                if team {
+                    for (target, source) in [("worker_model", "model"), ("worker_effort", "effort")]
+                    {
+                        if let Some(value) = recommendation
+                            .get(source)
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            config.insert(target.into(), serde_json::Value::String(value.into()));
+                        }
+                    }
+                }
+            }
+        }
+        config.insert("fast".into(), serde_json::Value::Bool(false));
+        let missing = resolve_codex_summary_tiers(&mut config, team);
+        let mut lines = summary_lines(&serde_json::Value::Object(config), team)?;
+        if missing {
+            lines.push(
+                tr(
+                    "No CodexRadar tier selected; using Codex defaults",
+                    "未选择可用的 CodexRadar 档位；将使用 Codex 默认值",
+                )
+                .into(),
+            );
+        }
+        return Ok(lines);
+    }
+
+    let scene_tool = options.tool == Tool::Traex;
+    if !scene_tool && !team {
+        return summary_lines(&serde_json::json!({}), false);
+    }
     let launcher = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join("agent-team"))
         .find(|path| path.is_file())
         .and_then(|path| path.canonicalize().ok());
-    let config = launcher
+    let teams_path = launcher
         .as_ref()
         .and_then(|path| path.parent())
         .and_then(|dir| dir.parent())
-        .map(|root| root.join("config/teams.json"));
-    let Some(config) = config.filter(|path| path.is_file()) else {
-        return Ok(vec![
-            tr(
-                "Model settings resolved at launch",
-                "模型配置将在启动时解析",
-            )
-            .into(),
-        ]);
-    };
-    let defaults: serde_json::Value = serde_json::from_slice(&std::fs::read(config)?)?;
+        .map(|root| root.join("config/teams.json"))
+        .ok_or("agent-team configuration is missing")?;
+    let defaults: serde_json::Value = serde_json::from_slice(&std::fs::read(teams_path)?)?;
     let paths = Paths::discover()?;
     let personal_path = paths
         .config_dir
@@ -1598,36 +1773,222 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
         Err(error) => return Err(error.into()),
     };
     let tool = options.tool.name();
-    let team = options.preset.is_team();
-    let scene_tool = matches!(options.tool, Tool::Codex | Tool::Traex);
-    if !scene_tool && !team {
-        return summary_lines(&serde_json::json!({}), false);
-    }
     let (base, extra) = if scene_tool {
         (
-            &defaults[tool]["scenes"][options.scene.name()],
-            &personal[tool]["scenes"][options.scene.name()],
+            defaults
+                .get(tool)
+                .and_then(|value| value.get("scenes"))
+                .and_then(|value| value.get(options.scene.name())),
+            personal
+                .get(tool)
+                .and_then(|value| value.get("scenes"))
+                .and_then(|value| value.get(options.scene.name())),
         )
     } else {
-        (&defaults[tool]["team"], &personal[tool]["team"])
+        (
+            defaults.get(tool).and_then(|value| value.get("team")),
+            personal.get(tool).and_then(|value| value.get("team")),
+        )
     };
     let mut config = base
-        .as_object()
+        .and_then(serde_json::Value::as_object)
         .ok_or("agent-team configuration is missing")?
         .clone();
-    // All displayed fields are scalars, so a shallow overlay matches the
-    // launcher's recursive merge without reproducing its launch machinery.
-    if let Some(extra) = extra.as_object() {
+    if let Some(extra) = extra.and_then(serde_json::Value::as_object) {
         config.extend(extra.clone());
     }
-    if scene_tool && team {
-        for (lead, single) in [("lead_model", "model"), ("lead_effort", "effort")] {
-            if let Some(value) = config.get(lead).cloned() {
-                config.insert(single.into(), value);
-            }
+    summary_lines(&serde_json::Value::Object(config), team)
+}
+
+fn valid_recommendation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn parse_recommendation_id(value: &str) -> std::result::Result<String, String> {
+    if valid_recommendation_id(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("invalid CodexRadar recommendation id".into())
+    }
+}
+
+fn sanitize_remote_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() && *character != '#')
+        .take(120)
+        .collect()
+}
+
+fn codex_radar_cache() -> Option<serde_json::Value> {
+    let cache_root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))?;
+    let cache_path = cache_root.join("agent-team/codexradar-recommendations.json");
+    let bytes = std::fs::read(cache_path).ok()?;
+    let cache: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    (cache.get("version").and_then(serde_json::Value::as_u64) == Some(2)).then_some(cache)
+}
+
+fn codex_radar_recommendations() -> Vec<serde_json::Value> {
+    codex_radar_cache()
+        .and_then(|cache| cache.get("recommendations").cloned())
+        .and_then(|recommendations| recommendations.get("items").cloned())
+        .and_then(|items| items.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| {
+            let id = item.get("id").and_then(serde_json::Value::as_str);
+            let label = item.get("label").and_then(serde_json::Value::as_str);
+            id.is_some_and(valid_recommendation_id)
+                && label.is_some()
+                && item
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                && item
+                    .get("effort")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+        })
+        .collect()
+}
+
+fn codex_radar_model_version(model: &str) -> Vec<u64> {
+    let bytes = model.as_bytes();
+    let Some(mut end) = bytes.iter().position(u8::is_ascii_digit) else {
+        return Vec::new();
+    };
+    let start = end;
+    while end < bytes.len() {
+        if bytes[end].is_ascii_digit() {
+            end += 1;
+        } else if bytes[end] == b'.'
+            && end + 1 < bytes.len()
+            && bytes[end + 1].is_ascii_digit()
+        {
+            end += 1;
+        } else {
+            break;
         }
     }
-    summary_lines(&serde_json::Value::Object(config), team)
+    model[start..end]
+        .split('.')
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+fn codex_radar_menu_recommendations() -> Vec<serde_json::Value> {
+    let mut categories: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
+    for recommendation in codex_radar_recommendations() {
+        let category = recommendation
+            .get("source_key")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.is_empty())
+            .or_else(|| recommendation.get("id").and_then(serde_json::Value::as_str));
+        let Some(category) = category else {
+            continue;
+        };
+        if let Some(index) = categories
+            .iter()
+            .position(|(key, _)| key.as_str() == category)
+        {
+            categories[index].1.push(recommendation);
+        } else {
+            categories.push((category.to_owned(), vec![recommendation]));
+        }
+    }
+
+    categories
+        .into_iter()
+        .take(CODEX_RADAR_MENU_CATEGORY_LIMIT)
+        .filter_map(|(_, choices)| {
+            choices
+                .into_iter()
+                .enumerate()
+                .max_by_key(|(index, recommendation)| {
+                    let version = recommendation
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(codex_radar_model_version)
+                        .unwrap_or_default();
+                    (version, *index)
+                })
+                .map(|(_, recommendation)| recommendation)
+        })
+        .collect()
+}
+
+fn codex_radar_recommendation(id: &str) -> Option<serde_json::Value> {
+    if !valid_recommendation_id(id) {
+        return None;
+    }
+    codex_radar_recommendations()
+        .into_iter()
+        .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(id))
+}
+
+fn has_summary_tier_pair(
+    config: &serde_json::Map<String, serde_json::Value>,
+    model: &str,
+    effort: &str,
+) -> bool {
+    config
+        .get(model)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+        && config
+            .get(effort)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+}
+
+fn resolve_codex_summary_tiers(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    team: bool,
+) -> bool {
+    let selected_pair = if team && has_summary_tier_pair(config, "lead_model", "lead_effort") {
+        Some(("lead_model", "lead_effort"))
+    } else if has_summary_tier_pair(config, "model", "effort") {
+        Some(("model", "effort"))
+    } else {
+        None
+    };
+    if let Some((model, effort)) = selected_pair {
+        if team {
+            for (source, target) in [(model, "model"), (effort, "effort")] {
+                if let Some(value) = config.get(source).cloned() {
+                    config.insert(target.into(), value);
+                }
+            }
+        }
+        if !has_summary_tier_pair(config, "worker_model", "worker_effort") {
+            config.remove("worker_model");
+            config.remove("worker_effort");
+        }
+    } else {
+        for key in [
+            "model",
+            "effort",
+            "lead_model",
+            "lead_effort",
+            "worker_model",
+            "worker_effort",
+        ] {
+            config.remove(key);
+        }
+    }
+    config.remove("lead_model");
+    config.remove("lead_effort");
+    config
+        .entry("fast")
+        .or_insert(serde_json::Value::Bool(false));
+    selected_pair.is_none()
 }
 
 fn summary_lines(config: &serde_json::Value, team: bool) -> Result<Vec<String>> {
@@ -1688,7 +2049,14 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
         "start".into(),
         options.tool.name().into(),
     ];
-    if matches!(options.tool, Tool::Codex | Tool::Traex) {
+    if options.tool == Tool::Codex {
+        if let Some(recommendation) = options.recommendation.as_deref() {
+            if !valid_recommendation_id(recommendation) {
+                return Err("Invalid CodexRadar recommendation id".into());
+            }
+            args.extend(["--recommendation".into(), recommendation.into()]);
+        }
+    } else if options.tool == Tool::Traex {
         if !Scene::choices(options.tool)
             .iter()
             .any(|(scene, _)| *scene == options.scene)
@@ -2279,7 +2647,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
         assert_eq!(json.as_object().unwrap().len(), 4);
-        assert!(settings.description().contains("computer"));
+        assert!(settings.description().contains("Codex"));
         assert!(settings.description().contains("tmux"));
         std::fs::write(
             &saved,
@@ -2299,46 +2667,72 @@ mod tests {
         assert!(LaunchSettings::load(&paths).is_err());
     }
     #[test]
-    fn codex_has_four_scenes_two_modes_without_adjustments() {
-        for &(scene, _) in Scene::choices(Tool::Codex) {
-            for preset in [Preset::Single, Preset::Team] {
-                let args = launch_argv(&MenuOptions {
-                    tool: Tool::Codex,
-                    scene,
-                    preset,
-                    ..Default::default()
-                })
-                .unwrap();
-                assert_eq!(
-                    &args[..5],
-                    ["agent-team", "start", "codex", "--scene", scene.name()]
-                );
-                assert_eq!(args.contains(&"--team".into()), preset == Preset::Team);
-            }
-        }
+    fn codex_uses_only_dynamic_recommendation_ids_or_native_defaults() {
+        assert!(Scene::choices(Tool::Codex).is_empty());
+        let default = launch_argv(&MenuOptions::default()).unwrap();
+        assert_eq!(&default[..3], ["agent-team", "start", "codex"]);
+        assert!(!default.contains(&"--scene".into()));
+
+        let selected = launch_argv(&MenuOptions {
+            tool: Tool::Codex,
+            recommendation: Some("daily-development-a1b2c3d4".into()),
+            preset: Preset::Team,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            &selected[3..6],
+            ["--recommendation", "daily-development-a1b2c3d4", "--team"]
+        );
+        assert!(
+            launch_argv(&MenuOptions {
+                recommendation: Some("bad #{id}".into()),
+                ..Default::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]
-    fn computer_scene_is_only_offered_for_codex() {
-        for tool in [Tool::Codex, Tool::Traex] {
-            let options = MenuOptions {
-                tool,
-                scene: Scene::Computer,
-                view: View::Configure,
+    fn missing_codex_tiers_resolve_to_native_defaults_and_fast_off() {
+        let mut config = serde_json::json!({
+            "worker_model": "stale-worker",
+            "worker_effort": "max",
+            "fast": false
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(resolve_codex_summary_tiers(&mut config, true));
+        assert!(!config.contains_key("model"));
+        assert!(!config.contains_key("effort"));
+        assert!(!config.contains_key("worker_model"));
+        assert!(!config.contains_key("worker_effort"));
+        assert_eq!(config.get("fast"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            summary_lines(&serde_json::Value::Object(config), true).unwrap(),
+            vec![tr(
+                "Model / thinking: tool defaults",
+                "模型 / thinking: 工具默认配置"
+            )]
+        );
+    }
+
+    #[test]
+    fn no_cached_codex_data_still_has_a_default_launch_choice() {
+        assert!(Scene::choices(Tool::Codex).is_empty());
+        assert_eq!(
+            launch_argv(&MenuOptions {
+                tool: Tool::Codex,
+                preset: Preset::Team,
                 ..Default::default()
-            };
-            let (_, choices) = actions(
-                StatusMenuKind::Tmux,
-                &options,
-                &context(None, BaseState::Idle),
-            );
-            let computer = choices.iter().find(|a| a.id == "computer");
-            assert_eq!(computer.is_some(), tool == Tool::Codex);
-            if let Some(computer) = computer {
-                assert_eq!(computer.key, 'c');
-            }
-            assert_eq!(launch_argv(&options).is_ok(), tool == Tool::Codex);
-        }
+            })
+            .unwrap()
+            .iter()
+            .filter(|arg| arg.as_str() == "--scene")
+            .count(),
+            0
+        );
     }
 
     #[test]

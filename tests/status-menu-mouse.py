@@ -66,7 +66,22 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     for tool in ('claude', 'opencode'):
         (shim / tool).symlink_to(codex)
     preview = root / 'preview.py'
-    preview.write_text('import json, sys\na = sys.argv[1:]\ntool = a[1]\nscene = a[a.index("--scene") + 1] if "--scene" in a else None\nteam = "--team" in a\ncfg = {"model": scene + ("-lead" if team else "-single"), "effort": "high", "worker_model": "worker-model", "worker_effort": "max", "fast": scene == "daily"} if scene else {}\nprint(json.dumps({"config": cfg}))\n')
+    radar_cache_dir = Path(env['XDG_CACHE_HOME']) / 'agent-team'
+    radar_cache_dir.mkdir(parents=True)
+    radar_items = [
+        {'id': 'pick-daily-sol-high', 'source_key': 'daily_development', 'label': 'Daily development · GPT-6.1 Sol high', 'model': 'gpt-6.1-sol', 'effort': 'high'},
+        {'id': 'pick-computer-terra-max', 'source_key': 'computer_automation', 'label': 'Computer automation · GPT-6.1 Terra max', 'model': 'gpt-6.1-terra', 'effort': 'max'},
+        {'id': 'pick-hard-astra-xhigh', 'source_key': 'hard_problems', 'label': 'Hard problems · GPT-6 Astra xhigh', 'model': 'gpt-6-astra', 'effort': 'xhigh'},
+        {'id': 'pick-background-luna-max', 'source_key': 'background_automation', 'label': 'Background automation · GPT-5.6 Luna max', 'model': 'gpt-5.6-luna', 'effort': 'max'},
+        {'id': 'pick-background-gpt6-luna-max', 'source_key': 'background_automation', 'label': 'Background automation · GPT-6 Luna max', 'model': 'gpt-6-luna', 'effort': 'max'},
+        {'id': 'pick-realtime-astra-low', 'source_key': 'real_time_interaction', 'label': 'Real-time interaction · GPT-6 Astra low', 'model': 'gpt-6-astra', 'effort': 'low'},
+        {'id': 'pick-blue-team-sol-xhigh', 'source_key': 'blue_team', 'label': 'Blue team · GPT-5.6 Sol xhigh', 'model': 'gpt-5.6-sol', 'effort': 'xhigh'},
+    ]
+    (radar_cache_dir / 'codexradar-recommendations.json').write_text(json.dumps({
+        'version': 2, 'source_url': 'https://api.codexradar.com/api/v1/radar-insights',
+        'recommendations': {'items': radar_items},
+    }))
+    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/codexradar-recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["model"],"worker_effort":item["effort"],"fast":False} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
     # Panel previews read the same declarative settings as agent-team. Any
     # --dry-run process on the interaction path is a regression, including
     # the very first agent selection with an empty cache.
@@ -77,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                      'worker_effort': 'max', 'fast': scene == 'daily'}
               for scene in ('daily', 'hard', 'batch', 'computer')}
     (settings_dir / 'teams.json').write_text(json.dumps({
-        'codex': {'scenes': scenes},
+        'codex': {'scenes': {}},
         'traex': {'scenes': {name: settings for name, settings in scenes.items() if name != 'computer'}},
         'claude': {'team': {}}, 'opencode': {'team': {}}}))
     preview_calls = root / 'preview-calls'
@@ -85,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     preview_handler = 'case " $* " in *" --dry-run "*) exec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(preview)) + ' "$@" ;; esac\n'
     reject_scene = root / 'reject-scene'
     team_cli = shim / 'agent-team'
-    team_cli.write_text('#!/bin/sh\n' + preview_handler + 'case " $* " in *" --check "*) if [ -f ' + shlex.quote(str(reject_scene)) + ' ]; then echo "Configured model is unavailable" >&2; exit 1; fi; exit 0 ;; esac\nexec ' + shlex.quote(str(codex)) + ' "$@"\n')
+    team_cli.write_text('#!/bin/sh\ncase "$1 $2" in "recommendations prepare") exit 0 ;; esac\n' + preview_handler + 'case " $* " in *" --check "*) if [ -f ' + shlex.quote(str(reject_scene)) + ' ]; then echo "Configured model is unavailable" >&2; exit 1; fi; exit 0 ;; esac\nexec ' + shlex.quote(str(codex)) + ' "$@"\n')
     team_cli.chmod(0o755)
     # Source selection reopens Usage in a background tmux callback. Track
     # that callback's completion instead of assuming a fixed sleep closes it.
@@ -858,8 +873,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 for label, expected in (
                     ('Create', b'Session'),
                     ('(a)', b'choose agent'),
-                    ('Codex', b'daily-single'),
-                    ('Batch', b'batch-single'),
+                    ('Codex', b'gpt-6.1-sol'),
+                    ('Background automation', b'gpt-5.6-luna'),
                     ('\u2190 Back', b'choose agent'),
                 ):
                     x, y = item_position(rendered, label)
@@ -876,7 +891,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     rendered = wait_for_text(client_process, expected) + drain(0.3)
                 # The final release must leave the chooser usable, not close it.
                 os.write(master, b'x')
-                wait_for_text(client_process, b'daily-single')
+                wait_for_text(client_process, b'gpt-6.1-sol')
                 os.write(master, b'\x1b')
                 drain(0.7)
                 menu.wait(timeout=3)
@@ -1279,7 +1294,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # A preceding menu can leave a pending redraw containing "close".
         # Wait for this menu's own action before sending its first shortcut.
         wait_for_text(menu, b'Create', b'Detach')
-        for key, expected in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'daily-single')]:
+        for key, expected in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'gpt-6.1-sol')]:
             started = time.monotonic()
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -1288,7 +1303,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             drain(0.15)
         assert not preview_calls.exists(), 'Initial agent selection started the configuration resolver'
         latencies = []
-        for key, expected in [(b'c', b'computer-single'), (b't', b'computer-lead'), (b'h', b'hard-lead'), (b'b', b'batch-lead'), (b's', b'batch-single'), (b'd', b'daily-single')]:
+        for key, expected in [(b'3', b'gpt-6.1-terra'), (b't', b'gpt-6.1-terra'),
+                              (b'4', b'gpt-6-astra'), (b'5', b'gpt-5.6-luna'),
+                              (b'6', b'gpt-6-luna'), (b'8', b'gpt-5.6-sol'),
+                              (b's', b'gpt-5.6-sol'), (b'2', b'gpt-6.1-sol')]:
             started = time.monotonic()
             os.write(master, key)
             wait_for_text(client_process, expected)
@@ -1299,7 +1317,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         personal_settings.parent.mkdir(parents=True, exist_ok=True)
         personal_settings.write_text(json.dumps({'codex': {'scenes': {'hard': {
             'lead_model': 'personal-lead', 'lead_effort': 'max'}}}}))
-        for key, expected in [(b'h', b'hard-single'), (b't', b'personal-lead'), (b'd', b'daily-lead'), (b's', b'daily-single')]:
+        for key, expected in [(b'4', b'gpt-6-astra'), (b't', b'gpt-6-astra'),
+                              (b'2', b'gpt-6.1-sol'), (b's', b'gpt-6.1-sol')]:
             os.write(master, key)
             wait_for_text(client_process, expected)
             drain(0.05)
@@ -1327,7 +1346,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert time.monotonic() < deadline, 'successful launch was not remembered'
             drain(.05)
         saved_single = last_launch.read_text()
-        assert json.loads(saved_single) == {'tool': 'codex', 'preset': 'single', 'scene': 'daily', 'panes': False}
+        assert json.loads(saved_single) == {
+            'tool': 'codex', 'preset': 'single', 'recommendation': 'pick-daily-sol-high', 'panes': False}
         # A different source directory must be used for the new conversation.
         quick_cwd = root / 'quick-project'
         quick_cwd.mkdir()
@@ -1336,7 +1356,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ui(mode)
             menu = open_menu([core, 'status-menu', 'tmux', '--pane', quick_source, '--client', client,
                               '--view', 'create'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'daily', b'Auto approval')
+            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'GPT-6.1 Sol', b'Auto approval')
             x, y = item_position(rendered, 'Quick Agent')
             before = tmux('list-windows', '-F', '#{window_id}').splitlines()
             # The gray subtitle is part of the same action in both renderers.
@@ -1374,14 +1394,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         config_dir.mkdir(parents=True, exist_ok=True)
         reject_scene.touch()
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                          '--view', 'configure', '--scene', 'hard'], env=env,
+                          '--view', 'configure', '--recommendation', 'pick-hard-astra-xhigh'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu, b'hard-single')
+        wait_for_text(menu, b'gpt-6-astra')
         before = tmux('list-windows', '-F', '#{window_id}')
         os.write(master, b'\r')
         menu.wait(timeout=3)
         rendered = wait_for_text(client_process, b'Configured model is unavailable')
-        assert b'hard-single' in screen_text(rendered)
+        assert b'gpt-6-astra' in screen_text(rendered)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agent')
         os.write(master, b'\x1b')
@@ -1389,7 +1409,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert last_launch.read_text() == saved_single, 'failed launch replaced the last successful combination'
         reject_scene.unlink()
         drain(0.7)
-        print('PASS unavailable scene reports an error without opening a window')
+        print('PASS unavailable recommendation reports an error without opening a window')
 
         # On short clients the error must be in the footer of every page,
         # rather than disappearing before the page containing it is opened.
@@ -1399,7 +1419,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain(0.3)
         reject_scene.touch()
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                          '--view', 'configure', '--scene', 'hard'], env=env,
+                          '--view', 'configure', '--recommendation', 'pick-hard-astra-xhigh'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu, b'(enter)')
         os.write(master, b'\r')
@@ -1415,7 +1435,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # Check the current screen; the PTY may still contain older redraws
         # with the error even after the newly selected scene has replaced it.
         drain()
-        os.write(master, b'd')
+        os.write(master, b'2')
         wait_for_text(client_process, '● Daily development'.encode(), b'(enter)',
                       current_screen=True, absent=(b'Configured model is unavailable',))
         os.write(master, b'\x7f')
@@ -1432,31 +1452,35 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # calls. The pane backend creates its own window; no launcher survives.
         trace = root / 'team-launch.txt'
         team_cli = shim / 'agent-team'
-        team_cli.write_text('#!/bin/sh\nset -eu\n' + preview_handler + 'case " $* " in *" --check "*) exit 0 ;; esac\n' +
+        team_cli.write_text('#!/bin/sh\nset -eu\ncase "$1 $2" in "recommendations prepare") exit 0 ;; esac\n' + preview_handler + 'case " $* " in *" --check "*) exit 0 ;; esac\n' +
             'printf "%s\\n" "$PWD" "$@" > ' + shlex.quote(str(trace)) + '\n' +
             'case " $* " in *" --tmux "*)\n' +
             'session=$(tmux display-message -p -t "$TMUX_PANE" "#{session_id}")\n' +
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
-        for scene, panes, expected in [
-                ('daily', False, ['start', 'codex', '--scene', 'daily', '--team']),
-                ('batch', True, ['start', 'codex', '--scene', 'batch', '--team', '--tmux']),
-                ('computer', False, ['start', 'codex', '--scene', 'computer', '--team']),
-                ('computer', True, ['start', 'codex', '--scene', 'computer', '--team', '--tmux'])]:
+        for recommendation_id, shortcut, model, panes, expected in [
+                ('pick-daily-sol-high', None, 'gpt-6.1-sol', False,
+                 ['start', 'codex', '--recommendation', 'pick-daily-sol-high', '--team']),
+                ('pick-background-luna-max', b'5', 'gpt-5.6-luna', True,
+                 ['start', 'codex', '--recommendation', 'pick-background-luna-max', '--team', '--tmux']),
+                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', False,
+                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team']),
+                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True,
+                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux'])]:
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu, b'Create', b'Detach')
-            for key, heading in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'daily-single')]:
+            for key, heading in [(b'c', b'Session'), (b'a', b'choose agent'), (b'x', b'gpt-6.1-sol')]:
                 os.write(master, key)
                 wait_for_text(client_process, heading)
                 drain(0.15)
-            if scene != 'daily':
-                os.write(master, b'b' if scene == 'batch' else b'c')
-                wait_for_text(client_process, (scene + '-single').encode())
+            if shortcut is not None:
+                os.write(master, shortcut)
+                wait_for_text(client_process, model.encode())
             os.write(master, b't')
-            rendered = wait_for_text(client_process, (scene + '-lead').encode())
-            assert b'Worker: worker-model' in screen_text(rendered)
+            rendered = wait_for_text(client_process, model.encode())
+            assert ('Worker: ' + model).encode() in screen_text(rendered)
             assert '临时调整'.encode() not in screen_text(rendered)
             if panes:
                 os.write(master, b'm')
@@ -1478,10 +1502,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             trace.unlink()
             drain()
             # Quick launch reads the saved Team choices in a fresh menu process.
-            if scene == 'computer':
+            if recommendation_id == 'pick-computer-terra-max':
                 menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                   '--view', 'create'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                rendered = wait_for_text(menu, b'Quick Agent', b'computer', b'Team')
+                rendered = wait_for_text(menu, b'Quick Agent', b'Computer automation', b'Team')
                 assert (b'tmux' if panes else b'Native') in screen_text(rendered)
                 before = tmux('list-windows', '-F', '#{window_id}').splitlines()
                 os.write(master, b'q')
@@ -1496,7 +1520,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 tmux('kill-window', '-t', next(w for w in after if w not in before))
                 trace.unlink()
                 drain(.3)
-        print('PASS daily, batch and computer native/tmux Team launch exactly one window')
+        print('PASS daily, background and computer remote recommendations launch native/tmux Teams')
 
         for tool in ('claude', 'opencode'):
             for preset, key in (('single', b's'), ('team', b't')):
@@ -1655,7 +1679,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
         # The pinned model summary remains inert on a keyboard-sized screen.
-        x, y = item_position(rendered, 'daily-single')
+        x, y = item_position(rendered, 'gpt-6.1-sol')
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         rendered += drain(.15)
         assert menu.poll() is None
@@ -1670,7 +1694,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             # changed cells, so the pinned footer need not be written again.
             rendered += drain(.15)
         assert any('Daily development' in screen for screen in visited)
-        assert any('Batch work' in screen for screen in visited)
+        assert any('Background automation' in screen for screen in visited)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agen')
         os.write(master, b'\x1b')

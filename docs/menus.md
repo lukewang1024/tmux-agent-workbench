@@ -13,7 +13,7 @@ prefix M-m / tmux-agent-workbench menu
 statusbar tmux / prefix M-t
   Create → Quick Agent / Agent / Window / Pane / Session
     Quick Agent → repeat last successful combination in the source directory
-    Agent → installed tool → scene / mode / collaboration → Launch
+    Agent → installed tool → remote recommendation or Trae scene / mode → Launch
     Window → new shell in source directory
     Pane → split below / right in source directory
     Session → name, create in source directory, enter
@@ -97,9 +97,20 @@ carry a hash of the target identity and rebuild their available actions before
 executing. Window and launch menus check the pane, session and directory using
 tmux metadata only. Agent commands additionally discover and verify the live
 foreground process; changed targets or unavailable actions show a message.
-Launch previews read local agent-team JSON settings directly, with no process
-scan, Python startup, model lookup or cache warmup. Launch-time validation stays
-in agent-team.
+Launch previews read local agent-team JSON settings and the active CodexRadar
+cache; they do not scan processes or query a model catalog. The Codex menu shows
+the first four distinct remote categories and the newest numeric model version
+within each category. Its Codex defaults choice appears only when no usable
+recommendations are available. Opening Create Agent → Codex prepares the cache
+once for that menu visit. If no cache exists,
+it fetches synchronously. If a cache exists and is at least 24 hours old, it
+starts a background refresh while keeping the current cache in use. The refresh
+writes a pending cache, which becomes active the next time Create Agent → Codex
+opens. If both a recommendation and a local tier preset are missing, the menu
+shows a note and launches Codex with its native model and effort defaults;
+missing optional tier data never disables Create Agent. An empty or failed
+first fetch is retried after five minutes on a later menu visit. Launch-time
+validation stays in agent-team.
 
 New pointer and touch menus execute only on release. A hold, drag, wheel movement
 or resize cannot launch a held item. The component handles these events itself
@@ -140,7 +151,7 @@ parent menu.
   never execute on menu selection, and retain the CLI's loading/permission
   checks. This is filesystem discovery, not an inventory of enabled plugins
   or per-session skill overrides.
-- Codex and Trae scenes call `agent-team start TOOL --scene SCENE [--team] [--tmux]`; Claude and OpenCode call `agent-team start TOOL [--team] [--tmux]`
+- Codex calls `agent-team start codex [--recommendation ID] [--team] [--tmux]`; Trae calls `agent-team start traex --scene SCENE [--team] [--tmux]`; Claude and OpenCode call `agent-team start TOOL [--team] [--tmux]`
   interface. Workbench owns no model configuration or team execution policy.
   All launches are interactive; permissions inherit the CLI/team configuration.
 - Pane membership is rechecked through tmux's `@agent_team` marker. Roles and
@@ -240,26 +251,24 @@ applications, btop and interactive botmux commands retain their own UI.
 
 ## Scene launch policy
 
-Codex offers daily, hard, batch and computer (电脑自动化) scenes, each in Single
-or Team mode. Trae retains daily, hard and batch.
-Agent-team owns model, effort and Fast values. Workbench forwards the scene,
-mode, with no independent model defaults or temporary adjustment selector.
-Single `s` and Team `t` are the mode shortcuts. Scene shortcuts are daily `d`,
-hard `h`, batch `b`, and Codex computer `c`; Native `n` and tmux `m` only appear in
-Team mode. All choices stay in the same panel, and Enter launches with the current selection. Launch
-is pinned with Back/Close even on short terminals. Launch and configuration errors
-stay immediately above Launch on every page, survive pagination, and clear when
-a choice changes or the panel is left. Fast is scene-wide in both
-native and tmux modes, and is previewed from the actual agent-team config.
+Codex recommendation choices come directly from the active CodexRadar cache.
+The menu does not define Codex categories or model tiers locally. Opening Create
+Agent → Codex prepares the cache: the first request is synchronous, and a cache
+older than 24 hours refreshes asynchronously while the current cached values
+remain active. A successful background update is promoted on the next menu open.
+If no usable recommendation exists, the menu offers no Codex tiers and still
+launches with Codex's native model and effort defaults.
 
-Claude and OpenCode have only Single / Team. No scene, Fast, quick or budget
-selectors are shown, and the menu no longer reads `launch.toml` budget overrides.
-Explicit scene/adjust/Fast options on the unified command are ignored with a
-notice; explicit native CLI model options are preserved. Old standalone
-agent-team budget commands remain available to existing scripts.
+Each remote recommendation can be selected in Single or Team mode. Fast is not
+part of the cached tier and stays off unless the caller explicitly passes
+`--fast`. Launch summaries show the selected remote model/effort or state that
+Codex defaults will be used. Agent-team resolves the recommendation ID against
+the active cache at launch; a missing ID falls back to Codex defaults without
+blocking creation.
 
-Trae Single, Team lead and worker use xhigh in every scene. Its batch scene
-uses Luna 5.6; no Fast service tier is applied.
+Trae retains its daily, hard and batch scenes. Claude and OpenCode have only
+Single / Team. No scene, Fast, quick or budget selectors are shown for them.
+The Trae `quick` adjustment remains available through its CLI adapter.
 
 ## Language and contextual controls
 
