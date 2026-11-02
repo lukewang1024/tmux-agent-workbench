@@ -83,9 +83,15 @@ pub(crate) fn open(
         Sizing::List { width, height } => format!("WORKBENCH_POPUP_SURFACE=list,{width},{height} "),
         Sizing::Sidebar => "WORKBENCH_POPUP_SURFACE=sidebar ".into(),
     };
+    let termux = crate::paths::Paths::discover()
+        .ok()
+        .and_then(|paths| crate::attachment::client_kind(&paths, server, client))
+        .map(|kind| kind == "termux")
+        .unwrap_or(cfg!(target_os = "android"));
     let shell_quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
     let command = format!(
-        "{surface}WORKBENCH_POPUP=1 WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
+        "{surface}WORKBENCH_POPUP=1 WORKBENCH_TERMUX_INPUT={} WORKBENCH_TARGET_CLIENT={} WORKBENCH_SOURCE_PANE={} TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} {} {}",
+        u8::from(termux),
         shell_quote(client),
         shell_quote(pane),
         shell_quote(&server.socket_path.to_string_lossy()),

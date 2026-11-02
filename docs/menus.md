@@ -84,6 +84,13 @@ The shared panel container captures a muted, in-memory snapshot of the terminal
 behind its bounded card. This client-local input surface receives backdrop
 clicks that native tmux popups discard. The live terminal returns on dismissal;
 no pane, focus, or key binding is changed to implement outside dismissal.
+Termux 0.118.x also performs a delayed URL lookup after reporting a touch to
+tmux. Shared popups retain their surface until 400 ms after the last touch
+release and blank the tapped cells during teardown, so that lookup cannot open
+a URL in the restored pane or open a URL choice twice. Keyboard-only dismissal
+and registered desktop clients do not wait. Unregistered clients on Android use
+the same conservative protection. This applies to shared popups and pickers;
+classic native tmux menus retain tmux's own lifecycle.
 Action menus dismiss when the terminal viewport changes. Navigation, searchable
 lists and name dialogs retain search/input and scrolling when the phone keyboard
 shrinks the viewport. If the client grows beyond the original input surface,
