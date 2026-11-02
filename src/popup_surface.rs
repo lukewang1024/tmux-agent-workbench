@@ -2,6 +2,7 @@
 //! tmux's native popup does not forward outside mouse events. Keep drawing and
 //! list coordinates local to the card while capturing those events here.
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::{Backend, ClearType, WindowSize};
@@ -13,6 +14,11 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
 use crate::popup::{Dimensions, Sizing};
 use crate::server::ServerIdentity;
+
+// Termux 0.118.x confirms a tap after Android's 300ms double-tap timeout,
+// independently of the mouse reports it already sent to tmux. Keep the modal
+// surface through that callback so it cannot look up a URL in the restored pane.
+const TERMUX_TAP_GUARD: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Geometry {
@@ -189,7 +195,7 @@ impl Backdrop {
     }
 }
 
-pub(crate) struct Surface<B> {
+pub(crate) struct Surface<B: Backend> {
     backend: B,
     sizing: Option<Sizing>,
     geometry: Option<Geometry>,
@@ -197,6 +203,8 @@ pub(crate) struct Surface<B> {
     content: Buffer,
     backdrop: Backdrop,
     outside_press: Option<bool>,
+    termux_input: bool,
+    last_touch_release: Option<(Instant, Position)>,
 }
 
 impl<B: Backend> Surface<B> {
@@ -225,7 +233,10 @@ impl<B: Backend> Surface<B> {
         } else {
             Backdrop::default()
         };
-        Ok(Self::new(backend, sizing, backdrop))
+        let mut surface = Self::new(backend, sizing, backdrop);
+        surface.termux_input = surface.sizing.is_some()
+            && std::env::var("WORKBENCH_TERMUX_INPUT").as_deref() == Ok("1");
+        Ok(surface)
     }
 
     fn new(backend: B, sizing: Option<Sizing>, backdrop: Backdrop) -> Self {
@@ -237,6 +248,8 @@ impl<B: Backend> Surface<B> {
             content: Buffer::empty(Rect::default()),
             backdrop,
             outside_press: None,
+            termux_input: false,
+            last_touch_release: None,
         }
     }
 
@@ -267,6 +280,9 @@ impl<B: Backend> Surface<B> {
             return Ok(Some(event));
         };
         let point = Position::new(mouse.column, mouse.row);
+        if self.termux_input && mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            self.last_touch_release = Some((Instant::now(), point));
+        }
         let outside = !geometry.card.contains(point);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -299,6 +315,35 @@ impl<B: Backend> Surface<B> {
         mouse.column -= geometry.content.x;
         mouse.row -= geometry.content.y;
         Ok(Some(Event::Mouse(mouse)))
+    }
+
+    fn settle_touch(&mut self) {
+        let Some((released, point)) = self.last_touch_release.take() else {
+            return;
+        };
+        let Some(remaining) = TERMUX_TAP_GUARD.checked_sub(released.elapsed()) else {
+            return;
+        };
+        if let Ok(size) = self.backend.size() {
+            // URL choices and the dim backdrop can themselves contain URLs.
+            // Termux's delayed word lookup must see a space at the tap, even
+            // if its pixel-to-cell conversion rounds to the next column.
+            let blank = Cell::default();
+            if point.y < size.height {
+                let _ = self.backend.draw(
+                    (point.x.saturating_sub(1)..point.x.saturating_add(2).min(size.width))
+                        .map(|column| (column, point.y, &blank)),
+                );
+                let _ = self.backend.flush();
+            }
+        }
+        crate::compat::sleep(remaining);
+    }
+}
+
+impl<B: Backend> Drop for Surface<B> {
+    fn drop(&mut self) {
+        self.settle_touch();
     }
 }
 
@@ -421,6 +466,51 @@ mod tests {
     }
     fn outside(kind: MouseEventKind) -> Event {
         mouse(kind, 0, 0)
+    }
+
+    #[test]
+    fn only_termux_left_releases_arm_the_delayed_tap_guard() {
+        let mut surface = surface();
+        surface
+            .input(outside(MouseEventKind::Up(MouseButton::Left)))
+            .unwrap();
+        assert!(surface.last_touch_release.is_none());
+        surface.termux_input = true;
+        surface
+            .input(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        surface
+            .input(outside(MouseEventKind::Up(MouseButton::Right)))
+            .unwrap();
+        assert!(surface.last_touch_release.is_none());
+        surface
+            .input(outside(MouseEventKind::Up(MouseButton::Left)))
+            .unwrap();
+        assert_eq!(
+            surface.last_touch_release.take().unwrap().1,
+            Position::new(0, 0)
+        );
+    }
+
+    #[test]
+    fn delayed_lookup_sees_spaces_in_both_rounded_tap_columns() {
+        let mut surface = surface();
+        let text = Cell::new("x");
+        surface
+            .backend
+            .draw((0..20).map(|x| (x, 4, &text)))
+            .unwrap();
+        surface.last_touch_release = Some((Instant::now(), Position::new(8, 4)));
+        surface.settle_touch();
+        assert!(surface.last_touch_release.is_none());
+        for x in 7..10 {
+            assert_eq!(surface.backend.buffer()[(x, 4)].symbol(), " ");
+        }
+        assert_eq!(surface.backend.buffer()[(6, 4)].symbol(), "x");
+        assert_eq!(surface.backend.buffer()[(10, 4)].symbol(), "x");
     }
 
     #[test]

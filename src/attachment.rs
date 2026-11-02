@@ -9,6 +9,32 @@ use crate::{model::TmuxTarget, server::ServerIdentity};
 
 pub const LAST: &str = "@workbench-resume-last";
 
+/// Resolve the input device attached to this client, including SSH attachments.
+pub fn client_kind(
+    paths: &crate::paths::Paths,
+    server: &ServerIdentity,
+    client: &str,
+) -> Option<String> {
+    let tty = crate::tmux::Tmux::new(server.clone())
+        .client_format(client, "#{client_tty}")
+        .ok()??;
+    if tty.is_empty() {
+        return None;
+    }
+    let value = crate::ipc::call(
+        &paths.socket_for_server(&server.key),
+        &crate::ipc::Request::new("snapshot.get", serde_json::Value::Null),
+        std::time::Duration::from_secs(2),
+    )
+    .ok()?;
+    let snapshot: crate::model::Snapshot = serde_json::from_value(value).ok()?;
+    snapshot
+        .clients
+        .into_iter()
+        .find(|endpoint| endpoint.attachment.as_deref() == Some(tty.as_str()))
+        .map(|endpoint| endpoint.kind)
+}
+
 pub fn attachment_key(attachment: &str) -> String {
     format!(
         "@workbench-attachment-{:x}",

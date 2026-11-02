@@ -14,9 +14,7 @@ use tmux_agent_workbench::config::Config;
 use tmux_agent_workbench::daemon;
 use tmux_agent_workbench::ipc::{Request, call, exchange};
 use tmux_agent_workbench::manifest::ManifestSet;
-use tmux_agent_workbench::model::{
-    AgentKind, AgentSnapshot, ConversationRole, DisplayState, Snapshot,
-};
+use tmux_agent_workbench::model::{AgentKind, AgentSnapshot, ConversationRole, DisplayState};
 use tmux_agent_workbench::paths::Paths;
 use tmux_agent_workbench::server::ServerIdentity;
 
@@ -2361,23 +2359,8 @@ fn client_uses_termux_input(paths: &Paths, client: &str) -> bool {
     let Ok(server) = ServerIdentity::discover() else {
         return false;
     };
-    let Ok(Some(tty)) =
-        tmux_agent_workbench::tmux::Tmux::new(server).client_format(client, "#{client_tty}")
-    else {
-        return false;
-    };
-    if tty.is_empty() {
-        return false;
-    }
-    let Ok(value) = ipc_call(paths, "snapshot.get", serde_json::Value::Null) else {
-        return false;
-    };
-    let Ok(snapshot) = serde_json::from_value::<Snapshot>(value) else {
-        return false;
-    };
-    snapshot.clients.iter().any(|endpoint| {
-        endpoint.kind == "termux" && endpoint.attachment.as_deref() == Some(tty.as_str())
-    })
+    tmux_agent_workbench::attachment::client_kind(paths, &server, client).as_deref()
+        == Some("termux")
 }
 
 fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {

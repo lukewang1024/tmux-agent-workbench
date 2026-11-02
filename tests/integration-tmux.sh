@@ -96,6 +96,7 @@ XDG_RUNTIME_DIR="$responsive_runtime" PATH="$responsive_mock_bin:$PATH" \
 [ ! -d "$responsive_runtime/workbench-responsive-12345-_dev_pts_missing.lock" ]
 
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbench
+"$python_runner" "$repo/tests/menu-termux-tap.py" "$binary"
 "$python_runner" "$repo/tests/status-menu-mouse.py" "$binary"
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/session-projections.py" "$binary" "$repo/target/debug/examples/codex"
