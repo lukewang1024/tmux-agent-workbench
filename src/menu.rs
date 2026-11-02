@@ -7,7 +7,7 @@ use crate::{
     server::ServerIdentity,
     ui_language::text as tr,
 };
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -792,6 +792,9 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
     let mut row_width = None;
     let mut query = String::new();
     let mut row_query = String::new();
+    // Preserve the default Enter shortcut until the user explicitly focuses a
+    // body choice. Moving to a tier must confirm that tier before Launch.
+    let mut body_focused = false;
     let mut first_frame = true;
     let mut dirty = true;
     loop {
@@ -911,6 +914,8 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
                         Some(Action::Close) => return Ok(None),
                         None => None,
                     }
+                } else if key.code == KeyCode::Enter && body_focused {
+                    rows.get(navigation.selected).map(|(index, _)| *index)
                 } else {
                     name.as_ref().and_then(|name| {
                         menu.items
@@ -924,10 +929,18 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
                         KeyCode::Enter => {
                             chosen = rows.get(navigation.selected).map(|(index, _)| *index)
                         }
-                        KeyCode::Char('[') => navigation.page(-1),
-                        KeyCode::Char(']') => navigation.page(1),
+                        KeyCode::Char('[') => {
+                            navigation.page(-1);
+                            body_focused = true;
+                        }
+                        KeyCode::Char(']') => {
+                            navigation.page(1);
+                            body_focused = true;
+                        }
                         code => {
-                            navigation.navigate(code);
+                            if navigation.navigate(code) {
+                                body_focused = navigation.focused_action().is_none();
+                            }
                         }
                     }
                 }
@@ -935,12 +948,23 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
             Event::Paste(text) if menu.searchable || menu.prompt.is_some() => {
                 query.push_str(&clean(&text))
             }
-            Event::Mouse(mouse) => match navigation.mouse(mouse, &actions) {
-                Some(Hit::Item(id)) => chosen = menu.items.iter().position(|item| item.id == id),
-                Some(Hit::Action(Action::Choose(index))) => chosen = Some(index),
-                Some(Hit::Action(Action::Close)) => return Ok(None),
-                None => {}
-            },
+            Event::Mouse(mouse) => {
+                match navigation.mouse(mouse, &actions) {
+                    Some(Hit::Item(id)) => {
+                        chosen = menu.items.iter().position(|item| item.id == id)
+                    }
+                    Some(Hit::Action(Action::Choose(index))) => chosen = Some(index),
+                    Some(Hit::Action(Action::Close)) => return Ok(None),
+                    None => {}
+                }
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::Moved | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                ) {
+                    body_focused =
+                        navigation.selection_visible && navigation.focused_action().is_none();
+                }
+            }
             Event::FocusLost => navigation.blur(),
             Event::FocusGained => navigation.selection_visible = true,
             _ => {}
