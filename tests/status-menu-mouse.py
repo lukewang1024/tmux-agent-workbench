@@ -390,6 +390,35 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert ui() == 'new', 'saved preference did not survive clearing the server override'
         print('PASS new default, explicit classic selection, in-menu round trip, native paging and persistent CLI switch')
 
+        # Enter confirms an explicitly navigated option before a pinned Launch
+        # shortcut. An untouched panel still supports its default Enter action.
+        tier_args = [core, 'display-menu', '--', '-c', client, '-t', pane, '-T', 'Tier selection',
+                     'First tier', '1', 'set-option -g @tier-choice first',
+                     'Second tier', '2', 'set-option -g @tier-choice second',
+                     'Launch', 'Enter', 'set-option -g @tier-choice launch']
+        for keys, expected in [(b'\r', 'launch'), (b'\x1b[B\r', 'second'),
+                               (b'\x1b[B\x1b[A\r', 'first'),
+                               (b'\x1b[B\x1b[B\r', 'launch'), (b'2', 'second')]:
+            tmux('set-option', '-gu', '@tier-choice')
+            menu = open_menu(tier_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for_text(menu, b'First tier', b'Second tier', b'Launch')
+            os.write(master, keys)
+            menu.wait(timeout=3)
+            assert tmux('show-option', '-gqv', '@tier-choice') == expected, (keys, expected)
+            drain(.3)
+        for pointer in ('hover', 'wheel'):
+            tmux('set-option', '-gu', '@tier-choice')
+            menu = open_menu(tier_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rendered = wait_for_text(menu, b'First tier', b'Second tier', b'Launch')
+            x, y = item_position(rendered, 'Second tier' if pointer == 'hover' else 'First tier')
+            os.write(master, f'\x1b[<{35 if pointer == "hover" else 65};{x};{y}M'.encode())
+            drain(.15)
+            os.write(master, b'\r')
+            menu.wait(timeout=3)
+            assert tmux('show-option', '-gqv', '@tier-choice') == 'second', pointer
+            drain(.3)
+        print('PASS Enter confirms a navigated tier and preserves default/focused Launch and shortcuts')
+
         # These lists fit completely: wheel must still move selection. Verify
         # SGR and legacy wheel reports through the actual attached tmux PTY.
         choice_args = [core, 'display-menu', '--', '-c', client, '-t', pane, '-T', 'Pointer test',
@@ -1458,14 +1487,18 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
-        for recommendation_id, shortcut, model, panes, expected in [
-                ('pick-daily-sol-high', None, 'gpt-6.1-sol', False,
+        for recommendation_id, shortcut, model, team, panes, expected in [
+                ('pick-daily-sol-high', None, 'gpt-6.1-sol', True, False,
                  ['start', 'codex', '--recommendation', 'pick-daily-sol-high', '--team']),
-                ('pick-background-gpt6-luna-max', b'5', 'gpt-6-luna', True,
+                ('pick-hard-astra-xhigh', b'4', 'gpt-6-astra', False, False,
+                 ['start', 'codex', '--recommendation', 'pick-hard-astra-xhigh']),
+                ('pick-hard-astra-xhigh', b'4', 'gpt-6-astra', True, False,
+                 ['start', 'codex', '--recommendation', 'pick-hard-astra-xhigh', '--team']),
+                ('pick-background-gpt6-luna-max', b'5', 'gpt-6-luna', True, True,
                  ['start', 'codex', '--recommendation', 'pick-background-gpt6-luna-max', '--team', '--tmux']),
-                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', False,
+                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, False,
                  ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team']),
-                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True,
+                ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, True,
                  ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux'])]:
             menu = open_menu([str(repo / 'bin/workbench-status-popup'), 'tmux', client, pane],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1475,11 +1508,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 wait_for_text(client_process, heading)
                 drain(0.15)
             if shortcut is not None:
-                os.write(master, shortcut)
-                wait_for_text(client_process, model.encode())
-            os.write(master, b't')
-            rendered = wait_for_text(client_process, model.encode())
-            assert ('Worker: ' + model).encode() in screen_text(rendered)
+                # Arrow through the tier list and confirm with Enter. This
+                # used to launch the first tier before applying the choice.
+                os.write(master, b'\x1b[B' * (int(shortcut) - 2) + b'\r')
+                rendered = wait_for_text(client_process, model.encode())
+            if team:
+                os.write(master, b't')
+                rendered = wait_for_text(client_process, model.encode())
+                assert ('Worker: ' + model).encode() in screen_text(rendered)
             assert '临时调整'.encode() not in screen_text(rendered)
             if panes:
                 os.write(master, b'm')

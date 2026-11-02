@@ -77,6 +77,9 @@ card. Escape and Close dismiss it; Backspace returns to its parent
 or closes a root menu. Back, Close and Launch use full-width list rows, with
 their shortcut on the right of the label, and stay pinned while the body scrolls.
 Launch configuration summaries also stay visible near Launch when space allows.
+After keyboard, hover or wheel navigation focuses a body choice, Enter confirms
+that choice before the pinned Launch shortcut. On a freshly opened panel, Enter
+still launches the displayed settings; focusing Launch explicitly does the same.
 The shared panel container captures a muted, in-memory snapshot of the terminal
 behind its bounded card. This client-local input surface receives backdrop
 clicks that native tmux popups discard. The live terminal returns on dismissal;
