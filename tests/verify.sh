@@ -1,5 +1,5 @@
 #!/bin/sh
-# The same required checks run locally and in pull-request CI.
+# Full P1 regression suite; the required P0 gate is tests/p0.sh.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo"
