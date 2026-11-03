@@ -105,6 +105,7 @@ cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/task-title-exit.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
+"$python_runner" "$repo/tests/sidebar-team.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-upgrade.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-naming.py" "$binary"
 tmux -f "$repo/tests/fixtures/tmux.conf" -S "$socket" \
