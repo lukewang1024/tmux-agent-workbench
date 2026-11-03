@@ -102,20 +102,28 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         # Moving the task window carries both panes; regrouping keeps the
         # worker nested under the same lead after the snapshot catches up.
         tmux('move-window', '-s', window, '-t', 'b-destination:')
-        wait_for(lambda: any('b-destination' in line for line in screen())
-                 and any('▾ Team Task' in line for line in screen())
-                 and any('worker_a' in line for line in screen()), 'team did not move together')
+        def team_in_destination():
+            rows = screen()
+            return any(line.strip() == 'b-destination' and index + 1 < len(rows)
+                       and '▾ Team Task' in rows[index + 1]
+                       for index, line in enumerate(rows))
+
+        wait_for(team_in_destination, 'team did not move together')
         assert tmux('display-message', '-p', '-t', worker, '#{window_id}') == window
         assert tmux('display-message', '-p', '-t', worker, '#{session_name}') == 'b-destination'
+        # Check identity while the sidebar is still visible. A hidden sidebar
+        # intentionally throttles rendering and its captured screen may be stale.
+        state['socket'] = '/tmp/not-the-same-socket'
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        wait_for(lambda: not any('▾ Team Task' in line or '▸ Team Task' in line for line in screen())
+                 and sum('Team Task' in line for line in screen()) >= 2, 'invalid team was grouped')
+        state['socket'] = socket
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        wait_for(lambda: team_in_destination() and any('worker_a' in line for line in screen()),
+                 'restored team was not grouped')
         row = next(i for i, line in enumerate(screen()) if 'worker_a' in line)
         click(5, row)
         wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == worker, 'worker click did not focus')
-        # The exact socket is an identity boundary. Invalid state must reveal
-        # the two agents independently rather than hide an unknown worker.
-        state['socket'] = '/tmp/not-the-same-socket'
-        state_file.write_text(json.dumps(state))
-        wait_for(lambda: not any('▾ Team Task' in line or '▸ Team Task' in line for line in screen())
-                 and sum('Team Task' in line for line in screen()) >= 2, 'invalid team was grouped')
         print('PASS: team sidebar collapse, mouse/keyboard expansion, worker focus, invalid identity')
     finally:
         os.close(master)
