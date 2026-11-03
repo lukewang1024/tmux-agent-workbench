@@ -343,6 +343,7 @@ fn deliver_event<B: NotificationBackend>(
         session_id: focus.session_id.clone(),
         pane_id: focus.pane_id.clone(),
     });
+    let updated_at_unix_ms = now_ms();
     let agent = AgentSnapshot {
         instance_id: format!("relay-{}", event.event_id),
         kind: parse_kind(&event.agent_kind).unwrap_or(AgentKind::Codex),
@@ -375,6 +376,8 @@ fn deliver_event<B: NotificationBackend>(
         } else {
             DisplayState::Done
         },
+        updated_at_unix_ms,
+        state_entered_at_unix_ms: updated_at_unix_ms,
         state_source: StateSource::Hook,
         confidence: StateConfidence::High,
         estimated_state: None,
@@ -384,7 +387,7 @@ fn deliver_event<B: NotificationBackend>(
             id: event.event_id,
             kind,
             seen: false,
-            since_unix_ms: now_ms(),
+            since_unix_ms: updated_at_unix_ms,
             attention_seq: None,
             seen_seq: None,
         }),

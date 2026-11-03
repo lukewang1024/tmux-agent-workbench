@@ -670,6 +670,8 @@ mod tests {
             } else {
                 DisplayState::Done
             },
+            updated_at_unix_ms: 0,
+            state_entered_at_unix_ms: 0,
             state_source: StateSource::Hook,
             confidence: StateConfidence::High,
             estimated_state: None,
