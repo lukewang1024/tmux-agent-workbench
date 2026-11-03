@@ -65,6 +65,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     codex_js.write_text('process.stdout.write("interactive-ready\\n"); setInterval(() => {}, 1000000);\n')
     for tool in ('claude', 'opencode'):
         (shim / tool).symlink_to(codex)
+    # Trae's launch-error path is exercised below; expose its executable so
+    # the menu reaches the live --check instead of stopping at availability.
+    (shim / 'traex').symlink_to(codex)
     preview = root / 'preview.py'
     radar_cache_dir = Path(env['XDG_CACHE_HOME']) / 'agent-team'
     radar_cache_dir.mkdir(parents=True)
