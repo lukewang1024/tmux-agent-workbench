@@ -2363,7 +2363,9 @@ fn execute_action(
         ActionCommand::Launch(settings) => {
             let options = settings.options(options);
             let args = launch_argv(&options)?;
-            if matches!(options.tool, Tool::Codex | Tool::Traex) {
+            // Codex may refresh a stale model catalog during startup.
+            // Trae exposes a live catalog, so keep its launch check.
+            if options.tool == Tool::Traex {
                 let output = Command::new(&args[0])
                     .args(&args[1..])
                     .arg("--check")
