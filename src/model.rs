@@ -138,6 +138,10 @@ pub struct AttentionEvent {
     pub seen_seq: Option<u64>,
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub instance_id: String,
@@ -151,6 +155,10 @@ pub struct AgentSnapshot {
     pub process: Option<ProcessFingerprint>,
     pub base_state: BaseState,
     pub display_state: DisplayState,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub updated_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub state_entered_at_unix_ms: u64,
     #[serde(default = "default_state_source")]
     pub state_source: StateSource,
     #[serde(default = "default_confidence")]

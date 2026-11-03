@@ -119,6 +119,7 @@ pub struct RuntimeMetadata {
     pub runtime_id: String,
     pub attention_seq: u64,
     pub seen_seq: u64,
+    pub state_entered_at_unix_ms: u64,
     pub hook_session_id: Option<String>,
     pub visible_session_id: Option<String>,
     pub previous_session_id: Option<String>,
@@ -190,6 +191,11 @@ impl StateMachine {
         }) == StateSource::Hook
             && previous != BaseState::Unknown
             && checkpoint.hook_session_id.is_some();
+        if checkpoint.state_entered_at_unix_ms > 0
+            && (hook_source || tracked.snapshot.base_state == previous)
+        {
+            tracked.snapshot.state_entered_at_unix_ms = checkpoint.state_entered_at_unix_ms;
+        }
         tracked.runtime_id = checkpoint.runtime_id.clone();
         tracked.attention_seq = checkpoint.attention_seq;
         tracked.seen_seq = checkpoint.seen_seq;
@@ -214,7 +220,12 @@ impl StateMachine {
             tracked.snapshot.confidence = StateConfidence::Low;
             tracked.snapshot.hook_health = HookHealth::Missing;
             tracked.snapshot.attention = None;
+            let old_display_state = tracked.snapshot.display_state;
             tracked.snapshot.display_state = display_for(tracked.snapshot.base_state);
+            if tracked.snapshot.display_state != old_display_state {
+                tracked.snapshot.updated_at_unix_ms = restored_at_ms;
+                tracked.snapshot.state_entered_at_unix_ms = restored_at_ms;
+            }
             return true;
         }
         tracked.snapshot.base_state = previous;
@@ -271,6 +282,7 @@ impl StateMachine {
             runtime_id: tracked.runtime_id.clone(),
             attention_seq: tracked.attention_seq,
             seen_seq: tracked.seen_seq,
+            state_entered_at_unix_ms: tracked.snapshot.state_entered_at_unix_ms,
             hook_session_id: tracked.active_hook_session_id.clone(),
             visible_session_id: tracked.conversation_identity.clone(),
             previous_session_id: tracked.previous_session_id.clone(),
@@ -314,6 +326,8 @@ impl StateMachine {
                     process: Some(observation.process.clone()),
                     base_state: observation.state,
                     display_state: display_for(observation.state),
+                    updated_at_unix_ms: observation.observed_at_ms,
+                    state_entered_at_unix_ms: observation.observed_at_ms,
                     state_source: StateSource::Screen,
                     confidence: StateConfidence::Low,
                     estimated_state: Some(observation.state),
@@ -350,6 +364,7 @@ impl StateMachine {
         });
 
         let old_state = tracked.snapshot.base_state;
+        let old_display_state = tracked.snapshot.display_state;
         let reason_changed = tracked.reason_fingerprint != new_reason;
         let mut publish_state = observation.state;
 
@@ -466,6 +481,10 @@ impl StateMachine {
         }
 
         refresh_attention_display(&mut tracked.snapshot);
+        if tracked.snapshot.display_state != old_display_state {
+            tracked.snapshot.updated_at_unix_ms = observation.observed_at_ms;
+            tracked.snapshot.state_entered_at_unix_ms = observation.observed_at_ms;
+        }
 
         tracked.snapshot.clone()
     }
@@ -489,6 +508,7 @@ impl StateMachine {
                 .agents
                 .get_mut(&snapshot.instance_id)
                 .expect("just observed");
+            let old_display_state = tracked.snapshot.display_state;
             tracked.attention_seq = attention_seq;
             tracked.seen_seq = seen_seq;
             tracked.snapshot.state_source = StateSource::Screen;
@@ -497,10 +517,16 @@ impl StateMachine {
             tracked.snapshot.hook_health = HookHealth::Missing;
             tracked.snapshot.attention = None;
             tracked.snapshot.display_state = display_for(tracked.snapshot.base_state);
+            if tracked.snapshot.display_state != old_display_state {
+                tracked.snapshot.updated_at_unix_ms = observation.observed_at_ms;
+                tracked.snapshot.state_entered_at_unix_ms = observation.observed_at_ms;
+            }
             return tracked.snapshot.clone();
         }
 
         let tracked = self.agents.get_mut(&instance_id).expect("hook tracked");
+        let old_display_state = tracked.snapshot.display_state;
+        let observed_at_ms = observation.observed_at_ms;
         tracked.snapshot.label = tracked
             .snapshot
             .thread_name
@@ -551,6 +577,10 @@ impl StateMachine {
                 }
                 tracked.snapshot.display_state = DisplayState::Working;
                 tracked.conflict_since_ms = None;
+                if tracked.snapshot.display_state != old_display_state {
+                    tracked.snapshot.updated_at_unix_ms = observed_at_ms;
+                    tracked.snapshot.state_entered_at_unix_ms = observed_at_ms;
+                }
                 return tracked.snapshot.clone();
             }
             if tracked.confirmed_display.is_none() {
@@ -585,6 +615,10 @@ impl StateMachine {
                 tracked.snapshot.display_state = display_for(state);
                 tracked.snapshot.rule_id = observation.rule_id;
             }
+        }
+        if tracked.snapshot.display_state != old_display_state {
+            tracked.snapshot.updated_at_unix_ms = observed_at_ms;
+            tracked.snapshot.state_entered_at_unix_ms = observed_at_ms;
         }
         tracked.snapshot.clone()
     }
@@ -654,6 +688,7 @@ impl StateMachine {
         tracked.snapshot.visible = visible;
         tracked.snapshot.exited = false;
         tracked.snapshot.exited_at_unix_ms = None;
+        tracked.snapshot.updated_at_unix_ms = report.occurred_at_unix_ms;
 
         let next = match report.event {
             AgentEventType::SessionStart | AgentEventType::Working | AgentEventType::Activity => {
@@ -664,6 +699,7 @@ impl StateMachine {
             AgentEventType::Error => BaseState::Working,
         };
         let old = tracked.snapshot.base_state;
+        let old_display_state = tracked.snapshot.display_state;
         tracked.automatic_review_attention = None;
         tracked.snapshot.base_state = next;
         tracked.snapshot.display_state = display_for(next);
@@ -708,6 +744,9 @@ impl StateMachine {
             _ => {}
         }
         refresh_attention_display(&mut tracked.snapshot);
+        if tracked.snapshot.display_state != old_display_state {
+            tracked.snapshot.state_entered_at_unix_ms = report.occurred_at_unix_ms;
+        }
         let snapshot = tracked.snapshot.clone();
         // A resumed conversation is the same task even when a theme refresh
         // replaced its process. Only authoritative hooks establish continuity;
@@ -745,8 +784,13 @@ impl StateMachine {
         if tracked.snapshot.state_source != StateSource::Hook
             && now_ms.saturating_sub(stale_since) >= stale_grace_ms
         {
+            let old_display_state = tracked.snapshot.display_state;
             tracked.snapshot.base_state = BaseState::Unknown;
             tracked.snapshot.display_state = DisplayState::Unknown;
+            tracked.snapshot.updated_at_unix_ms = now_ms;
+            if old_display_state != DisplayState::Unknown {
+                tracked.snapshot.state_entered_at_unix_ms = now_ms;
+            }
             tracked.snapshot.reason_category = None;
             tracked.snapshot.rule_id = None;
             tracked.snapshot.attention = None;
@@ -798,8 +842,13 @@ impl StateMachine {
                 || tracked.snapshot.target.pane_id != pane_id
         });
         let tracked = self.agents.get_mut(instance_id)?;
+        let old_display_state = tracked.snapshot.display_state;
         tracked.snapshot.exited = true;
         tracked.snapshot.exited_at_unix_ms = Some(now_ms);
+        tracked.snapshot.updated_at_unix_ms = now_ms;
+        if old_display_state != DisplayState::Done {
+            tracked.snapshot.state_entered_at_unix_ms = now_ms;
+        }
         tracked.snapshot.process = None;
         tracked.snapshot.base_state = BaseState::Idle;
         tracked.snapshot.display_state = DisplayState::Done;
@@ -826,11 +875,32 @@ impl StateMachine {
         title: &str,
         resume: Option<&str>,
     ) -> Option<AgentSnapshot> {
+        self.observe_codex_identity_inner(instance_id, title, resume, None)
+    }
+
+    pub fn observe_codex_identity_at(
+        &mut self,
+        instance_id: &str,
+        title: &str,
+        resume: Option<&str>,
+        observed_at_ms: u64,
+    ) -> Option<AgentSnapshot> {
+        self.observe_codex_identity_inner(instance_id, title, resume, Some(observed_at_ms))
+    }
+
+    fn observe_codex_identity_inner(
+        &mut self,
+        instance_id: &str,
+        title: &str,
+        resume: Option<&str>,
+        observed_at_ms: Option<u64>,
+    ) -> Option<AgentSnapshot> {
         let identity = codex_title_identity(title)?;
         let tracked = self.agents.get_mut(instance_id)?;
         if tracked.snapshot.kind != AgentKind::Codex || tracked.snapshot.exited {
             return None;
         }
+        let old_display_state = tracked.snapshot.display_state;
         let remembered = tracked
             .conversation_identity
             .as_deref()
@@ -866,6 +936,12 @@ impl StateMachine {
             tracked.snapshot.confidence = StateConfidence::Low;
             tracked.snapshot.hook_health = HookHealth::Missing;
         }
+        if tracked.snapshot.display_state != old_display_state {
+            if let Some(at_ms) = observed_at_ms {
+                tracked.snapshot.updated_at_unix_ms = at_ms;
+                tracked.snapshot.state_entered_at_unix_ms = at_ms;
+            }
+        }
         tracked.conversation_identity = Some(identity.to_owned());
         tracked.confirmed_resume = resume.is_some_and(|id| id.starts_with(identity))
             && tracked
@@ -896,14 +972,19 @@ impl StateMachine {
         }
     }
 
-    pub fn acknowledge(&mut self, event_id: &str) -> bool {
+    pub fn acknowledge(&mut self, event_id: &str, now_ms: u64) -> bool {
         for tracked in self.agents.values_mut() {
             if let Some(event) = &mut tracked.snapshot.attention {
                 if event.id == event_id {
+                    let old_display_state = tracked.snapshot.display_state;
                     event.seen = true;
                     tracked.seen_seq = event.attention_seq.unwrap_or(tracked.attention_seq);
                     event.seen_seq = Some(tracked.seen_seq);
                     refresh_attention_display(&mut tracked.snapshot);
+                    if tracked.snapshot.display_state != old_display_state {
+                        tracked.snapshot.updated_at_unix_ms = now_ms;
+                        tracked.snapshot.state_entered_at_unix_ms = now_ms;
+                    }
                     return true;
                 }
             }
@@ -911,8 +992,14 @@ impl StateMachine {
         false
     }
 
-    pub fn set_visibility(&mut self, instance_id: &str, visible: bool) -> Option<AgentSnapshot> {
+    pub fn set_visibility(
+        &mut self,
+        instance_id: &str,
+        visible: bool,
+        now_ms: u64,
+    ) -> Option<AgentSnapshot> {
         let tracked = self.agents.get_mut(instance_id)?;
+        let old_display_state = tracked.snapshot.display_state;
         tracked.snapshot.visible = visible;
         if visible {
             if let Some(event) = &mut tracked.snapshot.attention {
@@ -922,6 +1009,10 @@ impl StateMachine {
             }
         }
         refresh_attention_display(&mut tracked.snapshot);
+        if tracked.snapshot.display_state != old_display_state {
+            tracked.snapshot.updated_at_unix_ms = now_ms;
+            tracked.snapshot.state_entered_at_unix_ms = now_ms;
+        }
         Some(tracked.snapshot.clone())
     }
 
@@ -1310,7 +1401,7 @@ mod tests {
         let still_done = machine.observe(observation(BaseState::Idle, 2_300));
         assert_eq!(still_done.display_state, DisplayState::Done);
         let event_id = still_done.attention.unwrap().id;
-        assert!(machine.acknowledge(&event_id));
+        assert!(machine.acknowledge(&event_id, 2_400));
         assert_eq!(machine.snapshots()[0].display_state, DisplayState::Idle);
     }
 
@@ -1513,7 +1604,9 @@ mod tests {
         let mut machine = StateMachine::default();
         let blocked = machine.observe(observation(BaseState::Blocked, 10));
         assert!(machine.next_attention().is_some());
-        let visible = machine.set_visibility(&blocked.instance_id, true).unwrap();
+        let visible = machine
+            .set_visibility(&blocked.instance_id, true, 20)
+            .unwrap();
         assert_eq!(visible.base_state, BaseState::Blocked);
         assert_eq!(visible.display_state, DisplayState::Blocked);
         assert!(visible.attention.unwrap().seen);
@@ -1632,14 +1725,16 @@ mod tests {
         assert_eq!(fallback.display_state, DisplayState::Blocked);
         assert_eq!(fallback.hook_health, HookHealth::Conflict);
         assert!(fallback.attention.is_none());
+        let mut expected_metadata = before;
+        expected_metadata.state_entered_at_unix_ms = 3_100;
         assert_eq!(
             machine.checkpoint_metadata(&initial.instance_id).unwrap(),
-            before
+            expected_metadata
         );
         assert!(machine.next_attention().is_none());
         assert_eq!(
             machine
-                .set_visibility(&initial.instance_id, true)
+                .set_visibility(&initial.instance_id, true, 5_000)
                 .unwrap()
                 .display_state,
             DisplayState::Blocked

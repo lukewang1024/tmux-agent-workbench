@@ -590,6 +590,7 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
         agents.sort_by_key(|agent| {
             (
                 std::cmp::Reverse(agent_attention_priority(agent)),
+                std::cmp::Reverse(agent.state_entered_at_unix_ms),
                 std::cmp::Reverse(
                     agent
                         .attention

@@ -524,7 +524,7 @@ fn dispatch_notifications(state: &mut State, now_ms: u64) {
         },
     );
     for id in seen {
-        let _ = state.detector.acknowledge(&id);
+        let _ = state.detector.acknowledge(&id, now_ms);
     }
 }
 
@@ -683,6 +683,7 @@ fn save_checkpoint(paths: &Paths, server_key: &str, state: &State) -> io::Result
                     process.pid, process.started_at_ticks, process.executable
                 ),
                 previous_state: format!("{:?}", agent.base_state).to_lowercase(),
+                state_entered_at_unix_ms: runtime.state_entered_at_unix_ms,
                 state_source: Some(agent.state_source),
                 last_hook_event_at_ms: state.detector.hook_replay_guard(&agent.instance_id).0,
                 hook_event_ids: state.detector.hook_replay_guard(&agent.instance_id).1,
@@ -1082,7 +1083,7 @@ fn handle(
         }
         "attention.ack" => parse_params::<AckParams>(request.params).and_then(|params| {
             let mut state = state.write().expect("state poisoned");
-            if state.detector.acknowledge(&params.event_id) {
+            if state.detector.acknowledge(&params.event_id, now_unix_ms()) {
                 let agents = state.detector.machine_snapshots();
                 state.snapshot.agents = agents;
                 state.snapshot.generation = state.snapshot.generation.saturating_add(1);

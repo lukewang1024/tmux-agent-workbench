@@ -117,7 +117,7 @@ impl Detector {
             if due {
                 self.capture(&pane, process, config, manifests, now, now_ms);
             } else if let Some(instance) = self.pane_instances.get(&pane.target.pane_id) {
-                self.machine.set_visibility(instance, pane.visible);
+                self.machine.set_visibility(instance, pane.visible, now_ms);
             }
         }
         self.machine.prune_tombstones(now_ms);
@@ -125,8 +125,8 @@ impl Detector {
         Ok(self.decorated_snapshots())
     }
 
-    pub fn acknowledge(&mut self, event_id: &str) -> bool {
-        self.machine.acknowledge(event_id)
+    pub fn acknowledge(&mut self, event_id: &str, now_ms: u64) -> bool {
+        self.machine.acknowledge(event_id, now_ms)
     }
 
     pub fn set_task_name(&mut self, instance: &str, name: String) -> Option<AgentSnapshot> {
@@ -675,10 +675,11 @@ impl Detector {
         });
         let snapshot = if kind == AgentKind::Codex {
             self.machine
-                .observe_codex_identity(
+                .observe_codex_identity_at(
                     &snapshot.instance_id,
                     &pane.title,
                     resume_session_id.as_deref(),
+                    now_ms,
                 )
                 .unwrap_or(snapshot)
         } else {
