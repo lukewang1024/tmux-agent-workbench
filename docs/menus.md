@@ -282,13 +282,20 @@ The Trae `quick` adjustment remains available through its CLI adapter.
 
 ## Language and contextual controls
 
-The launch panel follows the system display language: Chinese for `zh` variants,
-English otherwise. On macOS it uses the first preferred system language, not
-the input source or shell locale. Other systems use `LC_ALL`, `LC_MESSAGES`,
-`LANG` and `LANGUAGE`, with English for C/POSIX. Tool names, model identifiers
+The UI language is configured by `[ui].language` in
+`$XDG_CONFIG_HOME/tmux-agent-workbench/config.toml`. Its default, `auto`, follows
+the system display language: Chinese for `zh` variants, English otherwise. On
+macOS it uses the first preferred system language, not the input source or shell
+locale. Other systems use `LC_ALL`, `LC_MESSAGES`, `LANG` and `LANGUAGE`, with
+English for C/POSIX. Set a BCP 47 tag such as `zh-CN`, `en-US`, or `ja-JP` to
+choose explicitly; currently non-Chinese tags use English. Task-title naming
+reminders use the same preference. Existing thread names remain untouched; the
+reminder applies the configured language when the agent chooses a task title.
+
+The menu's `--language` option takes precedence, followed by
+`TMUX_AGENT_WORKBENCH_LANGUAGE=en|zh`, `[ui].language`, and the system language.
+One open menu retains its language across callbacks. Tool names, model identifiers
 and external diagnostics keep their original spelling.
-`TMUX_AGENT_WORKBENCH_LANGUAGE=en|zh` explicitly overrides the display language
-for a remote terminal or tests; one open menu retains its language across callbacks.
 
 Agent startup, exit and suspension are refreshed by the existing detector.
 The session label is the persistent Sidebar toggle. Wide clients toggle its

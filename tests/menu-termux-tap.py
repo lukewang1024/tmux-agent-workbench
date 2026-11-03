@@ -104,12 +104,26 @@ with tempfile.TemporaryDirectory(prefix='wb-tap-') as directory, \
         length = int.from_bytes(control.stdout.read(4), 'big')
         welcome = json.loads(control.stdout.read(length))
         assert welcome['type'] == 'welcome', welcome
+        tty = os.ttyname(slave)
         try:
             subprocess.run([core, 'client', 'attach-pty', '--bind', welcome['attachment_token']],
-                           env=dict(env, SSH_TTY=os.ttyname(slave)), stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1)
+                           env=dict(env, SSH_TTY=tty), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
         except subprocess.TimeoutExpired:
             pass
+
+        # The popup reads this binding from the daemon snapshot to enable the
+        # delayed-tap guard; do not race attachment setup on slower runners.
+        def termux_attachment_ready():
+            result = subprocess.run([core, 'snapshot', '--json'], env=env,
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return False
+            clients = json.loads(result.stdout).get('clients', [])
+            return any(client.get('kind') == 'termux' and client.get('attachment') == tty
+                       for client in clients)
+
+        wait_for(termux_attachment_ready)
         subprocess.run([core, 'ui', 'new'], env=env, check=True, stdout=subprocess.DEVNULL)
         for case in ('action', 'url-choice', 'outside'):
             tmux('set-option', '-gu', '@tap-selected')

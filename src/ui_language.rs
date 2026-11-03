@@ -1,17 +1,49 @@
 //! Shared workbench UI rule: system display language, zh variants or English.
 use std::sync::OnceLock;
 
-thread_local! { static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+thread_local! {
+    static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static CONFIGURED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
 
 pub fn set_language(language: Option<&str>) {
     OVERRIDE.set(language.map(is_chinese));
 }
 
+pub fn set_configured_language(language: &str) {
+    CONFIGURED.set(language_choice(language));
+}
+
 fn chinese() -> bool {
+    OVERRIDE.get().unwrap_or_else(|| {
+        let environment = std::env::var("TMUX_AGENT_WORKBENCH_LANGUAGE").ok();
+        resolve_language(environment.as_deref(), CONFIGURED.get(), system_language)
+    })
+}
+
+fn language_choice(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(is_chinese(value))
+    }
+}
+
+fn resolve_language(
+    environment: Option<&str>,
+    configured: Option<bool>,
+    system: impl FnOnce() -> bool,
+) -> bool {
+    environment
+        .and_then(language_choice)
+        .or(configured)
+        .unwrap_or_else(system)
+}
+
+fn system_language() -> bool {
     static CHINESE: OnceLock<bool> = OnceLock::new();
-    OVERRIDE
-        .get()
-        .unwrap_or_else(|| *CHINESE.get_or_init(detect))
+    *CHINESE.get_or_init(detect_system)
 }
 
 pub fn name() -> &'static str {
@@ -29,13 +61,7 @@ fn is_chinese(value: &str) -> bool {
         .is_some_and(|lang| lang.eq_ignore_ascii_case("zh"))
 }
 
-fn detect() -> bool {
-    // Explicit override is useful for remote terminals and deterministic tests.
-    if let Ok(value) = std::env::var("TMUX_AGENT_WORKBENCH_LANGUAGE") {
-        if !value.is_empty() {
-            return is_chinese(&value);
-        }
-    }
+fn detect_system() -> bool {
     #[cfg(target_os = "macos")]
     {
         preferred_language()
@@ -110,6 +136,35 @@ mod tests {
             assert!(!is_chinese(value));
         }
     }
+    #[test]
+    fn configured_language_and_fallbacks() {
+        let system = || false;
+        assert!(resolve_language(None, language_choice("zh-CN"), system));
+        assert!(!resolve_language(None, language_choice("en-US"), || true));
+        assert!(!resolve_language(None, language_choice("ja-JP"), || true));
+        assert!(!resolve_language(None, language_choice("auto"), || false));
+        assert!(resolve_language(None, language_choice("auto"), || true));
+    }
+
+    #[test]
+    fn environment_override_precedes_configured_language() {
+        assert!(!resolve_language(
+            Some("en"),
+            language_choice("zh-CN"),
+            || true
+        ));
+        assert!(resolve_language(
+            Some("zh"),
+            language_choice("en-US"),
+            || false
+        ));
+        assert!(resolve_language(
+            Some("auto"),
+            language_choice("zh-CN"),
+            || false
+        ));
+    }
+
     #[test]
     fn standard_message_locale_precedence() {
         let check = |pairs: &[(&str, &str)]| {
