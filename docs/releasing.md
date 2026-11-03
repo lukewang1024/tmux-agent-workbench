@@ -1,10 +1,15 @@
 # PR checks and release delivery
 
-Run `sh tests/verify.sh` locally before shipping. It checks formatting, all
-Rust tests, isolated tmux integration, relay pairing, and the installer.
-CI repeats the same command on Ubuntu and Apple Silicon macOS for every PR
-and main push. Intel macOS also runs the title-hook integration and process
-identity unit tests before tagging; the release repeats all native checks.
+Run `sh tests/p0.sh` for the required fast gate. It checks Rust library and
+binary unit tests, CLI startup, task/workspace isolation, pane routing, and
+daemon shutdown. Automatic PR and main-push CI runs this P0 suite on Ubuntu,
+with a five-minute job timeout; the stable CI gate requires only P0.
+
+Run `sh tests/verify.sh` locally before shipping for the full P1 regression
+suite: formatting, all Rust tests, isolated tmux integration, relay pairing,
+and the installer. Manual CI dispatch runs this suite on Ubuntu and Apple
+Silicon macOS, plus the P2 iSH static-target and Intel title-hook checks.
+The release workflow continues to run the full native checks.
 Linux and Apple Silicon macOS CI build tmux 3.7c with its official SHA-256.
 Ubuntu 24.04's bundled tmux 3.4 lacks the existing menu mouse flags, while
 Homebrew may already ship a newer menu implementation. The macOS source

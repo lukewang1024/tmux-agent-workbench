@@ -1,7 +1,8 @@
 # Delivery and release
 
-- Run `sh tests/verify.sh` before shipping. This is the same unit, tmux,
-  relay, and installer validation required by PR CI on Linux and macOS.
+- Run `sh tests/p0.sh` for the required PR gate. Run `sh tests/verify.sh`
+  before shipping for the full P1 unit, tmux, relay, and installer suite.
+  Manual CI dispatch also runs the extended Linux/macOS and platform checks.
 - Ship through a feature branch and PR; enable GitHub squash auto-merge and
   wait for required `CI gate` checks. Never push directly to `main` or bypass
   branch protection. Update from `main` if the strict checks require it.

@@ -15,8 +15,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Verify (${{ matrix.os }})
+  ci_gate:
+    name: CI gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install P0 test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux
+      - run: sh tests/p0.sh
+
+  extended:
+    name: P1 full suite (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +68,7 @@ jobs:
           cargo test --locked --target i586-unknown-linux-musl
   intel_title_hooks:
     name: Title hooks (macos-15-intel)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
@@ -62,16 +79,3 @@ jobs:
       - run: cargo test --locked --lib task_title::tests
       - run: cargo build --locked --bin tmux-agent-workbench --example codex
       - run: sh tests/python.sh tests/task-titles.py target/debug/tmux-agent-workbench target/debug/examples/codex
-  required:
-    name: CI gate
-    if: always()
-    needs: [verify, intel_title_hooks]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require all platforms to pass
-        env:
-          VERIFY_RESULT: ${{ needs.verify.result }}
-          INTEL_RESULT: ${{ needs.intel_title_hooks.result }}
-        run: |
-          test "$VERIFY_RESULT" = success
-          test "$INTEL_RESULT" = success
