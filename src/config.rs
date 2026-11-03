@@ -20,6 +20,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    pub ui: UiConfig,
     pub detection: DetectionConfig,
     pub sidebar: SidebarConfig,
     pub notifications: NotificationConfig,
@@ -40,6 +41,22 @@ pub struct ClientsConfig {
 #[serde(default)]
 pub struct DeviceClientConfig {
     pub selected_implies_focused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// `auto` follows the system display language; other BCP 47 tags select a
+    /// language family, with Chinese supported and English as the fallback.
+    pub language: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,6 +180,23 @@ pub struct OpenPeonConfig {
     pub active_pack: Option<String>,
 }
 
+fn valid_language_tag(value: &str) -> bool {
+    if value.eq_ignore_ascii_case("auto") {
+        return true;
+    }
+    let mut subtags = value.split('-');
+    let Some(language) = subtags.next() else {
+        return false;
+    };
+    (2..=8).contains(&language.len())
+        && language.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && subtags.all(|subtag| {
+            !subtag.is_empty()
+                && subtag.len() <= 8
+                && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
@@ -178,6 +212,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !valid_language_tag(&self.ui.language) {
+            return Err(ConfigError::Validation(
+                "ui.language must be 'auto' or a BCP 47 language tag, for example zh-CN or en-US"
+                    .into(),
+            ));
+        }
         let d = &self.detection;
         if d.process_interval_ms == 0
             || d.active_capture_interval_ms == 0
@@ -234,6 +274,7 @@ mod tests {
     #[test]
     fn defaults_match_specification() {
         let c = Config::default();
+        assert_eq!(c.ui.language, "auto");
         assert_eq!(c.detection.process_interval_ms, 1_000);
         assert_eq!(c.detection.active_capture_interval_ms, 500);
         assert_eq!(c.detection.idle_capture_interval_ms, 2_000);
@@ -246,6 +287,23 @@ mod tests {
     fn preserves_forward_compatibility_for_unknown_keys() {
         let config = toml::from_str::<Config>("mystery = true").unwrap();
         assert!(!config.clients.selected_implies_focused);
+    }
+
+    #[test]
+    fn accepts_language_tags_and_rejects_invalid_values() {
+        for language in ["auto", "zh-CN", "en-US", "ja-JP"] {
+            let input = format!("[ui]\nlanguage = {language:?}\n");
+            let config = toml::from_str::<Config>(&input).unwrap();
+            assert!(config.validate().is_ok(), "{language}");
+            assert_eq!(config.ui.language, language);
+        }
+        let config = Config {
+            ui: UiConfig {
+                language: "not a locale".into(),
+            },
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]
