@@ -1379,14 +1379,14 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         config_dir.mkdir(parents=True, exist_ok=True)
         reject_scene.touch()
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                          '--view', 'configure', '--recommendation', 'pick-hard-astra-xhigh'], env=env,
+                          '--view', 'configure', '--tool', 'traex', '--scene', 'hard'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for_text(menu, b'gpt-6-astra')
+        wait_for_text(menu, b'hard-single')
         before = tmux('list-windows', '-F', '#{window_id}')
         os.write(master, b'\r')
         menu.wait(timeout=3)
         rendered = wait_for_text(client_process, b'Configured model is unavailable')
-        assert b'gpt-6-astra' in screen_text(rendered)
+        assert b'hard-single' in screen_text(rendered)
         os.write(master, b'\x7f')
         wait_for_text(client_process, b'choose agent')
         os.write(master, b'\x1b')
@@ -1394,7 +1394,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert last_launch.read_text() == saved_single, 'failed launch replaced the last successful combination'
         reject_scene.unlink()
         drain(0.7)
-        print('PASS unavailable recommendation reports an error without opening a window')
+        print('PASS unavailable Trae scene reports an error without opening a window')
 
         # On short clients the error must be in the footer of every page,
         # rather than disappearing before the page containing it is opened.
@@ -1404,7 +1404,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain(0.3)
         reject_scene.touch()
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
-                          '--view', 'configure', '--recommendation', 'pick-hard-astra-xhigh'], env=env,
+                          '--view', 'configure', '--tool', 'traex', '--scene', 'hard'], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu, b'(enter)')
         os.write(master, b'\r')
@@ -1420,7 +1420,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         # Check the current screen; the PTY may still contain older redraws
         # with the error even after the newly selected scene has replaced it.
         drain()
-        os.write(master, b'2')
+        os.write(master, b'd')
         wait_for_text(client_process, '● Daily development'.encode(), b'(enter)',
                       current_screen=True, absent=(b'Configured model is unavailable',))
         os.write(master, b'\x7f')
