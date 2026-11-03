@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write, stdout};
 use std::process::{Command, Stdio};
@@ -30,9 +31,198 @@ enum Row {
     SessionSub(SessionSnapshot),
     Agent(AgentSnapshot),
     AgentSub(AgentSnapshot, AgentSort),
+    Team(AgentSnapshot, TeamSummary),
+    TeamSub(AgentSnapshot, AgentSort, TeamSummary),
+    TeamWorker(AgentSnapshot, WorkerDisplay),
+    TeamWorkerSub(AgentSnapshot, WorkerDisplay),
     Detail(String, String),
     Conversation(AgentSnapshot, ConversationSnapshot),
     Spacer,
+}
+
+#[derive(Debug, Clone)]
+struct TeamSummary {
+    key: String,
+    expanded: bool,
+    workers: usize,
+    blocked: usize,
+    done: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TeamMember {
+    key: String,
+    window: String,
+    name: String,
+    brief: Option<String>,
+    assignment: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerDisplay {
+    name: String,
+    title: String,
+}
+
+type TeamIndex = HashMap<String, TeamMember>;
+
+// Only explicit, already received assignments replace the original thread
+// title. Ordinary follow-ups and pending messages need not change the task.
+fn received_assignment(state: &serde_json::Value, name: &str, cursor: u64) -> Option<String> {
+    state["messages"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if message["from"] != "lead"
+                || message["to"] != name
+                || message["type"] != "send"
+                || message["id"].as_u64().is_none_or(|id| id > cursor)
+            {
+                return None;
+            }
+            let text = message["text"].as_str()?.trim();
+            let content = [
+                "新只读任务：",
+                "新只读任务:",
+                "新任务：",
+                "新任务:",
+                "New task:",
+                "NEW TASK:",
+            ]
+            .iter()
+            .find_map(|prefix| text.strip_prefix(prefix))?;
+            task_title(content)
+        })
+}
+
+fn task_title(text: &str) -> Option<String> {
+    let text = text.trim();
+    let text = text
+        .strip_prefix("目标：")
+        .or_else(|| text.strip_prefix("目标:"))
+        .unwrap_or(text)
+        .trim();
+    let first = text.split(['\n', '。', '；', ';']).next()?.trim();
+    let clean: String = first
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect();
+    (!clean.is_empty()).then_some(clean)
+}
+
+fn worker_display(agent: &AgentSnapshot, member: &TeamMember) -> WorkerDisplay {
+    let thread = agent
+        .thread_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| meaningful_topic(s));
+    let title = member
+        .assignment
+        .clone()
+        .or_else(|| thread.and_then(task_title))
+        .or_else(|| member.brief.as_deref().and_then(task_title))
+        .unwrap_or_else(|| member.name.clone());
+    WorkerDisplay {
+        name: member.name.clone(),
+        title,
+    }
+}
+
+/// Both the pane marker and state file are needed: titles and pane ordering are
+/// not identities. A missing or inconsistent state leaves agents independent.
+fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
+    let inventory = crate::tmux::Tmux::new(server.clone())
+        .output_with_timeout(
+            &[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}",
+            ],
+            Duration::from_millis(250),
+        )
+        .ok()?;
+    let mut marked: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    for line in inventory.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 4
+            || fields[3] != "0"
+            || fields[2].is_empty()
+            || !fields[2]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            continue;
+        }
+        marked
+            .entry((fields[0].into(), fields[2].into()))
+            .or_default()
+            .insert(fields[1].into());
+    }
+    let mut index = TeamIndex::new();
+    for ((window, id), panes) in marked {
+        let Some(root) = paths.state_dir.parent() else {
+            continue;
+        };
+        let file = root.join("agent-team").join(&id).join("state.json");
+        let state = std::fs::metadata(&file)
+            .ok()
+            .filter(|m| m.len() < 4 * 1024 * 1024)
+            .and_then(|_| std::fs::read(file).ok())
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+        let Some(state) = state else { continue };
+        if state["id"] != id
+            || state["window"] != window
+            || state["closed"] == true
+            || state["socket"].as_str().map(std::path::Path::new)
+                != Some(server.socket_path.as_path())
+        {
+            continue;
+        }
+        let Some(members) = state["members"].as_object() else {
+            continue;
+        };
+        let Some(lead) = members.get("lead").and_then(|m| m["pane"].as_str()) else {
+            continue;
+        };
+        if !panes.contains(lead) {
+            continue;
+        }
+        // A duplicate pane makes ownership ambiguous: never hide that team.
+        let mut seen = HashSet::new();
+        if members
+            .values()
+            .filter_map(|m| m["pane"].as_str())
+            .any(|pane| !seen.insert(pane))
+        {
+            continue;
+        }
+        let key = format!("{window}:{id}");
+        for (name, member) in members {
+            let Some(pane) = member["pane"].as_str() else {
+                continue;
+            };
+            if panes.contains(pane) {
+                index.insert(
+                    pane.into(),
+                    TeamMember {
+                        key: key.clone(),
+                        window: window.clone(),
+                        name: name.clone(),
+                        brief: member["brief"].as_str().map(str::to_owned),
+                        assignment: received_assignment(
+                            &state,
+                            name,
+                            member["cursor"].as_u64().unwrap_or(0),
+                        ),
+                    },
+                );
+            }
+        }
+    }
+    Some(index)
 }
 
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
@@ -182,6 +372,8 @@ fn event_loop(
     let visibility_pane = std::env::var("TMUX_PANE").ok();
     let is_popup = popup_mode();
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
+    let team_paths = paths.clone();
+    let team_server = server.clone();
     std::thread::spawn(move || {
         let mut visible = true;
         let mut next_visibility_check = Instant::now();
@@ -194,7 +386,12 @@ fn event_loop(
                 next_visibility_check = Instant::now() + Duration::from_secs(5);
             }
             let result = fetch_snapshot(&fetch_socket).map_err(|error| error.to_string());
-            let _ = snapshot_tx.try_send((result, visible));
+            let teams = if result.is_ok() {
+                read_teams(&team_paths, &team_server)
+            } else {
+                None
+            };
+            let _ = snapshot_tx.try_send((result, teams, visible));
         }
     });
     let mut detailed = false;
@@ -205,9 +402,11 @@ fn event_loop(
         agent_sort = saved;
     }
     let mut snapshot = initial_snapshot.ok();
+    let mut teams = read_teams(paths, server).unwrap_or_default();
+    let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
-        .map(|snapshot| build_rows(snapshot, detailed, agent_sort))
+        .map(|snapshot| build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded))
         .unwrap_or_default();
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
@@ -228,12 +427,14 @@ fn event_loop(
     let mut last_content_height = usize::MAX;
     let mut runtime_registered = is_popup;
     loop {
-        if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
+        if let Ok((result, fetched_teams, now_visible)) = snapshot_rx.try_recv() {
             visible = now_visible;
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
                 Ok(fetched) => {
-                    rows = build_rows(&fetched, detailed, agent_sort);
+                    // A failed identity read cannot justify hiding workers.
+                    teams = fetched_teams.unwrap_or_default();
+                    rows = build_team_rows(&fetched, detailed, agent_sort, &teams, &expanded);
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
@@ -278,7 +479,7 @@ fn event_loop(
             {
                 agent_sort = saved;
                 if let Some(snapshot) = &snapshot {
-                    rows = build_rows(snapshot, detailed, agent_sort);
+                    rows = build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                 }
                 dirty = true;
@@ -412,6 +613,29 @@ fn event_loop(
                         }
                     }
                     _ if navigation.navigate(key.code) => {}
+                    KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                        if let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
+                            rows.get(navigation.selected)
+                        {
+                            let team_key = summary.key.clone();
+                            let open =
+                                match key_event_direction(key.code, expanded.contains(&team_key)) {
+                                    Some(open) => open,
+                                    None => expanded.contains(&team_key),
+                                };
+                            if open {
+                                expanded.insert(team_key);
+                            } else {
+                                expanded.remove(&team_key);
+                            }
+                            if let Some(snapshot) = &snapshot {
+                                rows = build_team_rows(
+                                    snapshot, detailed, agent_sort, &teams, &expanded,
+                                );
+                                navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            }
+                        }
+                    }
                     KeyCode::Enter => {
                         let navigated = activate(&rows, navigation.selected)?;
                         if popup_mode() && navigated {
@@ -435,7 +659,8 @@ fn event_loop(
                     KeyCode::Char('d') => {
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
-                            rows = build_rows(snapshot, detailed, agent_sort);
+                            rows =
+                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
@@ -523,12 +748,32 @@ fn event_loop(
                         };
                         persist_agent_sort(paths, agent_sort)?;
                         if let Some(snapshot) = &snapshot {
-                            rows = build_rows(snapshot, detailed, agent_sort);
+                            rows =
+                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
                             navigation = NavigationList::default();
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
                     Some(Hit::Item(_)) => {
+                        let clicked_row = navigation.scroll
+                            + usize::from(mouse.row.saturating_sub(viewport.first_row as u16));
+                        if mouse.kind == MouseEventKind::Up(MouseButton::Left) && mouse.column <= 2
+                        {
+                            if let Some(Row::Team(_, summary)) = rows.get(clicked_row) {
+                                let key = summary.key.clone();
+                                if !expanded.remove(&key) {
+                                    expanded.insert(key);
+                                }
+                                if let Some(snapshot) = &snapshot {
+                                    rows = build_team_rows(
+                                        snapshot, detailed, agent_sort, &teams, &expanded,
+                                    );
+                                    navigation
+                                        .replace_rows(rows.iter().map(selection_key).collect());
+                                }
+                                continue;
+                            }
+                        }
                         let navigated = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
                             show_row_menu(
                                 &rows,
@@ -582,27 +827,109 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
     Ok(serde_json::from_value(value)?)
 }
 
+#[cfg(test)]
 fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec<Row> {
-    let mut rows = vec![];
+    build_team_rows(
+        snapshot,
+        detailed,
+        agent_sort,
+        &TeamIndex::new(),
+        &HashSet::new(),
+    )
+}
+
+fn key_event_direction(key: KeyCode, is_open: bool) -> Option<bool> {
+    match key {
+        KeyCode::Char(' ') => Some(!is_open),
+        KeyCode::Left => Some(false),
+        KeyCode::Right => Some(true),
+        _ => None,
+    }
+}
+
+fn build_team_rows(
+    snapshot: &Snapshot,
+    detailed: bool,
+    agent_sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+) -> Vec<Row> {
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
+    // Only group live agents when the validated lead is present. Unmatched or
+    // exited agents remain visible independently instead of disappearing.
+    let mut leads = HashMap::new();
+    for agent in &agents {
+        if !agent.exited && !agent.stale {
+            if let Some(member) = teams
+                .get(&agent.target.pane_id)
+                .filter(|m| m.name == "lead" && m.window == agent.target.window_id)
+            {
+                leads.insert(member.key.clone(), agent.instance_id.clone());
+            }
+        }
+    }
+    let mut workers: HashMap<String, Vec<(AgentSnapshot, WorkerDisplay)>> = HashMap::new();
+    for agent in &agents {
+        if !agent.exited && !agent.stale {
+            if let Some(member) = teams.get(&agent.target.pane_id).filter(|m| {
+                m.name != "lead" && m.window == agent.target.window_id && leads.contains_key(&m.key)
+            }) {
+                workers
+                    .entry(member.key.clone())
+                    .or_default()
+                    .push((agent.clone(), worker_display(agent, member)));
+            }
+        }
+    }
+    let grouped_keys: HashSet<String> = workers.keys().cloned().collect();
+    let mut entries: Vec<(
+        AgentSnapshot,
+        Option<(String, Vec<(AgentSnapshot, WorkerDisplay)>)>,
+    )> = Vec::new();
+    for agent in agents {
+        let member = (!agent.exited && !agent.stale)
+            .then(|| teams.get(&agent.target.pane_id))
+            .flatten()
+            .filter(|m| m.window == agent.target.window_id);
+        if let Some(member) = member {
+            if member.name != "lead" && grouped_keys.contains(&member.key) {
+                continue;
+            }
+            if member.name == "lead" && leads.get(&member.key) == Some(&agent.instance_id) {
+                if let Some(children) = workers.remove(&member.key) {
+                    entries.push((agent, Some((member.key.clone(), children))));
+                    continue;
+                }
+            }
+        }
+        entries.push((agent, None));
+    }
     if agent_sort == AgentSort::Prioritized {
-        agents.sort_by_key(|agent| {
-            (
-                std::cmp::Reverse(agent_attention_priority(agent)),
-                std::cmp::Reverse(agent.state_entered_at_unix_ms),
-                std::cmp::Reverse(
-                    agent
-                        .attention
-                        .as_ref()
-                        .and_then(|event| event.attention_seq)
-                        .unwrap_or(0),
-                ),
-            )
+        entries.sort_by_key(|(agent, team)| {
+            let members = std::iter::once(agent).chain(
+                team.iter()
+                    .flat_map(|(_, children)| children.iter().map(|(a, _)| a)),
+            );
+            let rank = members
+                .map(|a| {
+                    (
+                        agent_attention_priority(a),
+                        a.state_entered_at_unix_ms,
+                        a.attention
+                            .as_ref()
+                            .and_then(|e| e.attention_seq)
+                            .unwrap_or(0),
+                    )
+                })
+                .max()
+                .unwrap();
+            std::cmp::Reverse(rank)
         });
     }
+    let mut rows = vec![];
     let mut previous_session = None;
-    for agent in agents {
+    for (agent, team) in entries {
         if agent_sort == AgentSort::Grouped {
             let session = (
                 agent.target.session_name.clone(),
@@ -613,35 +940,34 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
                 previous_session = Some(session);
             }
         }
-        rows.push(Row::Agent(agent.clone()));
-        rows.push(Row::AgentSub(agent.clone(), agent_sort));
-        if detailed {
-            let pid = agent
-                .process
-                .as_ref()
-                .map(|process| process.pid.to_string())
-                .unwrap_or_else(|| "—".into());
-            rows.push(Row::Detail(
-                format!(
-                    "   {} · {}:{} · pid {pid}",
-                    agent_kind_name(agent.kind),
-                    agent.target.window_index,
-                    agent.target.pane_index
-                ),
-                String::new(),
-            ));
-            rows.push(Row::Detail(
-                format!("   {}", source_health(&agent)),
-                format!("rule {}", agent.rule_id.as_deref().unwrap_or("—")),
-            ));
+        if let Some((key, children)) = team {
+            let summary = TeamSummary {
+                expanded: expanded.contains(&key),
+                key,
+                workers: children.len(),
+                blocked: children
+                    .iter()
+                    .filter(|(a, _)| a.display_state == DisplayState::Blocked)
+                    .count(),
+                done: children
+                    .iter()
+                    .filter(|(a, _)| a.display_state == DisplayState::Done)
+                    .count(),
+            };
+            rows.push(Row::Team(agent.clone(), summary.clone()));
+            rows.push(Row::TeamSub(agent.clone(), agent_sort, summary.clone()));
+            append_agent_details(&mut rows, &agent, detailed);
+            if summary.expanded {
+                for (worker, display) in children {
+                    rows.push(Row::TeamWorker(worker.clone(), display.clone()));
+                    rows.push(Row::TeamWorkerSub(worker, display));
+                }
+            }
+        } else {
+            rows.push(Row::Agent(agent.clone()));
+            rows.push(Row::AgentSub(agent.clone(), agent_sort));
+            append_agent_details(&mut rows, &agent, detailed);
         }
-        rows.extend(
-            agent
-                .conversations
-                .iter()
-                .cloned()
-                .map(|conversation| Row::Conversation(agent.clone(), conversation)),
-        );
     }
     rows.push(Row::Spacer);
     rows.push(Row::Section("sessions"));
@@ -653,6 +979,36 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
         rows.push(Row::SessionSub(session));
     }
     rows
+}
+
+fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bool) {
+    if detailed {
+        let pid = agent
+            .process
+            .as_ref()
+            .map(|process| process.pid.to_string())
+            .unwrap_or_else(|| "—".into());
+        rows.push(Row::Detail(
+            format!(
+                "   {} · {}:{} · pid {pid}",
+                agent_kind_name(agent.kind),
+                agent.target.window_index,
+                agent.target.pane_index
+            ),
+            String::new(),
+        ));
+        rows.push(Row::Detail(
+            format!("   {}", source_health(&agent)),
+            format!("rule {}", agent.rule_id.as_deref().unwrap_or("—")),
+        ));
+    }
+    rows.extend(
+        agent
+            .conversations
+            .iter()
+            .cloned()
+            .map(|conversation| Row::Conversation(agent.clone(), conversation)),
+    );
 }
 
 fn agent_attention_priority(agent: &AgentSnapshot) -> u8 {
@@ -707,7 +1063,7 @@ fn current_agent_selection(
     let instance = current_agent_instance(snapshot, server)?;
     // Prefer the canonical Agent row when restoring focus after a refresh.
     rows.iter()
-        .rposition(|row| matches!(row, Row::Agent(agent) if agent.instance_id == instance))
+        .rposition(|row| matches!(row, Row::Agent(agent) | Row::Team(agent, _) | Row::TeamWorker(agent, _) if agent.instance_id == instance))
 }
 
 fn initial_row(
@@ -805,6 +1161,64 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             selected,
         ),
         Row::SessionSub(session) => context_line(&session_context(session), width, selected),
+        Row::Team(agent, summary) => icon_title_line(
+            if summary.expanded { "▾" } else { "▸" },
+            agent_topic(agent),
+            width,
+            Style::default().fg(state_color(agent.display_state)),
+            Style::default().fg(Color::Rgb(235, 235, 245)),
+            selected,
+        ),
+        Row::TeamSub(agent, sort, summary) => {
+            let mut text = format!(
+                "   {} worker{}",
+                summary.workers,
+                if summary.workers == 1 { "" } else { "s" }
+            );
+            if *sort == AgentSort::Prioritized {
+                text.push_str(&format!(" · {}", agent.target.session_name));
+            }
+            let mut status = agent_status(agent);
+            if summary.blocked > 0 {
+                status.push_str(&format!(" !{}", summary.blocked));
+            }
+            if summary.done > 0 {
+                status.push_str(&format!(" ✓{}", summary.done));
+            }
+            aligned_line(
+                text,
+                status,
+                width,
+                muted_style(),
+                Style::default().fg(if summary.blocked > 0 {
+                    state_color(DisplayState::Blocked)
+                } else if summary.done > 0 {
+                    state_color(DisplayState::Done)
+                } else {
+                    state_color(agent.display_state)
+                }),
+                selected,
+            )
+        }
+        Row::TeamWorker(agent, display) => {
+            let title = format!("   └ {} {}", glyph(agent.display_state), display.title);
+            aligned_line(
+                title,
+                String::new(),
+                width,
+                Style::default().fg(Color::Rgb(235, 235, 245)),
+                muted_style(),
+                selected,
+            )
+        }
+        Row::TeamWorkerSub(agent, display) => aligned_line(
+            format!("       {}", display.name),
+            agent_status(agent),
+            width,
+            muted_style(),
+            Style::default().fg(state_color(agent.display_state)),
+            selected,
+        ),
         Row::Agent(agent) => {
             let title = if agent.visible && agent.state_source != StateSource::Screen {
                 Style::default()
@@ -972,6 +1386,8 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
     let items = [
         "-j/k ↑/↓ · move",
         "-Enter · open / focus",
+        "-Space / ←/→ · collapse / expand team",
+        "-click team arrow · collapse / expand",
         "-m · item menu",
         "-N · projects",
         "-i · temporary Git tool",
@@ -1258,7 +1674,11 @@ fn selection_key(row: &Row) -> Option<String> {
         Row::Session(session) => Some(format!("session:{}", session.session_id)),
         Row::SessionSub(session) => Some(format!("session:{}", session.session_id)),
         Row::Agent(agent) => Some(format!("agent:{}", agent.instance_id)),
-        Row::AgentSub(agent, _) => Some(format!("agent:{}", agent.instance_id)),
+        Row::AgentSub(agent, _)
+        | Row::Team(agent, _)
+        | Row::TeamSub(agent, _, _)
+        | Row::TeamWorker(agent, _)
+        | Row::TeamWorkerSub(agent, _) => Some(format!("agent:{}", agent.instance_id)),
         Row::Conversation(agent, conversation) => Some(format!(
             "conversation:{}:{}",
             agent.instance_id, conversation.id
@@ -1313,14 +1733,28 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             }
             return Ok(true);
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) if agent.exited => {
+        Some(
+            Row::Agent(agent)
+            | Row::AgentSub(agent, _)
+            | Row::Team(agent, _)
+            | Row::TeamSub(agent, _, _)
+            | Row::TeamWorker(agent, _)
+            | Row::TeamWorkerSub(agent, _),
+        ) if agent.exited => {
             if let Some(event) = &agent.attention {
                 let server = ServerIdentity::discover()?;
                 let paths = Paths::discover()?;
                 acknowledge_attention(&paths.socket_for_server(&server.key), &event.id)?;
             }
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) => {
+        Some(
+            Row::Agent(agent)
+            | Row::AgentSub(agent, _)
+            | Row::Team(agent, _)
+            | Row::TeamSub(agent, _, _)
+            | Row::TeamWorker(agent, _)
+            | Row::TeamWorkerSub(agent, _),
+        ) => {
             let mut command = Command::new(std::env::current_exe()?);
             command.args([
                 "focus",
@@ -1432,9 +1866,14 @@ fn show_row_menu(
                 ],
             )
         }
-        Some(Row::Agent(agent) | Row::AgentSub(agent, _))
-            if !agent.exited && safe_target(&agent.target.pane_id, '%') =>
-        {
+        Some(
+            Row::Agent(agent)
+            | Row::AgentSub(agent, _)
+            | Row::Team(agent, _)
+            | Row::TeamSub(agent, _, _)
+            | Row::TeamWorker(agent, _)
+            | Row::TeamWorkerSub(agent, _),
+        ) if !agent.exited && safe_target(&agent.target.pane_id, '%') => {
             let executable = std::env::current_exe()?;
             let source = source_pane().ok_or("sidebar source pane unavailable")?;
             let focus = format!(
@@ -1689,9 +2128,15 @@ fn current_client() -> Result<String, Box<dyn std::error::Error>> {
 
 fn new_task_selected(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
     let pane = match rows.get(selected) {
-        Some(Row::Agent(agent) | Row::AgentSub(agent, _)) | Some(Row::Conversation(agent, _)) => {
-            Some(agent.target.pane_id.as_str())
-        }
+        Some(
+            Row::Agent(agent)
+            | Row::AgentSub(agent, _)
+            | Row::Team(agent, _)
+            | Row::TeamSub(agent, _, _)
+            | Row::TeamWorker(agent, _)
+            | Row::TeamWorkerSub(agent, _),
+        )
+        | Some(Row::Conversation(agent, _)) => Some(agent.target.pane_id.as_str()),
         Some(Row::Session(session) | Row::SessionSub(session)) => {
             session.last_active_pane_id.as_deref()
         }
@@ -1925,6 +2370,173 @@ mod tests {
         }
     }
 
+    fn team_fixture() -> (Snapshot, TeamIndex) {
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let template = snapshot.agents[0].clone();
+        let agent = |name: &str, pane: &str, index: u32, state: DisplayState| {
+            let mut agent = template.clone();
+            agent.instance_id = name.into();
+            agent.target.pane_id = pane.into();
+            agent.target.window_id = "@9".into();
+            agent.target.pane_index = index;
+            agent.display_state = state;
+            agent.exited = false;
+            agent.stale = false;
+            agent
+        };
+        // A child can appear before or after its lead in tmux order.
+        snapshot.agents = vec![
+            agent("worker-a", "%1", 0, DisplayState::Blocked),
+            agent("lead", "%2", 1, DisplayState::Working),
+            agent("worker-b", "%3", 2, DisplayState::Done),
+            agent("other", "%4", 3, DisplayState::Working),
+        ];
+        let mut teams = TeamIndex::new();
+        for (pane, name) in [("%1", "worker_a"), ("%2", "lead"), ("%3", "worker_b")] {
+            teams.insert(
+                pane.into(),
+                TeamMember {
+                    key: "@9:test".into(),
+                    window: "@9".into(),
+                    name: name.into(),
+                    brief: None,
+                    assignment: None,
+                },
+            );
+        }
+        (snapshot, teams)
+    }
+
+    #[test]
+    fn team_collapses_by_default_and_expands_once_in_tmux_order() {
+        let (snapshot, teams) = team_fixture();
+        for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+            assert_eq!(
+                rows.iter().filter(|r| matches!(r, Row::Team(..))).count(),
+                1
+            );
+            assert!(!rows.iter().any(|r| matches!(r, Row::TeamWorker(..))));
+            assert_eq!(
+                rows.iter().filter(|r| matches!(r, Row::Agent(..))).count(),
+                1
+            );
+            let summary = rows
+                .iter()
+                .find_map(|r| match r {
+                    Row::Team(_, s) => Some(s),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!((summary.workers, summary.blocked, summary.done), (2, 1, 1));
+            let subtitle = rows.iter().find(|r| matches!(r, Row::TeamSub(..))).unwrap();
+            let line = render_row(subtitle, false, 24);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("!1") && text.contains("✓1"), "{text}");
+            let expanded = HashSet::from(["@9:test".into()]);
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &expanded);
+            let lead = rows
+                .iter()
+                .position(|r| matches!(r, Row::Team(..)))
+                .unwrap();
+            let members: Vec<_> = rows
+                .iter()
+                .filter_map(|r| match r {
+                    Row::TeamWorker(a, display) => {
+                        Some((a.instance_id.as_str(), display.name.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                members,
+                [("worker-a", "worker_a"), ("worker-b", "worker_b")]
+            );
+            assert!(matches!(&rows[lead+2], Row::TeamWorker(a, _) if a.instance_id == "worker-a"));
+            assert!(matches!(&rows[lead+4], Row::TeamWorker(a, _) if a.instance_id == "worker-b"));
+            if sort == AgentSort::Prioritized {
+                assert!(
+                    lead < rows
+                        .iter()
+                        .position(|r| matches!(r, Row::Agent(..)))
+                        .unwrap()
+                );
+            }
+            assert_eq!(
+                selection_key(&rows[lead + 2]).as_deref(),
+                Some("agent:worker-a")
+            );
+        }
+        assert_eq!(key_event_direction(KeyCode::Char(' '), false), Some(true));
+        assert_eq!(key_event_direction(KeyCode::Left, true), Some(false));
+        assert_eq!(key_event_direction(KeyCode::Right, false), Some(true));
+    }
+
+    #[test]
+    fn worker_titles_follow_received_explicit_assignments_then_thread_and_brief() {
+        let (snapshot, mut teams) = team_fixture();
+        let mut agent = snapshot.agents[0].clone();
+        agent.thread_name = Some("核对 CCM worker 状态并建议命名".into());
+        let member = teams.get_mut("%1").unwrap();
+        member.brief = Some("目标：核对注册信息；禁止修改资源".into());
+        let state = serde_json::json!({"messages": [
+            {"id": 1, "from": "lead", "to": "worker_a", "type": "send", "text": "新任务：检查 Remote 发布情况。报告结论。"},
+            {"id": 2, "from": "lead", "to": "worker_a", "type": "send", "text": "谢谢，请继续核查。"},
+            {"id": 3, "from": "lead", "to": "worker_a", "type": "send", "text": "新任务：待接收的任务。"},
+            {"id": 4, "from": "worker_b", "to": "worker_a", "type": "send", "text": "新任务：其他成员的消息。"}
+        ]});
+        member.assignment = received_assignment(&state, "worker_a", 2);
+        assert_eq!(worker_display(&agent, member).title, "检查 Remote 发布情况");
+        member.assignment = received_assignment(&state, "worker_a", 0);
+        assert_eq!(
+            worker_display(&agent, member).title,
+            "核对 CCM worker 状态并建议命名"
+        );
+        agent.thread_name = None;
+        assert_eq!(worker_display(&agent, member).title, "核对注册信息");
+        member.brief = None;
+        assert_eq!(worker_display(&agent, member).title, "worker_a");
+        assert_eq!(
+            task_title("目标：安全\u{1b}标题；其他内容").as_deref(),
+            Some("安全标题")
+        );
+    }
+
+    #[test]
+    fn uncertain_or_stale_team_members_remain_independent() {
+        let (mut snapshot, mut teams) = team_fixture();
+        teams.remove("%2");
+        let rows = build_team_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            rows.iter().filter(|r| matches!(r, Row::Agent(..))).count(),
+            4
+        );
+        let (fresh_snapshot, fresh_teams) = team_fixture();
+        snapshot = fresh_snapshot;
+        teams = fresh_teams;
+        snapshot.agents[0].target.window_id = "@other".into();
+        snapshot.agents[2].stale = true;
+        let rows = build_team_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &HashSet::new(),
+        );
+        assert!(!rows.iter().any(|r| matches!(r, Row::Team(..))));
+        assert_eq!(
+            rows.iter().filter(|r| matches!(r, Row::Agent(..))).count(),
+            4
+        );
+    }
+
     #[test]
     fn agent_sort_state_is_shared_between_sidebar_instances() {
         let temp = tempfile::tempdir().unwrap();
@@ -2029,6 +2641,10 @@ mod tests {
                 | Row::SessionSub(_)
                 | Row::Agent(_)
                 | Row::AgentSub(_, _)
+                | Row::Team(_, _)
+                | Row::TeamSub(_, _, _)
+                | Row::TeamWorker(_, _)
+                | Row::TeamWorkerSub(_, _)
                 | Row::Detail(_, _)
                 | Row::Conversation(_, _)
                 | Row::Spacer => None,

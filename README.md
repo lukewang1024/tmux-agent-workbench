@@ -320,6 +320,18 @@ agents; prioritized mode keeps it on each agent card, so
 parallel tasks within one direction remain distinguishable. Both lines are
 clickable, and long Chinese titles truncate to their actual terminal width.
 
+Pane Teams appear as a single task, collapsed by default. The lead row shows
+worker count and `!N` / `✓N` for blocked / done workers, including when the
+team is collapsed. Press Space or Left/Right on the lead, or click its arrow,
+to collapse or expand the indented workers; Enter or a click on a worker
+focuses its pane. A worker card shows its task title, then its member name and
+status. An explicit received new-task message takes precedence over the agent
+thread title; the original brief and member name are fallbacks. Priority sorting
+keeps the team together and uses its most
+urgent member. Membership requires matching live pane markers and agent-team
+state for the same window and tmux socket; uncertain members remain separate.
+Expansion is local to the open sidebar.
+
 With focus in the sidebar, press `?` for the complete centered shortcut card.
 The everyday keys are plain letters: `i` opens a temporary Git tool, `d` toggles details,
 `n` jumps to attention, and `s`/`a` open pickers. Heavier mutating actions use

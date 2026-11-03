@@ -149,7 +149,11 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn output_with_timeout(&self, args: &[&str], timeout: Duration) -> Result<String, TmuxError> {
+    pub(crate) fn output_with_timeout(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, TmuxError> {
         let mut child = Command::new("tmux")
             .arg("-S")
             .arg(&self.server.socket_path)
