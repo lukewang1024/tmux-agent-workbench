@@ -589,15 +589,17 @@ pub fn run(
     stay_open: bool,
     options: &MenuOptions,
 ) -> Result<()> {
-    crate::ui_language::set_language(options.language.as_deref());
     if options.json && (action.is_some() || options.focus_agent) {
         return Err("JSON menu reads cannot execute an action or change focus".into());
     }
     validate_pane(pane)?;
+    let paths = Paths::discover()?;
+    let config = crate::config::Config::load(&paths.config_file())?;
+    crate::ui_language::set_configured_language(&config.ui.language);
+    crate::ui_language::set_language(options.language.as_deref());
     if kind == StatusMenuKind::Agent && options.focus_agent && action.is_none() {
         return open_agent_status(pane, client, stay_open, options);
     }
-    let paths = Paths::discover()?;
     let context = match if launch_context(kind, options.view) {
         Context::read_launch(pane)
     } else {

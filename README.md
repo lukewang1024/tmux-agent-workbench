@@ -238,6 +238,9 @@ validated replacement into the running daemon and retains the previous config
 if validation fails.
 
 ```toml
+[ui]
+language = "auto" # auto follows the OS; e.g. zh-CN, en-US, ja-JP
+
 [detection]
 process_interval_ms = 1000
 active_capture_interval_ms = 500
@@ -953,8 +956,10 @@ not grant socket access, and naming does not require changing the session's
 sandbox or network policy.
 
 Codex and Claude lifecycle hooks ask the model to choose a task name and a
-semantic session direction, supplying existing session names for reuse. They
-also request grouping on prompt submission when a task already has a name.
+semantic session direction, supplying existing session names for reuse. The
+title reminder follows `[ui].language` (`auto` uses the system language; `zh`
+tags use Simplified Chinese and other tags use English). They also request
+grouping on prompt submission when a task already has a name.
 `SessionStart` and `UserPromptSubmit`
 provide short context; `Stop` requests at most one naming continuation after
 a submitted task. The continuation budget is stored with the tmux window, so

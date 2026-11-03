@@ -626,8 +626,16 @@ fn reset_for_session_change(
     restore_title(&server, &current, &previous, &encoded, &finish)
 }
 
+fn instruction_language_hint() -> &'static str {
+    crate::ui_language::text(
+        "Use English for the task title.",
+        "请用简体中文为任务命名。",
+    )
+}
+
 fn instruction(snapshot: &Snapshot, agent: &AgentSnapshot, needs_name: bool) -> String {
     let session = agent.hook_session_id.as_deref().unwrap_or_default();
+    let language_hint = instruction_language_hint();
     let codex = if agent.kind == AgentKind::Codex {
         " For Codex exec_command, use sandbox_permissions=\"require_escalated\" with a naming-specific justification when the tool schema and approval policy allow it."
     } else {
@@ -640,7 +648,7 @@ fn instruction(snapshot: &Snapshot, agent: &AgentSnapshot, needs_name: bool) -> 
         .collect();
     let title = if needs_name { " '<task name>'" } else { "" };
     format!(
-        "Once the task is clear, group it by direction and give its window a short concrete task name (2–4 words or 6–12 Chinese characters). A tmux session groups related tasks; a window represents this one task. Existing session directions: {}. Reuse a suitable existing session, or choose a concise new direction if none fits. Do not derive the direction just from the launching session or working directory. Run `tmux-agent-workbench title set{title} --session '<direction>' --pane {} --session-id {}`. Omitting the task name preserves an existing name. Workbench creates/reuses the session and moves only this task's independent window; it never renames the launching session or restarts the agent. This command needs local Unix-socket access. Choose execution permissions BEFORE the first invocation using your session's current sandbox and approval policy. When that policy blocks local sockets (including the default restricted workspace-write/read-only policy) and approvals are allowed, request approval for this exact command on the FIRST invocation.{codex} Do not first run a restricted naming attempt as a permission probe. If these sockets are already permitted, run normally. If socket access is blocked and approval is forbidden or unavailable, skip naming and continue the task. Keep this pane and its sandbox/network policy.",
+        "{language_hint} Once the task is clear, group it by direction and give its window a short concrete task name (2–4 words or 6–12 Chinese characters). A tmux session groups related tasks; a window represents this one task. Existing session directions: {}. Reuse a suitable existing session, or choose a concise new direction if none fits. Do not derive the direction just from the launching session or working directory. Run `tmux-agent-workbench title set{title} --session '<direction>' --pane {} --session-id {}`. Omitting the task name preserves an existing name. Workbench creates/reuses the session and moves only this task's independent window; it never renames the launching session or restarts the agent. This command needs local Unix-socket access. Choose execution permissions BEFORE the first invocation using your session's current sandbox and approval policy. When that policy blocks local sockets (including the default restricted workspace-write/read-only policy) and approvals are allowed, request approval for this exact title command on the FIRST invocation.{codex} Do not first run a restricted naming attempt as a permission probe. If these sockets are already permitted, run normally. If socket access is blocked and approval is forbidden or unavailable, skip naming and continue the task. Keep this pane and its sandbox/network policy.",
         serde_json::to_string(&sessions).unwrap_or_default(),
         quote(&agent.target.pane_id),
         quote(session)
@@ -663,6 +671,10 @@ pub fn hook_output(
     {
         return json!({});
     }
+    let configured_language = crate::config::Config::load(&paths.config_file())
+        .map(|config| config.ui.language)
+        .unwrap_or_else(|_| "auto".into());
+    crate::ui_language::set_configured_language(&configured_language);
     let result = (|| -> Result<Value, String> {
         let value = call(
             socket,
@@ -1307,6 +1319,18 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(observations, Some((true, true, true)), "{identity:?}");
         assert!(reaper.exited(identity.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn task_title_language_hint_supports_chinese_and_english() {
+        crate::ui_language::set_language(Some("zh"));
+        assert!(instruction_language_hint().contains("简体中文"));
+        crate::ui_language::set_language(Some("en"));
+        assert_eq!(
+            instruction_language_hint(),
+            "Use English for the task title."
+        );
+        crate::ui_language::set_language(None);
     }
 
     #[test]
