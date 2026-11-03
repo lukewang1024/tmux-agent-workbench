@@ -20,6 +20,8 @@ pub struct RuntimeCheckpoint {
     #[serde(default)]
     pub last_hook_event_at_ms: u64,
     #[serde(default)]
+    pub state_entered_at_unix_ms: u64,
+    #[serde(default)]
     pub hook_event_ids: Vec<String>,
     pub attention_seq: u64,
     pub seen_seq: u64,
