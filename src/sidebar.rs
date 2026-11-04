@@ -56,6 +56,7 @@ struct TeamMember {
     name: String,
     brief: Option<String>,
     assignment: Option<String>,
+    pane_missing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -145,8 +146,12 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
         )
         .ok()?;
     let mut marked: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut all_panes = HashSet::new();
     for line in inventory.lines() {
         let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() == 4 {
+            all_panes.insert(fields[1].to_owned());
+        }
         if fields.len() != 4
             || fields[3] != "0"
             || fields[2].is_empty()
@@ -204,7 +209,8 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
             let Some(pane) = member["pane"].as_str() else {
                 continue;
             };
-            if panes.contains(pane) {
+            let pane_missing = !all_panes.contains(pane);
+            if panes.contains(pane) || (name != "lead" && pane_missing) {
                 index.insert(
                     pane.into(),
                     TeamMember {
@@ -217,6 +223,7 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
                             name,
                             member["cursor"].as_u64().unwrap_or(0),
                         ),
+                        pane_missing,
                     },
                 );
             }
@@ -613,7 +620,7 @@ fn event_loop(
                         }
                     }
                     _ if navigation.navigate(key.code) => {}
-                    KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                    KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
                         if let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
                             rows.get(navigation.selected)
                         {
@@ -841,8 +848,8 @@ fn build_rows(snapshot: &Snapshot, detailed: bool, agent_sort: AgentSort) -> Vec
 fn key_event_direction(key: KeyCode, is_open: bool) -> Option<bool> {
     match key {
         KeyCode::Char(' ') => Some(!is_open),
-        KeyCode::Left => Some(false),
-        KeyCode::Right => Some(true),
+        KeyCode::Left | KeyCode::Char('h') => Some(false),
+        KeyCode::Right | KeyCode::Char('l') => Some(true),
         _ => None,
     }
 }
@@ -856,8 +863,8 @@ fn build_team_rows(
 ) -> Vec<Row> {
     let mut agents = snapshot.agents.clone();
     agents.sort_by_key(stable_agent_key);
-    // Only group live agents when the validated lead is present. Unmatched or
-    // exited agents remain visible independently instead of disappearing.
+    // Only group live agents when the validated lead is present. Unmatched
+    // agents remain visible independently.
     let mut leads = HashMap::new();
     for agent in &agents {
         if !agent.exited && !agent.stale {
@@ -873,7 +880,10 @@ fn build_team_rows(
     for agent in &agents {
         if !agent.exited && !agent.stale {
             if let Some(member) = teams.get(&agent.target.pane_id).filter(|m| {
-                m.name != "lead" && m.window == agent.target.window_id && leads.contains_key(&m.key)
+                m.name != "lead"
+                    && !m.pane_missing
+                    && m.window == agent.target.window_id
+                    && leads.contains_key(&m.key)
             }) {
                 workers
                     .entry(member.key.clone())
@@ -888,6 +898,15 @@ fn build_team_rows(
         Option<(String, Vec<(AgentSnapshot, WorkerDisplay)>)>,
     )> = Vec::new();
     for agent in agents {
+        // A verified team state retains worker pane IDs after stop. Suppress
+        // their cached snapshots instead of promoting them to top-level rows.
+        if teams.get(&agent.target.pane_id).is_some_and(|member| {
+            member.name != "lead"
+                && member.window == agent.target.window_id
+                && (agent.exited || member.pane_missing)
+        }) {
+            continue;
+        }
         let member = (!agent.exited && !agent.stale)
             .then(|| teams.get(&agent.target.pane_id))
             .flatten()
@@ -1386,7 +1405,7 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
     let items = [
         "-j/k ↑/↓ · move",
         "-Enter · open / focus",
-        "-Space / ←/→ · collapse / expand team",
+        "-Space / ←/→ / h/l · collapse / expand team",
         "-click team arrow · collapse / expand",
         "-m · item menu",
         "-N · projects",
@@ -2402,10 +2421,54 @@ mod tests {
                     name: name.into(),
                     brief: None,
                     assignment: None,
+                    pane_missing: false,
                 },
             );
         }
         (snapshot, teams)
+    }
+
+    #[test]
+    fn stopped_workers_disappear_without_hiding_done_or_independent_agents() {
+        let (mut snapshot, mut teams) = team_fixture();
+        snapshot.agents[0].exited = true;
+        snapshot.agents[3].exited = true;
+        let rows = build_team_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &HashSet::from(["@9:test".into()]),
+        );
+        assert!(!rows.iter().any(|row| matches!(row, Row::Agent(a) | Row::TeamWorker(a, _) if a.instance_id == "worker-a")));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, Row::TeamWorker(a, _) if a.instance_id == "worker-b"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, Row::Agent(a) if a.instance_id == "other"))
+        );
+
+        // The pane can disappear before the next agent snapshot marks exit.
+        snapshot.agents[0].exited = false;
+        teams.get_mut("%1").unwrap().pane_missing = true;
+        let rows = build_team_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &HashSet::new(),
+        );
+        let summary = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Team(_, summary) => Some(summary),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary.workers, 1);
+        assert!(!rows.iter().any(|row| matches!(row, Row::Agent(a) | Row::TeamWorker(a, _) if a.instance_id == "worker-a")));
     }
 
     #[test]
@@ -2471,6 +2534,8 @@ mod tests {
         assert_eq!(key_event_direction(KeyCode::Char(' '), false), Some(true));
         assert_eq!(key_event_direction(KeyCode::Left, true), Some(false));
         assert_eq!(key_event_direction(KeyCode::Right, false), Some(true));
+        assert_eq!(key_event_direction(KeyCode::Char('h'), true), Some(false));
+        assert_eq!(key_event_direction(KeyCode::Char('l'), false), Some(true));
     }
 
     #[test]

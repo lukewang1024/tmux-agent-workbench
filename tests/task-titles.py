@@ -561,6 +561,26 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert title(new_task, 'Resumed naming repair')['status'] == 'renamed'
             assert name(new_task) == 'Resumed naming repair'
 
+            # The team lead names the shared window, even with a worker present;
+            # worker titles and manual window renames never take ownership.
+            team = spawn('codex-team')
+            tmux('set-option', '-p', '-t', team['pane'], '@agent_team', 'test-team')
+            tmux('set-option', '-p', '-t', team['pane'], '@agent_team_role', 'lead')
+            worker = spawn(split=team['pane'])
+            tmux('set-option', '-p', '-t', worker['pane'], '@agent_team', 'test-team')
+            tmux('set-option', '-p', '-t', worker['pane'], '@agent_team_role', 'worker')
+            context = wait_hook_context(team, 'UserPromptSubmit')['hookSpecificOutput']['additionalContext']
+            assert '--session ' not in context, context
+            assert hook(worker, 'SessionStart', thread_name='Worker task') == {}
+            assert name(team) == 'codex-team'
+            assert hook(team, 'UserPromptSubmit', thread_name='Team task') == {}
+            wait_name(team, 'Team task')
+            hook(worker, 'UserPromptSubmit', thread_name='Worker update')
+            assert name(team) == 'Team task'
+            tmux('rename-window', '-t', team['pane'], 'Manual team name')
+            hook(team, 'UserPromptSubmit', thread_name='New team task')
+            assert name(team) == 'Manual team name'
+
             # Thread-name is shared by the sidebar and automatically owned title.
             named = spawn()
             assert hook(named, 'SessionStart', thread_name='Readable thread') == {}

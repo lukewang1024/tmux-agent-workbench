@@ -45,7 +45,7 @@ pub mod workspace;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Changes when a daemon gains methods required by same-version clients.
-pub const DAEMON_RUNTIME_REVISION: u32 = 1;
+pub const DAEMON_RUNTIME_REVISION: u32 = 2;
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const CLIENT_PROTOCOL_VERSION: u32 = 2;

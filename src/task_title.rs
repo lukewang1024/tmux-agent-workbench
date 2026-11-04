@@ -78,6 +78,18 @@ struct Window {
     protected: bool,
     automatic_rename: bool,
     task_name: Option<String>,
+    team_role: String,
+}
+
+impl Window {
+    fn generic_name(&self) -> bool {
+        generic_name(&self.name)
+            || (self.team_role == "lead"
+                && matches!(
+                    self.name.as_str(),
+                    "codex-team" | "claude-team" | "traex-team" | "opencode-team"
+                ))
+    }
 }
 
 pub(crate) fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, String> {
@@ -117,11 +129,11 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
             "-p",
             "-t",
             target,
-            "#{pane_id}\u{1f}#{window_id}\u{1f}#{window_name}\u{1f}#{@workbench_task}\u{1f}#{@workbench_project_root}\u{1f}#{@pane_role}\u{1f}#{@workbench-window-automatic-rename}\u{1f}#{automatic-rename}\u{1f}#{@workbench_task_root}\u{1f}#{@workbench_task_name}",
+            "#{pane_id}\u{1f}#{window_id}\u{1f}#{window_name}\u{1f}#{@workbench_task}\u{1f}#{@workbench_project_root}\u{1f}#{@pane_role}\u{1f}#{@workbench-window-automatic-rename}\u{1f}#{automatic-rename}\u{1f}#{@workbench_task_root}\u{1f}#{@workbench_task_name}\u{1f}#{@agent_team_role}",
         ],
     )?;
     let fields: Vec<_> = value.split('\u{1f}').collect();
-    if fields.len() != 10 || !fields[1].starts_with('@') {
+    if fields.len() != 11 || !fields[1].starts_with('@') {
         return Err("agent pane moved or expired; retry with its current identity".into());
     }
     Ok((
@@ -135,6 +147,7 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
                 || fields[6] == "on",
             automatic_rename: fields[7] == "1",
             task_name: (!fields[8].is_empty()).then(|| fields[9].to_owned()),
+            team_role: fields[10].into(),
         },
     ))
 }
@@ -403,7 +416,7 @@ fn with_window<T>(
     let current = window(&server, agent)?;
     let previous = state(&server, &current)?;
     let preserved = current.protected
-        || !generic_name(&current.name)
+        || !current.generic_name()
         || previous.as_ref().is_some_and(|state| {
             current.name != state.title.as_deref().unwrap_or(&state.initial_name)
         });
@@ -440,7 +453,7 @@ fn sync_thread_name(
     let initial = window(&server, agent)?;
     let _lock = window_lock(paths, &server, &initial.id)?;
     let current = window(&server, agent)?;
-    if current.protected || current.name == title {
+    if current.protected || current.name == title || current.team_role == "worker" {
         return Ok(());
     }
     let mut previous = state(&server, &current)?;
@@ -461,7 +474,7 @@ fn sync_thread_name(
         if current.name != previous.title.as_deref().unwrap_or(&previous.initial_name) {
             return Ok(());
         }
-    } else if !generic_name(&current.name) && current.task_name.as_deref() != Some(&current.name) {
+    } else if !current.generic_name() && current.task_name.as_deref() != Some(&current.name) {
         return Ok(());
     }
     let mut state = owner_state(snapshot, agent, &current, previous)?;
@@ -655,6 +668,16 @@ fn instruction(snapshot: &Snapshot, agent: &AgentSnapshot, needs_name: bool) -> 
     )
 }
 
+fn team_instruction(agent: &AgentSnapshot) -> String {
+    let language = instruction_language_hint();
+    let session = agent.hook_session_id.as_deref().unwrap_or_default();
+    format!(
+        "{language} Once the task is clear, give this team window a short concrete task name (2–4 words or 6–12 Chinese characters). Run `tmux-agent-workbench title set '<task name>' --pane {} --session-id {}`. Keep the team window in its current session. This command needs local Unix-socket access; choose permissions before the first invocation. If access is blocked, use the normal approval mechanism when available, otherwise skip naming and continue the task. Keep this pane and its sandbox/network policy.",
+        quote(&agent.target.pane_id),
+        quote(session)
+    )
+}
+
 /// An accepted lifecycle report has already resolved the owning pane. Ask its
 /// daemon for the socket and live process inventory, never use inherited focus.
 pub fn hook_output(
@@ -716,21 +739,34 @@ pub fn hook_output(
                     return Ok(json!({}));
                 }
                 let needs_name = !preserved && state.title.is_none();
+                if current.team_role == "worker" {
+                    return Ok(json!({}));
+                }
+                let team = current.team_role == "lead";
                 if (!needs_name && (state.grouped || event == "SessionStart"))
-                    || !tmux(
-                        server,
-                        &["display-message", "-p", "-t", pane, "#{@agent_team}"],
-                    )?
-                    .is_empty()
+                    || (!team
+                        && !tmux(
+                            server,
+                            &["display-message", "-p", "-t", pane, "#{@agent_team}"],
+                        )?
+                        .is_empty())
                 {
                     return Ok(json!({}));
                 }
+                if team && !needs_name {
+                    return Ok(json!({}));
+                }
+                let naming_instruction = if team {
+                    team_instruction(&agent)
+                } else {
+                    instruction(&snapshot, &agent, needs_name)
+                };
                 match event {
                     "SessionStart" | "UserPromptSubmit" => {
                         state.task_seen |= event == "UserPromptSubmit";
                         save(server, &current, &state)?;
                         Ok(
-                            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": instruction(&snapshot, &agent, needs_name)}}),
+                            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": naming_instruction}}),
                         )
                     }
                     "Stop"
@@ -744,7 +780,7 @@ pub fn hook_output(
                         state.repair_used = true;
                         save(server, &current, &state)?;
                         Ok(
-                            json!({"decision": "block", "reason": format!("{} Then finish the response. This naming repair is requested only once for this task.", instruction(&snapshot, &agent, needs_name))}),
+                            json!({"decision": "block", "reason": format!("{} Then finish the response. This naming repair is requested only once for this task.", naming_instruction)}),
                         )
                     }
                     _ => Ok(json!({})),

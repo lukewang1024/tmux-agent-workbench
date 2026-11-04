@@ -99,6 +99,10 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         wait_for(lambda: not any('worker_a' in line for line in screen()), 'space did not collapse')
         tmux('send-keys', '-t', sidebar, 'Right')
         wait_for(lambda: any('worker_a' in line for line in screen()), 'right did not expand')
+        tmux('send-keys', '-t', sidebar, 'h')
+        wait_for(lambda: not any('worker_a' in line for line in screen()), 'h did not collapse')
+        tmux('send-keys', '-t', sidebar, 'l')
+        wait_for(lambda: any('worker_a' in line for line in screen()), 'l did not expand')
         # Moving the task window carries both panes; regrouping keeps the
         # worker nested under the same lead after the snapshot catches up.
         tmux('move-window', '-s', window, '-t', 'b-destination:')
@@ -121,6 +125,24 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         state_file.write_text(json.dumps(state, ensure_ascii=False))
         wait_for(lambda: team_in_destination() and any('worker_a' in line for line in screen()),
                  'restored team was not grouped')
+        # A stopped worker remains in agent-team state and in the daemon's
+        # retained snapshots, but must not reappear as an independent agent.
+        stopped = tmux('split-window', '-d', '-t', lead, '-P', '-F', '#{pane_id}', shlex.quote(fixture))
+        tmux('set-option', '-p', '-t', stopped, '@agent_team', 'team-test')
+        state['members']['worker_b'] = {'pane': stopped, 'brief': 'Stopped worker unique task'}
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        wait_for(lambda: any('worker_b' in line for line in screen()), 'second worker was not grouped')
+        tmux('kill-pane', '-t', stopped)
+        state['members']['worker_b']['status'] = 'stopped'
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        def stopped_snapshot():
+            result = subprocess.check_output([core, 'snapshot', '--json'], env=env, text=True)
+            return any(agent['target']['pane_id'] == stopped and agent['exited']
+                       for agent in json.loads(result)['agents'])
+        wait_for(stopped_snapshot, 'daemon did not retain the stopped worker')
+        wait_for(lambda: not any('worker_b' in line or 'Stopped worker unique task' in line for line in screen())
+                 and sum('Team Task' in line for line in screen()) == 1,
+                 'stopped worker escaped to top level')
         row = next(i for i, line in enumerate(screen()) if 'worker_a' in line)
         click(5, row)
         wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == worker, 'worker click did not focus')
