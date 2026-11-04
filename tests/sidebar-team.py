@@ -24,8 +24,16 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
     socket = root + '/tmux.sock'
     env = dict(os.environ, TERM='xterm-256color', TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,
                WORKBENCH_FIXTURE_SECONDS='120')
-    for key in ('TMUX', 'TMUX_PANE', 'WORKBENCH_SOURCE_PANE', 'WORKBENCH_POPUP'):
+    for key in ('TMUX', 'TMUX_PANE', 'WORKBENCH_SOURCE_PANE', 'WORKBENCH_POPUP', 'TERM_PROGRAM'):
         env.pop(key, None)
+    # Focusing a tmux pane must not launch or wait for desktop applications on
+    # headless macOS runners. Keep this navigation test inside its tmux server.
+    shim = Path(root) / 'bin'
+    shim.mkdir()
+    osascript = shim / 'osascript'
+    osascript.write_text('#!/bin/sh\nprintf "missing\\n"\n')
+    osascript.chmod(0o755)
+    env['PATH'] = str(shim) + os.pathsep + env.get('PATH', '/usr/bin:/bin')
     for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = root + '/' + key
     master, slave = pty.openpty()
@@ -86,6 +94,7 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         assert not any('worker_a' in line for line in screen()), screen()
         assert any('1 worker' in line for line in screen()), screen()
         row = next(i for i, line in enumerate(screen()) if '▸ Team Task' in line)
+        assert 'codex' in screen()[row + 1], screen()
         click(1, row)
         wait_for(lambda: any('worker_a' in line for line in screen()), 'arrow did not expand')
         assert sum('worker_a' in line for line in screen()) == 1, screen()
@@ -143,12 +152,8 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         wait_for(lambda: not any('worker_b' in line or 'Stopped worker unique task' in line for line in screen())
                  and sum('Team Task' in line for line in screen()) == 1,
                  'stopped worker escaped to top level')
-        row = next(i for i, line in enumerate(screen()) if 'worker_a' in line)
-        click(5, row)
-        wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == worker, 'worker click did not focus')
         # The daemon retains unseen stopped-worker snapshots. Closing the lead
         # and all team panes must not promote those snapshots to top-level rows.
-        tmux('switch-client', '-t', 'z-source')
         state['closed'] = True
         state_file.write_text(json.dumps(state, ensure_ascii=False))
         tmux('kill-pane', '-t', worker)
@@ -173,6 +178,28 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         drain(.5)
         assert sum('Team Task' in line for line in screen()) <= 1, screen()
         assert stopped_snapshot(), 'the check must cover a retained worker snapshot'
+        # Exercise worker navigation last: focusing another window can leave
+        # this sidebar hidden while the platform completes terminal activation.
+        focus_lead = tmux('new-window', '-d', '-t', 'z-source:', '-n', 'Focus Team',
+                          '-P', '-F', '#{pane_id}', shlex.quote(fixture))
+        focus_window = tmux('display-message', '-p', '-t', focus_lead, '#{window_id}')
+        focus_worker = tmux('split-window', '-d', '-t', focus_lead, '-P', '-F', '#{pane_id}', shlex.quote(fixture))
+        for pane in (focus_lead, focus_worker):
+            tmux('set-option', '-p', '-t', pane, '@agent_team', 'team-focus')
+        focus_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-focus'
+        focus_dir.mkdir(parents=True)
+        (focus_dir / 'state.json').write_text(json.dumps({
+            'id': 'team-focus', 'socket': socket, 'window': focus_window,
+            'members': {'lead': {'pane': focus_lead}, 'focus_worker': {'pane': focus_worker}}
+        }))
+        wait_for(lambda: any('▸ Focus Team' in line for line in screen()), 'focus team not grouped')
+        row = next(i for i, line in enumerate(screen()) if '▸ Focus Team' in line)
+        click(1, row)
+        wait_for(lambda: any('focus_worker' in line for line in screen()), 'focus team not expanded')
+        row = next(i for i, line in enumerate(screen()) if 'focus_worker' in line)
+        click(5, row)
+        wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == focus_worker,
+                 'worker click did not focus')
         print('PASS: team sidebar navigation, identity, and closed-team worker suppression')
     finally:
         os.close(master)

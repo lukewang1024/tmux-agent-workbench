@@ -1248,6 +1248,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             if summary.done > 0 {
                 status.push_str(&format!(" ✓{}", summary.done));
             }
+            status.push_str(&format!(" · {}", agent_kind_name(agent.kind)));
             aligned_line(
                 text,
                 status,
@@ -2639,6 +2640,34 @@ mod tests {
                         worker_states.contains(&DisplayState::Done)
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn team_subtitle_shows_the_lead_agent_kind() {
+        let (mut snapshot, teams) = team_fixture();
+        for kind in [
+            crate::model::AgentKind::Codex,
+            crate::model::AgentKind::Claude,
+            crate::model::AgentKind::Trae,
+            crate::model::AgentKind::Opencode,
+        ] {
+            snapshot.agents[1].kind = kind;
+            for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+                let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+                let subtitle = rows
+                    .iter()
+                    .find(|row| matches!(row, Row::TeamSub(..)))
+                    .unwrap();
+                let line = render_row(subtitle, false, 36);
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                assert!(text.contains(agent_kind_name(kind)), "{text}");
+                assert!(text.contains("!1") && text.contains("✓1"), "{text}");
             }
         }
     }

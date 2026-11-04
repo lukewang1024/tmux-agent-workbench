@@ -322,7 +322,7 @@ clickable, and long Chinese titles truncate to their actual terminal width.
 
 Pane Teams appear as a single task, collapsed by default. The lead row shows
 worker count and `!N` / `✓N` for blocked / done workers, including when the
-team is collapsed. Its status color follows the lead agent. Press Space or
+team is collapsed. Its status color and agent type follow the lead agent. Press Space or
 Left/Right on the lead, or click its arrow,
 to collapse or expand the indented workers; Enter or a click on a worker
 focuses its pane. A worker card shows its task title, then its member name and
