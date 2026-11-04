@@ -156,8 +156,10 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .args(["menu-mouse-mode", "--client", client])
         .output()?;
     let input_mode = String::from_utf8_lossy(&mode.stdout);
-    // A release with no selected row should not dismiss the native menu.
-    if mode.status.success() && matches!(input_mode.trim(), "mouse" | "release") {
+    // Older tmux needs -O to prevent ordinary hover from dismissing the menu.
+    // In 3.8, hover is safe without it and -O selects on press rather than
+    // release (a first tap with no prior selection can dismiss the menu).
+    if mode.status.success() && input_mode.trim() == "mouse" {
         args.push("-O".into());
     }
     // Disabled rows start with '-'. Stop option parsing before the first row,

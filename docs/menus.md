@@ -67,6 +67,13 @@ This setting changes action-menu rendering only. Sidebar and the Agent,
 Window, Pane and Session switchers always use the shared list UI. Both menu
 renderers expose the same ordered actions, targets and return destinations.
 
+For classic menus, tmux 3.7 uses `-O` to prevent pointer motion from dismissing
+the menu. tmux 3.8 distinguishes hover from release and no longer needs `-O`;
+without it, a press selects only on release and a release outside cancels. In
+3.8 `display-menu` returns while the native menu is still visible, so tests and
+callers must observe the rendered menu or its callback rather than equate the
+command process exiting with menu dismissal.
+
 The new renderer owns layout, two-row buttons and pinned navigation. Its popup
 fits the content, with a maximum width of 60 cells, rather than using Sidebar's
 larger dimensions. Every cell of both button rows is clickable. Descriptions
