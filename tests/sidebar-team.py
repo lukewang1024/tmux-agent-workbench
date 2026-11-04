@@ -149,6 +149,9 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         # The daemon retains unseen stopped-worker snapshots. Closing the lead
         # and all team panes must not promote those snapshots to top-level rows.
         tmux('switch-client', '-t', 'z-source')
+        tmux('select-pane', '-t', sidebar)
+        wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == sidebar,
+                 'sidebar did not regain focus before closure check')
         state['closed'] = True
         state_file.write_text(json.dumps(state, ensure_ascii=False))
         tmux('kill-pane', '-t', worker)
@@ -158,6 +161,9 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         # it still exists and that the subsequent suppression uses team state.
         state['socket'] = '/tmp/not-the-same-socket'
         state_file.write_text(json.dumps(state, ensure_ascii=False))
+        # Focus/input wakes a sidebar which previously entered its hidden-pane
+        # refresh mode; capture-pane can otherwise return an old team screen.
+        tmux('send-keys', '-t', sidebar, 'Down')
         wait_for(lambda: sum('Team Task' in line for line in screen()) >= 2,
                  'retained worker snapshot was not observable')
         state['socket'] = socket
