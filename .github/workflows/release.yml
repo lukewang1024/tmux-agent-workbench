@@ -41,7 +41,8 @@ jobs:
   build:
     needs: prepare
     if: needs.prepare.outputs.enabled == 'true'
-    timeout-minutes: 30
+    # Intel macOS runs the full tmux suite and a release build on slower hosts.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
