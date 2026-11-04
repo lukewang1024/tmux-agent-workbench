@@ -1,0 +1,21 @@
+name: Temporary team sidebar smoke
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: brew install fzf libevent ncurses bison pkgconf utf8proc jemalloc
+      - run: sh .github/scripts/install-ci-tmux.sh
+      - run: cargo build --locked --bin tmux-agent-workbench --example codex
+      - run: sh tests/python.sh tests/sidebar-team.py target/debug/tmux-agent-workbench
