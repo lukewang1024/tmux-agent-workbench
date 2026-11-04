@@ -52,7 +52,10 @@ class DaemonTimeouts(unittest.TestCase):
                         if method == "daemon.status":
                             ready.wait(5)
                             version = next(line.split('"')[1] for line in (repo / "Cargo.toml").read_text().splitlines() if line.startswith("version ="))
-                            result = dict(engine_version=version, runtime_revision=1, pid=process.pid)
+                            revision = next(int(line.split("=")[1].strip().rstrip(";"))
+                                            for line in (repo / "src/lib.rs").read_text().splitlines()
+                                            if line.startswith("pub const DAEMON_RUNTIME_REVISION:"))
+                            result = dict(engine_version=version, runtime_revision=revision, pid=process.pid)
                         elif method == "client.register":
                             time.sleep(2.5)  # startup must also survive a busy scan
                             result = dict(endpoint_id=endpoint, attachment_token=str(uuid.uuid4()))
