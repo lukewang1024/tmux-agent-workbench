@@ -202,9 +202,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         drain()
         return subprocess.Popen(*args, **kwargs)
 
-    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=(), menu_footer=True, initial=b''):
+    def wait_for_text(proc, needle=b'close', *additional, current_screen=True, absent=(), menu_footer=True, initial=b'', attempts=40):
         output = initial
-        for _ in range(40):
+        for _ in range(attempts):
             output += drain(0.05)
             visible = screen_text(output) if current_screen else output
             # Native menu content precedes its Close footer. A matching heading
@@ -474,14 +474,36 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for mode in ('old', 'new'):
             subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
             menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
+            # tmux 3.8 returns from display-menu as soon as the window-owned
+            # native menu opens; observe the terminal, not that process, for
+            # menu lifetime and activation.
+            observer = client_process if mode == 'old' and release_menus else menu
+            rendered = wait_for_text(observer, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
             if mode == 'old' and release_menus:
-                # A release outside a native menu must not dismiss it before
-                # the user can move the pointer to an item.
                 x, y = item_position(rendered, 'Create')
-                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;1;1m'.encode())
-                drain(.2)
-                assert menu.poll() is None, 'unselected mouse release dismissed the native menu'
+                os.write(master, f'\x1b[<0;{x};{y}M'.encode())
+                rendered += drain(.2)
+                assert b'Create' in screen_text(rendered), 'native menu selected on press'
+                os.write(master, b'\x1b[<0;1;1m')
+                deadline = time.monotonic() + 5
+                while b'Create' in screen_text(rendered) and time.monotonic() < deadline:
+                    rendered += drain(.05)
+                assert b'Create' not in screen_text(rendered), 'outside release did not dismiss native menu'
+                menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rendered = wait_for_text(client_process, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
+                # First tap without hover must keep the root open until release,
+                # then navigate to the actual Create submenu.
+                x, y = item_position(rendered, 'Create')
+                os.write(master, f'\x1b[<0;{x};{y}M'.encode())
+                rendered += drain(.2)
+                assert b'Create' in screen_text(rendered), 'native menu activated on press'
+                assert b'Quick Agent' not in screen_text(rendered), 'submenu opened before release'
+                os.write(master, f'\x1b[<0;{x};{y}m'.encode())
+                wait_for_text(client_process, b'Quick Agent', b'Window', b'Pane', b'Session')
+                os.write(master, b'\x1b')
+                drain(.7)
+                menu = open_menu(root_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rendered = wait_for_text(client_process, b'Switch', b'Create', b'Extract', b'Kill', b'Layout', b'Detach')
             labels = ('Create', 'Switch', 'Extract', 'Layout', 'Kill', 'Detach')
             positions = [item_position(rendered, label)[1] for label in labels]
             assert positions == sorted(set(positions)), (positions, rendered)
@@ -878,9 +900,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                     assert expected not in held, (input_mode, label, 'selected before release', held)
                     os.write(master, f'\x1b[<0;{x};{y}m'.encode())
                     rendered = wait_for_text(client_process, expected) + drain(0.3)
-                # The final release must leave the chooser usable, not close it.
+                # Re-enter Codex from the chooser to prove it is still usable.
+                # The current panel starts with tool defaults and shows the
+                # recommendation labels rather than a preselected model.
                 os.write(master, b'x')
-                wait_for_text(client_process, b'gpt-6.1-sol')
+                wait_for_text(client_process, b'Launch Codex', b'Daily development')
                 os.write(master, b'\x1b')
                 drain(0.7)
                 menu.wait(timeout=3)
@@ -1185,7 +1209,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert b'Usage & reset cards...' in screen_text(rendered), rendered
         os.write(master, b'u')
         menu.wait(timeout=3)
-        wait_for_text(client_process, 'Usage · Codex'.encode(), b'Schedule card', b'View / adjust')
+        # Usage opens through a guarded shell callback; allow the new menu
+        # time to launch under load instead of assuming a two-second redraw.
+        wait_for_text(client_process, 'Usage · Codex'.encode(), b'Schedule card', b'View / adjust', attempts=120)
         assert tmux('show-option', '-gqv', '@workbench-usage-source') == 'opencode'
         os.write(master, b's')
         wait_for_pane_text('$codex-reset-card', pane)
