@@ -57,6 +57,7 @@ struct TeamMember {
     brief: Option<String>,
     assignment: Option<String>,
     pane_missing: bool,
+    team_closed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -131,9 +132,9 @@ fn worker_display(agent: &AgentSnapshot, member: &TeamMember) -> WorkerDisplay {
     }
 }
 
-/// Both the pane marker and state file are needed: titles and pane ordering are
-/// not identities. A missing or inconsistent state leaves agents independent.
-fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
+/// Live grouping requires a pane marker and matching state. Retained snapshots
+/// of missing worker panes can also be matched against validated team state.
+fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Option<TeamIndex> {
     let inventory = crate::tmux::Tmux::new(server.clone())
         .output_with_timeout(
             &[
@@ -166,21 +167,51 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
             .or_default()
             .insert(fields[1].into());
     }
+    let missing: HashSet<_> = snapshot
+        .agents
+        .iter()
+        .filter(|agent| !all_panes.contains(&agent.target.pane_id))
+        .map(|agent| (agent.target.window_id.clone(), agent.target.pane_id.clone()))
+        .collect();
+    let root = paths.state_dir.parent()?.join("agent-team");
+    let mut candidates: HashSet<String> = marked.keys().map(|(_, id)| id.clone()).collect();
+    if !missing.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if let Some(id) = entry.file_name().to_str().filter(|id| {
+                    !id.is_empty()
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                }) {
+                    candidates.insert(id.to_owned());
+                }
+            }
+        }
+    }
     let mut index = TeamIndex::new();
-    for ((window, id), panes) in marked {
-        let Some(root) = paths.state_dir.parent() else {
-            continue;
-        };
-        let file = root.join("agent-team").join(&id).join("state.json");
+    for id in candidates {
+        let file = root.join(&id).join("state.json");
+        // A tmux socket path and pane IDs can be reused after a server restart.
+        // Old team directories must not claim snapshots from the new server.
+        if let (Ok(team_created), Ok(socket_created)) = (
+            std::fs::metadata(root.join(&id)).and_then(|m| m.created()),
+            std::fs::metadata(&server.socket_path).and_then(|m| m.created()),
+        ) {
+            if team_created < socket_created {
+                continue;
+            }
+        }
         let state = std::fs::metadata(&file)
             .ok()
             .filter(|m| m.len() < 4 * 1024 * 1024)
             .and_then(|_| std::fs::read(file).ok())
             .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
         let Some(state) = state else { continue };
+        let Some(window) = state["window"].as_str() else {
+            continue;
+        };
         if state["id"] != id
-            || state["window"] != window
-            || state["closed"] == true
             || state["socket"].as_str().map(std::path::Path::new)
                 != Some(server.socket_path.as_path())
         {
@@ -192,9 +223,9 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
         let Some(lead) = members.get("lead").and_then(|m| m["pane"].as_str()) else {
             continue;
         };
-        if !panes.contains(lead) {
-            continue;
-        }
+        let panes = marked.get(&(window.to_owned(), id.clone()));
+        let lead_present = panes.is_some_and(|panes| panes.contains(lead));
+        let closed = state["closed"] == true;
         // A duplicate pane makes ownership ambiguous: never hide that team.
         let mut seen = HashSet::new();
         if members
@@ -210,12 +241,18 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
                 continue;
             };
             let pane_missing = !all_panes.contains(pane);
-            if panes.contains(pane) || (name != "lead" && pane_missing) {
+            let marked_member = panes.is_some_and(|panes| panes.contains(pane));
+            if (lead_present && !closed && marked_member)
+                || (name != "lead"
+                    && ((closed && marked_member)
+                        || (pane_missing
+                            && missing.contains(&(window.to_owned(), pane.to_owned())))))
+            {
                 index.insert(
                     pane.into(),
                     TeamMember {
                         key: key.clone(),
-                        window: window.clone(),
+                        window: window.to_owned(),
                         name: name.clone(),
                         brief: member["brief"].as_str().map(str::to_owned),
                         assignment: received_assignment(
@@ -224,6 +261,7 @@ fn read_teams(paths: &Paths, server: &ServerIdentity) -> Option<TeamIndex> {
                             member["cursor"].as_u64().unwrap_or(0),
                         ),
                         pane_missing,
+                        team_closed: closed,
                     },
                 );
             }
@@ -394,7 +432,10 @@ fn event_loop(
             }
             let result = fetch_snapshot(&fetch_socket).map_err(|error| error.to_string());
             let teams = if result.is_ok() {
-                read_teams(&team_paths, &team_server)
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|snapshot| read_teams(&team_paths, &team_server, snapshot))
             } else {
                 None
             };
@@ -409,7 +450,10 @@ fn event_loop(
         agent_sort = saved;
     }
     let mut snapshot = initial_snapshot.ok();
-    let mut teams = read_teams(paths, server).unwrap_or_default();
+    let mut teams = snapshot
+        .as_ref()
+        .and_then(|snapshot| read_teams(paths, server, snapshot))
+        .unwrap_or_default();
     let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
@@ -903,7 +947,7 @@ fn build_team_rows(
         if teams.get(&agent.target.pane_id).is_some_and(|member| {
             member.name != "lead"
                 && member.window == agent.target.window_id
-                && (agent.exited || member.pane_missing)
+                && (agent.exited || member.pane_missing || member.team_closed)
         }) {
             continue;
         }
@@ -1209,13 +1253,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
                 status,
                 width,
                 muted_style(),
-                Style::default().fg(if summary.blocked > 0 {
-                    state_color(DisplayState::Blocked)
-                } else if summary.done > 0 {
-                    state_color(DisplayState::Done)
-                } else {
-                    state_color(agent.display_state)
-                }),
+                Style::default().fg(state_color(agent.display_state)),
                 selected,
             )
         }
@@ -2422,6 +2460,7 @@ mod tests {
                     brief: None,
                     assignment: None,
                     pane_missing: false,
+                    team_closed: false,
                 },
             );
         }
@@ -2469,6 +2508,28 @@ mod tests {
             .unwrap();
         assert_eq!(summary.workers, 1);
         assert!(!rows.iter().any(|row| matches!(row, Row::Agent(a) | Row::TeamWorker(a, _) if a.instance_id == "worker-a")));
+    }
+
+    #[test]
+    fn closed_team_workers_stay_hidden_after_lead_exits() {
+        let (mut snapshot, mut teams) = team_fixture();
+        snapshot.agents[1].exited = true;
+        snapshot.agents[0].exited = true;
+        teams.get_mut("%1").unwrap().pane_missing = true;
+        teams.get_mut("%3").unwrap().team_closed = true;
+        // A live agent in another window must not be claimed by a stale team.
+        snapshot.agents[3].target.pane_id = "%5".into();
+        let mut unrelated = teams["%1"].clone();
+        unrelated.window = "@old".into();
+        teams.insert("%5".into(), unrelated);
+        for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+            assert!(!rows.iter().any(|row| matches!(row, Row::Agent(a) | Row::TeamWorker(a, _) if a.instance_id.starts_with("worker-"))));
+            assert!(
+                rows.iter()
+                    .any(|row| matches!(row, Row::Agent(a) if a.instance_id == "other"))
+            );
+        }
     }
 
     #[test]
@@ -2536,6 +2597,50 @@ mod tests {
         assert_eq!(key_event_direction(KeyCode::Right, false), Some(true));
         assert_eq!(key_event_direction(KeyCode::Char('h'), true), Some(false));
         assert_eq!(key_event_direction(KeyCode::Char('l'), false), Some(true));
+    }
+
+    #[test]
+    fn team_status_color_follows_lead_with_worker_counts() {
+        let (mut snapshot, teams) = team_fixture();
+        for lead_state in [
+            DisplayState::Blocked,
+            DisplayState::Done,
+            DisplayState::Working,
+            DisplayState::Idle,
+            DisplayState::Unknown,
+        ] {
+            snapshot.agents[1].display_state = lead_state;
+            for worker_states in [
+                [DisplayState::Working, DisplayState::Working],
+                [DisplayState::Done, DisplayState::Working],
+                [DisplayState::Blocked, DisplayState::Done],
+            ] {
+                snapshot.agents[0].display_state = worker_states[0];
+                snapshot.agents[2].display_state = worker_states[1];
+                for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+                    let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+                    let subtitle = rows
+                        .iter()
+                        .find(|row| matches!(row, Row::TeamSub(..)))
+                        .unwrap();
+                    let line = render_row(subtitle, false, 80);
+                    assert_eq!(line.spans[2].style.fg, Some(state_color(lead_state)));
+                    let text: String = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect();
+                    assert_eq!(
+                        text.contains("!1"),
+                        worker_states.contains(&DisplayState::Blocked)
+                    );
+                    assert_eq!(
+                        text.contains("✓1"),
+                        worker_states.contains(&DisplayState::Done)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

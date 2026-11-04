@@ -146,7 +146,34 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         row = next(i for i, line in enumerate(screen()) if 'worker_a' in line)
         click(5, row)
         wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == worker, 'worker click did not focus')
-        print('PASS: team sidebar collapse, mouse/keyboard expansion, worker focus, invalid identity')
+        # The daemon retains unseen stopped-worker snapshots. Closing the lead
+        # and all team panes must not promote those snapshots to top-level rows.
+        tmux('switch-client', '-t', 'z-source')
+        state['closed'] = True
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        tmux('kill-pane', '-t', worker)
+        tmux('kill-pane', '-t', lead)
+        wait_for(stopped_snapshot, 'stopped worker snapshot disappeared before closure check')
+        # Invalid provenance must expose the retained snapshot again, proving
+        # it still exists and that the subsequent suppression uses team state.
+        state['socket'] = '/tmp/not-the-same-socket'
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        wait_for(lambda: sum('Team Task' in line for line in screen()) >= 2,
+                 'retained worker snapshot was not observable')
+        state['socket'] = socket
+        state_file.write_text(json.dumps(state, ensure_ascii=False))
+        wait_for(lambda: sum('Team Task' in line for line in screen()) <= 1,
+                 'stopped workers reappeared after lead exit')
+        # Reopening the sidebar must recover the same suppression from disk.
+        tmux('kill-pane', '-t', sidebar)
+        sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
+                       '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
+        tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+        wait_for(lambda: any('agents' in line.lower() for line in screen()), 'sidebar did not reopen')
+        drain(.5)
+        assert sum('Team Task' in line for line in screen()) <= 1, screen()
+        assert stopped_snapshot(), 'the check must cover a retained worker snapshot'
+        print('PASS: team sidebar navigation, identity, and closed-team worker suppression')
     finally:
         os.close(master)
         os.close(slave)
