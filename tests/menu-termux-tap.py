@@ -144,6 +144,8 @@ with tempfile.TemporaryDirectory(prefix='wb-tap-') as directory, \
             # after the 300ms Android double-tap timeout, even after onUp sent
             # this press/release pair to tmux. Its URL handler ignores capture.
             drain(.3)
+            if case == 'action':
+                assert label in '\n'.join(rows()), 'ordinary action text disappeared during the tap delay'
             word = word_at(x - 1, y - 1)
             assert not re.search(r'https?://', word), (case, 'delayed tap opened URL', word)
             menu.wait(timeout=5)
