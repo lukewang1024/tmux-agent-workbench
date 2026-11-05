@@ -430,16 +430,10 @@ fn event_loop(
                     .unwrap_or(true);
                 next_visibility_check = Instant::now() + Duration::from_secs(5);
             }
-            let result = fetch_snapshot(&fetch_socket).map_err(|error| error.to_string());
-            let teams = if result.is_ok() {
-                result
-                    .as_ref()
-                    .ok()
-                    .and_then(|snapshot| read_teams(&team_paths, &team_server, snapshot))
-            } else {
-                None
-            };
-            let _ = snapshot_tx.try_send((result, teams, visible));
+            let result = fetch_snapshot(&fetch_socket)
+                .map_err(|error| error.to_string())
+                .and_then(|snapshot| sidebar_state(&team_paths, &team_server, snapshot));
+            let _ = snapshot_tx.try_send((result, visible));
         }
     });
     let mut detailed = false;
@@ -449,11 +443,13 @@ fn event_loop(
     if let Some(saved) = persisted_agent_sort(paths) {
         agent_sort = saved;
     }
-    let mut snapshot = initial_snapshot.ok();
-    let mut teams = snapshot
-        .as_ref()
-        .and_then(|snapshot| read_teams(paths, server, snapshot))
-        .unwrap_or_default();
+    let initial_state = initial_snapshot
+        .map_err(|error| error.to_string())
+        .and_then(|snapshot| sidebar_state(paths, server, snapshot));
+    let (mut snapshot, mut teams) = match initial_state {
+        Ok((snapshot, teams)) => (Some(snapshot), teams),
+        Err(_) => (None, TeamIndex::new()),
+    };
     let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
@@ -478,13 +474,12 @@ fn event_loop(
     let mut last_content_height = usize::MAX;
     let mut runtime_registered = is_popup;
     loop {
-        if let Ok((result, fetched_teams, now_visible)) = snapshot_rx.try_recv() {
+        if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
             visible = now_visible;
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
-                Ok(fetched) => {
-                    // A failed identity read cannot justify hiding workers.
-                    teams = fetched_teams.unwrap_or_default();
+                Ok((fetched, fetched_teams)) => {
+                    teams = fetched_teams;
                     rows = build_team_rows(&fetched, detailed, agent_sort, &teams, &expanded);
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
@@ -497,10 +492,9 @@ fn event_loop(
                     snapshot = Some(fetched);
                 }
                 Err(error) => {
-                    // Keep the last good snapshot through a short scan/IPC
-                    // hiccup. A genuinely unavailable daemon still becomes
-                    // visible after the stale grace instead of flashing on
-                    // every isolated timeout.
+                    // Keep the snapshot and its verified team identities together
+                    // through a scan, IPC, or tmux inventory hiccup. Never mix
+                    // a new snapshot with an empty or obsolete team index.
                     disconnected = last_success
                         .is_none_or(|success| success.elapsed() >= Duration::from_secs(3));
                     if last_failure_log.elapsed() >= Duration::from_secs(10) {
@@ -876,6 +870,18 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
         Duration::from_millis(500),
     )?;
     Ok(serde_json::from_value(value)?)
+}
+
+// A snapshot and its team identities form one display frame. A temporary
+// tmux inventory failure must not promote retained workers to ordinary agents.
+fn sidebar_state(
+    paths: &Paths,
+    server: &ServerIdentity,
+    snapshot: Snapshot,
+) -> Result<(Snapshot, TeamIndex), String> {
+    let teams = read_teams(paths, server, &snapshot)
+        .ok_or_else(|| "team pane inventory unavailable".to_owned())?;
+    Ok((snapshot, teams))
 }
 
 #[cfg(test)]
