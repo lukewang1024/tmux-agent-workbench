@@ -317,6 +317,63 @@ impl<B: Backend> Surface<B> {
         Ok(Some(Event::Mouse(mouse)))
     }
 
+    // Termux checks the tapped word for links after the mouse release.
+    // Keep ordinary labels intact and redact only words that might contain a
+    // link, including the dim backdrop outside the card. When the rendered
+    // geometry is unavailable, keep the conservative protection.
+    fn touch_may_open_url(&self, point: Position) -> bool {
+        let Ok(Some(geometry)) = self.current() else {
+            return true;
+        };
+        if self.geometry != Some(geometry) || point.y >= geometry.screen.height {
+            return true;
+        }
+        let backdrop = self.backdrop.render(geometry);
+        let mut cells = Vec::with_capacity(usize::from(geometry.screen.width));
+        for x in 0..geometry.screen.width {
+            let pos = Position::new(x, point.y);
+            let cell = if geometry.content.contains(pos) {
+                self.content
+                    .cell((x - geometry.content.x, point.y - geometry.content.y))
+            } else {
+                backdrop.cell((x, point.y))
+            };
+            if let Some(cell) = cell {
+                cells.push(cell.symbol());
+            } else {
+                return true;
+            }
+        }
+        static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let link = LINK.get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)(?:[a-z][a-z0-9+.-]*://|mailto:|www\.|[\p{L}0-9][\p{L}0-9-]*\.\p{L}{2,}|(?:[0-9]{1,3}\.){3}[0-9]{1,3}|(?:[a-f0-9]{1,4}:){2,})",
+            )
+            .expect("link pattern")
+        });
+        let whitespace = |value: &str| !value.is_empty() && value.chars().all(char::is_whitespace);
+        let width = cells.len();
+        for index in usize::from(point.x.saturating_sub(1))
+            ..usize::from(point.x.saturating_add(2)).min(width)
+        {
+            if whitespace(cells[index]) {
+                continue;
+            }
+            let mut start = index;
+            let mut end = index + 1;
+            while start > 0 && !whitespace(cells[start - 1]) {
+                start -= 1;
+            }
+            while end < width && !whitespace(cells[end]) {
+                end += 1;
+            }
+            if link.is_match(&cells[start..end].concat()) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn settle_touch(&mut self) {
         let Some((released, point)) = self.last_touch_release.take() else {
             return;
@@ -324,7 +381,12 @@ impl<B: Backend> Surface<B> {
         let Some(remaining) = TERMUX_TAP_GUARD.checked_sub(released.elapsed()) else {
             return;
         };
-        if let Ok(size) = self.backend.size() {
+        // Ratatui can show the cursor while dropping Terminal. Hide it during
+        // the Android tap delay, even when the selected label needs no redaction.
+        let _ = self.backend.hide_cursor();
+        if self.touch_may_open_url(point)
+            && let Ok(size) = self.backend.size()
+        {
             // URL choices and the dim backdrop can themselves contain URLs.
             // Termux's delayed word lookup must see a space at the tap, even
             // if its pixel-to-cell conversion rounds to the next column.
@@ -334,9 +396,9 @@ impl<B: Backend> Surface<B> {
                     (point.x.saturating_sub(1)..point.x.saturating_add(2).min(size.width))
                         .map(|column| (column, point.y, &blank)),
                 );
-                let _ = self.backend.flush();
             }
         }
+        let _ = self.backend.flush();
         crate::compat::sleep(remaining);
     }
 }
@@ -496,21 +558,69 @@ mod tests {
     }
 
     #[test]
-    fn delayed_lookup_sees_spaces_in_both_rounded_tap_columns() {
+    fn delayed_lookup_redacts_links_but_keeps_regular_labels_and_hides_cursor() {
         let mut surface = surface();
-        let text = Cell::new("x");
+        let geometry = surface.current().unwrap().unwrap();
+        let row = 2;
+        let make_cells = |value: &str| {
+            value
+                .chars()
+                .map(|c| {
+                    let mut cell = Cell::default();
+                    cell.set_symbol(&c.to_string());
+                    cell
+                })
+                .collect::<Vec<_>>()
+        };
+        let label = make_cells("Daily GPT-6.1 Terra max + Fast");
         surface
-            .backend
-            .draw((0..20).map(|x| (x, 4, &text)))
+            .draw(
+                label
+                    .iter()
+                    .enumerate()
+                    .map(|(x, cell)| (x as u16, row, cell)),
+            )
             .unwrap();
-        surface.last_touch_release = Some((Instant::now(), Position::new(8, 4)));
+        let point = Position::new(geometry.content.x + 4, geometry.content.y + row);
+        surface.backend.show_cursor().unwrap();
+        surface.last_touch_release = Some((Instant::now(), point));
         surface.settle_touch();
-        assert!(surface.last_touch_release.is_none());
-        for x in 7..10 {
-            assert_eq!(surface.backend.buffer()[(x, 4)].symbol(), " ");
+        assert_eq!(surface.backend.buffer()[(point.x, point.y)].symbol(), "y");
+        assert!(!surface.backend.cursor_visible());
+        for value in [
+            "example.com",
+            "例子.中国",
+            "192.168.1.1",
+            "https://menu.invalid/choice",
+        ] {
+            let line = make_cells(value);
+            surface.clear().unwrap();
+            surface
+                .draw(
+                    line.iter()
+                        .enumerate()
+                        .map(|(x, cell)| (x as u16, row, cell)),
+                )
+                .unwrap();
+            assert!(
+                surface.touch_may_open_url(point),
+                "link was not guarded: {value}"
+            );
         }
-        assert_eq!(surface.backend.buffer()[(6, 4)].symbol(), "x");
-        assert_eq!(surface.backend.buffer()[(10, 4)].symbol(), "x");
+
+        let link = make_cells("https://menu.invalid/choice");
+        surface
+            .draw(
+                link.iter()
+                    .enumerate()
+                    .map(|(x, cell)| (x as u16, row, cell)),
+            )
+            .unwrap();
+        surface.last_touch_release = Some((Instant::now(), point));
+        surface.settle_touch();
+        for x in point.x - 1..=point.x + 1 {
+            assert_eq!(surface.backend.buffer()[(x, point.y)].symbol(), " ");
+        }
     }
 
     #[test]
