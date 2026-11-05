@@ -8,6 +8,7 @@ from pathlib import Path
 import pty
 import select
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -34,6 +35,12 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
     osascript.write_text('#!/bin/sh\nprintf "missing\\n"\n')
     osascript.chmod(0o755)
     env['PATH'] = str(shim) + os.pathsep + env.get('PATH', '/usr/bin:/bin')
+    real_tmux = shutil.which('tmux')
+    tmux_shim = shim / 'tmux'
+    team_failure = Path(root) / 'fail-team-inventory'
+    tmux_shim.write_text('#!/bin/sh\ncase "$*" in *"#{@agent_team}"*) [ ! -f "$WORKBENCH_TEST_TEAM_FAILURE" ] || exit 1 ;; esac\nexec ' + shlex.quote(real_tmux) + ' "$@"\n')
+    tmux_shim.chmod(0o755)
+    env['WORKBENCH_TEST_TEAM_FAILURE'] = str(team_failure)
     for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = root + '/' + key
     master, slave = pty.openpty()
@@ -152,6 +159,18 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         wait_for(lambda: not any('worker_b' in line or 'Stopped worker unique task' in line for line in screen())
                  and sum('Team Task' in line for line in screen()) == 1,
                  'stopped worker escaped to top level')
+        # A temporary failure of the sidebar's tmux inventory must not turn
+        # retained workers into ordinary top-level agents. Other daemon reads
+        # remain healthy, reproducing the intermittent refresh race.
+        team_failure.touch()
+        try:
+            drain(3.5)
+            assert sum('Team Task' in line for line in screen()) == 1, screen()
+            assert stopped_snapshot(), 'retained worker must still exist during inventory failure'
+        finally:
+            team_failure.unlink()
+        wait_for(lambda: sum('Team Task' in line for line in screen()) == 1,
+                 'team did not recover after inventory failure')
         # The daemon retains unseen stopped-worker snapshots. Closing the lead
         # and all team panes must not promote those snapshots to top-level rows.
         state['closed'] = True
