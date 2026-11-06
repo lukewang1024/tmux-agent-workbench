@@ -20,6 +20,7 @@ from daemon_fixture import running_daemon
 core = str(Path(sys.argv[1]).resolve())
 fixture = str(Path(__file__).resolve().parents[1] / 'target/debug/examples/codex')
 language = sys.argv[2] if len(sys.argv) > 2 else 'en'
+sidebar_columns = os.environ.get('WORKBENCH_TEST_SIDEBAR_WIDTH', '36')
 agents, sessions, pinned_sessions, unpin = (
     ('智能体', '会话', '置顶的会话', '取消置顶会话') if language == 'zh' else
     ('Agents', 'Sessions', 'Pinned sessions', 'Unpin session'))
@@ -52,6 +53,10 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         lines = tmux('capture-pane', '-p', '-t', sidebar).splitlines()
         return lines if lines else ['']
 
+    def showing_view(label, icon):
+        header = screen()[0]
+        return label in header or icon in header
+
     def wait(predicate, label):
         deadline = time.monotonic() + 12
         while not predicate():
@@ -81,19 +86,19 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         main = tmux('display-message', '-p', '-t', 'z-source', '#{pane_id}')
         tmux('set-option', '-w', '-t', a_window, '@agent_focus', '1')
         processes.enter_context(running_daemon(core, env))
-        sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
+        sidebar = tmux('split-window', '-b', '-h', '-l', sidebar_columns, '-t', 'z-source',
                        '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
         tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
         tmux('select-pane', '-t', main)
         client = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'z-source'], env=env,
                                   stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
-        wait(lambda: agents in screen()[0] and ' 1' in screen()[0]
+        wait(lambda: showing_view(agents, '󰚩') and ' 1' in screen()[0]
              and 'Priority task' in screen()[1], 'initial Agent view and its pinned task')
         assert not any('b-shell' in line for line in screen()), screen()
         client_name = tmux('list-clients', '-F', '#{client_name}').splitlines()[0]
         # The first Powerline label is a real touch/click target.
         os.write(master, b'\x1b[<0;2;1M\x1b[<0;2;1m')
-        wait(lambda: sessions in screen()[0] and ' 0' in screen()[0]
+        wait(lambda: showing_view(sessions, '') and ' 0' in screen()[0]
              and any('b-shell' in line for line in screen()), 'switch to Session view')
         assert not any('Priority task' in line for line in screen()), screen()
         assert ('Sessions' not in screen()[0] if language == 'zh' else '会话' not in screen()[0]), screen()
@@ -150,16 +155,16 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         wait(lambda: tmux('show-option', '-qv', '-t', b_id, '@workbench_session_focus') == '1', 'repin')
         wait(lambda: 'b-shell' in screen()[1], 'repin shown')
         tmux('send-keys', '-t', sidebar, 'Tab')
-        wait(lambda: agents in screen()[0] and 'Priority task' in screen()[1], 'return to Agent view')
+        wait(lambda: showing_view(agents, '󰚩') and 'Priority task' in screen()[1], 'return to Agent view')
         assert not any('b-shell' in line for line in screen()), screen()
         tmux('send-keys', '-t', sidebar, 'Tab')
-        wait(lambda: sessions in screen()[0] and 'b-shell' in screen()[1], 'session pin persists across views')
+        wait(lambda: showing_view(sessions, '') and 'b-shell' in screen()[1], 'session pin persists across views')
         # A new sidebar process restores the remembered view and session pin.
         tmux('kill-pane', '-t', sidebar)
-        sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
+        sidebar = tmux('split-window', '-b', '-h', '-l', sidebar_columns, '-t', 'z-source',
                        '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
         tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
-        wait(lambda: sessions in screen()[0] and 'b-shell' in screen()[1], 'view and pin survive reopen')
+        wait(lambda: showing_view(sessions, '') and 'b-shell' in screen()[1], 'view and pin survive reopen')
         print(f'PASS {language}: independent Agent and Session views, pinning, navigation, menus and persistence', flush=True)
     finally:
         os.close(master)
