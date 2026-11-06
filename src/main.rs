@@ -2078,9 +2078,14 @@ fn focus_target(
             &focused_window,
         )?;
     }
-    // Menus already run in the invoking client. Raising a desktop terminal
-    // here can open an unrelated app or wait for macOS automation permission.
-    let within_client = source_pane.is_some() && target_client.is_some();
+    // Menus and sidebars already run in the invoking client. Raising a desktop
+    // terminal here can open an unrelated app or wait for macOS automation.
+    let within_client = source_pane.is_some()
+        && (target_client.is_some()
+            || source_client
+                .as_deref()
+                .zip(client)
+                .is_some_and(|(source, selected)| source == selected.name));
     if !within_client
         && !client.is_some_and(|client| tmux_agent_workbench::terminal::focus_tty(&client.tty))
     {

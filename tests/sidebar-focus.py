@@ -32,6 +32,15 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         env.pop(key, None)
     for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
         env[key] = root + '/' + key
+    automation_bin = Path(root) / 'automation-bin'
+    automation_bin.mkdir()
+    automation_marker = Path(root) / 'desktop-automation-calls'
+    for name in ('osascript', 'open'):
+        fake = automation_bin / name
+        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$0" >> "$WORKBENCH_TEST_AUTOMATION_MARKER"\nexit 1\n')
+        fake.chmod(0o755)
+    env['WORKBENCH_TEST_AUTOMATION_MARKER'] = str(automation_marker)
+    env['PATH'] = str(automation_bin) + os.pathsep + env.get('PATH', '')
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 160, 0, 0))
     client = None
@@ -135,6 +144,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         tmux('send-keys', '-t', sidebar, 'Home', 'Down', 'Down', 'Up', 'Enter')
         wait(lambda: tmux('list-clients', '-F', '#{session_name}:#{pane_id}') == f'm-shell:{shell_pane}',
              'keyboard navigation did not return from ordinary rows to pinned cards')
+        assert not automation_marker.exists(), 'local sidebar focus invoked desktop terminal automation'
         tmux('switch-client', '-c', client_name, '-t', 'z-source')
         tmux('select-pane', '-t', sidebar)
         tmux('send-keys', '-t', sidebar, 'Home')
