@@ -121,6 +121,8 @@ fi
 "$python_runner" "$repo/tests/sidebar-focus.py" "$binary" zh
 "$python_runner" "$repo/tests/sidebar-views.py" "$binary" en
 "$python_runner" "$repo/tests/sidebar-views.py" "$binary" zh
+WORKBENCH_TEST_SIDEBAR_WIDTH=26 "$python_runner" "$repo/tests/sidebar-views.py" "$binary" en
+WORKBENCH_TEST_SIDEBAR_WIDTH=26 "$python_runner" "$repo/tests/sidebar-views.py" "$binary" zh
 "$python_runner" "$repo/tests/sidebar-assistant.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-team.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-upgrade.py" "$binary"
