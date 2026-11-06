@@ -295,6 +295,9 @@ OpenCode 1.18.32's plugin verifies that a fresh foreground native child has no
 broader permissions than the parent, both before dispatch and when the child
 starts. Other OpenCode versions need revalidation; if the check cannot prove
 this, the split is unavailable.
+Some Trae CLI versions can report a missing native thread in interactive mode.
+If its native child cannot start or finish, mark the split unavailable and
+leave the task in place; Workbench does not substitute a different agent.
 After a successful split, the caller chooses
 an appropriate child direction and retries placement. Unrelated full
 directions do not trigger work. The worker's scoped plan preserves other
