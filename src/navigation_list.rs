@@ -46,6 +46,7 @@ pub(crate) struct NavigationList<A> {
     pub scroll: usize,
     pub selection_visible: bool,
     pub hovered: Option<Hit<A>>,
+    leading_actions: Vec<A>,
     actions: Vec<A>,
     focused_action: Option<A>,
     pressed: Option<Press<A>>,
@@ -61,6 +62,7 @@ impl<A: Clone + Eq> Default for NavigationList<A> {
             scroll: 0,
             selection_visible: true,
             hovered: None,
+            leading_actions: vec![],
             actions: vec![],
             focused_action: None,
             pressed: None,
@@ -195,6 +197,33 @@ impl<A: Clone + Eq> NavigationList<A> {
         self.hovered = None;
         let down = matches!(key, KeyCode::Down | KeyCode::Char('j'));
         let up = matches!(key, KeyCode::Up | KeyCode::Char('k'));
+        if key == KeyCode::Home && !self.leading_actions.is_empty() {
+            self.focused_action = self.leading_actions.first().cloned();
+            self.selection_visible = false;
+            self.scroll = 0;
+            self.cancel_press();
+            return true;
+        }
+        if let Some(action) = &self.focused_action
+            && (down || up)
+            && let Some(index) = self
+                .leading_actions
+                .iter()
+                .position(|value| value == action)
+        {
+            if down {
+                if let Some(next) = self.leading_actions.get(index + 1).cloned() {
+                    self.focused_action = Some(next);
+                } else if let Some(first) = self.rows.iter().position(Option::is_some) {
+                    self.select(first);
+                    self.scroll = 0;
+                }
+            } else if index > 0 {
+                self.focused_action = self.leading_actions.get(index - 1).cloned();
+            }
+            self.cancel_press();
+            return true;
+        }
         if let Some(action) = &self.focused_action
             && (down || up)
             && let Some(index) = self.actions.iter().position(|value| value == action)
@@ -240,6 +269,9 @@ impl<A: Clone + Eq> NavigationList<A> {
             } else {
                 self.scroll_by(-1);
             }
+        } else if up && !self.leading_actions.is_empty() {
+            self.focused_action = self.leading_actions.last().cloned();
+            self.selection_visible = false;
         } else if down {
             self.focused_action = self.actions.first().cloned();
         }
@@ -327,18 +359,31 @@ impl<A: Clone + Eq> NavigationList<A> {
             .is_some_and(|press| !press.dragged && &press.hit == hit)
     }
 
-    /// Pinned controls participate in the same navigation order as body rows.
+    /// Controls above the list precede its rows in keyboard and wheel order.
+    pub fn set_leading_actions(&mut self, actions: &[(Rect, A)]) {
+        self.leading_actions = actions
+            .iter()
+            .filter(|(area, _)| area.height > 0)
+            .map(|(_, action)| action.clone())
+            .collect();
+        if self.focused_action.as_ref().is_some_and(|action| {
+            !self.leading_actions.contains(action) && !self.actions.contains(action)
+        }) {
+            self.focused_action = None;
+            self.selection_visible = true;
+        }
+    }
+
+    /// Controls below the list participate after body rows.
     pub fn set_actions(&mut self, actions: &[(Rect, A)]) {
         self.actions = actions
             .iter()
             .filter(|(area, _)| area.height > 0)
             .map(|(_, action)| action.clone())
             .collect();
-        if self
-            .focused_action
-            .as_ref()
-            .is_some_and(|action| !self.actions.contains(action))
-        {
+        if self.focused_action.as_ref().is_some_and(|action| {
+            !self.actions.contains(action) && !self.leading_actions.contains(action)
+        }) {
             self.focused_action = None;
         }
     }
@@ -383,7 +428,35 @@ impl<A: Clone + Eq> NavigationList<A> {
                     let delta = isize::try_from(press.row).unwrap_or(0)
                         - isize::try_from(mouse.row).unwrap_or(0);
                     press.row = mouse.row;
-                    self.scroll_by(delta);
+                    if self.leading_actions.is_empty() {
+                        self.scroll_by(delta);
+                    } else {
+                        // Keep the original press until release so a swipe
+                        // cannot activate a card. Crossing the top edge moves
+                        // through the pinned cards before the ordinary list.
+                        for _ in 0..delta.unsigned_abs() {
+                            let leading = self
+                                .focused_action
+                                .as_ref()
+                                .is_some_and(|action| self.leading_actions.contains(action));
+                            if leading || (delta < 0 && self.scroll == 0) {
+                                if !leading
+                                    && let Some(first) = self.rows.iter().position(Option::is_some)
+                                {
+                                    self.select(first);
+                                }
+                                let press = self.pressed.take();
+                                self.navigate(if delta > 0 {
+                                    KeyCode::Down
+                                } else {
+                                    KeyCode::Up
+                                });
+                                self.pressed = press;
+                            } else {
+                                self.scroll_by(delta.signum());
+                            }
+                        }
+                    }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -396,11 +469,14 @@ impl<A: Clone + Eq> NavigationList<A> {
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 self.cancel_press();
-                if matches!(self.hovered, Some(Hit::Action(_))) {
+                if matches!(&self.hovered, Some(Hit::Action(action)) if !self.leading_actions.contains(action))
+                {
                     self.focused_action = None;
                 }
                 self.hovered = None;
-                self.selection_visible = true;
+                if self.focused_action.is_none() {
+                    self.selection_visible = true;
+                }
                 let down = mouse.kind == MouseEventKind::ScrollDown;
                 let next_item = self.next_entry(down).is_some();
                 // Headings and information at either edge remain reachable,
@@ -554,6 +630,65 @@ mod tests {
         }
         assert_eq!(list.scroll, 0);
         assert_eq!(list.selected, 1);
+    }
+
+    #[test]
+    fn leading_cards_and_rows_form_one_keyboard_and_wheel_order() {
+        let mut list = list();
+        let pinned = [
+            (Rect::new(0, 0, 24, 1), "first"),
+            (Rect::new(0, 1, 24, 1), "second"),
+        ];
+        list.set_leading_actions(&pinned);
+        list.navigate(KeyCode::Up);
+        assert_eq!(list.focused_action(), Some(&"second"));
+        assert!(!list.selection_visible);
+        list.navigate(KeyCode::Up);
+        assert_eq!(list.focused_action(), Some(&"first"));
+        list.navigate(KeyCode::Down);
+        assert_eq!(list.focused_action(), Some(&"second"));
+        list.navigate(KeyCode::Down);
+        assert_eq!(list.focused_action(), None);
+        assert_eq!(list.selected, 1);
+        assert!(list.selection_visible);
+        list.navigate(KeyCode::Home);
+        assert_eq!(list.focused_action(), Some(&"first"));
+        list.mouse(mouse(MouseEventKind::Moved, 0), &pinned);
+        list.mouse(mouse(MouseEventKind::ScrollDown, 0), &pinned);
+        assert_eq!(list.focused_action(), Some(&"second"));
+        list.mouse(mouse(MouseEventKind::ScrollDown, 0), &pinned);
+        assert_eq!(list.focused_action(), None);
+        assert_eq!(list.selected, 1);
+        list.mouse(mouse(MouseEventKind::ScrollUp, 0), &pinned);
+        assert_eq!(list.focused_action(), Some(&"second"));
+        list.set_leading_actions(&pinned[..1]);
+        assert_eq!(list.focused_action(), None);
+        assert!(list.selection_visible);
+    }
+
+    #[test]
+    fn dragging_crosses_pinned_cards_without_activating_them() {
+        let mut list = list();
+        let pinned = [
+            (Rect::new(0, 0, 24, 1), "first"),
+            (Rect::new(0, 1, 24, 1), "second"),
+        ];
+        list.set_leading_actions(&pinned);
+        list.mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1), &pinned);
+        list.mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0), &pinned);
+        assert_eq!(list.focused_action(), None);
+        assert_eq!(list.selected, 1);
+        assert_eq!(
+            list.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0), &pinned),
+            None
+        );
+        list.mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3), &pinned);
+        list.mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5), &pinned);
+        assert_eq!(list.focused_action(), Some(&"first"));
+        assert_eq!(
+            list.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 5), &pinned),
+            None
+        );
     }
 
     #[test]

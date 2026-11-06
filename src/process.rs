@@ -235,7 +235,7 @@ pub fn current_agent_ancestor(kind: AgentKind) -> Option<u32> {
 }
 
 fn is_shared_backend(kind: AgentKind, args: &[std::ffi::OsString]) -> bool {
-    kind == AgentKind::Codex && args.iter().any(|arg| arg == "app-server")
+    matches!(kind, AgentKind::Codex | AgentKind::Trae) && args.iter().any(|arg| arg == "app-server")
 }
 
 fn find_agents(
@@ -495,6 +495,7 @@ mod tests {
         ]
         .map(std::ffi::OsString::from);
         assert!(is_shared_backend(AgentKind::Codex, &shared));
+        assert!(is_shared_backend(AgentKind::Trae, &shared));
         assert!(!is_shared_backend(
             AgentKind::Codex,
             &["codex".into(), "--yolo".into()]

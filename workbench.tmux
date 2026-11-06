@@ -216,11 +216,17 @@ if [ -n "$ATTENTION_BIN" ]; then
   if [ -z "$(tmux show-option -gqv @continuum-restore 2>/dev/null || true)" ]; then
     tmux set-option -g @continuum-restore on
   fi
-  # Workbench owns the composed assistant/session persistence hook. The
-  # assistant-resurrect implementation is vendored here, and Workbench's
-  # native lifecycle hook identity is merged into its compatible sidecar.
+  # Workbench coordinates its assistant adapters, native lifecycle identities,
+  # and team metadata around the tmux-resurrect layout snapshot.
   tmux set-option -g @resurrect-hook-post-save-all \
     "'$CURRENT_DIR/bin/workbench-resurrect-save-all'"
+  # Preserve any previously configured pre-restore hook when composing ours.
+  restore_pre_hook="'$CURRENT_DIR/bin/workbench-resurrect-pre-restore'"
+  previous_pre_hook=$(tmux show-option -gqv @resurrect-hook-pre-restore-all 2>/dev/null || true)
+  if [ "$previous_pre_hook" != "$restore_pre_hook" ]; then
+    tmux set-option -g @workbench-resurrect-prior-pre-restore-all "$previous_pre_hook"
+  fi
+  tmux set-option -g @resurrect-hook-pre-restore-all "$restore_pre_hook"
   tmux set-option -g @resurrect-hook-post-restore-all \
     "'$CURRENT_DIR/bin/workbench-resurrect-restore-all'"
   expected_version="$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' "$CURRENT_DIR/Cargo.toml" | head -1)"

@@ -139,7 +139,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 continue
             elif token == '\r': x = 0
             elif token == '\n': y += 1
-            elif token.isprintable() and not unicodedata.combining(token):
+            # Nerd Font and Powerline glyphs live in Unicode private-use
+            # ranges, which Python does not classify as printable.
+            elif (token.isprintable() or unicodedata.category(token) == 'Co') and not unicodedata.combining(token):
                 screen[x, y] = token
                 x += 2 if unicodedata.east_asian_width(token) in ('W', 'F') else 1
         return [''.join(screen.get((col, row), ' ') for col in range(size[0]))
@@ -156,7 +158,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             for bottom in range(top + 1, len(rows)):
                 if rows[bottom][left] == '└' and rows[bottom][right] == '┘':
                     assert right - left + 1 == min(96, max(32, size[0] * 9 // 10)), rows
-                    assert bottom - top + 1 == min(40, max(12, size[1] * 9 // 10)), rows
+                    status = tmux('show-option', '-gqv', 'status')
+                    status_lines = 0 if status == 'off' else 1 if status == 'on' else int(status)
+                    available_height = size[1] - status_lines
+                    assert bottom - top + 1 == min(40, max(12, available_height * 9 // 10)), rows
                     return left + 1, top + 1, right - left - 1, bottom - top - 1
         raise AssertionError(('missing Sidebar popup border', rows))
 
@@ -317,7 +322,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 popup = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 popups.append(popup)
-                text('+ new')
+                text('Agents')
                 drain(.15)
             else:
                 popup = open_list(kind)
@@ -501,27 +506,31 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                                    env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
+        text('Agents')
         drain(.2)
         os.write(master, b's')
         text('Switch sessions')
         footer(0)
-        text('+ new')
+        text('Agents')
         drain(.2)
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'a')
         text('Switch agents')
         footer(0)
-        text('+ new')
+        text('Agents')
         os.write(master, b'\x1b')
         drain(.7)
         assert focused(window=windows[0])
         print('PASS Sidebar and contextual-menu routes share the touch UI and preserve their Back destination', flush=True)
+        # Populate enough Agent groups to overflow the now-independent Agents view.
+        for index in range(6):
+            tmux('new-session', '-d', '-s', f'zz-agent-{index}', '-n', f'work-{index}', shlex.quote(fixture))
+        drain(1.5)
         # A lower current Agent must not open the overview halfway through its
         # groups. The Agents/sort heading also stays usable after scrolling.
         prepare_popup()
@@ -529,30 +538,33 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', lower_pane, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
-        wait(lambda: 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1]
-             and visible_rows()[3].strip() == 'other', 'Sidebar hid its heading or first Session group')
+        text('Agents')
+        wait(lambda: 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0]
+             and '' in visible_rows()[0] and visible_rows()[2].strip() == 'other',
+             'Sidebar hid its status bar or first Session group')
         for _ in range(2):
             wheel(True, 12)
-            wait(lambda: visible_rows()[3].strip() != 'other', 'first Session group did not scroll away')
+            wait(lambda: visible_rows()[2].strip() != 'other', 'first Session group did not scroll away')
             wheel(False, 50)
-            wait(lambda: visible_rows()[3].strip() == 'other', 'wheel could not restore the first Session group heading')
+            wait(lambda: visible_rows()[2].strip() == 'other', 'wheel could not restore the first Session group heading')
             drain(1.4)
-            assert visible_rows()[3].strip() == 'other', 'snapshot refresh hid the restored first group'
-        assert 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1], visible_rows()
-        assert visible_rows()[2].strip('─ ') == '' and '─' in visible_rows()[2], visible_rows()
+            assert visible_rows()[2].strip() == 'other', 'snapshot refresh hid the restored first group'
+        assert 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0], visible_rows()
+        assert visible_rows()[1].strip('─ ') == '' and '─' in visible_rows()[1], visible_rows()
         assert visible_rows()[-2].strip('─ ') == '' and '─' in visible_rows()[-2], visible_rows()
-        tap(content_rect()[2] - 2, 2)
-        text('prioritized')
-        assert 'agents' in visible_rows()[1] and 'prioritized' in visible_rows()[1], visible_rows()
-        tap(content_rect()[2] - 2, 2)
+        tap(visible_rows()[0].index('grouped') + 1, 1)
+        text('priority')
+        assert 'Agents' in visible_rows()[0] and 'priority' in visible_rows()[0], visible_rows()
+        tap(visible_rows()[0].index('priority') + 1, 1)
         text('grouped')
-        wait(lambda: visible_rows()[3].strip() == 'other', 'grouped sort did not restore the first group')
+        wait(lambda: visible_rows()[2].strip() == 'other', 'grouped sort did not restore the first group')
         os.write(master, b'\x1b')
         finish_popup(sidebar)
         drain(.7)
         assert focused(window=windows[0]), 'opening the overview changed its source window'
         print('PASS overview pins its Agents/sort header and restores the first group after repeated wheel round trips', flush=True)
+        for index in range(6):
+            tmux('kill-session', '-t', f'zz-agent-{index}')
         # A shared pane ID must still list and focus windows in this client's
         # Session rather than whichever Session tmux finds first.
         tmux('new-session', '-d', '-s', 'linked', '-n', 'linked-only', '/bin/sh')
@@ -586,8 +598,10 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
-        wait(lambda: any('sessions' in row for row in visible_rows()), 'Sidebar session rows not ready')
+        text('Agents')
+        tap(2, 1)
+        wait(lambda: 'Sessions' in visible_rows()[0] and any('other' in row for row in visible_rows()),
+             'Sidebar session view not ready')
         wheel(True, 20)
         wait(lambda: any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel did not reach the last session')
         after_scroll = visible_rows()[1:-1]
@@ -595,8 +609,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         assert visible_rows()[1:-1] == after_scroll, 'Sidebar refresh pulled the wheel back to its selection'
         assert focused(window=windows[0]), 'Sidebar wheel changed the client target'
         wheel(False, 20)
-        wait(lambda: any(row.strip() == 'sessions' for row in visible_rows()),
-             'Sidebar wheel did not restore the first section heading')
+        wait(lambda: any('other' in row for row in visible_rows()[1:]),
+             'Sidebar wheel did not restore the first session')
         assert not any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel could not return to the start'
         for _ in range(12):
             if any('wheel-0' in row for row in visible_rows()):
@@ -612,23 +626,36 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         release(10, row)
         drain(.2)
         assert sidebar.poll() is None and focused(window=windows[0]), 'wheeling while held also activated the Sidebar row'
+        # Session pins are directly touchable even in the bounded popup.
+        for _ in range(20):
+            if any('wheel-0' in value for value in visible_rows()):
+                break
+            wheel(False)
+            drain(.05)
+        row = next(index + 1 for index, value in enumerate(visible_rows()) if 'wheel-0' in value)
+        tap(content_rect()[2] - 1, row)
+        wait(lambda: tmux('show-option', '-qv', '-t', 'wheel-0', '@workbench_session_focus') == '1',
+             'touching the Session pin did not pin the session')
+        wait(lambda: ' 1' in visible_rows()[0], 'session pin count did not update')
+        assert sidebar.poll() is None and focused(window=windows[0]), 'pin touch also switched sessions'
         close(sidebar)
+        (Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench' / 'sidebar-view').unlink(missing_ok=True)
         print('PASS overview Sidebar shares wheel limits, refresh stability and release cancellation with filtered lists', flush=True)
         subprocess.check_call([core, 'ui', 'old'], env=env, stdout=subprocess.DEVNULL)
         prepare_popup()
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
+        text('Agents')
         drain(.2)
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         os.write(master, b's')
         text('Switch sessions')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         os.write(master, b'\x1b')
         finish_popup(sidebar)
         drain(.7)

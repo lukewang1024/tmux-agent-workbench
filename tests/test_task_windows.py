@@ -197,8 +197,10 @@ class TaskWindows(unittest.TestCase):
         file = self.task_root('first') / "app/notes ' $(touch injected).md"
         file.write_text('# Preview\n')
         record = self.root / 'editor-args'
+        pending = record.with_suffix('.tmp')
         self.write_script('preview-editor',
-                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(record))}\nexec sleep 300\n')
+                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(pending))}\n'
+                          f'mv {shlex.quote(str(pending))} {shlex.quote(str(record))}\nexec sleep 300\n')
         tool = self.cli('inspect', str(file), '--pane', pane=caller,
                         extra={'VISUAL': f'{self.bin / "preview-editor"} --marker',
                                'EDITOR': 'false'}).stdout.strip()
@@ -233,8 +235,10 @@ class TaskWindows(unittest.TestCase):
         file = self.root / 'outside-repo.md'
         file.write_text('# Outside a workspace\n')
         record = self.root / 'editor-args'
+        pending = record.with_suffix('.tmp')
         self.write_script('preview-editor',
-                          f'printf "%s\\n" "$@" > {shlex.quote(str(record))}\nexec sleep 300\n')
+                          f'printf "%s\\n" "$@" > {shlex.quote(str(pending))}\n'
+                          f'mv {shlex.quote(str(pending))} {shlex.quote(str(record))}\nexec sleep 300\n')
         self.cli('inspect', str(file), '--editor', '--pane', session=None, pane=caller,
                  extra={'VISUAL': '', 'EDITOR': str(self.bin / 'preview-editor')})
         self.wait(record.exists)
@@ -246,13 +250,17 @@ class TaskWindows(unittest.TestCase):
         directory = self.task_root('first') / 'app'
         record = self.root / 'command-args'
         answer = self.root / 'command-answer'
+        pending_record = record.with_suffix('.tmp')
+        pending_answer = answer.with_suffix('.tmp')
         self.write_script('interactive-tool',
                           '[ -t 0 ] && [ -t 1 ]\n'
                           '[ -n "${HTTPS_PROXY:-}" ] && [ -n "${https_proxy:-}" ]\n'
-                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(record))}\n'
+                          f'printf "%s\\n" "$PWD" "$@" > {shlex.quote(str(pending_record))}\n'
+                          f'mv {shlex.quote(str(pending_record))} {shlex.quote(str(record))}\n'
                           'printf "Waiting for input: "\n'
                           'IFS= read -r answer\n'
-                          f'printf "%s\\n" "$answer" > {shlex.quote(str(answer))}\n')
+                          f'printf "%s\\n" "$answer" > {shlex.quote(str(pending_answer))}\n'
+                          f'mv {shlex.quote(str(pending_answer))} {shlex.quote(str(answer))}\n')
         args = ['space here', "quote's", '', '$(touch injected)', '; touch injected', '--pane', '预览']
         tool = self.cli('inspect', str(directory), '--pane', '--', str(self.bin / 'interactive-tool'),
                         *args, pane=caller, extra={'HTTPS_PROXY': 'http://test-proxy.invalid:8443',

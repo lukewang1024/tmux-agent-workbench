@@ -1,0 +1,13 @@
+#!/bin/sh
+# Workbench's assistant-session adapter entrypoint. The imported compatibility
+# implementation retains its upstream Bash interpreter and data formats.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+adapter_dir=$script_dir/../lib/assistant-sessions/scripts
+
+case ${1:-} in
+  save) [ "$#" -eq 1 ] || exit 2; exec bash "$adapter_dir/save-assistant-sessions.sh" ;;
+  restore) [ "$#" -eq 1 ] || exit 2; exec bash "$adapter_dir/restore-assistant-sessions.sh" ;;
+  *) printf '%s\n' 'usage: workbench-assistant-sessions save|restore' >&2; exit 2 ;;
+esac

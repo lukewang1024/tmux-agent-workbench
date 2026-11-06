@@ -12,6 +12,12 @@ done
 plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
 . "$plugin_dir/lib/resolve-core.sh"
 core=$(workbench_core_path "$plugin_dir") || core=
+# New popups can use an updated core while existing sidebar and daemon
+# processes continue running. Explicit test/developer overrides win.
+if [ -z "${TMUX_AGENT_WORKBENCH_BIN:-}" ]; then
+  routing_core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-routing
+  [ ! -x "$routing_core" ] || core=$routing_core
+fi
 [ -n "$core" ] || { tmux display-message "Workbench binary unavailable"; exit 1; }
 
 # tmux run-shell does not guarantee that TMUX is present in the child

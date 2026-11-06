@@ -39,7 +39,7 @@ def screen_rows(output, columns, rows, compact=False):
             continue
         elif token == '\r': x = 0
         elif token == '\n': y += 1
-        elif token.isprintable() and not unicodedata.combining(token):
+        elif (token.isprintable() or unicodedata.category(token) == 'Co') and not unicodedata.combining(token):
             screen[x, y] = token
             width = 2 if unicodedata.east_asian_width(token) in ('W', 'F') else 1
             if width == 2:

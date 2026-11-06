@@ -86,9 +86,13 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
                 return output
             assert output == {}, output
             if time.monotonic() >= deadline:
+                diagnostic = core('title', 'status', '--pane', agent['pane'],
+                                  '--session-id', agent['session_id'],
+                                  run_env=run_env, check=False)
                 raise AssertionError(('naming context did not become ready', event, extra,
                                       agent, output,
                                       tmux('show-option', '-wqv', '-t', agent['pane'], '@workbench_task_title'),
+                                      diagnostic.returncode, diagnostic.stdout, diagnostic.stderr,
                                       json.loads(core('snapshot', '--json').stdout)))
             time.sleep(.05)
 

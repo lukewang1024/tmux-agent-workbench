@@ -4,6 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo"
 python_runner="$repo/tests/python.sh"
+# Snapshot and team tests invoke the core before the later cargo test step.
+cargo build --locked --bin tmux-agent-workbench
 "$python_runner" -B -m unittest discover -s tests -p test_codex_usage.py
 "$python_runner" -B -m unittest discover -s tests -p test_release_prepare.py
 "$python_runner" -B -m unittest discover -s tests -p test_botmux.py
@@ -11,6 +13,11 @@ python_runner="$repo/tests/python.sh"
 "$python_runner" -B -m unittest discover -s tests -p test_host_metrics.py
 "$python_runner" -B -m unittest discover -s tests -p test_reorganise.py
 "$python_runner" -B -m unittest discover -s tests -p test_task_windows.py
+"$python_runner" -B -m unittest discover -s tests -p test_team_resurrection.py
+"$python_runner" -B -m unittest discover -s tests -p test_assistant_resurrection.py
+"$python_runner" -B -m unittest discover -s tests -p test_assistant_admin.py
+"$python_runner" -B -m unittest discover -s tests -p test_legacy_state_migration.py
+sh tests/assistant-sessions.sh
 sh test/test-resolve-session.sh
 if command -v bash >/dev/null 2>&1; then
   bash --posix test/test-resolve-session.sh
@@ -22,6 +29,7 @@ cargo test --locked
 "$python_runner" tests/client-open-url.py
 "$python_runner" tests/client-open-url-routing.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-daemon-timeouts.py
+"$python_runner" tests/client-rolling-upgrade.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-notifications.py
 "$python_runner" tests/client-resume.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-window-resize.py target/debug/tmux-agent-workbench

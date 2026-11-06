@@ -71,6 +71,10 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         os.write(master, f'\x1b[<0;{column+1};{row+1}M\x1b[<0;{column+1};{row+1}m'.encode())
 
     try:
+        # A restored team directory predates the new tmux socket. Its explicit
+        # restored marker, rather than age alone, proves the rebind is fresh.
+        team_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-test'
+        team_dir.mkdir(parents=True)
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'a-team', '-n', 'Team Task',
              '-x', '160', '-y', '40', shlex.quote(fixture))
         lead = tmux('display-message', '-p', '-t', 'a-team', '#{pane_id}')
@@ -78,12 +82,16 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         worker = tmux('split-window', '-d', '-t', lead, '-P', '-F', '#{pane_id}', shlex.quote(fixture))
         for pane in (lead, worker):
             tmux('set-option', '-p', '-t', pane, '@agent_team', 'team-test')
-        team_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-test'
-        team_dir.mkdir(parents=True)
-        state = {'id': 'team-test', 'socket': socket, 'window': window,
+        token = '0123456789abcdef0123456789abcdef'
+        tmux('set-option', '-g', '@workbench_team_restore_token', token)
+        state = {'id': 'team-test', 'socket': socket, 'window': window, 'workbench_restore_token': token,
                  'members': {'lead': {'pane': lead}, 'worker_a': {'pane': worker, 'brief': '目标：核对注册信息；只读'}}}
+        # Restored teams can retain many stopped members without live panes.
+        for index in range(25):
+            state['members']['historical_' + str(index)] = {'pane': '', 'status': 'stopped'}
         state_file = team_dir / 'state.json'
         state_file.write_text(json.dumps(state))
+        tmux('set-option', '-w', '-t', window, '@workbench_restored_team', 'team-test')
         tmux('new-session', '-d', '-s', 'b-destination', '-n', 'Destination', '-x', '160', '-y', '40')
         tmux('new-session', '-d', '-s', 'z-source', '-n', 'Source', '-x', '160', '-y', '40',
              shlex.quote(fixture))
@@ -100,6 +108,36 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         wait_for(lambda: any('▸ Team Task' in line for line in screen()), 'team not collapsed')
         assert not any('worker_a' in line for line in screen()), screen()
         assert any('1 worker' in line for line in screen()), screen()
+        # Empty historical entries are harmless, but duplicate real pane IDs
+        # remain ambiguous and must not be grouped.
+        state['members']['duplicate'] = {'pane': worker}
+        state_file.write_text(json.dumps(state))
+        wait_for(lambda: not any('▸ Team Task' in line or '▾ Team Task' in line for line in screen()),
+                 'duplicate real pane was grouped')
+        del state['members']['duplicate']
+        state_file.write_text(json.dumps(state))
+        wait_for(lambda: any('▸ Team Task' in line for line in screen()), 'team did not regroup')
+        solo = tmux('new-window', '-d', '-t', 'z-source:', '-n', 'Solo Team',
+                    '-P', '-F', '#{pane_id}', shlex.quote(fixture))
+        solo_window = tmux('display-message', '-p', '-t', solo, '#{window_id}')
+        tmux('set-option', '-p', '-t', solo, '@agent_team', 'team-solo')
+        solo_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-solo'
+        solo_dir.mkdir(parents=True)
+        history = os.environ.get('WORKBENCH_TEST_TEAM_HISTORY_STATE')
+        if history:
+            solo_state = json.loads(Path(history).read_text())
+            solo_state.update(id='team-solo', socket=socket, window=solo_window, closed=False)
+            for item in solo_state['members'].values():
+                item['pane'] = ''
+            solo_state['members']['lead']['pane'] = solo
+        else:
+            solo_state = {'id': 'team-solo', 'socket': socket, 'window': solo_window,
+                          'members': {'lead': {'pane': solo}, 'stopped_worker': {'pane': '', 'status': 'stopped'}}}
+        (solo_dir / 'state.json').write_text(json.dumps(solo_state))
+        wait_for(lambda: any('▸ Solo Team' in line for line in screen()), 'lead-only team was not grouped')
+        solo_row = next(i for i, line in enumerate(screen()) if '▸ Solo Team' in line)
+        assert '0 workers' in screen()[solo_row + 1], screen()
+        tmux('kill-pane', '-t', solo)
         row = next(i for i, line in enumerate(screen()) if '▸ Team Task' in line)
         assert 'codex' in screen()[row + 1], screen()
         click(1, row)

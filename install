@@ -256,3 +256,8 @@ done
 if "$CORE_DIR/tmux-agent-workbench-core" daemon ensure --help 2>/dev/null | grep -q -- '--all'; then
   "$CORE_DIR/tmux-agent-workbench-core" daemon ensure --all
 fi
+
+# A complete install supersedes the temporary rolling-upgrade routing core.
+if [ -f "$CORE_DIR/tmux-agent-workbench-routing" ]; then
+  rm "$CORE_DIR/tmux-agent-workbench-routing"
+fi

@@ -910,7 +910,8 @@ fn handle(
             state.detector.refresh_targets().map_err(|error| error.to_string())?;
             let mut current = state.snapshot.clone();
             current.agents = state.detector.machine_snapshots();
-            let result = crate::task_title::apply(paths, &current, &params);
+            current.sessions = state.detector.sessions();
+            let result = crate::task_title::apply(paths, &current, &params, &state.config.auto_split);
             // Publish the actual layout even if a later naming/verification step
             // failed. No consumer should retain a pre-move target.
             let refreshed = state.detector.refresh_targets().map_err(|error| error.to_string());

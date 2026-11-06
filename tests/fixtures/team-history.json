@@ -1,0 +1,17 @@
+{
+  "id": "historical-team",
+  "socket": "/tmp/old-tmux.sock",
+  "window": "@12",
+  "tool": "codex",
+  "cwd": "/old/project",
+  "budget": false,
+  "extra": [],
+  "config": {"limit": 4, "yolo": false, "worker_args": []},
+  "members": {
+    "lead": {"pane": "%11", "status": "running", "cursor": 2},
+    "v2_merge_review": {"pane": "%12", "status": "stopped", "cursor": 1},
+    "worker_old": {"pane": "", "status": "stopped", "cursor": 0},
+    "worker_done": {"pane": "", "status": "stopped", "cursor": 0}
+  },
+  "messages": [{"id": 1, "to": "v2_merge_review", "text": "historical fixture"}]
+}

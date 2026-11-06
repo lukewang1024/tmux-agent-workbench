@@ -82,10 +82,15 @@ impl Backdrop {
             "#{status}\t#{status-position}\t#{window_offset_x}\t#{window_offset_y}\t#{T:status-left}\t#{W:#{T:window-status-format}}\t#{T:status-right}",
         ).ok().flatten().unwrap_or_default();
         let fields: Vec<_> = context.splitn(7, '\t').collect();
-        let status_lines = match fields.first().copied().unwrap_or("off") {
-            "on" => 1,
-            "off" => 0,
-            number => number.parse::<u16>().unwrap_or(0).min(screen.height),
+        let status_lines = if std::env::var("WORKBENCH_POPUP_STATUS_VISIBLE").as_deref() == Ok("1")
+        {
+            0
+        } else {
+            match fields.first().copied().unwrap_or("off") {
+                "on" => 1,
+                "off" => 0,
+                number => number.parse::<u16>().unwrap_or(0).min(screen.height),
+            }
         };
         let top_status = fields.get(1) == Some(&"top");
         let offset_x = fields

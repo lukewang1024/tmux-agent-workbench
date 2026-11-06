@@ -146,6 +146,11 @@ enum Command {
         #[command(subcommand)]
         command: TitleCommand,
     },
+    /// Inspect or settle a pending automatic direction split request.
+    AutoSplit {
+        #[command(subcommand)]
+        command: AutoSplitCommand,
+    },
     Metadata {
         #[command(subcommand)]
         command: MetadataCommand,
@@ -302,6 +307,17 @@ enum TitleCommand {
         pane: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutoSplitCommand {
+    Status,
+    Finish {
+        #[arg(long)]
+        ticket: String,
+        #[arg(long, value_parser = ["completed", "no_change", "unavailable", "failed"])]
+        result: String,
     },
 }
 
@@ -1415,6 +1431,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
         Command::HostCpuCounters => unreachable!(),
+        Command::AutoSplit { command } => match command {
+            AutoSplitCommand::Status => println!(
+                "{}",
+                serde_json::to_string_pretty(&tmux_agent_workbench::auto_split::status(&paths)?)?
+            ),
+            AutoSplitCommand::Finish { ticket, result } => {
+                tmux_agent_workbench::auto_split::finish(&paths, &ticket, &result)?;
+                println!("{{\"status\":\"recorded\"}}");
+            }
+        },
         Command::NormalizeResurrectLayout { path } => {
             let input = std::fs::read_to_string(path)?;
             print!(
@@ -1512,10 +1538,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let agent = parse_agent_kind(&agent)?;
             let input = tmux_agent_workbench::hooks::read_stdin()?;
-            let output = if agent == tmux_agent_workbench::model::AgentKind::Codex {
-                // A shared app-server can outlive its launching pane and serve
-                // several Codex TUIs. Its inherited TMUX_PANE is never an
-                // event's owner; resolve each hook by its session identity.
+            let output = if matches!(
+                agent,
+                tmux_agent_workbench::model::AgentKind::Codex
+                    | tmux_agent_workbench::model::AgentKind::Trae
+                    | tmux_agent_workbench::model::AgentKind::Opencode
+            ) {
+                // Shared backends can outlive their launching pane. Their
+                // inherited TMUX_PANE is not evidence of an event's owner.
                 tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
             } else {
                 match ServerIdentity::discover() {
@@ -2449,6 +2479,23 @@ fn ensure_server_runtime(
             .as_ref()
             .and_then(|value| value.get("runtime_revision"))
             .and_then(|value| value.as_u64());
+        // Attaching a client or opening an Agent switcher must not replace a
+        // compatible daemon (and its live sidebars) during a rolling upgrade.
+        // Explicit `daemon ensure` still performs the normal upgrade handoff.
+        if !announce
+            && response.ok
+            && response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
+            && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))
+            && daemon_pid.is_some_and(|pid| pid != 0)
+            && response
+                .result
+                .as_ref()
+                .and_then(|value| value.get("server"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| std::path::Path::new(path) == server.socket_path)
+        {
+            return Ok(());
+        }
         if response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
             && version == tmux_agent_workbench::ENGINE_VERSION
             && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))

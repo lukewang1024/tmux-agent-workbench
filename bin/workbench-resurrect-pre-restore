@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${TMUX_AGENT_WORKBENCH_TMUX_SOCKET:-}" ]; then
+  prior=$(tmux -S "$TMUX_AGENT_WORKBENCH_TMUX_SOCKET" show-option -gqv @workbench-resurrect-prior-pre-restore-all 2>/dev/null || true)
+else
+  prior=$(tmux show-option -gqv @workbench-resurrect-prior-pre-restore-all 2>/dev/null || true)
+fi
+if [ -n "$prior" ]; then
+  bash -c "$prior"
+fi
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+"$script_dir/workbench-resurrect-team" pre-restore

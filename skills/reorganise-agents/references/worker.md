@@ -1,6 +1,6 @@
 # Reorganisation worker
 
-You are the single worker selected from the configured `batch` scene. Complete
+You are the single native worker selected by the current agent. Complete
 the parent's requested layout operation and return evidence. Do not dispatch
 this skill again or spawn other agents.
 
@@ -24,6 +24,16 @@ windows in their current session and express that preservation in the plan.
 Multiple agents in one window stay together. Keep running agents' directories,
 worktrees, branches, pending work, and input untouched. Do not use workspace
 creation commands that would start more agents or create new checkouts.
+
+For an automatic split, operate only on the provided source session. Move
+only its live agent windows into child sessions named `<source>·<subdirection>`;
+leave shells, stale agents, the designated personal assistant, and unrelated
+directions in their original sessions.
+Preserve the order of retained windows. Group by task meaning, using concise
+child direction names; leave uncertain tasks in the source direction. Aim for
+at most the configured number of live agent windows per child. If the available
+task evidence cannot support a useful semantic split, report no change instead
+of inventing numbered groups or moving unrelated tasks.
 
 ## Plan and apply
 
@@ -49,6 +59,10 @@ For a request to execute, use:
 ```sh
 <helper> apply --snapshot <snapshot.json> --plan <plan.json>
 ```
+
+For an automatic split, add the exact `--scope-session <session-id>` supplied
+by the parent; it validates the source and prevents out-of-scope moves before
+any mutation. Use it even when the plan appears obvious.
 
 The helper rechecks the topology before changes and saves a before snapshot,
 plan, operation journal, and verified after state. If it rejects a stale

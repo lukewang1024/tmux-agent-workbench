@@ -42,6 +42,7 @@ class DaemonTimeouts(unittest.TestCase):
             process = None
             workers = []
             delayed = set()
+            methods = []
             endpoint = str(uuid.uuid4())
 
             def respond(stream):
@@ -49,13 +50,14 @@ class DaemonTimeouts(unittest.TestCase):
                     try:
                         request = json.loads(stream.makefile("rb").readline())
                         method = request["method"]
+                        methods.append(method)
                         if method == "daemon.status":
                             ready.wait(5)
-                            version = next(line.split('"')[1] for line in (repo / "Cargo.toml").read_text().splitlines() if line.startswith("version ="))
                             revision = next(int(line.split("=")[1].strip().rstrip(";"))
                                             for line in (repo / "src/lib.rs").read_text().splitlines()
                                             if line.startswith("pub const DAEMON_RUNTIME_REVISION:"))
-                            result = dict(engine_version=version, runtime_revision=revision, pid=process.pid)
+                            result = dict(engine_version="2.0.0-beta.69", runtime_revision=revision,
+                                          pid=process.pid, server=tmux_socket)
                         elif method == "client.register":
                             time.sleep(2.5)  # startup must also survive a busy scan
                             result = dict(endpoint_id=endpoint, attachment_token=str(uuid.uuid4()))
@@ -115,6 +117,7 @@ class DaemonTimeouts(unittest.TestCase):
                 _, error = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 0, error.decode())
                 self.assertEqual(error, b"", "optional failures must not paint over the terminal")
+                self.assertNotIn("daemon.stop", methods, "an implicit client must not stop a compatible daemon")
                 log = root / "XDG_STATE_HOME" / "tmux-agent-workbench" / ("daemon-" + key + ".log")
                 diagnostic = log.read_bytes()
                 self.assertEqual(log.stat().st_mode & 0o777, 0o600)

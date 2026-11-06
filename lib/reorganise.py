@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import uuid
@@ -160,7 +161,10 @@ def _agent_list(socket: str) -> dict[str, dict[str, Any]]:
             "started_at_ticks": process.get("started_at_ticks"),
             "executable": process.get("executable"),
             "thread_name": row.get("thread_name"),
+            "hook_session_id": row.get("hook_session_id"),
             "label": row.get("label"),
+            "exited": row.get("exited"),
+            "stale": row.get("stale"),
         }
         if pane_id in identities:
             raise ReorganiseError(f"agent list returned more than one agent for pane {pane_id}")
@@ -174,6 +178,24 @@ def _capture_tail(tmux: Tmux, pane_id: str, line_count: int) -> str:
     return tmux.call("capture-pane", "-p", "-S", f"-{line_count}", "-E", "-1", "-t", pane_id)
 
 
+def _personal_assistant_identity() -> tuple[str, str] | None:
+    root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
+    path = root / "tmux-agent-workbench" / "personal-assistant.json"
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+        kind, thread = value.get("kind"), value.get("thread_id")
+        if value.get("schema_version") == 1 and isinstance(kind, str) \
+                and kind in {"codex", "claude", "trae", "opencode"} \
+                and isinstance(thread, str) and thread and len(thread) <= 256 \
+                and not any(ord(character) < 32 or ord(character) == 127 for character in thread):
+            return kind, thread
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        pass
+    return None
+
+
 def take_snapshot(context_lines: int = 0) -> dict[str, Any]:
     if context_lines < 0 or context_lines > 20:
         raise ReorganiseError("--context-lines must be between 0 and 20")
@@ -182,6 +204,7 @@ def take_snapshot(context_lines: int = 0) -> dict[str, Any]:
     server = tmux.server_identity()
     server["origin_session_index"] = origin_index
     agent_by_pane = _agent_list(socket)
+    assistant_identity = _personal_assistant_identity()
 
     sessions: list[dict[str, Any]] = []
     window_rows: list[dict[str, Any]] = []
@@ -231,6 +254,12 @@ def take_snapshot(context_lines: int = 0) -> dict[str, Any]:
                     "current_path": _format(tmux, pane_id, "#{pane_current_path}"),
                     "current_command": _format(tmux, pane_id, "#{pane_current_command}"),
                     "dead": _format(tmux, pane_id, "#{pane_dead}") == "1",
+                    "agent_team": _format(tmux, pane_id, "#{@agent_team}"),
+                    "agent_team_role": _format(tmux, pane_id, "#{@agent_team_role}"),
+                    "personal_assistant": _format(tmux, pane_id, "#{@workbench_assistant}") == "1" or (
+                        assistant_identity is not None and pane_id in agent_by_pane and
+                        (agent_by_pane[pane_id].get("kind"), agent_by_pane[pane_id].get("hook_session_id")) == assistant_identity
+                    ),
                     "agent": agent_by_pane.get(pane_id),
                 }
                 if context_lines and pane["agent"]:
@@ -283,6 +312,9 @@ def _agent_signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
                 row.get("pid"),
                 row.get("started_at_ticks"),
                 row.get("executable"),
+                row.get("exited"),
+                row.get("stale"),
+                row.get("hook_session_id"),
             )
             for row in snapshot.get("agent_identities", [])
         )
@@ -447,6 +479,52 @@ def _validate_plan(snapshot: dict[str, Any], plan: Any) -> dict[str, Any]:
 
 def _window_to_group(plan: dict[str, Any]) -> dict[str, str]:
     return {window_id: group["session"] for group in plan["groups"] for window_id in group["windows"]}
+
+
+def _validate_split_scope(snapshot: dict[str, Any], plan: dict[str, Any], source_id: str) -> None:
+    """Limit an automatic split to live task windows in one original direction."""
+    if not re.fullmatch(r"\$[0-9]+", source_id):
+        raise ReorganiseError("automatic split requires an exact source session ID")
+    sources = [row for row in snapshot.get("sessions", []) if row.get("session_id") == source_id]
+    if len(sources) != 1:
+        raise ReorganiseError("automatic split source session is missing or ambiguous")
+    source_name = sources[0]["session_name"]
+    if plan.get("scratchpad") is not None:
+        raise ReorganiseError("automatic split cannot create a scratchpad")
+    live_agent_windows = {
+        pane.get("window_id") for pane in snapshot.get("panes", [])
+        if not pane.get("dead") and isinstance(pane.get("agent"), dict)
+        and pane["agent"].get("exited") is False and pane["agent"].get("stale") is False
+        and pane["agent"].get("window_id") == pane.get("window_id")
+    }
+    team_windows = {
+        pane.get("window_id") for pane in snapshot.get("panes", [])
+        if pane.get("agent_team") or pane.get("agent_team_role")
+    }
+    assistant_windows = {pane.get("window_id") for pane in snapshot.get("panes", [])
+                         if pane.get("personal_assistant")}
+    destination = _window_to_group(plan)
+    originals: dict[str, list[str]] = {}
+    for window in snapshot.get("windows", []):
+        window_id = window["window_id"]
+        origin = window["session_name"]
+        target = destination[window_id]
+        originals.setdefault(origin, []).append(window_id)
+        if window.get("session_id") != source_id:
+            if target != origin:
+                raise ReorganiseError(f"automatic split cannot move unrelated window {window_id}")
+        elif target != source_name:
+            if window_id not in live_agent_windows or window_id in team_windows or window_id in assistant_windows:
+                raise ReorganiseError(f"automatic split cannot move non-agent, stale, team, or personal assistant window {window_id}")
+            prefix = source_name + "·"
+            if not target.startswith(prefix) or not target[len(prefix):].strip():
+                raise ReorganiseError(f"automatic split destination must be a subdirection of {source_name!r}")
+    for group in plan["groups"]:
+        existing = originals.get(group["session"], [])
+        retained = [window_id for window_id in existing if destination[window_id] == group["session"]]
+        in_plan = [window_id for window_id in group["windows"] if window_id in retained]
+        if in_plan != retained:
+            raise ReorganiseError(f"automatic split cannot reorder existing windows in {group['session']!r}")
 
 
 def _focus_conflict(snapshot: dict[str, Any], window_to_group: dict[str, str]) -> None:
@@ -792,8 +870,10 @@ def _is_noop(snapshot: dict[str, Any], plan: dict[str, Any], tmux: Tmux) -> bool
     return False
 
 
-def _restore_names(mutator: Mutator, snapshot: dict[str, Any]) -> None:
+def _restore_names(mutator: Mutator, snapshot: dict[str, Any], only: set[str] | None = None) -> None:
     for row in snapshot.get("windows", []):
+        if only is not None and row["window_id"] not in only:
+            continue
         current = _format(mutator.tmux, row["window_id"], "#{window_name}")
         if current != row["window_name"]:
             mutator.command(
@@ -802,7 +882,7 @@ def _restore_names(mutator: Mutator, snapshot: dict[str, Any]) -> None:
             )
 
 
-def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
+def apply_plan(snapshot_path: str, plan_path: str, scope_session: str | None = None) -> dict[str, Any]:
     snapshot = _read_json(snapshot_path)
     plan = _read_json(plan_path)
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1:
@@ -813,9 +893,13 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
         raise ReorganiseError("snapshot belongs to a different tmux server")
     _ensure_unlinked_ungrouped(snapshot)
     normalized_plan = _validate_plan(snapshot, plan)
+    if scope_session is not None:
+        _validate_split_scope(snapshot, normalized_plan, scope_session)
     current = take_snapshot(0)
     _check_fresh(snapshot, current)
     _ensure_unlinked_ungrouped(current)
+    if scope_session is not None:
+        _validate_split_scope(current, normalized_plan, scope_session)
     destination_by_window = _window_to_group(normalized_plan)
     _focus_conflict(current, destination_by_window)
     state_root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
@@ -828,7 +912,7 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
     journal = Journal(run_dir)
     mutator = Mutator(Tmux(socket, server_pid), journal)
     original_session_by_name = _sid_by_name(current)
-    session_ids: dict[str, str] = {}
+    session_ids: dict[str, str] = dict(original_session_by_name) if scope_session is not None else {}
     placeholders: list[dict[str, Any]] = []
     scratch_shell: dict[str, Any] | None = None
     manifest = {
@@ -841,10 +925,17 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
     }
     _write_run_manifest(run_dir, manifest)
     try:
-        if not _is_noop(current, normalized_plan, mutator.tmux):
+        wanted_groups = {group["session"]: group["windows"] for group in normalized_plan["groups"]}
+        original_groups = _current_groups(current)
+        noop = original_groups == wanted_groups if scope_session is not None else _is_noop(current, normalized_plan, mutator.tmux)
+        if not noop:
+            # A scoped split must not create placeholders, renumber windows or
+            # disturb focus in directions whose membership is unchanged.
+            affected_groups = [group for group in normalized_plan["groups"]
+                               if scope_session is None or original_groups.get(group["session"]) != group["windows"]]
             # Prepare every destination before moving any existing window. This
             # keeps a destination alive when its own original windows move out.
-            for group in normalized_plan["groups"]:
+            for group in affected_groups:
                 name = group["session"]
                 sid = original_session_by_name.get(name)
                 if sid is None:
@@ -895,7 +986,7 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
                     )
 
             placeholder_by_session = {row["session_id"]: row for row in placeholders}
-            for group in normalized_plan["groups"]:
+            for group in affected_groups:
                 sid = session_ids[group["session"]]
                 placeholder = placeholder_by_session.get(sid)
                 if placeholder and placeholder.get("role") == "group":
@@ -903,7 +994,9 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
                 else:
                     _order_group(mutator, sid, group["windows"], None)
 
-            _restore_names(mutator, current)
+            moved = {row["window_id"] for row in current["windows"]
+                     if destination_by_window[row["window_id"]] != row["session_name"]}
+            _restore_names(mutator, current, moved if scope_session is not None else None)
 
             # A scratch-only placeholder is retained and renamed only after all
             # original windows have moved out of its session.
@@ -915,7 +1008,13 @@ def apply_plan(snapshot_path: str, plan_path: str) -> dict[str, Any]:
                     continue
                 _safe_cleanup_placeholder(mutator, placeholder)
 
-            _locate_clients(mutator, current.get("clients", []))
+            clients = current.get("clients", [])
+            if scope_session is not None:
+                affected_names = {group["session"] for group in affected_groups}
+                affected_names.update(row["session_name"] for row in current["sessions"]
+                                      if row["session_id"] == scope_session)
+                clients = [client for client in clients if client.get("session_name") in affected_names]
+            _locate_clients(mutator, clients)
         else:
             session_ids = _sid_by_name(current)
 
@@ -1066,10 +1165,10 @@ def restore_run(run_dir_text: str) -> dict[str, Any]:
         raise
 
 
-def batch_worker() -> dict[str, str]:
+def _agent_team(*args: str) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            ["agent-team", "start", "codex", "--scene", "batch", "--team", "--team-dry-run"],
+        return subprocess.run(
+            ["agent-team", *args],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1079,6 +1178,9 @@ def batch_worker() -> dict[str, str]:
         )
     except OSError as exc:
         raise ReorganiseError(f"cannot run read-only batch resolver 'agent-team': {exc}") from exc
+
+
+def _team_payload(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         raise ReorganiseError(f"batch settings resolver failed: {detail}")
@@ -1086,18 +1188,86 @@ def batch_worker() -> dict[str, str]:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ReorganiseError("batch settings resolver did not return JSON") from exc
-    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        raise ReorganiseError("batch settings resolver output must be a JSON object")
+    return payload
+
+
+def _worker_pair(config: Any) -> tuple[str, str]:
     if not isinstance(config, dict):
         raise ReorganiseError("batch settings resolver output is missing config")
-    if config.get("scene") != "batch":
-        raise ReorganiseError("batch settings resolver config.scene is missing or is not 'batch'")
     model = config.get("worker_model")
     effort = config.get("worker_effort")
     if not isinstance(model, str) or not model.strip():
         raise ReorganiseError("batch settings resolver config.worker_model is missing or empty")
     if not isinstance(effort, str) or not effort.strip():
         raise ReorganiseError("batch settings resolver config.worker_effort is missing or empty")
-    return {"scene": "batch", "model": model, "reasoning_effort": effort}
+    return model, effort
+
+
+def _model_version(model: str) -> tuple[int, ...]:
+    # Match agent-team's menu rule: newest numeric model version in a category,
+    # with the later recommendation breaking ties.
+    match = re.search(r"\d+(?:\.\d+)*", model)
+    return tuple(map(int, match.group(0).split("."))) if match else ()
+
+
+def _batch_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
+    recommendations = payload.get("recommendations")
+    items = recommendations.get("items") if isinstance(recommendations, dict) else None
+    if not isinstance(items, list):
+        raise ReorganiseError("agent-team recommendation cache is unavailable; prepare it before resolving a batch worker")
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        label, identifier, model, effort, category = (item.get(key) for key in
+            ("label", "id", "model", "effort", "source_key"))
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (label, identifier, model, effort, category)):
+            continue
+        heading = label.split(" · ", 1)[0].strip().casefold()
+        if heading in {"后台自动化", "批量执行", "background automation", "batch"}:
+            candidates.append((index, item))
+    if not candidates:
+        raise ReorganiseError("no background automation recommendation is available; no worker model was selected")
+    if len({item["source_key"] for _, item in candidates}) != 1:
+        raise ReorganiseError("background automation recommendations are ambiguous; no worker model was selected")
+    return max(candidates, key=lambda pair: (_model_version(pair[1]["model"]), pair[0]))[1]
+
+
+def batch_worker() -> dict[str, str]:
+    status = _agent_team("recommendations", "status")
+    if status.returncode != 0:
+        # Older agent-team versions predate recommendations and own a literal
+        # Codex batch scene. Do not reinterpret other failures as permission to
+        # choose a different model.
+        error = (status.stderr or "").strip().lower()
+        unsupported = error == "unknown command" or (
+            "recommendations" in error and any(marker in error for marker in
+                ("unknown command", "unrecognized", "invalid choice", "usage:"))
+        )
+        if not unsupported:
+            _team_payload(status)
+        legacy = _team_payload(_agent_team("start", "codex", "--scene", "batch", "--team", "--team-dry-run"))
+        config = legacy.get("config")
+        if not isinstance(config, dict) or config.get("scene") != "batch":
+            raise ReorganiseError("legacy batch settings resolver did not return the batch scene")
+        model, effort = _worker_pair(config)
+        return {"scene": "batch", "model": model, "reasoning_effort": effort}
+    recommendation = _batch_recommendation(_team_payload(status))
+    identifier = recommendation["id"]
+    result = _team_payload(_agent_team(
+        "start", "codex", "--recommendation", identifier, "--team", "--no-yolo", "--team-dry-run"
+    ))
+    config = result.get("config")
+    if not isinstance(config, dict) or config.get("recommendation_id") != identifier:
+        raise ReorganiseError("agent-team did not resolve the selected background recommendation; no worker was selected")
+    if result.get("mode") != "native":
+        raise ReorganiseError("agent-team did not resolve native mode; no worker was selected")
+    model, effort = _worker_pair(config)
+    return {"scene": "batch", "recommendation_id": identifier, "recommendation_label": recommendation["label"],
+            "model": model, "reasoning_effort": effort}
 
 
 def _positive_context(value: str) -> int:
@@ -1119,6 +1289,7 @@ def _parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply", help="apply a window grouping plan")
     apply.add_argument("--snapshot", required=True)
     apply.add_argument("--plan", required=True)
+    apply.add_argument("--scope-session", help="restrict an automatic split to this exact source session ID")
     restore = sub.add_parser("restore", help="restore the original grouping from a completed run")
     restore.add_argument("run_dir")
     return parser
@@ -1133,7 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "snapshot":
             result = take_snapshot(args.context_lines)
         elif args.command == "apply":
-            result = apply_plan(args.snapshot, args.plan)
+            result = apply_plan(args.snapshot, args.plan, args.scope_session)
         elif args.command == "restore":
             result = restore_run(args.run_dir)
         else:

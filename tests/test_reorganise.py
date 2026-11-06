@@ -198,6 +198,116 @@ class ReorganiseTmuxTests(unittest.TestCase):
         self.assertEqual({row["window_id"] for row in restored["windows"]}, set(moved_ids))
         self.assertFalse(any(row["window_name"] == "scratchpad" for row in restored["windows"]))
 
+    def test_scoped_split_moves_only_live_agent_windows_and_keeps_focus_marker(self):
+        before = self.snapshot()
+        source = next(row for row in before["sessions"] if row["session_name"] == "alpha")
+        task = next(row for row in before["windows"] if row["session_name"] == "alpha" and row["window_name"] == "源✨")
+        pane = next(row for row in before["panes"] if row["window_id"] == task["window_id"])
+        self._write_agent_list([{
+            "instance_id": "agent-one", "kind": "codex", "exited": False, "stale": False,
+            "target": {"pane_id": pane["pane_id"], "window_id": task["window_id"]},
+            "process": {"pid": pane["pane_pid"], "started_at_ticks": 44, "executable": "codex"},
+        }])
+        self.tmux("set-option", "-w", "-t", task["window_id"], "@agent_focus", "1")
+        before = self.snapshot()
+        groups = self.plan_for(before, [
+            {"session": "alpha", "windows": [w["window_id"] for w in before["windows"]
+                                               if w["session_name"] == "alpha" and w["window_id"] != task["window_id"]]},
+            {"session": "alpha·资源机", "windows": [task["window_id"]]},
+            {"session": "beta", "windows": [w["window_id"] for w in before["windows"] if w["session_name"] == "beta"]},
+        ])
+        result = json.loads(self.call("apply", "--snapshot", str(self.write_json("scoped.json", before)),
+                                      "--plan", str(self.write_json("scoped-plan.json", groups)),
+                                      "--scope-session", source["session_id"]).stdout)
+        after = self.snapshot()
+        self.assertEqual(self.windows(after)[task["window_id"]]["session_name"], "alpha·资源机")
+        self.assertEqual(self.tmux("show-option", "-wqv", "-t", task["window_id"], "@agent_focus"), "1")
+        self.assertEqual({p["pane_id"]: p["pane_pid"] for p in before["panes"]},
+                         {p["pane_id"]: p["pane_pid"] for p in after["panes"]})
+        beta_before = next(w for w in before["windows"] if w["session_name"] == "beta")
+        beta_after = self.windows(after)[beta_before["window_id"]]
+        self.assertEqual((beta_before["session_id"], beta_before["window_index"]),
+                         (beta_after["session_id"], beta_after["window_index"]))
+        journal = (Path(result["run_dir"]) / "journal.jsonl").read_text()
+        self.assertNotIn("placeholder in beta", journal)
+
+    def test_scoped_split_rejects_out_of_scope_or_non_agent_moves_before_mutation(self):
+        before = self.snapshot()
+        source = next(row for row in before["sessions"] if row["session_name"] == "alpha")
+        a, b = [w["window_id"] for w in before["windows"] if w["session_name"] == "alpha"]
+        unrelated = next(w["window_id"] for w in before["windows"] if w["session_name"] == "beta")
+        for plan in [
+            self.plan_for(before, [{"session": "alpha", "windows": [a, b]},
+                                   {"session": "alpha·资源机", "windows": [unrelated]}]),
+            self.plan_for(before, [{"session": "alpha", "windows": [a]},
+                                   {"session": "alpha·资源机", "windows": [b]},
+                                   {"session": "beta", "windows": [unrelated]}]),
+        ]:
+            result = self.call("apply", "--snapshot", str(self.write_json("scope-before.json", before)),
+                               "--plan", str(self.write_json("invalid-scope.json", plan)),
+                               "--scope-session", source["session_id"], ok=False)
+            self.assertIn("automatic split cannot move", result.stderr)
+            self.assertEqual(self.windows(self.snapshot()).keys(), self.windows(before).keys())
+            self.assertEqual({w["window_id"]: w["session_name"] for w in self.snapshot()["windows"]},
+                             {w["window_id"]: w["session_name"] for w in before["windows"]})
+
+    def test_scoped_split_rejects_unknown_agent_state_and_team_windows(self):
+        before = self.snapshot()
+        source = next(row for row in before["sessions"] if row["session_name"] == "alpha")
+        window = next(w for w in before["windows"] if w["session_name"] == "alpha")
+        pane = next(p for p in before["panes"] if p["window_id"] == window["window_id"])
+        agent = {"instance_id": "agent", "kind": "codex",
+                 "target": {"pane_id": pane["pane_id"], "window_id": window["window_id"]},
+                 "process": {"pid": pane["pane_pid"], "started_at_ticks": 44, "executable": "codex"}}
+        for mark_team in (False, True):
+            if mark_team:
+                agent.update({"stale": False, "exited": False})
+                self.tmux("set-option", "-p", "-t", pane["pane_id"], "@agent_team", "dedicated")
+            self._write_agent_list([agent])
+            before = self.snapshot()
+            plan = self.plan_for(before, [
+                {"session": "alpha", "windows": [w["window_id"] for w in before["windows"]
+                                                   if w["session_name"] == "alpha" and w["window_id"] != window["window_id"]]},
+                {"session": "alpha·child", "windows": [window["window_id"]]},
+                {"session": "beta", "windows": [w["window_id"] for w in before["windows"] if w["session_name"] == "beta"]},
+            ])
+            result = self.call("apply", "--snapshot", str(self.write_json("team-before.json", before)),
+                               "--plan", str(self.write_json("team-plan.json", plan)),
+                               "--scope-session", source["session_id"], ok=False)
+            self.assertIn("automatic split cannot move", result.stderr)
+            self.assertEqual(self.windows(self.snapshot())[window["window_id"]]["session_name"], "alpha")
+
+    def test_automatic_split_preserves_personal_assistant_by_role_or_saved_thread(self):
+        before = self.snapshot()
+        source = next(row for row in before["sessions"] if row["session_name"] == "alpha")
+        window = next(w for w in before["windows"] if w["session_name"] == "alpha")
+        pane = next(p for p in before["panes"] if p["window_id"] == window["window_id"])
+        agent = {"instance_id": "assistant", "kind": "codex", "stale": False, "exited": False,
+                 "hook_session_id": "assistant-thread",
+                 "target": {"pane_id": pane["pane_id"], "window_id": window["window_id"]},
+                 "process": {"pid": pane["pane_pid"], "started_at_ticks": 44, "executable": "codex"}}
+        self._write_agent_list([agent])
+        for mode in ("marker", "saved"):
+            if mode == "marker":
+                self.tmux("set-option", "-w", "-t", window["window_id"], "@workbench_assistant", "1")
+            else:
+                self.tmux("set-option", "-wu", "-t", window["window_id"], "@workbench_assistant")
+                path = self.root / "state/tmux-agent-workbench/personal-assistant.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"schema_version": 1, "kind": "codex", "thread_id": "assistant-thread"}))
+            before = self.snapshot()
+            plan = self.plan_for(before, [
+                {"session": "alpha", "windows": [w["window_id"] for w in before["windows"]
+                                                   if w["session_name"] == "alpha" and w["window_id"] != window["window_id"]]},
+                {"session": "alpha·child", "windows": [window["window_id"]]},
+                {"session": "beta", "windows": [w["window_id"] for w in before["windows"] if w["session_name"] == "beta"]},
+            ])
+            result = self.call("apply", "--snapshot", str(self.write_json("assistant-before.json", before)),
+                               "--plan", str(self.write_json("assistant-plan.json", plan)),
+                               "--scope-session", source["session_id"], ok=False)
+            self.assertIn("personal assistant", result.stderr)
+            self.assertEqual(self.windows(self.snapshot())[window["window_id"]]["session_name"], "alpha")
+
     def test_repeated_noop_has_no_tmux_operations_or_window_churn(self):
         before = self.snapshot()
         ids = [row["window_id"] for row in before["windows"]]
@@ -362,12 +472,18 @@ class BatchWorkerTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         script = self.bin / "agent-team"
-        script.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_LOG\"\ncat \"$RESOLVER_JSON\"\n")
+        script.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGS_LOG\"\n"
+            "if [ \"$1 $2\" = 'recommendations status' ]; then\n"
+            "  if [ -f \"$STATUS_JSON\" ]; then cat \"$STATUS_JSON\"; else echo 'unknown command' >&2; exit 2; fi\n"
+            "else cat \"$RESOLVER_JSON\"; fi\n"
+        )
         script.chmod(0o755)
         self.payload = self.root / "resolver.json"
+        self.status = self.root / "status.json"
         self.args_log = self.root / "args.txt"
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
-                        ARGS_LOG=str(self.args_log), RESOLVER_JSON=str(self.payload))
+                        ARGS_LOG=str(self.args_log), RESOLVER_JSON=str(self.payload), STATUS_JSON=str(self.status))
 
     def test_reads_batch_worker_settings_without_launching_returned_argv(self):
         self.payload.write_text(json.dumps({
@@ -380,8 +496,55 @@ class BatchWorkerTests(unittest.TestCase):
             "scene": "batch", "model": "gpt-6-luna", "reasoning_effort": "max"
         })
         self.assertEqual(self.args_log.read_text().splitlines(), [
-            "start", "codex", "--scene", "batch", "--team", "--team-dry-run"
+            "recommendations status", "start codex --scene batch --team --team-dry-run"
         ])
+
+    def test_current_background_recommendation_uses_agent_team_worker_settings(self):
+        self.status.write_text(json.dumps({"recommendations": {"items": [
+            {"id": "daily", "source_key": "daily", "label": "日常开发 · GPT-8", "model": "gpt-8", "effort": "max"},
+            {"id": "old", "source_key": "background", "label": "后台自动化 · GPT-5.6", "model": "gpt-5.6-luna", "effort": "max"},
+            {"id": "new", "source_key": "background", "label": "后台自动化 · GPT-6", "model": "gpt-6-luna", "effort": "max"},
+        ]}}))
+        self.payload.write_text(json.dumps({
+            "mode": "native", "config": {"recommendation_id": "new", "worker_model": "gpt-6.1-luna", "worker_effort": "high"},
+            "argv": ["never", "execute", "this"],
+        }))
+        result = subprocess.run([str(LAUNCHER), "batch-worker"], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        self.assertEqual(json.loads(result.stdout), {
+            "scene": "batch", "recommendation_id": "new", "recommendation_label": "后台自动化 · GPT-6",
+            "model": "gpt-6.1-luna", "reasoning_effort": "high",
+        })
+        self.assertEqual(self.args_log.read_text().splitlines(), [
+            "recommendations status", "start codex --recommendation new --team --no-yolo --team-dry-run"
+        ])
+
+    def test_missing_or_ambiguous_recommendations_fail_without_fallback(self):
+        for items in [[], [
+            {"id": "one", "source_key": "one", "label": "后台自动化 · GPT-6", "model": "gpt-6-luna", "effort": "max"},
+            {"id": "two", "source_key": "two", "label": "批量执行 · GPT-6", "model": "gpt-6-luna", "effort": "max"},
+        ]]:
+            with self.subTest(items=items):
+                self.args_log.unlink(missing_ok=True)
+                self.status.write_text(json.dumps({"recommendations": {"items": items}}))
+                result = subprocess.run([str(LAUNCHER), "batch-worker"], env=self.env, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no worker model was selected", result.stderr)
+                self.assertEqual(self.args_log.read_text().splitlines(), ["recommendations status"])
+
+    def test_recommendation_must_be_resolved_in_native_mode_without_silent_defaults(self):
+        self.status.write_text(json.dumps({"recommendations": {"items": [
+            {"id": "chosen", "source_key": "background", "label": "后台自动化 · GPT-6", "model": "gpt-6-luna", "effort": "max"},
+        ]}}))
+        for mode, selected in [("native", None), ("tmux", "chosen")]:
+            with self.subTest(mode=mode, selected=selected):
+                self.payload.write_text(json.dumps({"mode": mode, "config": {
+                    "recommendation_id": selected, "worker_model": "gpt-6-luna", "worker_effort": "max"}}))
+                result = subprocess.run([str(LAUNCHER), "batch-worker"], env=self.env, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no worker was selected", result.stderr)
 
     def test_missing_batch_settings_fail_clearly(self):
         self.payload.write_text(json.dumps({"config": {"scene": "batch", "worker_model": "gpt-6-luna"}}))
@@ -389,6 +552,16 @@ class BatchWorkerTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("config.worker_effort is missing", result.stderr)
+
+    def test_other_recommendation_errors_do_not_fall_back_to_legacy_scene(self):
+        script = self.bin / "agent-team"
+        script.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGS_LOG\"\necho 'unknown credentials error' >&2\nexit 1\n")
+        script.chmod(0o755)
+        result = subprocess.run([str(LAUNCHER), "batch-worker"], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown credentials error", result.stderr)
+        self.assertEqual(self.args_log.read_text().splitlines(), ["recommendations status"])
 
 
 if __name__ == "__main__":

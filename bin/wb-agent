@@ -49,6 +49,25 @@ exec_trae()
 
 exec_opencode()
 {
+  # v2's shared service can serve many terminals. A private stdio service
+  # lets Workbench verify the owning pane without changing existing sessions.
+  opencode_standalone=0
+  opencode_auto=0
+  case $(opencode --version 2>/dev/null || true) in
+    'opencode v2.0.25'|2.0.25) opencode_standalone=1 ;;
+  esac
+  for arg do
+    case $arg in
+      --team|--server|--server=*|--standalone) opencode_standalone=0 ;;
+      --auto) opencode_auto=1 ;;
+    esac
+  done
+  if [ "$opencode_standalone" = 1 ]; then
+    if [ "$opencode_auto" = 1 ]; then
+      exec agent-team start opencode --standalone "$@"
+    fi
+    exec agent-team start opencode --standalone --auto "$@"
+  fi
   for arg do
     case $arg in
       --) break ;;

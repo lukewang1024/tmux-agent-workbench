@@ -373,6 +373,14 @@ impl Detector {
         } else if bound.len() == 1 {
             bound[0]
         } else if bound.is_empty() {
+            if matches!(
+                detached.agent,
+                crate::model::AgentKind::Trae | crate::model::AgentKind::Opencode
+            ) {
+                // Shared backends can serve a non-tmux client with the same
+                // cwd as a terminal. Never bind an event using cwd alone.
+                return Err("agent hook has no verified pane identity".into());
+            }
             // CWD is a fallback, never a tiebreaker between live CLIs.
             let cwd = detached
                 .cwd

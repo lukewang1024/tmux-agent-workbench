@@ -555,7 +555,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS Extract in both roots and renderers retains its filter, source pane, client and directory')
         # Workbench-owned selection and name dialogs use the same touch UI.
         # Stub only the external inventory/launch boundary, keeping the actual
-        # Sidebar New button, deferred popup transition, list and callbacks.
+        # Sidebar New action, deferred popup transition, list and callbacks.
         project_choice = root / 'project-choice'
         tmuxinator = shim / 'tmuxinator'
         tmuxinator.write_text('#!/bin/sh\nset -eu\ncase $1 in\n'
@@ -573,9 +573,29 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ui(mode)
             menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
                              env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'+ new', b'close', menu_footer=False)
-            x, y = item_position(rendered, '+ new')
+            rendered = wait_for_text(menu, b'menu', b'close', menu_footer=False)
+            # The compact priority sidebar puts New inside its header menu;
+            # older sidebars expose the same action as a direct button.
+            direct_new = b'+ new' in screen_text(rendered)
+            if direct_new:
+                x, y = item_position(rendered, '+ new')
+            else:
+                # Nerd-font icons can have different reported widths in a PTY.
+                # The header menu and popup Close are both right aligned, so
+                # the Close column is a stable hit target for the header menu.
+                _, y = item_position(rendered, 'menu')
+                x, _ = item_position(rendered, 'close')
             os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+            if not direct_new:
+                rendered = wait_for_text(client_process, b'workbench', b'New', menu_footer=False)
+                x, y = item_position(rendered, 'New')
+                if mode == 'old' and not release_menus:
+                    # tmux 3.7's native -O menu selects the last hovered row
+                    # on press, before it processes that press's coordinates.
+                    # Send the mouse motion a real pointer produces; touch
+                    # mode has its own no-hover path and is tested separately.
+                    os.write(master, f'\x1b[<35;{x};{y}M'.encode())
+                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
             rendered = wait_for_text(client_process, b'Workbench Projects', b'touch-project-00')
             menu.wait(timeout=5)
             assert menu.returncode == 0, menu.stderr.read()
@@ -605,7 +625,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             drain(.2)
             menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
                              env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for_text(menu, b'+ new', b'close', menu_footer=False)
+            wait_for_text(menu, b'menu', b'close', menu_footer=False)
             os.write(master, b'?')
             wait_for_text(client_process, b'Shortcuts', b'(back)')
             menu.wait(timeout=5)
@@ -859,6 +879,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for _ in range(48):
             os.write(master, f'\x1b[<65;{footer_x};{footer_y}M'.encode())
             rendered += drain(.015)
+        # The last wheel event can still be queued even when host-48 is
+        # visible. Wait for host-49 so the click uses the final painted rows.
+        rendered = wait_for_text(menu, b'host-49', initial=rendered, attempts=100)
         visible = '\n'.join(screen_rows(rendered))
         assert 'host-48' in visible and 'host-00' not in visible, visible
         x, y = item_position(rendered, 'host-48')
@@ -868,7 +891,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         while not host_connected.exists():
             assert time.monotonic() < deadline, 'scrolled host action did not execute'
             drain(.05)
-        assert host_connected.read_text() == 'host-48\n'
+        actual_host = host_connected.read_text()
+        assert actual_host == 'host-48\n', (actual_host, visible)
         host_window = tmux('display-message', '-p', '-c', client, '#{window_id}')
         tmux('kill-window', '-t', host_window)
         hosts.write_text('dev-host\ntest-host\n')

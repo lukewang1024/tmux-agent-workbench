@@ -56,9 +56,10 @@ see [Install](#install).
 - **tmux >= 3.6 for interactive status/sidebar menus** (core requires >= 3.2), **git**, and the shipped `tmux-agent-workbench` binary —
   hard requirements. The installer downloads a matching macOS/Linux
   x86_64/aarch64 or iSH i586 musl release, then falls back to a local Cargo build.
-- **jq** and **Python 3** — local Codex/Trae token summaries can read session logs
-  without the optional `ccusage` CLI. The reader respects `CODEX_HOME` and
-  `TRAE_HOME`, including Termux home paths.
+- **Bash**, **jq**, and **Python 3** — required for assistant session
+  persistence. Python 3 and jq also let local Codex/Trae token summaries read
+  session logs without the optional `ccusage` CLI. The reader respects
+  `CODEX_HOME` and `TRAE_HOME`, including Termux home paths.
 - **tig** or **lazygit** — used only when opening a temporary Git tool.
   Defaults to `tig`; set `@workbench-git-tool` to change it.
 - **nvim** or **vim** — used only for an explicitly opened editor. Uses
@@ -258,6 +259,12 @@ position = "left"
 auto_create = true
 agent_sort = "grouped" # grouped or prioritized
 
+# Optional: enable automatic splitting (defaults: five tasks and semantic grouping).
+# [auto_split]
+# enabled = true
+# threshold = 5
+# strategy = "semantic"
+
 [notifications]
 enabled = true
 sound = true
@@ -276,6 +283,39 @@ bind = "127.0.0.1"
 port = 19999
 ```
 
+Automatic direction splitting is disabled by default. When enabled, a task's
+own agent chooses its direction by meaning, using the existing direction names
+and task titles. `title set` counts distinct windows with live local agents in
+the selected direction. Five tasks fit by default; when placing another would
+exceed that limit, the command leaves the caller in its current window and
+returns a request for one native `reorganise-agents` subagent of the calling
+agent to split the selected direction semantically. Codex uses its resolved
+batch worker settings; other agents use their own native subagent defaults.
+The OpenCode 1.18.32 and 2.0.25 plugins verify that a fresh foreground native
+child has no broader permissions than the parent, both before dispatch and
+when the child starts. OpenCode 2.0.25 launched by Workbench uses a private
+`--standalone` service so its terminal can be verified; an explicitly selected
+shared server is preserved and does not auto-group. Other versions need
+revalidation; if the check cannot prove this, the split is unavailable.
+Some Trae CLI versions can report a missing native thread in interactive mode.
+If its native child cannot start or finish, mark the split unavailable and
+leave the task in place; Workbench does not substitute a different agent.
+After a successful split, the caller chooses
+an appropriate child direction and retries placement. Unrelated full
+directions do not trigger work. The worker's scoped plan preserves other
+directions, non-agent windows, team windows, the personal assistant, panes,
+clients, and manually marked focus windows. If native delegation is unavailable or the tasks cannot
+be split confidently, the caller stays in its current window and continues its
+task; no alternative worker is launched. A task started inside an already full
+direction can temporarily bring that direction above the limit.
+
+`tmux-agent-workbench auto-split status` shows pending requests. A request
+remains pending if its owner disappears, so another worker cannot start while
+the first might still be operating. After confirming that its native worker is
+no longer running, recover it with `tmux-agent-workbench auto-split finish
+--ticket <id> --result failed`. A change to the server, task windows, or task
+titles permits a fresh request when a task next attempts placement.
+
 On macOS, clicking an overlay resolves the tmux client attached to the target
 session, focuses its exact iTerm2 or Terminal TTY/tab, and then selects the
 target window and pane. If no matching attached client exists, Workbench falls
@@ -289,20 +329,25 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 `@workbench-key-sidebar-all`, `@workbench-key-session`,
 `@workbench-key-agent`, and `@workbench-key-attention` before the plugin loads.
 
-The sidebar shows all sessions and all detected agents from the current tmux
-server in separate sections. A pinned top row keeps `new` on the left and
-`menu` on the right. The Agents heading and sort control stay pinned below it.
-Agents always appear above Sessions, on every screen size.
-Session groups in Agents follow one another without blank rows. A single blank
-row separates Agents from Sessions. Both sections use one continuous scrolling
-list, without rebuilding or sorting it on resize. Help remains available from `?`
-without taking space in the mouse action row. Session and Agent targets use
-two-line cards so the full card is easier to click. The label at the right of
-the Agents header toggles between `grouped`
-(stable session/window/pane order) and `prioritized` (blocked > done > working >
-idle > unknown; newest state entry first within each group); the choice is
-remembered and synchronized across all running sidebar instances. Press `d` to toggle a more detailed view with
-Agent kind, human-readable window/pane indices, process id, state source, hook
+The sidebar switches between Agents and Sessions from the current tmux server.
+Click the first Powerline segment or press `Tab` to switch views. The adjacent
+pinned count opens the pinned menu for the current view; the sort and global
+menu segments are also touchable. Pinned cards stay just below the bar. Select
+an Agent or session and press `p`, or use its item menu, to pin or unpin it.
+In Sessions, tap the pin icon at the right of a row to toggle its pin.
+Click a pinned card, or press its `1`–`9` shortcut, to visit it. Each view has
+its own pinned items, which also remain in its scrolling list. Keyboard, wheel,
+and touch navigation can move between pinned cards and ordinary rows. On short
+screens, the pinned menu still contains every pinned item.
+
+Window-scoped `@agent_focus` markers follow Agent window moves; session pins use
+a session-scoped `@workbench_session_focus` marker. A designated personal
+assistant stays first in the Agents view and is automatically pinned again
+when the same thread resumes in another window. The view and sort selection are
+remembered across sidebars. Agents can be sorted by `grouped` (stable
+session/window/pane order) or `prioritized` (blocked > done > working > idle >
+unknown). Sessions can be sorted by name or priority. Press `d` to toggle
+more detail, including Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
 opens session/agent actions. The top row opens the tmuxinator-project picker and
 the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
@@ -531,7 +576,26 @@ It composes with `tmux-resurrect` and `tmux-continuum`, preserves the
 existing `assistant-sessions.json` data, restores Claude, Codex, OpenCode,
 Copilot, Pi, Oh My Pi, and Grok sessions, and uses Workbench's native hooks for
 Claude, Codex, OpenCode, and TraeX. No separate assistant-resurrect TPM entry
-is needed.
+is needed. The session adapters and their compatibility tests are maintained by
+Workbench; see [assistant session persistence](docs/assistant-sessions.md) for
+the supported formats, legacy options, and session-less relaunch controls.
+
+Pane teams are saved as a group and rebound to the restored panes before their
+sessions resume. This requires an `agent-team` version with `resume-pane` and
+the original team state under `$XDG_STATE_HOME/agent-team`. Each member resumes
+with its team instructions, model and permission options; saved prompts are not
+replayed. A missing session ID, unsupported saved option, missing team state,
+or an occupied target prevents that member or team from being resumed. Teams
+do not automatically restart stopped members; a member without one unique
+session remains unconfirmed and has no live pane. A verified lead remains a
+team group even when no worker is running. Teams
+saved before this feature have no team sidecar and cannot be reconstructed by
+this mechanism. The team sidecar is private, stays in the resurrect folder, and
+is bound to the exact snapshot and assistant session sidecars saved alongside
+it. Selecting an older snapshot without its matching sidecars will not restore
+it as a team. Capture a complete tmux-resurrect save (prefix then `Ctrl-s` with
+the default bindings); the assistant-only `resurrect save` command is not a
+replacement for saving the tmux layout.
 
 Like Herdr, Workbench renders one state per Agent pane. Claude `/btw` and Codex
 `/side` are classified from whichever thread is currently in the foreground;
@@ -969,14 +1033,18 @@ sockets are blocked, skip naming and continue the task. Recreating a pane does
 not grant socket access, and naming does not require changing the session's
 sandbox or network policy.
 
-Codex and Claude lifecycle hooks ask the model to choose a task name and a
+Codex, Claude, Trae, and OpenCode lifecycle hooks ask the model to choose a task name and a
 semantic session direction, supplying existing session names for reuse. The
 title reminder follows `[ui].language` (`auto` uses the system language; `zh`
 tags use Simplified Chinese and other tags use English). They also request
 grouping on prompt submission when a task already has a name.
-`SessionStart` and `UserPromptSubmit`
-provide short context; `Stop` requests at most one naming continuation after
-a submitted task. The continuation budget is stored with the tmux window, so
+`SessionStart` and `UserPromptSubmit` provide short context; for Codex and
+Claude, `Stop` requests at most one naming continuation after a submitted task.
+Trae's CLI must trust the installed hook using its normal trust prompt; Workbench
+does not bypass hook trust. Trae and OpenCode require a verified owning process,
+and shared-server sessions with no such identity do not auto-group. OpenCode
+binds one root session per plugin process and excludes native child sessions.
+The continuation budget is stored with the tmux window, so
 resume, compaction, duplicate hooks, and daemon restarts cannot reset it.
 Issued naming bindings remain attached to the CLI process when auxiliary
 sessions report hooks from that same process. The visible Codex thread identity

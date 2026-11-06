@@ -25,7 +25,6 @@ use crate::server::ServerIdentity;
 #[derive(Debug, Clone)]
 enum Row {
     Section(&'static str),
-    AgentSection(AgentSort),
     AgentGroup(String),
     Session(SessionSnapshot),
     SessionSub(SessionSnapshot),
@@ -67,6 +66,95 @@ struct WorkerDisplay {
 }
 
 type TeamIndex = HashMap<String, TeamMember>;
+
+#[derive(Debug, Clone)]
+struct FocusCard {
+    window: FocusWindow,
+    agent: Option<AgentSnapshot>,
+    team: Option<TeamSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarView {
+    Agents,
+    Sessions,
+}
+
+impl SidebarView {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Agents => Self::Sessions,
+            Self::Sessions => Self::Agents,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PinnedCard {
+    Agent(FocusCard),
+    Session(SessionSnapshot),
+}
+
+impl PinnedCard {
+    fn action(&self) -> Action {
+        match self {
+            Self::Agent(card) => Action::Focus(card.window.id.clone()),
+            Self::Session(session) => Action::FocusSession(session.session_id.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FocusWindow {
+    id: String,
+    session_id: String,
+    session_name: String,
+    name: String,
+    index: u32,
+    pane: String,
+    state: DisplayState,
+    assistant: bool,
+}
+
+type FocusWindows = HashMap<String, FocusWindow>;
+type FocusSessions = HashSet<String>;
+
+fn assistant_window(paths: &Paths, snapshot: &Snapshot) -> Option<String> {
+    let path = paths.state_dir.join("personal-assistant.json");
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 8192 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if value.get("schema_version")?.as_u64()? != 1 {
+        return None;
+    }
+    let kind = value.get("kind")?.as_str()?;
+    let thread = value.get("thread_id")?.as_str()?;
+    if !matches!(kind, "codex" | "claude" | "trae" | "opencode")
+        || thread.is_empty()
+        || thread.len() > 256
+        || thread.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let windows: HashSet<_> = snapshot
+        .agents
+        .iter()
+        .filter(|agent| {
+            !agent.exited
+                && !agent.stale
+                && agent.process.is_some()
+                && agent.relay_focus.is_none()
+                && agent_kind_name(agent.kind) == kind
+                && agent.hook_session_id.as_deref() == Some(thread)
+        })
+        .map(|agent| agent.target.window_id.clone())
+        .collect();
+    (windows.len() == 1)
+        .then(|| windows.into_iter().next())
+        .flatten()
+}
 
 // Only explicit, already received assignments replace the original thread
 // title. Ordinary follow-ups and pending messages need not change the task.
@@ -134,26 +222,66 @@ fn worker_display(agent: &AgentSnapshot, member: &TeamMember) -> WorkerDisplay {
 
 /// Live grouping requires a pane marker and matching state. Retained snapshots
 /// of missing worker panes can also be matched against validated team state.
-fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Option<TeamIndex> {
+fn read_inventory(
+    paths: &Paths,
+    server: &ServerIdentity,
+    snapshot: &Snapshot,
+) -> Option<(TeamIndex, FocusWindows, FocusSessions)> {
     let inventory = crate::tmux::Tmux::new(server.clone())
         .output_with_timeout(
             &[
                 "list-panes",
                 "-a",
                 "-F",
-                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}",
+                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}\t#{@agent_focus}\t#{session_id}\t#{session_name}\t#{window_name}\t#{window_index}\t#{pane_active}\t#{@workbench_window_state}\t#{@pane_role}\t#{@workbench_assistant}\t#{@workbench_session_focus}",
             ],
             Duration::from_millis(250),
         )
         .ok()?;
     let mut marked: HashMap<(String, String), HashSet<String>> = HashMap::new();
     let mut all_panes = HashSet::new();
+    let mut focused = FocusWindows::new();
+    let mut focused_sessions = FocusSessions::new();
+    let saved_assistant = assistant_window(paths, snapshot);
     for line in inventory.lines() {
         let fields: Vec<_> = line.split('\t').collect();
-        if fields.len() == 4 {
+        if fields.len() == 14 {
             all_panes.insert(fields[1].to_owned());
+            if fields[13] == "1" && safe_target(fields[5], '$') {
+                focused_sessions.insert(fields[5].to_owned());
+            }
+            let assistant = fields[12] == "1" || saved_assistant.as_deref() == Some(fields[0]);
+            if (fields[4] == "1" || assistant)
+                && fields[11] != "sidebar"
+                && safe_target(fields[0], '@')
+                && safe_target(fields[1], '%')
+                && safe_target(fields[5], '$')
+            {
+                let state = match fields[10] {
+                    "working" => DisplayState::Working,
+                    "blocked" => DisplayState::Blocked,
+                    "done" => DisplayState::Done,
+                    "idle" => DisplayState::Idle,
+                    _ => DisplayState::Unknown,
+                };
+                let window = focused
+                    .entry(fields[0].to_owned())
+                    .or_insert_with(|| FocusWindow {
+                        id: fields[0].to_owned(),
+                        pane: fields[1].to_owned(),
+                        session_id: fields[5].to_owned(),
+                        session_name: fields[6].to_owned(),
+                        name: fields[7].to_owned(),
+                        index: fields[8].parse().unwrap_or(0),
+                        state,
+                        assistant,
+                    });
+                if fields[9] == "1" && window.session_id == fields[5] {
+                    window.pane = fields[1].to_owned();
+                }
+            }
         }
-        if fields.len() != 4
+        if fields.len() != 14
             || fields[3] != "0"
             || fields[2].is_empty()
             || !fields[2]
@@ -190,8 +318,23 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
         }
     }
     let mut index = TeamIndex::new();
+    // A random server-lifetime token lets a deliberately rebound team retain
+    // provenance even after its last window disappears.
+    let restore_token = crate::tmux::Tmux::new(server.clone())
+        .output_with_timeout(
+            &["show-option", "-gqv", "@workbench_team_restore_token"],
+            Duration::from_millis(250),
+        )
+        .unwrap_or_default();
+    let restore_token = restore_token.trim();
     for id in candidates {
         let file = root.join(&id).join("state.json");
+        let state = std::fs::metadata(&file)
+            .ok()
+            .filter(|m| m.len() < 4 * 1024 * 1024)
+            .and_then(|_| std::fs::read(file).ok())
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+        let Some(state) = state else { continue };
         // A tmux socket path and pane IDs can be reused after a server restart.
         // Old team directories must not claim snapshots from the new server.
         if let (Ok(team_created), Ok(socket_created)) = (
@@ -199,15 +342,15 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
             std::fs::metadata(&server.socket_path).and_then(|m| m.created()),
         ) {
             if team_created < socket_created {
-                continue;
+                // A restored team is rebound explicitly before its assistants
+                // restart; old directories alone must not claim reused IDs.
+                let restored = !restore_token.is_empty()
+                    && state["workbench_restore_token"].as_str() == Some(restore_token);
+                if !restored {
+                    continue;
+                }
             }
         }
-        let state = std::fs::metadata(&file)
-            .ok()
-            .filter(|m| m.len() < 4 * 1024 * 1024)
-            .and_then(|_| std::fs::read(file).ok())
-            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
-        let Some(state) = state else { continue };
         let Some(window) = state["window"].as_str() else {
             continue;
         };
@@ -231,13 +374,14 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
         if members
             .values()
             .filter_map(|m| m["pane"].as_str())
+            .filter(|pane| !pane.is_empty())
             .any(|pane| !seen.insert(pane))
         {
             continue;
         }
         let key = format!("{window}:{id}");
         for (name, member) in members {
-            let Some(pane) = member["pane"].as_str() else {
+            let Some(pane) = member["pane"].as_str().filter(|pane| !pane.is_empty()) else {
                 continue;
             };
             let pane_missing = !all_panes.contains(pane);
@@ -267,7 +411,7 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
             }
         }
     }
-    Some(index)
+    Some((index, focused, focused_sessions))
 }
 
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
@@ -279,14 +423,12 @@ struct SidebarViewport {
 }
 
 impl SidebarViewport {
-    fn new(content_height: usize, total: usize, notice: Option<&str>) -> Self {
-        // Actions and the Agents/sort heading stay above the scrolling body.
-        let first_row = 3 + usize::from(notice.is_some());
+    fn new(content_height: usize, notice: Option<&str>, focus_cards: usize) -> Self {
+        // The status bar and pinned cards stay above the scrolling body.
+        let first_row = 2 + focus_cards * 2 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
-        } else if total > available {
-            available.saturating_sub(1)
         } else {
             available
         };
@@ -314,15 +456,22 @@ impl SidebarViewport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
-    New,
+    View,
+    Pinned,
     Menu,
     Close,
     Sort,
+    Focus(String),
+    FocusSession(String),
+    ToggleSession(String),
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(config) = Config::load(&paths.config_file()) {
+        crate::ui_language::set_configured_language(&config.ui.language);
+    }
     let runtime_identity = crate::layout::executable_identity()?;
     // Resolve the first frame before switching to the alternate screen. Some
     // remote clients do not paint an initially empty fullscreen popup until a
@@ -403,6 +552,27 @@ fn refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 1 } else { 5 })
 }
 
+fn switch_sidebar_view(
+    paths: &Paths,
+    view: &mut SidebarView,
+    snapshot: Option<&Snapshot>,
+    detailed: bool,
+    sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+    rows: &mut Vec<Row>,
+    navigation: &mut NavigationList<Action>,
+) -> io::Result<()> {
+    *view = view.toggle();
+    persist_sidebar_view(paths, *view)?;
+    *rows = snapshot
+        .map(|value| view_rows(value, detailed, sort, teams, expanded, *view))
+        .unwrap_or_default();
+    *navigation = NavigationList::default();
+    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    Ok(())
+}
+
 fn event_loop(
     terminal: &mut Terminal<crate::popup_surface::Surface<CrosstermBackend<io::Stdout>>>,
     paths: &Paths,
@@ -443,18 +613,26 @@ fn event_loop(
     if let Some(saved) = persisted_agent_sort(paths) {
         agent_sort = saved;
     }
+    let mut view = persisted_sidebar_view(paths).unwrap_or(SidebarView::Agents);
     let initial_state = initial_snapshot
         .map_err(|error| error.to_string())
         .and_then(|snapshot| sidebar_state(paths, server, snapshot));
-    let (mut snapshot, mut teams) = match initial_state {
-        Ok((snapshot, teams)) => (Some(snapshot), teams),
-        Err(_) => (None, TeamIndex::new()),
+    let (mut snapshot, mut teams, mut focused, mut focused_sessions) = match initial_state {
+        Ok((snapshot, teams, focused, sessions)) => (Some(snapshot), teams, focused, sessions),
+        Err(_) => (
+            None,
+            TeamIndex::new(),
+            FocusWindows::new(),
+            FocusSessions::new(),
+        ),
     };
     let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
-        .map(|snapshot| build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded))
+        .map(|snapshot| view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view))
         .unwrap_or_default();
+    let mut focus_cards =
+        build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
@@ -478,9 +656,11 @@ fn event_loop(
             visible = now_visible;
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
-                Ok((fetched, fetched_teams)) => {
+                Ok((fetched, fetched_teams, fetched_focused, fetched_sessions)) => {
                     teams = fetched_teams;
-                    rows = build_team_rows(&fetched, detailed, agent_sort, &teams, &expanded);
+                    focused = fetched_focused;
+                    focused_sessions = fetched_sessions;
+                    rows = view_rows(&fetched, detailed, agent_sort, &teams, &expanded, view);
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
@@ -524,7 +704,18 @@ fn event_loop(
             {
                 agent_sort = saved;
                 if let Some(snapshot) = &snapshot {
-                    rows = build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                    navigation.replace_rows(rows.iter().map(selection_key).collect());
+                }
+                dirty = true;
+            }
+            if let Some(saved) = persisted_sidebar_view(paths)
+                && saved != view
+            {
+                view = saved;
+                if let Some(snapshot) = &snapshot {
+                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                    navigation = NavigationList::default();
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                 }
                 dirty = true;
@@ -540,25 +731,55 @@ fn event_loop(
             dirty = true;
         }
         let notice = connection_notice(disconnected, snapshot.is_some());
-        let viewport = SidebarViewport::new(content_height, rows.len(), notice);
+        if dirty {
+            focus_cards =
+                build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
+        }
+        let shown_focus = visible_focus_cards(content_height, notice, focus_cards.len());
+        let viewport = SidebarViewport::new(content_height, notice, shown_focus);
         navigation.set_viewport(Rect::new(
             0,
             viewport.first_row as u16,
             size.width,
             viewport.row_height as u16,
         ));
+        let leading: Vec<_> = action_regions(
+            Rect::new(0, 0, size.width, size.height),
+            view,
+            agent_sort,
+            popup_mode(),
+            &focus_cards[..shown_focus],
+            focus_cards.len(),
+        )
+        .into_iter()
+        .filter(|(_, action)| matches!(action, Action::Focus(_) | Action::FocusSession(_)))
+        .collect();
+        navigation.set_leading_actions(&leading);
         if dirty {
             terminal.draw(|frame| {
                 let area = frame.area();
-                let mut header = vec![
-                    render_actions(area.width, footer_hover),
-                    render_row(
-                        &Row::AgentSection(agent_sort),
-                        footer_hover == Some(Action::Sort),
-                        area.width,
-                    ),
-                ];
+                let mut header = vec![render_header(
+                    area.width,
+                    view,
+                    agent_sort,
+                    focus_cards.len(),
+                    shown_focus,
+                    footer_hover.as_ref(),
+                )];
+                for (index, card) in focus_cards.iter().take(shown_focus).enumerate() {
+                    let action = card.action();
+                    let highlighted = footer_hover.as_ref() == Some(&action)
+                        || navigation.is_highlighted(&Hit::Action(action));
+                    header.extend(render_pinned_card(card, index + 1, highlighted, area.width));
+                }
                 if let Some(notice) = notice {
+                    let notice = match notice {
+                        "disconnected" => crate::ui_language::text("disconnected", "已断开"),
+                        "stale · reconnecting" => {
+                            crate::ui_language::text("stale · reconnecting", "数据过期 · 正在重连")
+                        }
+                        _ => notice,
+                    };
                     header.push(Line::from(Span::styled(notice, muted_style())));
                 }
                 frame.render_widget(Paragraph::new(header), area);
@@ -567,29 +788,43 @@ fn event_loop(
                     Rect::new(0, (viewport.first_row - 1) as u16, area.width, 1),
                 );
                 navigation.render(frame, |index, selected| {
-                    render_row(&rows[index], selected, area.width)
+                    let row = &rows[index];
+                    if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
+                        && area.width >= 8
+                    {
+                        let mut line = render_row(row, selected, area.width - 3);
+                        let mut style = Style::default().fg(
+                            if focused_sessions.contains(&session.session_id) {
+                                Color::Green
+                            } else {
+                                Color::DarkGray
+                            },
+                        );
+                        if selected {
+                            style = style.bg(Color::DarkGray);
+                        }
+                        line.spans.push(Span::styled("  ", style));
+                        line
+                    } else {
+                        render_row(row, selected, area.width)
+                    }
                 });
                 if rows.is_empty() && notice != Some("disconnected") {
                     frame.render_widget(
-                        Paragraph::new("no sessions").style(muted_style()),
+                        Paragraph::new(match view {
+                            SidebarView::Agents => {
+                                crate::ui_language::text("no agents", "暂无智能体")
+                            }
+                            SidebarView::Sessions => {
+                                crate::ui_language::text("no sessions", "暂无会话")
+                            }
+                        })
+                        .style(muted_style()),
                         Rect::new(
                             0,
                             viewport.first_row as u16,
                             area.width,
                             1.min(area.height.saturating_sub(viewport.first_row as u16)),
-                        ),
-                    );
-                }
-                let shown = navigation.visible_rows().len();
-                let hidden = rows.len().saturating_sub(shown);
-                if hidden > 0 && viewport.first_row + viewport.row_height < content_height {
-                    frame.render_widget(
-                        Paragraph::new(format!("↕ {hidden} hidden")),
-                        Rect::new(
-                            0,
-                            (viewport.first_row + viewport.row_height) as u16,
-                            area.width,
-                            1,
                         ),
                     );
                 }
@@ -604,7 +839,7 @@ fn event_loop(
                         ),
                     );
                     frame.render_widget(
-                        Paragraph::new(render_close(area.width, footer_hover)),
+                        Paragraph::new(render_close(area.width, footer_hover.as_ref())),
                         Rect::new(0, area.height - 1, area.width, 1),
                     );
                 }
@@ -640,10 +875,17 @@ fn event_loop(
                 // selecting the current agent here can scroll a different row
                 // underneath the pending mouse coordinates. Initial selection
                 // is resolved when the first snapshot arrives above.
-                navigation.selection_visible = true;
+                if navigation.focused_action().is_none() {
+                    navigation.selection_visible = true;
+                }
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 navigation.cancel_press();
+                if key.code != KeyCode::Char('p') {
+                    // Once the user navigates with keys, act on the keyboard
+                    // selection instead of a previously hovered Focus card.
+                    footer_hover = None;
+                }
                 if popup_mode()
                     && (key.code == KeyCode::Esc
                         || (key.modifiers.contains(event::KeyModifiers::CONTROL)
@@ -657,10 +899,66 @@ fn event_loop(
                             return Ok(());
                         }
                     }
+                    KeyCode::Char(number @ '1'..='9') => {
+                        let index = number as usize - '1' as usize;
+                        if let Some(card) = focus_cards.iter().take(shown_focus).nth(index)
+                            && activate_pinned(card)?
+                            && popup_mode()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        let result = match navigation.focused_action().or(footer_hover.as_ref()) {
+                            Some(Action::Focus(window)) => {
+                                let assistant =
+                                    focused.get(window).is_some_and(|item| item.assistant);
+                                Some(toggle_focus(server, window, assistant))
+                            }
+                            Some(Action::FocusSession(session)) => {
+                                Some(toggle_session_focus(server, session))
+                            }
+                            _ if navigation.selection_visible => {
+                                match rows.get(navigation.selected) {
+                                    Some(Row::Session(session) | Row::SessionSub(session)) => {
+                                        Some(toggle_session_focus(server, &session.session_id))
+                                    }
+                                    _ => {
+                                        selected_window(&rows, navigation.selected).map(|window| {
+                                            let assistant = focused
+                                                .get(window)
+                                                .is_some_and(|item| item.assistant);
+                                            toggle_focus(server, window, assistant)
+                                        })
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(result) = result {
+                            if let Err(error) = result {
+                                append_sidebar_log(paths, &format!("focus-toggle error={error}"));
+                            }
+                            let _ = refresh_tx.try_send(true);
+                            next_refresh = Instant::now();
+                        }
+                    }
+                    KeyCode::Tab => switch_sidebar_view(
+                        paths,
+                        &mut view,
+                        snapshot.as_ref(),
+                        detailed,
+                        agent_sort,
+                        &teams,
+                        &expanded,
+                        &mut rows,
+                        &mut navigation,
+                    )?,
                     _ if navigation.navigate(key.code) => {}
                     KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
-                        if let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
-                            rows.get(navigation.selected)
+                        if navigation.selection_visible
+                            && let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
+                                rows.get(navigation.selected)
                         {
                             let team_key = summary.key.clone();
                             let open =
@@ -674,30 +972,58 @@ fn event_loop(
                                 expanded.remove(&team_key);
                             }
                             if let Some(snapshot) = &snapshot {
-                                rows = build_team_rows(
-                                    snapshot, detailed, agent_sort, &teams, &expanded,
+                                rows = view_rows(
+                                    snapshot, detailed, agent_sort, &teams, &expanded, view,
                                 );
                                 navigation.replace_rows(rows.iter().map(selection_key).collect());
                             }
                         }
                     }
                     KeyCode::Enter => {
-                        let navigated = activate(&rows, navigation.selected)?;
+                        let navigated = match navigation.focused_action() {
+                            Some(action @ (Action::Focus(_) | Action::FocusSession(_))) => {
+                                focus_cards
+                                    .iter()
+                                    .take(shown_focus)
+                                    .find(|card| card.action() == *action)
+                                    .map(activate_pinned)
+                                    .transpose()?
+                                    .unwrap_or(false)
+                            }
+                            _ => activate(&rows, navigation.selected)?,
+                        };
                         if popup_mode() && navigated {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('m') => {
-                        if show_row_menu(
-                            &rows,
-                            navigation.selected,
-                            Some((
-                                0,
-                                (viewport.first_row
-                                    + navigation.selected.saturating_sub(navigation.scroll))
-                                    as u16,
-                            )),
-                        )? {
+                        let shown = match navigation.focused_action() {
+                            Some(action @ (Action::Focus(_) | Action::FocusSession(_))) => {
+                                if let Some((index, card)) = focus_cards
+                                    .iter()
+                                    .take(shown_focus)
+                                    .enumerate()
+                                    .find(|(_, card)| card.action() == *action)
+                                {
+                                    show_pinned_card_menu(card, Some((0, 1 + 2 * index as u16)))?
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => show_row_menu(
+                                &rows,
+                                navigation.selected,
+                                Some((
+                                    0,
+                                    (viewport.first_row
+                                        + navigation.selected.saturating_sub(navigation.scroll))
+                                        as u16,
+                                )),
+                                &focused,
+                                &focused_sessions,
+                            )?,
+                        };
+                        if shown {
                             return Ok(());
                         }
                     }
@@ -705,7 +1031,7 @@ fn event_loop(
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
                             rows =
-                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
@@ -757,32 +1083,70 @@ fn event_loop(
                 }
             }
             Event::Mouse(mouse) => {
-                let actions = action_regions(
+                let mut actions = action_regions(
                     Rect::new(0, 0, size.width, size.height),
+                    view,
                     agent_sort,
                     popup_mode(),
+                    &focus_cards[..shown_focus],
+                    focus_cards.len(),
                 );
+                if view == SidebarView::Sessions && size.width >= 8 {
+                    for index in navigation.visible_rows() {
+                        if let Some(Row::Session(session)) = rows.get(index) {
+                            let y = viewport.first_row + index - navigation.scroll;
+                            actions.push((
+                                Rect::new(size.width - 3, y as u16, 3, 1),
+                                Action::ToggleSession(session.session_id.clone()),
+                            ));
+                        }
+                    }
+                }
                 let hit = navigation.mouse(mouse, &actions);
                 let hit = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
                     navigation
                         .hit(mouse.column, mouse.row, &actions)
-                        .filter(|hit| matches!(hit, Hit::Item(_)))
+                        .filter(|hit| {
+                            matches!(
+                                hit,
+                                Hit::Item(_)
+                                    | Hit::Action(Action::Focus(_) | Action::FocusSession(_))
+                            )
+                        })
                 } else {
                     hit
                 };
-                footer_hover = match navigation.hovered {
-                    Some(Hit::Action(action)) => Some(action),
+                footer_hover = match &navigation.hovered {
+                    Some(Hit::Action(action)) => Some(action.clone()),
                     _ => None,
                 };
                 match hit {
                     Some(Hit::Action(Action::Close)) => return Ok(()),
-                    Some(Hit::Action(Action::New)) => {
-                        if run_session_picker()? {
+                    Some(Hit::Action(Action::View)) => switch_sidebar_view(
+                        paths,
+                        &mut view,
+                        snapshot.as_ref(),
+                        detailed,
+                        agent_sort,
+                        &teams,
+                        &expanded,
+                        &mut rows,
+                        &mut navigation,
+                    )?,
+                    Some(Hit::Action(Action::Pinned)) => {
+                        if show_pinned_menu(&focus_cards, view, Some((mouse.column, mouse.row)))? {
                             return Ok(());
                         }
                     }
+                    Some(Hit::Action(Action::ToggleSession(session))) => {
+                        if let Err(error) = toggle_session_focus(server, &session) {
+                            append_sidebar_log(paths, &format!("focus-toggle error={error}"));
+                        }
+                        let _ = refresh_tx.try_send(true);
+                        next_refresh = Instant::now();
+                    }
                     Some(Hit::Action(Action::Menu)) => {
-                        if show_global_menu(false, Some((mouse.column, mouse.row)))? {
+                        if show_global_menu(Some((mouse.column, mouse.row)))? {
                             return Ok(());
                         }
                     }
@@ -794,9 +1158,26 @@ fn event_loop(
                         persist_agent_sort(paths, agent_sort)?;
                         if let Some(snapshot) = &snapshot {
                             rows =
-                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
                             navigation = NavigationList::default();
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
+                        }
+                    }
+                    Some(Hit::Action(action @ (Action::Focus(_) | Action::FocusSession(_)))) => {
+                        if let Some(card) = focus_cards
+                            .iter()
+                            .take(shown_focus)
+                            .find(|card| card.action() == action)
+                        {
+                            let navigated =
+                                if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                                    show_pinned_card_menu(card, Some((mouse.column, mouse.row)))?
+                                } else {
+                                    activate_pinned(card)?
+                                };
+                            if popup_mode() && navigated {
+                                return Ok(());
+                            }
                         }
                     }
                     Some(Hit::Item(_)) => {
@@ -810,8 +1191,8 @@ fn event_loop(
                                     expanded.insert(key);
                                 }
                                 if let Some(snapshot) = &snapshot {
-                                    rows = build_team_rows(
-                                        snapshot, detailed, agent_sort, &teams, &expanded,
+                                    rows = view_rows(
+                                        snapshot, detailed, agent_sort, &teams, &expanded, view,
                                     );
                                     navigation
                                         .replace_rows(rows.iter().map(selection_key).collect());
@@ -824,6 +1205,8 @@ fn event_loop(
                                 &rows,
                                 navigation.selected,
                                 Some((mouse.column, mouse.row)),
+                                &focused,
+                                &focused_sessions,
                             )?
                         } else {
                             activate(&rows, navigation.selected)?
@@ -878,10 +1261,10 @@ fn sidebar_state(
     paths: &Paths,
     server: &ServerIdentity,
     snapshot: Snapshot,
-) -> Result<(Snapshot, TeamIndex), String> {
-    let teams = read_teams(paths, server, &snapshot)
+) -> Result<(Snapshot, TeamIndex, FocusWindows, FocusSessions), String> {
+    let (teams, focused, sessions) = read_inventory(paths, server, &snapshot)
         .ok_or_else(|| "team pane inventory unavailable".to_owned())?;
-    Ok((snapshot, teams))
+    Ok((snapshot, teams, focused, sessions))
 }
 
 #[cfg(test)]
@@ -966,10 +1349,9 @@ fn build_team_rows(
                 continue;
             }
             if member.name == "lead" && leads.get(&member.key) == Some(&agent.instance_id) {
-                if let Some(children) = workers.remove(&member.key) {
-                    entries.push((agent, Some((member.key.clone(), children))));
-                    continue;
-                }
+                let children = workers.remove(&member.key).unwrap_or_default();
+                entries.push((agent, Some((member.key.clone(), children))));
+                continue;
             }
         }
         entries.push((agent, None));
@@ -1050,6 +1432,198 @@ fn build_team_rows(
     rows
 }
 
+fn view_rows(
+    snapshot: &Snapshot,
+    detailed: bool,
+    sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+    view: SidebarView,
+) -> Vec<Row> {
+    if view == SidebarView::Agents {
+        let mut rows = build_team_rows(snapshot, detailed, sort, teams, expanded);
+        if let Some(section) = rows
+            .iter()
+            .position(|row| matches!(row, Row::Section("sessions")))
+        {
+            rows.truncate(section.saturating_sub(1));
+        }
+        rows
+    } else {
+        let mut sessions = snapshot.sessions.clone();
+        sessions.sort_by_key(|session| {
+            let priority = if sort == AgentSort::Prioritized {
+                std::cmp::Reverse(agent_attention_priority_state(session.rollup_state))
+            } else {
+                std::cmp::Reverse(0)
+            };
+            (priority, stable_session_key(session))
+        });
+        sessions
+            .into_iter()
+            .flat_map(|session| [Row::Session(session.clone()), Row::SessionSub(session)])
+            .collect()
+    }
+}
+
+fn build_pinned_cards(
+    view: SidebarView,
+    rows: &[Row],
+    focused: &FocusWindows,
+    focused_sessions: &FocusSessions,
+    snapshot: Option<&Snapshot>,
+) -> Vec<PinnedCard> {
+    match view {
+        SidebarView::Agents => build_focus_cards(rows, focused)
+            .into_iter()
+            .map(PinnedCard::Agent)
+            .collect(),
+        SidebarView::Sessions => {
+            let mut sessions: Vec<_> = snapshot
+                .into_iter()
+                .flat_map(|value| value.sessions.iter())
+                .filter(|session| focused_sessions.contains(&session.session_id))
+                .cloned()
+                .collect();
+            sessions.sort_by_key(stable_session_key);
+            sessions.into_iter().map(PinnedCard::Session).collect()
+        }
+    }
+}
+
+fn build_focus_cards(rows: &[Row], focused: &FocusWindows) -> Vec<FocusCard> {
+    let mut cards: Vec<_> = focused
+        .values()
+        .cloned()
+        .map(|window| FocusCard {
+            window,
+            agent: None,
+            team: None,
+        })
+        .collect();
+    cards.sort_by(|a, b| {
+        (
+            !a.window.assistant,
+            &a.window.session_name,
+            a.window.index,
+            &a.window.id,
+        )
+            .cmp(&(
+                !b.window.assistant,
+                &b.window.session_name,
+                b.window.index,
+                &b.window.id,
+            ))
+    });
+    for row in rows {
+        let (agent, team) = match row {
+            Row::Team(agent, summary) => (agent, Some(summary)),
+            Row::Agent(agent) => (agent, None),
+            _ => continue,
+        };
+        if agent.exited {
+            continue;
+        }
+        if let Some(card) = cards
+            .iter_mut()
+            .find(|card| card.window.id == agent.target.window_id)
+            && (card.agent.is_none() || (team.is_some() && card.team.is_none()))
+        {
+            card.agent = Some(agent.clone());
+            card.team = team.cloned();
+        }
+    }
+    cards
+}
+
+fn visible_focus_cards(content_height: usize, notice: Option<&str>, count: usize) -> usize {
+    // Keep the regular list reachable on small terminals. The complete list is
+    // still available through the existing focus picker when it overflows.
+    count
+        .min(9)
+        .min(content_height.saturating_sub(3 + usize::from(notice.is_some())) / 2)
+}
+
+fn render_focus_card(
+    card: &FocusCard,
+    number: usize,
+    selected: bool,
+    width: u16,
+) -> [Line<'static>; 2] {
+    let mut title = if let Some(agent) = &card.agent {
+        let mut agent = agent.clone();
+        if card.window.assistant {
+            agent.thread_name =
+                Some(crate::ui_language::text("Personal assistant", "个人助理").into());
+        }
+        render_row(&Row::Agent(agent), selected, width.saturating_sub(2))
+    } else {
+        icon_title_line(
+            glyph(card.window.state),
+            if card.window.assistant {
+                crate::ui_language::text("Personal assistant", "个人助理")
+            } else {
+                &card.window.name
+            },
+            width.saturating_sub(2),
+            Style::default().fg(state_color(card.window.state)),
+            Style::default().fg(Color::Rgb(235, 235, 245)),
+            selected,
+        )
+    };
+    title
+        .spans
+        .insert(0, Span::styled(format!("{number} "), muted_style()));
+    let subtitle = if let Some(agent) = &card.agent {
+        if let Some(team) = &card.team {
+            render_row(
+                &Row::TeamSub(agent.clone(), AgentSort::Prioritized, team.clone()),
+                selected,
+                width,
+            )
+        } else {
+            render_row(
+                &Row::AgentSub(agent.clone(), AgentSort::Prioritized),
+                selected,
+                width,
+            )
+        }
+    } else {
+        aligned_line(
+            format!("   {}", card.window.session_name),
+            state_name(card.window.state).into(),
+            width,
+            muted_style(),
+            Style::default().fg(state_color(card.window.state)),
+            selected,
+        )
+    };
+    [title, subtitle]
+}
+
+fn render_pinned_card(
+    card: &PinnedCard,
+    number: usize,
+    selected: bool,
+    width: u16,
+) -> [Line<'static>; 2] {
+    match card {
+        PinnedCard::Agent(card) => render_focus_card(card, number, selected, width),
+        PinnedCard::Session(session) => {
+            let mut title = render_row(
+                &Row::Session(session.clone()),
+                selected,
+                width.saturating_sub(2),
+            );
+            title
+                .spans
+                .insert(0, Span::styled(format!("{number} "), muted_style()));
+            let subtitle = render_row(&Row::SessionSub(session.clone()), selected, width);
+            [title, subtitle]
+        }
+    }
+}
+
 fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bool) {
     if detailed {
         let pid = agent
@@ -1068,7 +1642,11 @@ fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bo
         ));
         rows.push(Row::Detail(
             format!("   {}", source_health(&agent)),
-            format!("rule {}", agent.rule_id.as_deref().unwrap_or("—")),
+            format!(
+                "{} {}",
+                crate::ui_language::text("rule", "规则"),
+                agent.rule_id.as_deref().unwrap_or("—")
+            ),
         ));
     }
     rows.extend(
@@ -1081,12 +1659,38 @@ fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bo
 }
 
 fn agent_attention_priority(agent: &AgentSnapshot) -> u8 {
-    match agent.display_state {
+    agent_attention_priority_state(agent.display_state)
+}
+
+fn agent_attention_priority_state(state: DisplayState) -> u8 {
+    match state {
         DisplayState::Blocked => 4,
         DisplayState::Done => 3,
         DisplayState::Working => 2,
         DisplayState::Idle => 1,
         DisplayState::Unknown => 0,
+    }
+}
+
+fn persist_sidebar_view(paths: &Paths, view: SidebarView) -> io::Result<()> {
+    std::fs::create_dir_all(&paths.state_dir)?;
+    std::fs::write(
+        paths.state_dir.join("sidebar-view"),
+        match view {
+            SidebarView::Agents => "agents\n",
+            SidebarView::Sessions => "sessions\n",
+        },
+    )
+}
+
+fn persisted_sidebar_view(paths: &Paths) -> Option<SidebarView> {
+    match std::fs::read_to_string(paths.state_dir.join("sidebar-view"))
+        .ok()?
+        .trim()
+    {
+        "agents" => Some(SidebarView::Agents),
+        "sessions" => Some(SidebarView::Sessions),
+        _ => None,
     }
 }
 
@@ -1193,24 +1797,23 @@ fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Optio
         .map(|agent| agent.instance_id.clone())
 }
 
+fn sort_label(sort: AgentSort) -> &'static str {
+    match sort {
+        AgentSort::Grouped => crate::ui_language::text("grouped", "分组"),
+        AgentSort::Prioritized => crate::ui_language::text("prioritized", "按优先级"),
+    }
+}
+
 fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
     match row {
         Row::Section(label) => Line::from(Span::styled(
-            *label,
+            if *label == "sessions" {
+                crate::ui_language::text("sessions", "会话")
+            } else {
+                *label
+            },
             muted_style().add_modifier(Modifier::BOLD),
         )),
-        Row::AgentSection(sort) => aligned_line(
-            "agents".into(),
-            match sort {
-                AgentSort::Grouped => "grouped",
-                AgentSort::Prioritized => "prioritized",
-            }
-            .into(),
-            width,
-            muted_style().add_modifier(Modifier::BOLD),
-            muted_style(),
-            selected,
-        ),
         Row::AgentGroup(name) => Line::from(Span::styled(
             fit_text(name, usize::from(width)),
             muted_style().add_modifier(Modifier::BOLD),
@@ -1239,11 +1842,15 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             selected,
         ),
         Row::TeamSub(agent, sort, summary) => {
-            let mut text = format!(
-                "   {} worker{}",
-                summary.workers,
-                if summary.workers == 1 { "" } else { "s" }
-            );
+            let mut text = if crate::ui_language::name() == "zh" {
+                format!("   {} 个工作代理", summary.workers)
+            } else {
+                format!(
+                    "   {} worker{}",
+                    summary.workers,
+                    if summary.workers == 1 { "" } else { "s" }
+                )
+            };
             if *sort == AgentSort::Prioritized {
                 text.push_str(&format!(" · {}", agent.target.session_name));
             }
@@ -1328,7 +1935,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
         }
         Row::Conversation(_, conversation) => {
             let status = if conversation.display_state == DisplayState::Blocked {
-                conversation.reason_category.as_deref().unwrap_or("blocked")
+                reason_name(conversation.reason_category.as_deref().unwrap_or("blocked"))
             } else {
                 state_name(conversation.display_state)
             };
@@ -1379,9 +1986,9 @@ fn source_pane() -> Option<String> {
         .filter(|pane| safe_target(pane, '%'))
 }
 
-fn button_style(button: Action, hovered: Option<Action>) -> Style {
+fn button_style(button: Action, hovered: Option<&Action>) -> Style {
     let style = muted_style();
-    if hovered == Some(button) {
+    if hovered == Some(&button) {
         style.add_modifier(Modifier::REVERSED)
     } else {
         style
@@ -1395,77 +2002,261 @@ fn muted_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-fn render_actions(width: u16, hovered: Option<Action>) -> Line<'static> {
-    let gap = usize::from(width).saturating_sub(11);
+/// One layout drives both the Powerline spans and their mouse/touch hit areas.
+struct HeaderLayout {
+    labels: [String; 4],
+    gap: usize,
+}
+
+impl HeaderLayout {
+    fn new(width: u16, view: SidebarView, sort: AgentSort, total: usize, shown: usize) -> Self {
+        let (label, view_icon) = match view {
+            SidebarView::Agents => (crate::ui_language::text("Agents", "智能体"), "󰚩"),
+            SidebarView::Sessions => (crate::ui_language::text("Sessions", "会话"), ""),
+        };
+        let menu = crate::ui_language::text("menu", "菜单");
+        let icon = match sort {
+            AgentSort::Grouped => "",
+            AgentSort::Prioritized => "",
+        };
+        let count = if shown < total {
+            format!("{shown}/{total}")
+        } else {
+            total.to_string()
+        };
+        let sort_text = match (view, sort) {
+            (SidebarView::Sessions, AgentSort::Grouped) => crate::ui_language::text("name", "名称"),
+            _ => sort_label(sort),
+        };
+        let short_sort = match sort {
+            AgentSort::Grouped => sort_text,
+            AgentSort::Prioritized => crate::ui_language::text("priority", "优先"),
+        };
+        let candidates = [
+            [
+                format!(" {view_icon} {label} "),
+                format!("  {count} "),
+                format!(" {icon} {sort_text} "),
+                format!("  {menu} "),
+            ],
+            [
+                format!(" {view_icon} {label} "),
+                format!("  {count} "),
+                format!(" {icon} {sort_text} "),
+                "  ".into(),
+            ],
+            [
+                format!(" {view_icon} {label} "),
+                format!("  {count} "),
+                format!(" {icon} {short_sort} "),
+                "  ".into(),
+            ],
+            [
+                format!(" {view_icon} "),
+                format!("  {total} "),
+                format!(" {icon} "),
+                "  ".into(),
+            ],
+            [
+                view_icon.into(),
+                format!("{total}"),
+                icon.into(),
+                "".into(),
+            ],
+        ];
+        let required = |labels: &[String; 4]| {
+            labels
+                .iter()
+                .map(|label| Span::raw(label.as_str()).width())
+                .sum::<usize>()
+                + 4
+        };
+        let labels = candidates
+            .iter()
+            .find(|labels| required(labels) <= usize::from(width))
+            .cloned()
+            .unwrap_or_else(|| candidates.last().unwrap().clone());
+        let gap = usize::from(width).saturating_sub(required(&labels));
+        Self { labels, gap }
+    }
+
+    fn regions(&self, area: Rect) -> Vec<(Rect, Action)> {
+        if area.height == 0 {
+            return Vec::new();
+        }
+        let widths: Vec<_> = self
+            .labels
+            .iter()
+            .map(|label| Span::raw(label.as_str()).width() + 1)
+            .collect();
+        let starts = [
+            0,
+            widths[0],
+            widths[0] + widths[1] + self.gap,
+            widths[0] + widths[1] + self.gap + widths[2],
+        ];
+        [Action::View, Action::Pinned, Action::Sort, Action::Menu]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, action)| {
+                let start = starts[index].min(usize::from(area.width));
+                let end = (starts[index] + widths[index]).min(usize::from(area.width));
+                (end > start).then(|| {
+                    (
+                        Rect::new(area.x + start as u16, area.y, (end - start) as u16, 1),
+                        action,
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn render_header(
+    width: u16,
+    view: SidebarView,
+    sort: AgentSort,
+    total: usize,
+    shown: usize,
+    hovered: Option<&Action>,
+) -> Line<'static> {
+    let layout = HeaderLayout::new(width, view, sort, total, shown);
+    // Match the tmux status bar: ANSI green, One Dark surfaces, and its
+    // left/right Powerline separators. Hover keeps the separators connected.
+    let background = Color::Rgb(40, 44, 52);
+    let foreground = Color::Rgb(170, 178, 191);
+    let surface = Color::Rgb(62, 68, 82);
+    let raised = Color::Rgb(75, 82, 99);
+    let highlight = Color::Rgb(92, 99, 112);
+    let selected = |action: Action, color: Color| {
+        if hovered == Some(&action) {
+            highlight
+        } else {
+            color
+        }
+    };
+    let first = if hovered == Some(&Action::View) {
+        Color::LightGreen
+    } else {
+        Color::Green
+    };
+    let pinned = selected(Action::Pinned, surface);
+    let sorting = selected(Action::Sort, surface);
+    let menu = selected(Action::Menu, raised);
+    let [agents, count, sort, menu_label] = layout.labels;
     Line::from(vec![
-        Span::styled("+ new", button_style(Action::New, hovered)),
-        Span::raw(" ".repeat(gap)),
-        Span::styled("⋯ menu", button_style(Action::Menu, hovered)),
+        Span::styled(
+            agents,
+            Style::default()
+                .fg(background)
+                .bg(first)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("", Style::default().fg(first).bg(pinned)),
+        Span::styled(count, Style::default().fg(foreground).bg(pinned)),
+        Span::styled("", Style::default().fg(pinned).bg(background)),
+        Span::styled(" ".repeat(layout.gap), Style::default().bg(background)),
+        Span::styled("", Style::default().fg(sorting).bg(background)),
+        Span::styled(sort, Style::default().fg(foreground).bg(sorting)),
+        Span::styled("", Style::default().fg(menu).bg(sorting)),
+        Span::styled(menu_label, Style::default().fg(foreground).bg(menu)),
     ])
 }
 
-fn render_close(width: u16, hovered: Option<Action>) -> Line<'static> {
-    let gap = usize::from(width).saturating_sub(7);
+fn render_close(width: u16, hovered: Option<&Action>) -> Line<'static> {
+    let close = crate::ui_language::text("× close", "× 关闭");
+    let gap = usize::from(width).saturating_sub(Span::raw(close).width());
     Line::from(vec![
         Span::raw(" ".repeat(gap)),
-        Span::styled("× close", button_style(Action::Close, hovered)),
+        Span::styled(close, button_style(Action::Close, hovered)),
     ])
 }
 
-fn action_regions(area: Rect, agent_sort: AgentSort, is_popup: bool) -> Vec<(Rect, Action)> {
+fn action_regions(
+    area: Rect,
+    view: SidebarView,
+    agent_sort: AgentSort,
+    is_popup: bool,
+    focus_cards: &[PinnedCard],
+    total_focus: usize,
+) -> Vec<(Rect, Action)> {
     let mut actions = vec![];
     if area.height > 0 {
-        actions.push((Rect::new(0, 0, area.width.min(5), 1), Action::New));
-        actions.push((
-            Rect::new(area.width.saturating_sub(6), 0, area.width.min(6), 1),
-            Action::Menu,
-        ));
         if is_popup {
             actions.push((
                 Rect::new(
-                    area.width.saturating_sub(7),
+                    area.width.saturating_sub(
+                        Span::raw(crate::ui_language::text("× close", "× 关闭")).width() as u16,
+                    ),
                     area.height - 1,
-                    area.width.min(7),
+                    area.width.min(
+                        Span::raw(crate::ui_language::text("× close", "× 关闭")).width() as u16,
+                    ),
                     1,
                 ),
                 Action::Close,
             ));
         }
     }
-    if area.height > 1 {
-        let width = match agent_sort {
-            AgentSort::Grouped => 7,
-            AgentSort::Prioritized => 11,
+    actions.extend(
+        HeaderLayout::new(area.width, view, agent_sort, total_focus, focus_cards.len())
+            .regions(area),
+    );
+    for (index, card) in focus_cards.iter().enumerate() {
+        let y = 1 + 2 * index as u16;
+        if y < area.height {
+            actions.push((
+                Rect::new(0, y, area.width, 2.min(area.height - y)),
+                card.action(),
+            ));
         }
-        .min(area.width);
-        actions.push((
-            Rect::new(area.width.saturating_sub(width), 1, width, 1),
-            Action::Sort,
-        ));
     }
     actions
 }
 
 fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
     let items = [
-        "-j/k ↑/↓ · move",
-        "-Enter · open / focus",
-        "-Space / ←/→ / h/l · collapse / expand team",
-        "-click team arrow · collapse / expand",
-        "-m · item menu",
-        "-N · projects",
-        "-i · temporary Git tool",
-        "-W · new workspace",
-        "-T · new task in selected session",
-        "-R · rebuild projects",
-        "-s / a · sessions / agents",
-        "-n · next attention",
-        "-d · details",
-        "-r · reload",
-        "-Escape / Ctrl-C / Ctrl-D · close popup",
+        crate::ui_language::text("-j/k ↑/↓ · move", "-j/k ↑/↓ · 移动"),
+        crate::ui_language::text("-Enter · open / focus", "-Enter · 打开 / 切换"),
+        crate::ui_language::text(
+            "-Space / ←/→ / h/l · collapse / expand team",
+            "-Space / ←/→ / h/l · 收起 / 展开团队",
+        ),
+        crate::ui_language::text(
+            "-click team arrow · collapse / expand",
+            "-点击团队箭头 · 收起 / 展开",
+        ),
+        crate::ui_language::text(
+            "-Tab · switch Agents / Sessions",
+            "-Tab · 切换智能体 / 会话",
+        ),
+        crate::ui_language::text("-p · pin / unpin item", "-p · 置顶 / 取消置顶"),
+        crate::ui_language::text("-1–9 · open a pinned item", "-1–9 · 打开置顶项"),
+        crate::ui_language::text("-m · item menu", "-m · 项目菜单"),
+        crate::ui_language::text("-N · projects", "-N · 项目"),
+        crate::ui_language::text("-i · temporary Git tool", "-i · 临时 Git 工具"),
+        crate::ui_language::text("-W · new workspace", "-W · 新建工作区"),
+        crate::ui_language::text(
+            "-T · new task in selected session",
+            "-T · 在选中会话中新建任务",
+        ),
+        crate::ui_language::text("-R · rebuild projects", "-R · 重建项目列表"),
+        crate::ui_language::text("-s / a · sessions / agents", "-s / a · 会话 / 智能体"),
+        crate::ui_language::text("-n · next attention", "-n · 下一条提醒"),
+        crate::ui_language::text("-d · details", "-d · 详情"),
+        crate::ui_language::text("-r · reload", "-r · 重新加载"),
+        crate::ui_language::text(
+            "-Escape / Ctrl-C / Ctrl-D · close popup",
+            "-Escape / Ctrl-C / Ctrl-D · 关闭弹窗",
+        ),
     ]
     .map(|label| (label, "", String::new()));
-    show_menu("Shortcuts", None, false, &items)
+    show_menu(
+        crate::ui_language::text("Shortcuts", "快捷键"),
+        None,
+        false,
+        &items,
+    )
 }
 
 pub(crate) fn agent_kind_name(kind: crate::model::AgentKind) -> &'static str {
@@ -1492,7 +2283,7 @@ pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
     }
     let topic = agent.target.window_name.trim();
     if !meaningful_topic(topic) {
-        "Blank session"
+        crate::ui_language::text("Blank session", "空白会话")
     } else {
         topic
     }
@@ -1528,9 +2319,9 @@ pub(crate) fn agent_status(agent: &AgentSnapshot) -> String {
     let mut status = if agent.display_state == DisplayState::Idle
         && agent.rule_id.as_deref() == Some("codex-queued-question-idle")
     {
-        "idle ?"
+        crate::ui_language::text("idle ?", "空闲 ?")
     } else if agent.display_state == DisplayState::Blocked {
-        agent.reason_category.as_deref().unwrap_or("blocked")
+        reason_name(agent.reason_category.as_deref().unwrap_or("blocked"))
     } else {
         state_name(agent.display_state)
     }
@@ -1543,7 +2334,7 @@ pub(crate) fn agent_status(agent: &AgentSnapshot) -> String {
         crate::model::HookHealth::Healthy => {}
     }
     if agent.stale {
-        status.push_str(" · stale");
+        status.push_str(crate::ui_language::text(" · stale", " · 已过期"));
     }
     status
 }
@@ -1578,20 +2369,24 @@ fn session_context(session: &SessionSnapshot) -> String {
             }
         }
     }
-    parts.push(format!(
-        "{} agent{}",
-        session.agent_count,
-        if session.agent_count == 1 { "" } else { "s" }
-    ));
+    parts.push(if crate::ui_language::name() == "zh" {
+        format!("{} 个智能体", session.agent_count)
+    } else {
+        format!(
+            "{} agent{}",
+            session.agent_count,
+            if session.agent_count == 1 { "" } else { "s" }
+        )
+    });
     parts.join(" · ")
 }
 
 fn source_health(agent: &AgentSnapshot) -> String {
     let source = match agent.state_source {
-        StateSource::Hook => "hook",
-        StateSource::Process => "process",
-        StateSource::Screen => "screen",
-        StateSource::None => "none",
+        StateSource::Hook => crate::ui_language::text("hook", "钩子"),
+        StateSource::Process => crate::ui_language::text("process", "进程"),
+        StateSource::Screen => crate::ui_language::text("screen", "屏幕"),
+        StateSource::None => crate::ui_language::text("none", "无"),
     };
     let marker = match agent.hook_health {
         crate::model::HookHealth::Healthy => "",
@@ -1715,11 +2510,23 @@ pub(crate) fn state_color(state: DisplayState) -> Color {
 
 fn state_name(state: DisplayState) -> &'static str {
     match state {
-        DisplayState::Blocked => "blocked",
-        DisplayState::Done => "done",
-        DisplayState::Working => "working",
-        DisplayState::Idle => "idle",
-        DisplayState::Unknown => "checking",
+        DisplayState::Blocked => crate::ui_language::text("blocked", "等待中"),
+        DisplayState::Done => crate::ui_language::text("done", "已完成"),
+        DisplayState::Working => crate::ui_language::text("working", "进行中"),
+        DisplayState::Idle => crate::ui_language::text("idle", "空闲"),
+        DisplayState::Unknown => crate::ui_language::text("checking", "检测中"),
+    }
+}
+
+fn reason_name(reason: &str) -> &str {
+    match reason {
+        "blocked" => crate::ui_language::text("blocked", "等待中"),
+        "approval" => crate::ui_language::text("approval", "等待批准"),
+        "permission" => crate::ui_language::text("permission", "等待权限"),
+        "input" => crate::ui_language::text("input", "等待输入"),
+        "question" => crate::ui_language::text("question", "等待回答"),
+        "task_error" => crate::ui_language::text("task_error", "任务出错"),
+        _ => reason,
     }
 }
 
@@ -1747,11 +2554,7 @@ fn selection_key(row: &Row) -> Option<String> {
             "conversation:{}:{}",
             agent.instance_id, conversation.id
         )),
-        Row::Section(_)
-        | Row::AgentSection(_)
-        | Row::AgentGroup(_)
-        | Row::Detail(_, _)
-        | Row::Spacer => None,
+        Row::Section(_) | Row::AgentGroup(_) | Row::Detail(_, _) | Row::Spacer => None,
     }
 }
 
@@ -1771,6 +2574,306 @@ fn acknowledge_attention(socket: &std::path::Path, event_id: &str) -> Result<(),
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn selected_window(rows: &[Row], selected: usize) -> Option<&str> {
+    match rows.get(selected)? {
+        Row::Agent(agent)
+        | Row::AgentSub(agent, _)
+        | Row::Team(agent, _)
+        | Row::TeamSub(agent, _, _)
+        | Row::TeamWorker(agent, _)
+        | Row::TeamWorkerSub(agent, _)
+        | Row::Conversation(agent, _) => Some(&agent.target.window_id),
+        Row::Session(session) | Row::SessionSub(session) => {
+            session.last_active_window_id.as_deref()
+        }
+        _ => None,
+    }
+}
+
+fn toggle_focus(
+    server: &ServerIdentity,
+    window: &str,
+    assistant: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !safe_target(window, '@') {
+        return Err("invalid focus window".into());
+    }
+    if assistant {
+        let _ = crate::tmux::Tmux::new(server.clone()).output_with_timeout(
+            &[
+                "display-message",
+                crate::ui_language::text("Personal assistant stays pinned", "个人助理始终置顶"),
+            ],
+            Duration::from_millis(500),
+        );
+        return Ok(());
+    }
+    let unset = format!("set-option -w -u -t {window} @agent_focus");
+    let set = format!("set-option -w -t {window} @agent_focus 1");
+    crate::tmux::Tmux::new(server.clone()).output_with_timeout(
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            window,
+            "#{==:#{@agent_focus},1}",
+            &unset,
+            &set,
+        ],
+        Duration::from_millis(500),
+    )?;
+    Ok(())
+}
+
+fn toggle_session_focus(
+    server: &ServerIdentity,
+    session: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !safe_target(session, '$') {
+        return Ok(());
+    }
+    let target = shell_quote(session);
+    let unset = format!("set-option -u -t {target} @workbench_session_focus");
+    let set = format!("set-option -t {target} @workbench_session_focus 1");
+    crate::tmux::Tmux::new(server.clone()).output_with_timeout(
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            session,
+            "#{==:#{@workbench_session_focus},1}",
+            &unset,
+            &set,
+        ],
+        Duration::from_millis(500),
+    )?;
+    Ok(())
+}
+
+fn activate_focus(card: &FocusCard) -> Result<bool, Box<dyn std::error::Error>> {
+    let pane = card
+        .agent
+        .as_ref()
+        .map(|agent| agent.target.pane_id.as_str())
+        .unwrap_or(&card.window.pane);
+    if !safe_target(&card.window.session_id, '$')
+        || !safe_target(&card.window.id, '@')
+        || !safe_target(pane, '%')
+    {
+        return Ok(false);
+    }
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args([
+        "focus",
+        "--responsive",
+        "--session",
+        &card.window.session_id,
+        "--window",
+        &card.window.id,
+        "--pane",
+        pane,
+    ]);
+    if let Some(source) = source_pane() {
+        command.args(["--source-pane", &source]);
+    }
+    Ok(command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success())
+}
+
+fn activate_pinned(card: &PinnedCard) -> Result<bool, Box<dyn std::error::Error>> {
+    match card {
+        PinnedCard::Agent(card) => activate_focus(card),
+        PinnedCard::Session(session) => activate(&[Row::Session(session.clone())], 0),
+    }
+}
+
+fn show_pinned_menu(
+    cards: &[PinnedCard],
+    view: SidebarView,
+    anchor: Option<(u16, u16)>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let source = source_pane().ok_or("sidebar source pane unavailable")?;
+    let mut owned = Vec::new();
+    for pinned in cards {
+        if let PinnedCard::Session(session) = pinned {
+            if !safe_target(&session.session_id, '$') {
+                continue;
+            }
+            let label: String = session
+                .session_name
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
+            let label = format!(" {}", label.replace('#', "##"));
+            let key = if owned.len() < 9 {
+                (owned.len() + 1).to_string()
+            } else {
+                String::new()
+            };
+            let mut focus = format!(
+                "{} focus --responsive --session {} --source-pane {}",
+                shell_quote(&executable.to_string_lossy()),
+                shell_quote(&session.session_id),
+                source
+            );
+            if let Some(window) = session
+                .last_active_window_id
+                .as_ref()
+                .filter(|id| safe_target(id, '@'))
+            {
+                focus.push_str(&format!(" --window {window}"));
+            }
+            if let Some(pane) = session
+                .last_active_pane_id
+                .as_ref()
+                .filter(|id| safe_target(id, '%'))
+            {
+                focus.push_str(&format!(" --pane {pane}"));
+            }
+            owned.push((label, key, format!("run-shell {}", shell_quote(&focus))));
+            continue;
+        }
+        let PinnedCard::Agent(card) = pinned else {
+            unreachable!()
+        };
+        let pane = card
+            .agent
+            .as_ref()
+            .map(|agent| agent.target.pane_id.as_str())
+            .unwrap_or(&card.window.pane);
+        if !safe_target(&card.window.session_id, '$')
+            || !safe_target(&card.window.id, '@')
+            || !safe_target(pane, '%')
+        {
+            continue;
+        }
+        let title = if card.window.assistant {
+            crate::ui_language::text("Personal assistant", "个人助理")
+        } else {
+            card.agent
+                .as_ref()
+                .and_then(|agent| agent.thread_name.as_deref())
+                .filter(|title| !title.is_empty())
+                .unwrap_or(&card.window.name)
+        };
+        // tmux expands # formats in menu labels; do not interpret task titles
+        // as formats, and keep arbitrary control characters out of the menu.
+        let title: String = title.chars().filter(|ch| !ch.is_control()).collect();
+        let session: String = card
+            .window
+            .session_name
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect();
+        let label = format!(
+            " {} · {}",
+            title.replace('#', "##"),
+            session.replace('#', "##")
+        );
+        let key = if owned.len() < 9 {
+            (owned.len() + 1).to_string()
+        } else {
+            String::new()
+        };
+        let focus = format!(
+            "{} focus --responsive --session {} --window {} --pane {} --source-pane {}",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&card.window.session_id),
+            card.window.id,
+            pane,
+            source,
+        );
+        owned.push((label, key, format!("run-shell {}", shell_quote(&focus))));
+    }
+    if owned.is_empty() {
+        owned.push((
+            match view {
+                SidebarView::Agents => {
+                    crate::ui_language::text("-No pinned agents", "-没有置顶的智能体")
+                }
+                SidebarView::Sessions => {
+                    crate::ui_language::text("-No pinned sessions", "-没有置顶的会话")
+                }
+            }
+            .into(),
+            String::new(),
+            String::new(),
+        ));
+    }
+    let items: Vec<_> = owned
+        .iter()
+        .map(|(label, key, command)| (label.as_str(), key.as_str(), command.clone()))
+        .collect();
+    show_menu(
+        match view {
+            SidebarView::Agents => crate::ui_language::text("Pinned agents", "置顶的智能体"),
+            SidebarView::Sessions => crate::ui_language::text("Pinned sessions", "置顶的会话"),
+        },
+        anchor,
+        false,
+        &items,
+    )
+}
+
+fn show_pinned_card_menu(
+    card: &PinnedCard,
+    anchor: Option<(u16, u16)>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match card {
+        PinnedCard::Agent(card) => show_focus_menu(card, anchor),
+        PinnedCard::Session(session) if safe_target(&session.session_id, '$') => show_menu(
+            crate::ui_language::text("Pinned session", "置顶会话"),
+            anchor,
+            false,
+            &[(
+                crate::ui_language::text("Unpin session", "取消置顶会话"),
+                "p",
+                format!(
+                    "set-option -u -t {} @workbench_session_focus",
+                    shell_quote(&session.session_id)
+                ),
+            )],
+        ),
+        _ => Ok(false),
+    }
+}
+
+fn show_focus_menu(
+    card: &FocusCard,
+    anchor: Option<(u16, u16)>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !safe_target(&card.window.id, '@') {
+        return Ok(false);
+    }
+    if card.window.assistant {
+        return show_menu(
+            crate::ui_language::text("Personal assistant", "个人助理"),
+            anchor,
+            false,
+            &[(
+                crate::ui_language::text("-Always pinned", "-始终置顶"),
+                "",
+                String::new(),
+            )],
+        );
+    }
+    show_menu(
+        crate::ui_language::text("Pinned", "置顶"),
+        anchor,
+        false,
+        &[(
+            crate::ui_language::text("Unpin task", "取消置顶"),
+            "p",
+            format!("set-option -w -u -t {} @agent_focus", card.window.id),
+        )],
+    )
 }
 
 fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
@@ -1877,18 +2980,21 @@ fn show_row_menu(
     rows: &[Row],
     selected: usize,
     anchor: Option<(u16, u16)>,
+    focused: &FocusWindows,
+    focused_sessions: &FocusSessions,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session))
             if safe_target(&session.session_id, '$') =>
         {
+            let pinned = focused_sessions.contains(&session.session_id);
             show_menu(
-                "session",
+                crate::ui_language::text("session", "会话"),
                 anchor,
                 false,
                 &[
                     (
-                        "Switch",
+                        crate::ui_language::text("Switch", "切换"),
                         "s",
                         format!(
                             "switch-client -c {} -t {}",
@@ -1897,7 +3003,26 @@ fn show_row_menu(
                         ),
                     ),
                     (
-                        "New task",
+                        if pinned {
+                            crate::ui_language::text("Unpin session", "取消置顶会话")
+                        } else {
+                            crate::ui_language::text("Pin session", "置顶会话")
+                        },
+                        "p",
+                        if pinned {
+                            format!(
+                                "set-option -u -t {} @workbench_session_focus",
+                                shell_quote(&session.session_id)
+                            )
+                        } else {
+                            format!(
+                                "set-option -t {} @workbench_session_focus 1",
+                                shell_quote(&session.session_id)
+                            )
+                        },
+                    ),
+                    (
+                        crate::ui_language::text("New task", "新建任务"),
                         "n",
                         format!(
                             "run-shell -b {}",
@@ -1910,20 +3035,22 @@ fn show_row_menu(
                         ),
                     ),
                     (
-                        "Rename",
+                        crate::ui_language::text("Rename", "重命名"),
                         "r",
                         format!(
-                            "command-prompt -t {} -p 'Rename session:' \"rename-session -t {} '%%'\"",
+                            "command-prompt -t {} -p '{}' \"rename-session -t {} '%%'\"",
                             shell_quote(&current_client()?),
+                            crate::ui_language::text("Rename session:", "重命名会话："),
                             session.session_id
                         ),
                     ),
                     (
-                        "Close",
+                        crate::ui_language::text("Close", "关闭"),
                         "x",
                         format!(
-                            "confirm-before -t {} -p 'Close session?' 'kill-session -t {}'",
+                            "confirm-before -t {} -p '{}' 'kill-session -t {}'",
                             shell_quote(&current_client()?),
+                            crate::ui_language::text("Close session?", "关闭会话？"),
                             session.session_id
                         ),
                     ),
@@ -1943,46 +3070,84 @@ fn show_row_menu(
             let focus = format!(
                 "{} focus --responsive --session {} --window {} --pane {} --source-pane {}",
                 shell_quote(&executable.to_string_lossy()),
-                agent.target.session_id,
+                shell_quote(&agent.target.session_id),
                 agent.target.window_id,
                 agent.target.pane_id,
                 source,
             );
+            if !safe_target(&agent.target.window_id, '@') {
+                return Ok(false);
+            }
+            let (focus_label, focus_key, focus_command) = if focused
+                .get(&agent.target.window_id)
+                .is_some_and(|item| item.assistant)
+            {
+                (
+                    crate::ui_language::text(
+                        "-Personal assistant stays pinned",
+                        "-个人助理始终置顶",
+                    ),
+                    "",
+                    String::new(),
+                )
+            } else if focused.contains_key(&agent.target.window_id) {
+                (
+                    crate::ui_language::text("Unpin task", "取消置顶"),
+                    "p",
+                    format!(
+                        "set-option -w -u -t {} @agent_focus",
+                        agent.target.window_id
+                    ),
+                )
+            } else {
+                (
+                    crate::ui_language::text("Pin task", "置顶任务"),
+                    "p",
+                    format!("set-option -w -t {} @agent_focus 1", agent.target.window_id),
+                )
+            };
             show_menu(
-                "agent",
+                crate::ui_language::text("agent", "智能体"),
                 anchor,
                 false,
                 &[
-                    ("Focus", "f", format!("run-shell {}", shell_quote(&focus))),
                     (
-                        "Rename pane",
+                        crate::ui_language::text("Focus", "切换到任务"),
+                        "f",
+                        format!("run-shell {}", shell_quote(&focus)),
+                    ),
+                    (focus_label, focus_key, focus_command),
+                    (
+                        crate::ui_language::text("Rename pane", "重命名窗格"),
                         "r",
                         format!(
-                            "command-prompt -p 'Rename pane:' \"select-pane -Z -t {} -T '%%'\"",
+                            "command-prompt -p '{}' \"select-pane -Z -t {} -T '%%'\"",
+                            crate::ui_language::text("Rename pane:", "重命名窗格："),
                             agent.target.pane_id
                         ),
                     ),
                     (
-                        "Split right",
+                        crate::ui_language::text("Split right", "向右分屏"),
                         "h",
                         format!("split-window -h -t {}", agent.target.pane_id),
                     ),
                     (
-                        "Split down",
+                        crate::ui_language::text("Split down", "向下分屏"),
                         "v",
                         format!("split-window -v -t {}", agent.target.pane_id),
                     ),
                     (
-                        "Zoom",
+                        crate::ui_language::text("Zoom", "缩放窗格"),
                         "z",
                         format!("resize-pane -Z -t {}", agent.target.pane_id),
                     ),
                     (
-                        "Close pane",
+                        crate::ui_language::text("Close pane", "关闭窗格"),
                         "x",
                         format!(
-                            "confirm-before -t {} -p 'Close pane?' 'kill-pane -t {}'",
+                            "confirm-before -t {} -p '{}' 'kill-pane -t {}'",
                             shell_quote(&current_client()?),
+                            crate::ui_language::text("Close pane?", "关闭窗格？"),
                             agent.target.pane_id
                         ),
                     ),
@@ -1993,13 +3158,7 @@ fn show_row_menu(
     }
 }
 
-fn show_global_menu(
-    new_only: bool,
-    anchor: Option<(u16, u16)>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    if new_only {
-        return run_session_picker();
-    }
+fn show_global_menu(anchor: Option<(u16, u16)>) -> Result<bool, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?.display().to_string();
     let executable = shell_quote(&executable);
     let sidebar_pane = source_pane().ok_or("sidebar source pane unavailable")?;
@@ -2022,7 +3181,7 @@ fn show_global_menu(
     };
     let mut items = vec![
         (
-            "New",
+            crate::ui_language::text("New", "新建"),
             "N",
             format!(
                 "run-shell -b {}",
@@ -2033,7 +3192,7 @@ fn show_global_menu(
             ),
         ),
         (
-            "Temporary Git tool",
+            crate::ui_language::text("Temporary Git tool", "临时 Git 工具"),
             "i",
             format!(
                 "run-shell -b {}",
@@ -2044,7 +3203,7 @@ fn show_global_menu(
             ),
         ),
         (
-            "New workspace",
+            crate::ui_language::text("New workspace", "新建工作区"),
             "W",
             format!(
                 "run-shell -b {}",
@@ -2055,7 +3214,7 @@ fn show_global_menu(
             ),
         ),
         (
-            "New task",
+            crate::ui_language::text("New task", "新建任务"),
             "T",
             format!(
                 "run-shell -b {}",
@@ -2066,20 +3225,32 @@ fn show_global_menu(
             ),
         ),
         (
-            "Rebuild projects",
+            crate::ui_language::text("Rebuild projects", "重建项目列表"),
             "R",
             "run-shell -b tmux-agent-workbench projects rebuild".into(),
         ),
-        ("Details", "d", format!("send-keys -t {sidebar_pane} d")),
-        ("Sessions", "s", navigation("session")?),
-        ("Agents", "a", navigation("agent")?),
         (
-            "Next",
+            crate::ui_language::text("Details", "详情"),
+            "d",
+            format!("send-keys -t {sidebar_pane} d"),
+        ),
+        (
+            crate::ui_language::text("Sessions", "会话"),
+            "s",
+            navigation("session")?,
+        ),
+        (
+            crate::ui_language::text("Agents", "智能体"),
+            "a",
+            navigation("agent")?,
+        ),
+        (
+            crate::ui_language::text("Next", "下一条提醒"),
             "n",
             format!("run-shell \"{} attention next\"", executable),
         ),
         (
-            "Reload",
+            crate::ui_language::text("Reload", "重新加载"),
             "r",
             format!("run-shell \"{} reload\"", executable),
         ),
@@ -2088,7 +3259,7 @@ fn show_global_menu(
         // Once this popup closes there is no sidebar pane to receive these
         // synthetic keys. The direct keyboard shortcuts remain available in
         // the TUI; omit only the menu entries whose target would be stale.
-        items.retain(|(label, _, _)| *label != "Details");
+        items.retain(|(label, _, _)| *label != crate::ui_language::text("Details", "详情"));
     }
     show_menu("workbench", anchor, anchor.is_some(), &items)
 }
@@ -2233,7 +3404,7 @@ fn show_menu(
     title: &str,
     anchor: Option<(u16, u16)>,
     pointer_bottom_right: bool,
-    items: &[(&'static str, &'static str, String)],
+    items: &[(&str, &str, String)],
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&pane, '%') {
@@ -2363,55 +3534,58 @@ mod tests {
     #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {
         let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
-        let viewport = SidebarViewport::new(10, rows.len(), Some("stale · reconnecting"));
+        let viewport = SidebarViewport::new(10, Some("stale · reconnecting"), 0);
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
-            rows[viewport.row_at(5, 0, rows.len()).unwrap()],
+            rows[viewport.row_at(4, 0, rows.len()).unwrap()],
             "A subtitle"
         );
-        assert_eq!(rows[viewport.row_at(6, 0, rows.len()).unwrap()], "agent B");
-        assert_eq!(viewport.row_at(8, 0, rows.len()), None);
+        assert_eq!(rows[viewport.row_at(5, 0, rows.len()).unwrap()], "agent B");
+        assert_eq!(viewport.row_at(9, 0, rows.len()), None);
     }
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Eight content lines: actions + heading + banner + divider + three rows + overflow;
+        // Eight lines include the header, a banner, divider and rows;
         // the popup footer follows and must not activate any hidden row.
-        let viewport = SidebarViewport::new(8, 20, Some("stale · reconnecting"));
-        assert_eq!(viewport.row_height, 3);
+        let viewport = SidebarViewport::new(8, Some("stale · reconnecting"), 0);
+        assert_eq!(viewport.row_height, 5);
         assert_eq!(viewport.row_at(0, 7, 20), None);
         assert_eq!(viewport.row_at(1, 7, 20), None);
         assert_eq!(viewport.row_at(2, 7, 20), None);
-        assert_eq!(viewport.row_at(3, 7, 20), None);
-        assert_eq!(viewport.row_at(4, 7, 20), Some(7));
-        assert_eq!(viewport.row_at(6, 7, 20), Some(9));
-        for row in [7, 8, 9] {
+        assert_eq!(viewport.row_at(3, 7, 20), Some(7));
+        assert_eq!(viewport.row_at(4, 7, 20), Some(8));
+        assert_eq!(viewport.row_at(5, 7, 20), Some(9));
+        assert_eq!(viewport.row_at(6, 7, 20), Some(10));
+        assert_eq!(viewport.row_at(7, 7, 20), Some(11));
+        for row in [8, 9] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
     }
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(7, 4, None);
-        assert_eq!(normal.row_at(6, 0, 4), Some(3));
-        let stale = SidebarViewport::new(7, 4, Some("stale · reconnecting"));
-        assert_eq!(stale.row_height, 2);
-        assert_eq!(stale.row_at(6, 0, 4), None);
-        let overflow = SidebarViewport::new(6, 10, None);
-        assert_eq!(overflow.row_at(4, 0, 10), Some(1));
-        assert_eq!(overflow.row_at(5, 0, 10), None);
+        let normal = SidebarViewport::new(8, None, 0);
+        assert_eq!(normal.row_at(7, 0, 6), Some(5));
+        let stale = SidebarViewport::new(8, Some("stale · reconnecting"), 0);
+        assert_eq!(stale.row_height, 5);
+        assert_eq!(stale.row_at(7, 0, 6), Some(4));
+        let overflow = SidebarViewport::new(6, None, 0);
+        assert_eq!(overflow.row_at(2, 0, 10), Some(0));
+        assert_eq!(overflow.row_at(5, 0, 10), Some(3));
+        assert_eq!(overflow.row_at(6, 0, 10), None);
     }
 
     #[test]
     fn empty_disconnected_and_tiny_viewports_have_no_agent_targets() {
         for height in [0, 1] {
-            let viewport = SidebarViewport::new(height, 10, Some("stale · reconnecting"));
+            let viewport = SidebarViewport::new(height, Some("stale · reconnecting"), 0);
             for row in 0..3 {
                 assert_eq!(viewport.row_at(row, 0, 10), None);
             }
         }
-        assert_eq!(SidebarViewport::new(10, 0, None).row_at(0, 0, 0), None);
-        let disconnected = SidebarViewport::new(10, 4, Some("disconnected"));
+        assert_eq!(SidebarViewport::new(10, None, 0).row_at(0, 0, 0), None);
+        let disconnected = SidebarViewport::new(10, Some("disconnected"), 0);
         assert_eq!(disconnected.row_at(1, 0, 4), None);
     }
 
@@ -2475,6 +3649,185 @@ mod tests {
     }
 
     #[test]
+    fn focus_cards_keep_teams_together_and_show_unobserved_windows() {
+        let (snapshot, teams) = team_fixture();
+        let agent = &snapshot.agents[1];
+        let marked = FocusWindow {
+            id: "@9".into(),
+            session_id: "$1".into(),
+            session_name: "zzz direction".into(),
+            name: "team task".into(),
+            index: 1,
+            pane: "%2".into(),
+            state: DisplayState::Working,
+            assistant: true,
+        };
+        let shell = FocusWindow {
+            id: "@10".into(),
+            session_id: "$2".into(),
+            session_name: "other direction".into(),
+            name: "shell task".into(),
+            index: 2,
+            pane: "%10".into(),
+            state: DisplayState::Idle,
+            assistant: false,
+        };
+        let focused = FocusWindows::from([(marked.id.clone(), marked), (shell.id.clone(), shell)]);
+        for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+            let cards = build_focus_cards(&rows, &focused);
+            assert_eq!(cards.len(), 2);
+            assert_eq!(
+                cards[0].agent.as_ref().unwrap().instance_id,
+                agent.instance_id
+            );
+            assert_eq!(cards[0].team.as_ref().unwrap().workers, 2);
+            crate::ui_language::set_language(Some("en"));
+            assert!(
+                render_focus_card(&cards[0], 1, false, 50)[0]
+                    .to_string()
+                    .contains("Personal assistant")
+            );
+            crate::ui_language::set_language(None);
+            assert!(cards[1].agent.is_none());
+            let [title, subtitle] = render_focus_card(&cards[1], 2, false, 50);
+            assert!(title.to_string().contains("shell task"));
+            assert!(subtitle.to_string().contains("other direction"));
+        }
+    }
+
+    #[test]
+    fn focus_actions_stay_at_the_top_when_the_ordinary_list_scrolls() {
+        let (snapshot, teams) = team_fixture();
+        let agent = snapshot.agents[1].clone();
+        let window = FocusWindow {
+            id: "@9".into(),
+            session_id: "$1".into(),
+            session_name: "direction".into(),
+            name: "team task".into(),
+            index: 1,
+            pane: "%2".into(),
+            state: DisplayState::Working,
+            assistant: false,
+        };
+        let focused = FocusWindows::from([(window.id.clone(), window)]);
+        let rows = build_team_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &HashSet::new(),
+        );
+        let cards: Vec<_> = build_focus_cards(&rows, &focused)
+            .into_iter()
+            .map(PinnedCard::Agent)
+            .collect();
+        let actions = action_regions(
+            Rect::new(0, 0, 36, 16),
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            false,
+            &cards,
+            cards.len(),
+        );
+        let viewport = SidebarViewport::new(16, None, cards.len());
+        let mut list = NavigationList::<Action>::default();
+        list.replace_rows((0..30).map(|i| Some(i.to_string())).collect());
+        list.set_viewport(Rect::new(
+            0,
+            viewport.first_row as u16,
+            36,
+            viewport.row_height as u16,
+        ));
+        list.scroll_by(12);
+        for row in [1, 2] {
+            assert_eq!(
+                list.hit(1, row, &actions),
+                Some(Hit::Action(Action::Focus("@9".into())))
+            );
+        }
+        assert_eq!(list.hit(1, 0, &actions), Some(Hit::Action(Action::View)));
+        assert_eq!(list.hit(35, 0, &actions), Some(Hit::Action(Action::Menu)));
+        assert_eq!(selected_window(&[Row::Agent(agent)], 0), Some("@9"));
+        assert_eq!(visible_focus_cards(12, None, 3), 3);
+        assert!(visible_focus_cards(6, None, 3) < 3);
+    }
+
+    #[test]
+    fn pinned_header_and_sort_use_one_language_and_match_hit_regions() {
+        for (language, agents, sort) in [
+            ("en", "Agents", "prioritized"),
+            ("zh-CN", "智能体", "按优先级"),
+            ("ja-JP", "Agents", "prioritized"),
+        ] {
+            crate::ui_language::set_language(Some(language));
+            let heading =
+                render_header(48, SidebarView::Agents, AgentSort::Prioritized, 2, 2, None)
+                    .to_string();
+            assert!(
+                heading.contains(agents) && heading.contains(" 2") && heading.contains(sort),
+                "{heading}"
+            );
+            assert!(heading.contains('') && heading.contains(''), "{heading}");
+            for width in [18, 26, 36, 48] {
+                let actions = action_regions(
+                    Rect::new(0, 0, width, 10),
+                    SidebarView::Agents,
+                    AgentSort::Prioritized,
+                    false,
+                    &[],
+                    2,
+                );
+                let mut list = NavigationList::<Action>::default();
+                list.replace_rows(vec![]);
+                for expected in [Action::View, Action::Pinned, Action::Sort, Action::Menu] {
+                    let (area, _) = actions
+                        .iter()
+                        .find(|(_, action)| *action == expected)
+                        .unwrap();
+                    assert_eq!(
+                        list.hit(area.x + area.width / 2, 0, &actions),
+                        Some(Hit::Action(expected))
+                    );
+                }
+                assert_eq!(
+                    list.hit(width - 1, 0, &actions),
+                    Some(Hit::Action(Action::Menu))
+                );
+            }
+        }
+        crate::ui_language::set_language(None);
+    }
+
+    #[test]
+    fn saved_assistant_identity_matches_only_one_live_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let path = paths.state_dir.join("personal-assistant.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"kind":"codex","thread_id":"test-thread"}"#,
+        )
+        .unwrap();
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        snapshot.agents[0].hook_session_id = Some("test-thread".into());
+        assert_eq!(
+            assistant_window(&paths, &snapshot).as_deref(),
+            Some(snapshot.agents[0].target.window_id.as_str())
+        );
+        let mut duplicate = snapshot.agents[0].clone();
+        duplicate.target.window_id = "@99".into();
+        snapshot.agents.push(duplicate);
+        assert!(assistant_window(&paths, &snapshot).is_none());
+        snapshot.agents[1].exited = true;
+        assert!(assistant_window(&paths, &snapshot).is_some());
+        std::fs::write(path, "{}").unwrap();
+        assert!(assistant_window(&paths, &snapshot).is_none());
+    }
+
+    #[test]
     fn stopped_workers_disappear_without_hiding_done_or_independent_agents() {
         let (mut snapshot, mut teams) = team_fixture();
         snapshot.agents[0].exited = true;
@@ -2515,6 +3868,27 @@ mod tests {
             .unwrap();
         assert_eq!(summary.workers, 1);
         assert!(!rows.iter().any(|row| matches!(row, Row::Agent(a) | Row::TeamWorker(a, _) if a.instance_id == "worker-a")));
+    }
+
+    #[test]
+    fn verified_lead_remains_a_team_with_no_live_workers() {
+        let (mut snapshot, mut teams) = team_fixture();
+        snapshot
+            .agents
+            .retain(|agent| !agent.instance_id.starts_with("worker-"));
+        teams.retain(|_, member| member.name == "lead");
+        for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+            let summary = rows
+                .iter()
+                .find_map(|row| match row {
+                    Row::Team(agent, summary) if agent.instance_id == "lead" => Some(summary),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(summary.workers, 0);
+            assert!(!rows.iter().any(|row| matches!(row, Row::TeamWorker(..))));
+        }
     }
 
     #[test]
@@ -2735,10 +4109,18 @@ mod tests {
             &teams,
             &HashSet::new(),
         );
-        assert!(!rows.iter().any(|r| matches!(r, Row::Team(..))));
+        let summary = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Team(_, summary) => Some(summary),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary.workers, 0);
+        assert!(!rows.iter().any(|r| matches!(r, Row::TeamWorker(..))));
         assert_eq!(
             rows.iter().filter(|r| matches!(r, Row::Agent(..))).count(),
-            4
+            3
         );
     }
 
@@ -2793,7 +4175,6 @@ mod tests {
             .position(|row| matches!(row, Row::Section("sessions")))
             .unwrap();
         assert!(matches!(rows.first(), Some(Row::AgentGroup(_))));
-        assert!(!rows.iter().any(|row| matches!(row, Row::AgentSection(_))));
         assert!(matches!(rows.get(sessions - 1), Some(Row::Spacer)));
         assert!(!matches!(rows.get(sessions - 2), Some(Row::Spacer)));
     }
@@ -2801,12 +4182,18 @@ mod tests {
     #[test]
     fn top_actions_span_left_and_right_without_help() {
         let list = NavigationList::<Action>::default();
-        let actions = action_regions(Rect::new(0, 0, 40, 20), AgentSort::Grouped, true);
-        assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::New)));
-        assert_eq!(list.hit(20, 0, &actions), None);
-        assert_eq!(list.hit(34, 0, &actions), Some(Hit::Action(Action::Menu)));
+        let actions = action_regions(
+            Rect::new(0, 0, 40, 20),
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            true,
+            &[],
+            0,
+        );
+        assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::View)));
+        assert_eq!(list.hit(20, 1, &actions), None);
+        assert_eq!(list.hit(39, 0, &actions), Some(Hit::Action(Action::Menu)));
         assert_eq!(list.hit(33, 19, &actions), Some(Hit::Action(Action::Close)));
-        assert_eq!(list.hit(38, 1, &actions), Some(Hit::Action(Action::Sort)));
     }
 
     #[test]
@@ -2841,7 +4228,6 @@ mod tests {
             .filter_map(|row| match row {
                 Row::Session(session) => Some(session.session_id),
                 Row::Section(_)
-                | Row::AgentSection(_)
                 | Row::AgentGroup(_)
                 | Row::SessionSub(_)
                 | Row::Agent(_)
@@ -3135,10 +4521,7 @@ mod tests {
     #[test]
     fn structural_labels_and_secondary_actions_use_theme_muted_without_dim() {
         let section = render_row(&Row::Section("sessions"), false, 40);
-        let agent_section = render_row(&Row::AgentSection(AgentSort::Prioritized), false, 40);
-        let actions = render_actions(40, None);
-
-        for line in [section, agent_section, actions] {
+        for line in [section] {
             for span in line
                 .spans
                 .iter()

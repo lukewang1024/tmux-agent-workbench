@@ -98,9 +98,26 @@ pub fn ingest_detached(
     } else {
         serde_json::from_slice(input)?
     };
+    // Trae emits UserPromptSubmit from native child agents too. The child's
+    // hook runs under the same process as its parent, so PID alone cannot
+    // identify a terminal window for it.
+    if agent == AgentKind::Trae
+        && payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(json!({}));
+    }
     let mut report = detached_report_from_payload(agent, event_name, &payload)?;
     if report.agent_pid.is_none() {
         report.agent_pid = crate::process::current_agent_ancestor(agent);
+    }
+    // Older running daemons can associate an unbound session by cwd. Shared
+    // backends make that unsafe, so enforce the stronger identity rule
+    // here as well; this also protects rolling upgrades without restarting it.
+    if matches!(agent, AgentKind::Trae | AgentKind::Opencode) && report.agent_pid.is_none() {
+        return Ok(json!({}));
     }
     let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
     // Global hooks may run outside tmux; an unmatched daemon is a normal no-op.
@@ -144,8 +161,8 @@ pub fn ingest_detached(
         }
     }
     if accepted == 0 && !rejections.is_empty() {
-        return Err(format!("no Workbench daemon could associate the Codex hook with a live pane (session={}, pid={:?}): {}",
-            report.session_id, report.agent_pid, rejections.join("; ")).into());
+        return Err(format!("no Workbench daemon could associate the {:?} hook with a live pane (session={}, pid={:?}): {}",
+            report.agent, report.session_id, report.agent_pid, rejections.join("; ")).into());
     }
     Ok(output)
 }
@@ -489,12 +506,11 @@ fn install_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
         ),
         HookTarget::Traex => {
             let paths = trae_hook_paths()?;
-            merge_json_hooks(&paths[0], "trae", false, true)?;
-            // Older Trae CLI releases read the legacy path. Keep an existing
-            // legacy config compatible while making ~/.trae/hooks.json the
-            // canonical path used by current TraeCode CLI releases.
-            if paths[1].exists() {
-                merge_json_hooks(&paths[1], "trae", false, true)?;
+            // Modern Trae CLI reads the CLI sidecar. Preserve the older IDE
+            // sidecar when it exists, without creating it unnecessarily.
+            merge_json_hooks(&paths[1], "trae", false, true)?;
+            if paths[0] != paths[1] && paths[0].exists() {
+                merge_json_hooks(&paths[0], "trae", false, true)?;
             }
             Ok(())
         }
@@ -525,9 +541,7 @@ fn remove_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
         HookTarget::Codex => merge_codex(&codex_home()?.join("config.toml"), true),
         HookTarget::Opencode => {
             let path = config_home()?.join("opencode/plugins/tmux-agent-workbench.js");
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
+            remove_opencode(&path)?;
             Ok(())
         }
     }
@@ -582,11 +596,42 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
         if !exact {
             return Ok("missing or duplicate Workbench entries".into());
         }
+        if target == HookTarget::Claude
+            && (!content.contains("tmux-agent-workbench hook track claude start")
+                || !content.contains("tmux-agent-workbench hook track claude end"))
+        {
+            return Ok("missing assistant session tracker".into());
+        }
     }
     if target == HookTarget::Codex {
         let doc = content.parse::<DocumentMut>()?;
         if let Some(issue) = codex_hooks_issue(&doc, &path) {
             return Ok(issue.into());
+        }
+    }
+    if target == HookTarget::Opencode {
+        let tracker = opencode_tracker_path(&path);
+        if !tracker.exists() || !fs::read_to_string(tracker)?.contains(HOOK_ID) {
+            return Ok("missing assistant session tracker".into());
+        }
+        let v2 = opencode_v2_path(&path);
+        if !v2.exists() || !fs::read_to_string(&v2)?.contains(HOOK_ID) {
+            return Ok("missing OpenCode v2 plugin".into());
+        }
+        let tui = v2.with_file_name("tui.js");
+        let manifest = v2.with_file_name("package.json");
+        if !tui.exists() || !fs::read_to_string(tui)?.contains(HOOK_ID) {
+            return Ok("missing OpenCode v2 session tracker".into());
+        }
+        let package = fs::read_to_string(manifest)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok());
+        if package
+            .as_ref()
+            .and_then(|value| value["exports"]["./tui"].as_str())
+            != Some("./tui.js")
+        {
+            return Ok("missing OpenCode v2 tracker package entry".into());
         }
     }
     let count = content.matches(&needle).count();
@@ -601,20 +646,20 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn trae_hook_paths() -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
-    let home = home()?;
-    Ok([
-        home.join(".trae/hooks.json"),
-        home.join(".trae/cli/hooks.json"),
-    ])
+    let root = std::env::var_os("TRAE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(home()?.join(".trae"));
+    let cli = std::env::var_os("TRAECLI_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("cli"));
+    Ok([root.join("hooks.json"), cli.join("hooks.json")])
 }
 
 fn trae_hook_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let paths = trae_hook_paths()?;
-    if paths[0].exists() || !paths[1].exists() {
-        Ok(paths[0].clone())
-    } else {
-        Ok(paths[1].clone())
-    }
+    Ok(paths[1].clone())
 }
 
 const EVENTS: [(&str, &str); 5] = [
@@ -665,7 +710,28 @@ fn merge_json_hooks(
                 .contains("tmux-agent-workbench hook ingest")
         });
         if install && !remove {
-            list.push(json!({"matcher":"*","hooks":[{"type":"command","command":format!("tmux-agent-workbench hook ingest {agent} {event}"),"timeout":3}],"_workbench":HOOK_ID}));
+            let mut commands = vec![
+                json!({"type":"command","command":format!("tmux-agent-workbench hook ingest {agent} {event}"),"timeout":3}),
+            ];
+            if agent == "claude" && key == "SessionStart" {
+                commands.push(json!({"type":"command","command":"tmux-agent-workbench hook track claude start","timeout":3}));
+            }
+            list.push(json!({"matcher":"*","hooks":commands,"_workbench":HOOK_ID}));
+        }
+    }
+    if agent == "claude" {
+        let list = hooks
+            .entry("SessionEnd")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or("hook event must be an array")?;
+        list.retain(|entry| {
+            !entry
+                .to_string()
+                .contains("tmux-agent-workbench hook track claude end")
+        });
+        if install && !remove {
+            list.push(json!({"matcher":"*","hooks":[{"type":"command","command":"tmux-agent-workbench hook track claude end","timeout":3}],"_workbench":HOOK_ID}));
         }
     }
     atomic_json(path, &root)
@@ -767,18 +833,87 @@ fn codex_entry_is_workbench(entry: &Table) -> bool {
 }
 
 fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let content = format!(
-        r#"// {HOOK_ID}
-const {{ spawn }} = require("node:child_process");
-module.exports = async () => ({{ event }}) => {{
-  const names = {{"session.created":"SessionStart","session.busy":"busy","session.idle":"idle","session.error":"session-error","permission.asked":"permission-asked","tool.after":"activity"}};
-  const mapped = names[event?.type]; if (!mapped) return;
-  const child = spawn("tmux-agent-workbench", ["hook","ingest","opencode",mapped], {{stdio:["pipe","ignore","ignore"], env:process.env}});
-  child.stdin.end(JSON.stringify(event));
-}};
-"#
+    let tracker = opencode_tracker_path(path);
+    let v2 = opencode_v2_path(path);
+    let tui = v2.with_file_name("tui.js");
+    let manifest = v2.with_file_name("package.json");
+    for candidate in [
+        path,
+        tracker.as_path(),
+        v2.as_path(),
+        tui.as_path(),
+        manifest.as_path(),
+    ] {
+        if candidate.exists() && !fs::read_to_string(candidate)?.contains(HOOK_ID) {
+            return Err(format!(
+                "refusing to replace non-Workbench plugin {}",
+                candidate.display()
+            )
+            .into());
+        }
+    }
+    let content = include_str!("../lib/opencode-workbench.js");
+    // Preserve the upstream tracker body while exporting an entry point each
+    // OpenCode generation can load. V2 tracks the actual foreground TUI route
+    // separately, since its server receives events for background sessions too.
+    let tracker_source = include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js");
+    if !tracker_source.contains("export const SessionTracker =") {
+        return Err(
+            "OpenCode tracker entry point changed; refusing incompatible installation".into(),
+        );
+    }
+    let tracker_source =
+        tracker_source.replacen("export const SessionTracker =", "const SessionTracker =", 1);
+    let tracker_content = format!(
+        "// {HOOK_ID}\n{tracker_source}\nexport default {{ id: \"workbench-tracker-v1-compat\", server: SessionTracker, setup: async () => {{}} }};\n"
     );
-    atomic_write(path, content.as_bytes())
+    atomic_write(path, content.as_bytes())?;
+    atomic_write(&tracker, tracker_content.as_bytes())?;
+    atomic_write(
+        &v2,
+        include_str!("../lib/opencode-workbench-v2.js").as_bytes(),
+    )?;
+    atomic_write(
+        &tui,
+        include_str!("../lib/opencode-session-track-v2.js").as_bytes(),
+    )?;
+    atomic_write(
+        &manifest,
+        b"{\n  \"name\": \"tmux-agent-workbench-v1\",\n  \"type\": \"module\",\n  \"exports\": { \".\": \"./index.js\", \"./tui\": \"./tui.js\" }\n}\n",
+    )
+}
+
+fn opencode_tracker_path(path: &Path) -> PathBuf {
+    path.with_file_name("tmux-agent-workbench-resurrect.js")
+}
+
+fn opencode_v2_path(path: &Path) -> PathBuf {
+    path.with_file_name("tmux-agent-workbench-v2")
+        .join("index.js")
+}
+
+fn remove_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let tracker = opencode_tracker_path(path);
+    let v2 = opencode_v2_path(path);
+    let tui = v2.with_file_name("tui.js");
+    let manifest = v2.with_file_name("package.json");
+    for candidate in [
+        path,
+        tracker.as_path(),
+        v2.as_path(),
+        tui.as_path(),
+        manifest.as_path(),
+    ] {
+        if candidate.exists() && fs::read_to_string(candidate)?.contains(HOOK_ID) {
+            fs::remove_file(candidate)?;
+        }
+    }
+    if let Some(directory) = v2.parent() {
+        if directory.exists() {
+            let _ = fs::remove_dir(directory);
+        }
+    }
+    Ok(())
 }
 
 fn atomic_json(path: &Path, value: &Value) -> Result<(), Box<dyn std::error::Error>> {
@@ -846,12 +981,58 @@ mod tests {
         merge_json_hooks(&path, "claude", false, true).unwrap();
         let installed = fs::read_to_string(&path).unwrap();
         assert_eq!(installed.matches("hook ingest claude Stop").count(), 1);
+        assert_eq!(installed.matches("hook track claude start").count(), 1);
+        assert_eq!(installed.matches("hook track claude end").count(), 1);
         assert!(installed.contains("peon-ping"));
         assert!(installed.contains("\"theme\": \"dark\""));
         merge_json_hooks(&path, "claude", true, false).unwrap();
         let removed = fs::read_to_string(&path).unwrap();
         assert!(!removed.contains("tmux-agent-workbench hook ingest"));
+        assert!(!removed.contains("tmux-agent-workbench hook track claude"));
         assert!(removed.contains("peon-ping"));
+    }
+
+    #[test]
+    fn opencode_install_includes_tracker_and_preserves_foreign_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tmux-agent-workbench.js");
+        let tracker = opencode_tracker_path(&path);
+        let v2 = opencode_v2_path(&path);
+        let tui = v2.with_file_name("tui.js");
+        let manifest = v2.with_file_name("package.json");
+        install_opencode(&path).unwrap();
+        install_opencode(&path).unwrap();
+        assert!(
+            fs::read_to_string(&tracker)
+                .unwrap()
+                .contains("SessionTracker")
+        );
+        assert!(
+            !fs::read_to_string(&tracker)
+                .unwrap()
+                .contains("export const SessionTracker")
+        );
+        assert!(fs::read_to_string(&v2).unwrap().contains("standaloneOwner"));
+        assert!(fs::read_to_string(&tui).unwrap().contains("router.current"));
+        assert!(fs::read_to_string(&manifest).unwrap().contains("./tui"));
+        remove_opencode(&path).unwrap();
+        assert!(
+            !path.exists()
+                && !tracker.exists()
+                && !v2.exists()
+                && !tui.exists()
+                && !manifest.exists()
+        );
+        fs::create_dir_all(tui.parent().unwrap()).unwrap();
+        fs::write(&tui, "user TUI plugin").unwrap();
+        assert!(install_opencode(&path).is_err());
+        remove_opencode(&path).unwrap();
+        assert_eq!(fs::read_to_string(&tui).unwrap(), "user TUI plugin");
+        fs::remove_file(&tui).unwrap();
+        fs::write(&tracker, "user plugin").unwrap();
+        assert!(install_opencode(&path).is_err());
+        remove_opencode(&path).unwrap();
+        assert_eq!(fs::read_to_string(tracker).unwrap(), "user plugin");
     }
 
     #[test]
