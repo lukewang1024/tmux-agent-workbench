@@ -14,6 +14,7 @@ python_runner="$repo/tests/python.sh"
 "$python_runner" -B -m unittest discover -s tests -p test_team_resurrection.py
 "$python_runner" -B -m unittest discover -s tests -p test_assistant_resurrection.py
 "$python_runner" -B -m unittest discover -s tests -p test_assistant_admin.py
+"$python_runner" -B -m unittest discover -s tests -p test_legacy_state_migration.py
 sh tests/assistant-sessions.sh
 sh test/test-resolve-session.sh
 if command -v bash >/dev/null 2>&1; then

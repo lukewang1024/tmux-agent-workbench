@@ -48,6 +48,8 @@ assistant/team restore coordinator after a layout already exists.
 
 The existing `assistant-sessions.json` format, older entries containing only a
 `pane` label, legacy tracking state and relaunch vouchers remain readable.
+Legacy state files belonging to live processes are copied without moving their
+originals, so older in-process trackers can continue writing until they exit.
 Sidecars are saved beside the layout using `TMUX_RESURRECT_DIR`, then
 `@resurrect-dir`, then an existing `~/.tmux/resurrect`, otherwise
 `$XDG_DATA_HOME/tmux/resurrect`. Each distinct new layout snapshot has a private

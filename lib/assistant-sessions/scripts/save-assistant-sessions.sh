@@ -152,7 +152,7 @@ log() {
 	fi
 }
 
-# Move state files left in any pre-$HOME default into the current state dir.
+# Synchronize state files left in any pre-$HOME default into the current state dir.
 #
 # Upgrades happen under a live tmux server: assistants that were already running
 # fired their SessionStart hook against the old path and will not fire it again.
@@ -165,7 +165,7 @@ migrate_legacy_state_files() {
 	rest=$(legacy_assistant_state_dirs)
 	[ -n "$rest" ] || return 0
 
-	local moved=0 sources="" legacy f nl=$'\n'
+	local moved=0 copied=0 sources="" legacy f nl=$'\n'
 	# Walk the newline-separated list with parameter expansion. Deliberately not
 	# `read` fed by a here-string: this script must contain no `<<<` at all (issue
 	# #48 -- bash >= 5.1 writes one to a pipe before the reader is exec'd, and that
@@ -188,12 +188,19 @@ migrate_legacy_state_files() {
 		[ -L "$legacy" ] && continue
 		[ -O "$legacy" ] || continue
 
-		local moved_here=0 dest
+		local moved_here=0 copied_here=0 dest filename pid writer_live temporary
 		for f in "$legacy"/claude-*.json "$legacy"/opencode-*.json; do
 			[ -f "$f" ] || continue
 			[ -O "$f" ] || continue
 
-			dest="$STATE_DIR/$(basename "$f")"
+			filename="${f##*/}"
+			dest="$STATE_DIR/$filename"
+			pid="${filename#*-}"
+			pid="${pid%.json}"
+			writer_live=0
+			if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
+				writer_live=1
+			fi
 			# Two files can claim one PID: a leftover whose PID was recycled, or the
 			# same PID seen at two pre-upgrade roots. Neither the destination's mere
 			# existence nor a root's probe position says which is current, so mtime
@@ -207,7 +214,24 @@ migrate_legacy_state_files() {
 				# abort the save before assistant-sessions.json is written. Leaving the
 				# older duplicate behind costs nothing — the destination already holds
 				# the copy that wins.
-				rm -f "$f" 2>/dev/null || true
+				# A pre-upgrade OpenCode process keeps writing this exact path.
+				# Never remove its file or directory while that process is alive.
+				[ "$writer_live" -eq 1 ] || rm -f "$f" 2>/dev/null || true
+				continue
+			fi
+
+			if [ "$writer_live" -eq 1 ]; then
+				# Older trackers may write again after the upgrade. Copy to a private
+				# temporary file and publish only valid, newer JSON; keep the source
+				# and its parent intact for the still-running writer.
+				temporary=$(mktemp "$STATE_DIR/.legacy-copy.XXXXXX" 2>/dev/null) || continue
+				if cp -p "$f" "$temporary" 2>/dev/null && chmod 600 "$temporary" 2>/dev/null &&
+					jq -e 'type == "object" and (.session_id | type == "string" and length > 0)' "$temporary" >/dev/null 2>&1 &&
+					{ [ ! -e "$dest" ] || [ "$temporary" -nt "$dest" ]; } &&
+					mv -f "$temporary" "$dest" 2>/dev/null; then
+					copied_here=$((copied_here + 1))
+				fi
+				rm -f "$temporary" 2>/dev/null || true
 				continue
 			fi
 
@@ -236,9 +260,11 @@ migrate_legacy_state_files() {
 			moved=$((moved + moved_here))
 			sources="$sources $legacy"
 		fi
+		copied=$((copied + copied_here))
 	done
 
 	[ "$moved" -gt 0 ] && log "migrated $moved state file(s) from legacy state dir(s):$sources"
+	[ "$copied" -gt 0 ] && log "synchronized $copied live legacy state file(s) without moving them"
 	return 0
 }
 
