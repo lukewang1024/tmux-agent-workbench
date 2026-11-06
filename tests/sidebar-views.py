@@ -68,6 +68,8 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
     def return_to_source():
         tmux('switch-client', '-c', client_name, '-t', 'z-source')
         tmux('select-pane', '-t', sidebar)
+        wait(lambda: tmux('display-message', '-p', '-t', sidebar, '#{pane_width}') == sidebar_columns,
+             'sidebar width after returning to source')
         drain(.2)
 
     try:
@@ -76,6 +78,9 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         for option in ('mouse', 'focus-events'):
             tmux('set-option', '-g', option, 'on')
         tmux('set-option', '-g', 'status', 'off')
+        # Layout maintenance otherwise restores the default width (26) when a
+        # client returns, invalidating coordinates read from a 36-column pane.
+        tmux('set-option', '-g', '@sidebar_width', sidebar_columns)
         tmux('new-session', '-d', '-s', 'b-shell', '-n', 'other task',
              '-x', '160', '-y', '24', 'exec sleep 120')
         tmux('new-session', '-d', '-s', 'z-source', '-n', 'source',
@@ -92,6 +97,8 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         tmux('select-pane', '-t', main)
         client = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'z-source'], env=env,
                                   stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        wait(lambda: tmux('display-message', '-p', '-t', sidebar, '#{pane_width}') == sidebar_columns,
+             'configured sidebar width')
         wait(lambda: showing_view(agents, '󰚩') and ' 1' in screen()[0]
              and 'Priority task' in screen()[1], 'initial Agent view and its pinned task')
         assert not any('b-shell' in line for line in screen()), screen()
