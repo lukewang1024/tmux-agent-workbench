@@ -139,7 +139,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 continue
             elif token == '\r': x = 0
             elif token == '\n': y += 1
-            elif token.isprintable() and not unicodedata.combining(token):
+            # Nerd Font and Powerline glyphs live in Unicode private-use
+            # ranges, which Python does not classify as printable.
+            elif (token.isprintable() or unicodedata.category(token) == 'Co') and not unicodedata.combining(token):
                 screen[x, y] = token
                 x += 2 if unicodedata.east_asian_width(token) in ('W', 'F') else 1
         return [''.join(screen.get((col, row), ' ') for col in range(size[0]))
@@ -317,7 +319,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 popup = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 popups.append(popup)
-                text('+ new')
+                text('Agents')
                 drain(.15)
             else:
                 popup = open_list(kind)
@@ -501,23 +503,23 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                                    env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
+        text('Agents')
         drain(.2)
         os.write(master, b's')
         text('Switch sessions')
         footer(0)
-        text('+ new')
+        text('Agents')
         drain(.2)
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'a')
         text('Switch agents')
         footer(0)
-        text('+ new')
+        text('Agents')
         os.write(master, b'\x1b')
         drain(.7)
         assert focused(window=windows[0])
@@ -529,25 +531,26 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', lower_pane, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
-        wait(lambda: 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1]
-             and visible_rows()[3].strip() == 'other', 'Sidebar hid its heading or first Session group')
+        text('Agents')
+        wait(lambda: 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0]
+             and '' in visible_rows()[0] and visible_rows()[2].strip() == 'other',
+             'Sidebar hid its status bar or first Session group')
         for _ in range(2):
             wheel(True, 12)
-            wait(lambda: visible_rows()[3].strip() != 'other', 'first Session group did not scroll away')
+            wait(lambda: visible_rows()[2].strip() != 'other', 'first Session group did not scroll away')
             wheel(False, 50)
-            wait(lambda: visible_rows()[3].strip() == 'other', 'wheel could not restore the first Session group heading')
+            wait(lambda: visible_rows()[2].strip() == 'other', 'wheel could not restore the first Session group heading')
             drain(1.4)
-            assert visible_rows()[3].strip() == 'other', 'snapshot refresh hid the restored first group'
-        assert 'agents' in visible_rows()[1] and 'grouped' in visible_rows()[1], visible_rows()
-        assert visible_rows()[2].strip('─ ') == '' and '─' in visible_rows()[2], visible_rows()
+            assert visible_rows()[2].strip() == 'other', 'snapshot refresh hid the restored first group'
+        assert 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0], visible_rows()
+        assert visible_rows()[1].strip('─ ') == '' and '─' in visible_rows()[1], visible_rows()
         assert visible_rows()[-2].strip('─ ') == '' and '─' in visible_rows()[-2], visible_rows()
-        tap(content_rect()[2] - 2, 2)
-        text('prioritized')
-        assert 'agents' in visible_rows()[1] and 'prioritized' in visible_rows()[1], visible_rows()
-        tap(content_rect()[2] - 2, 2)
+        tap(visible_rows()[0].index('grouped') + 1, 1)
+        text('priority')
+        assert 'Agents' in visible_rows()[0] and 'priority' in visible_rows()[0], visible_rows()
+        tap(visible_rows()[0].index('priority') + 1, 1)
         text('grouped')
-        wait(lambda: visible_rows()[3].strip() == 'other', 'grouped sort did not restore the first group')
+        wait(lambda: visible_rows()[2].strip() == 'other', 'grouped sort did not restore the first group')
         os.write(master, b'\x1b')
         finish_popup(sidebar)
         drain(.7)
@@ -586,7 +589,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
+        text('Agents')
         wait(lambda: any('sessions' in row for row in visible_rows()), 'Sidebar session rows not ready')
         wheel(True, 20)
         wait(lambda: any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel did not reach the last session')
@@ -619,16 +622,16 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('+ new')
+        text('Agents')
         drain(.2)
         tap(content_rect()[2] - 2, 1)
         text('workbench')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         os.write(master, b's')
         text('Switch sessions')
         os.write(master, b'\x7f')
-        text('+ new')
+        text('Agents')
         os.write(master, b'\x1b')
         finish_popup(sidebar)
         drain(.7)

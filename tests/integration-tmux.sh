@@ -101,10 +101,14 @@ cargo build --quiet --manifest-path "$repo/Cargo.toml" --bin tmux-agent-workbenc
 cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/session-projections.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/task-placement.py" "$binary" "$repo/target/debug/examples/codex"
+"$python_runner" "$repo/tests/auto-split.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/switcher.py" "$binary"
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/task-title-exit.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/sidebar-mouse.py" "$binary"
+"$python_runner" "$repo/tests/sidebar-focus.py" "$binary" en
+"$python_runner" "$repo/tests/sidebar-focus.py" "$binary" zh
+"$python_runner" "$repo/tests/sidebar-assistant.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-team.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-upgrade.py" "$binary"
 "$python_runner" "$repo/tests/sidebar-naming.py" "$binary"

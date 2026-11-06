@@ -16,10 +16,11 @@ A matching Workbench installation also exposes that helper as
 
 ## Dispatch
 
-1. Run the helper with `batch-worker`. This resolves the **worker** settings of
-   `agent-team`'s Codex `batch` scene without launching another CLI. Use its
-   returned `model` and `reasoning_effort` exactly. Do not use the scene's lead
-   model, inherit the parent's model, or substitute another scene on failure.
+1. Run the helper with `batch-worker`. It resolves the **worker** settings from
+   `agent-team`'s current Codex background-automation recommendation (or its
+   legacy `batch` scene) without launching a coding agent. Use the returned
+   `model` and `reasoning_effort` exactly. Do not use the lead model, inherit
+   the parent's model, or substitute another recommendation on failure.
 2. Spawn one native subagent with fresh context: `fork_turns="none"`, explicit
    `model` and `reasoning_effort` from the resolver. This request authorizes that
    delegation. Preserve inherited execution permissions and proxy environment;
@@ -31,10 +32,14 @@ A matching Workbench installation also exposes that helper as
    the user wants execution or a proposal. A user request to reorganise already
    authorizes the reversible layout changes within that scope. Do not invent a
    second approval step. The worker must not spawn further agents.
+   An automatic split request identifies one exact source session and a
+   required `--scope-session` guard; pass both to the worker unchanged.
 4. Wait for the worker's result, continue user-facing progress updates, and
    inspect its grouping, run directory, verification, and cleanup outcome.
    Report actual completion or the concrete blocker. A failed resolver or
    worker does not authorize a retry with a different model.
+   For an automatic request, settle its ticket as instructed after verifying
+   the worker result, including unavailable or failed attempts.
 
 Keep a user preference such as retaining session `0` as a scratchpad in the
 worker brief. Group names and the choice to keep a scratchpad are determined

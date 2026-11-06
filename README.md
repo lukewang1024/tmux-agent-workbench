@@ -259,6 +259,12 @@ position = "left"
 auto_create = true
 agent_sort = "grouped" # grouped or prioritized
 
+# Optional: enable automatic splitting (defaults: five tasks and semantic grouping).
+# [auto_split]
+# enabled = true
+# threshold = 5
+# strategy = "semantic"
+
 [notifications]
 enabled = true
 sound = true
@@ -277,6 +283,28 @@ bind = "127.0.0.1"
 port = 19999
 ```
 
+Automatic direction splitting is disabled by default. When enabled, a task's
+own agent chooses its direction by meaning, using the existing direction names
+and task titles. `title set` counts distinct windows with live local agents in
+the selected direction. Five tasks fit by default; when placing another would
+exceed that limit, the command leaves the caller in its current window and
+returns a request for one native `reorganise-agents` subagent to split the
+selected direction semantically. After a successful split, the caller chooses
+an appropriate child direction and retries placement. Unrelated full
+directions do not trigger work. The worker's scoped plan preserves other
+directions, non-agent windows, team windows, the personal assistant, panes,
+clients, and manually marked focus windows. If native delegation is unavailable or the tasks cannot
+be split confidently, the caller stays in its current window and continues its
+task; no alternative worker is launched. A task started inside an already full
+direction can temporarily bring that direction above the limit.
+
+`tmux-agent-workbench auto-split status` shows pending requests. A request
+remains pending if its owner disappears, so another worker cannot start while
+the first might still be operating. After confirming that its native worker is
+no longer running, recover it with `tmux-agent-workbench auto-split finish
+--ticket <id> --result failed`. A change to the server, task windows, or task
+titles permits a fresh request when a task next attempts placement.
+
 On macOS, clicking an overlay resolves the tmux client attached to the target
 session, focuses its exact iTerm2 or Terminal TTY/tab, and then selects the
 target window and pane. If no matching attached client exists, Workbench falls
@@ -291,8 +319,22 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 `@workbench-key-agent`, and `@workbench-key-attention` before the plugin loads.
 
 The sidebar shows all sessions and all detected agents from the current tmux
-server in separate sections. A pinned top row keeps `new` on the left and
-`menu` on the right. The Agents heading and sort control stay pinned below it.
+server in separate sections. A Powerline-style top bar contains an Agents
+control, pinned count, sort mode, and menu. Click Agents to return to the top of
+the list, or the pinned count to open all pinned tasks. The sort and menu are
+also touchable; the menu includes the new-task and workspace actions. Pinned
+cards stay directly below the bar and show each task's current state and original
+direction. Select an Agent in the sidebar and
+press `p`, or use its right-click menu, to add or remove its window. Click a
+Pinned card, or press its `1`–`9` shortcut in the sidebar, to visit it. Pinned
+tasks also remain in their normal direction below. The list is shared by all
+sidebars on the same tmux server; its window-scoped `@agent_focus` markers
+follow window moves and disappear when the window or server closes. On short
+screens the count shows visible/total when space permits; the pinned menu still
+contains all tasks. A designated personal
+assistant stays first and is automatically pinned again when the same agent
+thread resumes in another window. It is kept pinned until its designation is
+changed. The Agents heading and controls stay above the selected tasks.
 Agents always appear above Sessions, on every screen size.
 Session groups in Agents follow one another without blank rows. A single blank
 row separates Agents from Sessions. Both sections use one continuous scrolling

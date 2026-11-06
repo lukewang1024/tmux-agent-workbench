@@ -146,6 +146,11 @@ enum Command {
         #[command(subcommand)]
         command: TitleCommand,
     },
+    /// Inspect or settle a pending automatic direction split request.
+    AutoSplit {
+        #[command(subcommand)]
+        command: AutoSplitCommand,
+    },
     Metadata {
         #[command(subcommand)]
         command: MetadataCommand,
@@ -302,6 +307,17 @@ enum TitleCommand {
         pane: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutoSplitCommand {
+    Status,
+    Finish {
+        #[arg(long)]
+        ticket: String,
+        #[arg(long, value_parser = ["completed", "no_change", "unavailable", "failed"])]
+        result: String,
     },
 }
 
@@ -1415,6 +1431,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::discover()?;
     match cli.command {
         Command::HostCpuCounters => unreachable!(),
+        Command::AutoSplit { command } => match command {
+            AutoSplitCommand::Status => println!(
+                "{}",
+                serde_json::to_string_pretty(&tmux_agent_workbench::auto_split::status(&paths)?)?
+            ),
+            AutoSplitCommand::Finish { ticket, result } => {
+                tmux_agent_workbench::auto_split::finish(&paths, &ticket, &result)?;
+                println!("{{\"status\":\"recorded\"}}");
+            }
+        },
         Command::NormalizeResurrectLayout { path } => {
             let input = std::fs::read_to_string(path)?;
             print!(

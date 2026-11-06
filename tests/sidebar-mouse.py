@@ -96,24 +96,25 @@ def check(height, target, section='agent'):
             wait_for(lambda: any(target_row(line) for line in screen()), 'target card not visible')
             drain(0.15)
             rows = screen()
-            assert '+ new' in rows[0] and 'menu' in rows[0], rows
+            assert 'Agents' in rows[0] and '' in rows[0], rows
             row = next(i for i, line in enumerate(rows) if target_row(line))
             assert tmux('list-clients', '-F', '#{pane_id}') == main
             # tmux before 3.8 cannot scroll native menus. Keep the menu test
             # tall enough for all actions while the sidebar itself overflows;
             # the 12-line cases below still cover first-click navigation.
             if height == 16 and target == 'e-agent':
-                os.write(master, b'\x1b[<0;33;1M\x1b[<0;33;1m')
+                os.write(master, b'\x1b[<0;35;1M\x1b[<0;35;1m')
                 output = b''
                 deadline = time.monotonic() + 5
                 while b'workbench' not in output and time.monotonic() < deadline:
                     output += drain(.05)
                 assert b'workbench' in output, output
+                assert b'New' in output, output
                 os.write(master, b'\x1b')
                 drain(.7)
                 tmux('select-pane', '-t', main)
                 drain(.1)
-                assert '+ new' in screen()[0] and 'menu' in screen()[0]
+                assert 'Agents' in screen()[0] and '' in screen()[0]
                 print('PASS: scrolled sidebar opens its pinned top menu')
             # Real terminal mouse input: tmux emits FocusGained before forwarding
             # MouseDown. The short viewport used to scroll here and hit z-source

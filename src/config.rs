@@ -23,10 +23,35 @@ pub struct Config {
     pub ui: UiConfig,
     pub detection: DetectionConfig,
     pub sidebar: SidebarConfig,
+    pub auto_split: AutoSplitConfig,
     pub notifications: NotificationConfig,
     pub relay: RelayConfig,
     pub openpeon: OpenPeonConfig,
     pub clients: ClientsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoSplitConfig {
+    pub enabled: bool,
+    pub threshold: Option<usize>,
+    pub strategy: Option<SplitStrategy>,
+}
+
+impl Default for AutoSplitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: Some(5),
+            strategy: Some(SplitStrategy::Semantic),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitStrategy {
+    Semantic,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -212,6 +237,22 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.auto_split.enabled
+            && (self.auto_split.threshold.is_none() || self.auto_split.strategy.is_none())
+        {
+            return Err(ConfigError::Validation(
+                "auto_split requires an explicit threshold and strategy when enabled".into(),
+            ));
+        }
+        if self
+            .auto_split
+            .threshold
+            .is_some_and(|threshold| !(2..=999).contains(&threshold))
+        {
+            return Err(ConfigError::Validation(
+                "auto_split.threshold must be in 2..=999".into(),
+            ));
+        }
         if !valid_language_tag(&self.ui.language) {
             return Err(ConfigError::Validation(
                 "ui.language must be 'auto' or a BCP 47 language tag, for example zh-CN or en-US"
@@ -311,5 +352,23 @@ mod tests {
         let mut c = Config::default();
         c.detection.capture_lines = 201;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn auto_split_defaults_to_a_five_task_semantic_limit_when_enabled() {
+        let config = Config::default();
+        assert!(!config.auto_split.enabled);
+        assert_eq!(config.auto_split.threshold, Some(5));
+        assert_eq!(config.auto_split.strategy, Some(SplitStrategy::Semantic));
+        assert!(
+            toml::from_str::<Config>("[auto_split]\nenabled = true\n")
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        let invalid =
+            toml::from_str::<Config>("[auto_split]\nenabled = true\nthreshold = 1\n").unwrap();
+        assert!(invalid.validate().is_err());
+        assert!(toml::from_str::<Config>("[auto_split]\nstrategy = 'count'\n").is_err());
     }
 }
