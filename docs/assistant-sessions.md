@@ -12,6 +12,11 @@ Session persistence requires Bash, jq, Python 3, tmux-resurrect and the
 appropriate assistant executable. Team restoration also requires an
 `agent-team` version containing the recovery fixes from `b553a01`.
 
+During a rolling upgrade, implicit client connections reuse a live daemon with
+the same IPC protocol and runtime revision, without handing off its sidebars.
+An explicit `tmux-agent-workbench daemon ensure` performs the upgrade handoff;
+otherwise the new daemon starts after the old one naturally exits.
+
 | Assistant | Session discovery | Resume |
 | --- | --- | --- |
 | Claude Code | Workbench hook, legacy PID hook state, or CLI session argument | `claude --resume` |

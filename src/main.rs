@@ -2479,6 +2479,23 @@ fn ensure_server_runtime(
             .as_ref()
             .and_then(|value| value.get("runtime_revision"))
             .and_then(|value| value.as_u64());
+        // Attaching a client or opening an Agent switcher must not replace a
+        // compatible daemon (and its live sidebars) during a rolling upgrade.
+        // Explicit `daemon ensure` still performs the normal upgrade handoff.
+        if !announce
+            && response.ok
+            && response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
+            && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))
+            && daemon_pid.is_some_and(|pid| pid != 0)
+            && response
+                .result
+                .as_ref()
+                .and_then(|value| value.get("server"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| std::path::Path::new(path) == server.socket_path)
+        {
+            return Ok(());
+        }
         if response.protocol_version == tmux_agent_workbench::IPC_PROTOCOL_VERSION
             && version == tmux_agent_workbench::ENGINE_VERSION
             && runtime_revision == Some(u64::from(tmux_agent_workbench::DAEMON_RUNTIME_REVISION))

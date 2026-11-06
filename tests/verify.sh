@@ -29,6 +29,7 @@ cargo test --locked
 "$python_runner" tests/client-open-url.py
 "$python_runner" tests/client-open-url-routing.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-daemon-timeouts.py
+"$python_runner" tests/client-rolling-upgrade.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-notifications.py
 "$python_runner" tests/client-resume.py target/debug/tmux-agent-workbench
 "$python_runner" tests/client-window-resize.py target/debug/tmux-agent-workbench
