@@ -589,6 +589,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             if not direct_new:
                 rendered = wait_for_text(client_process, b'workbench', b'New', menu_footer=False)
                 x, y = item_position(rendered, 'New')
+                if mode == 'old' and not release_menus:
+                    # tmux 3.7's native -O menu selects the last hovered row
+                    # on press, before it processes that press's coordinates.
+                    # Send the mouse motion a real pointer produces; touch
+                    # mode has its own no-hover path and is tested separately.
+                    os.write(master, f'\x1b[<35;{x};{y}M'.encode())
                 os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
             rendered = wait_for_text(client_process, b'Workbench Projects', b'touch-project-00')
             menu.wait(timeout=5)
