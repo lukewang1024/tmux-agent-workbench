@@ -71,8 +71,10 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         for option in ('mouse', 'focus-events'):
             tmux('set-option', '-g', option, 'on')
         tmux('set-option', '-g', 'status', 'off')
-        tmux('new-session', '-d', '-s', 'b-shell', '-n', 'other task', 'exec sleep 120')
-        tmux('new-session', '-d', '-s', 'z-source', '-n', 'source', 'exec sleep 120')
+        tmux('new-session', '-d', '-s', 'b-shell', '-n', 'other task',
+             '-x', '160', '-y', '24', 'exec sleep 120')
+        tmux('new-session', '-d', '-s', 'z-source', '-n', 'source',
+             '-x', '160', '-y', '24', 'exec sleep 120')
         a_window = tmux('display-message', '-p', '-t', 'a-target', '#{window_id}')
         b_pane = tmux('display-message', '-p', '-t', 'b-shell', '#{pane_id}')
         b_id = tmux('display-message', '-p', '-t', 'b-shell', '#{session_id}')
