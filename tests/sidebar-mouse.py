@@ -89,7 +89,8 @@ def check(height, target, section='agent'):
             # see the actual agent card, without focusing the sidebar pane.
             def target_row(line):
                 title = f'Task {target}' if section == 'agent' else target
-                return line.strip() in (f'○ {title}', f'● {title}', f'! {title}', f'? {title}')
+                content = line.strip().removesuffix('').rstrip() if section == 'session' else line.strip()
+                return content in (f'○ {title}', f'● {title}', f'! {title}', f'? {title}')
 
             for _ in range(20):
                 if any(target_row(line) for line in screen()):
