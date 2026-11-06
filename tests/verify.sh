@@ -4,6 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo"
 python_runner="$repo/tests/python.sh"
+# Snapshot and team tests invoke the core before the later cargo test step.
+cargo build --locked --bin tmux-agent-workbench
 "$python_runner" -B -m unittest discover -s tests -p test_codex_usage.py
 "$python_runner" -B -m unittest discover -s tests -p test_release_prepare.py
 "$python_runner" -B -m unittest discover -s tests -p test_botmux.py
