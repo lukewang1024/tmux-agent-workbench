@@ -52,7 +52,6 @@ try:
   project=root/'project';project.mkdir();bindir=root/'bin';bindir.mkdir()
   (bindir/'tmux-agent-workbench').symlink_to(repo/'bin/tmux-agent-workbench-cli')
   config=root/'config';plugins=config/'opencode/plugins';plugins.mkdir(parents=True)
-  shutil.copyfile(repo/'lib/opencode-workbench.js',plugins/'tmux-agent-workbench.js')
   wb=config/'tmux-agent-workbench';wb.mkdir();(wb/'config.toml').write_text('[notifications]\nenabled = false\n[auto_split]\nenabled = true\n')
   (project/'opencode.json').write_text(json.dumps({'autoupdate':False,'permission':{'*':'allow'},'provider':{'wbmock':{'npm':'@ai-sdk/openai-compatible','name':'mock','options':{'baseURL':f'http://127.0.0.1:{server.server_port}/v1','apiKey':'mock'},'models':{'mock':{'name':'Mock','limit':{'context':32000,'output':2048}}}}},'model':'wbmock/mock'}))
   env=dict(os.environ,TERM='xterm-256color',PATH=str(bindir)+':'+os.environ['PATH'],XDG_CONFIG_HOME=str(config),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),XDG_DATA_HOME=str(root/'data'),XDG_RUNTIME_DIR=str(root/'run'),TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,OPENCODE_DISABLE_AUTOUPDATE='true',OPENCODE_DISABLE_MODELS_FETCH='true',NPM_CONFIG_REGISTRY='http://127.0.0.1:9',npm_config_registry='http://127.0.0.1:9',NPM_CONFIG_FETCH_RETRIES='0',npm_config_fetch_retries='0',NO_PROXY=(os.environ.get('NO_PROXY','')+',127.0.0.1,localhost').strip(','),no_proxy=(os.environ.get('no_proxy','')+',127.0.0.1,localhost').strip(','))
@@ -64,7 +63,9 @@ try:
   (root/'worker.py').write_text(common+'''helper=os.environ['WB_HELPER']; result=json.loads((r/'split.json').read_text()); snap=json.loads(subprocess.check_output([helper,'snapshot'],text=True)); move=set(json.loads((r/'move.json').read_text())); groups=[]\nfor session in snap['sessions']:\n ids=[w['window_id'] for w in snap['windows'] if w['session_id']==session['session_id']]\n if session['session_id']==result['source_session']:\n  groups.append({'session':'Office-docs','windows':[w for w in ids if w not in move]});groups.append({'session':'Office-docs·layout','windows':[w for w in ids if w in move]})\n else:groups.append({'session':session['session_name'],'windows':ids})\n(r/'snapshot.json').write_text(json.dumps(snap));(r/'plan.json').write_text(json.dumps({'groups':groups}));subprocess.run([helper,'apply','--snapshot',str(r/'snapshot.json'),'--plan',str(r/'plan.json'),'--scope-session',result['source_session']],check=True);(r/'worker-done').write_text('native child completed')\n''')
   (root/'finish.py').write_text(common+'''result=json.loads((r/'split.json').read_text());assert (r/'worker-done').exists();core('auto-split','finish','--ticket',result['ticket'],'--result','completed');pane=(r/'pane').read_text();a=next(x for x in core('snapshot','--json')['agents'] if x['target']['pane_id']==pane and not x['exited']);out=core('title','set','Picture layout','--session','Office-docs·layout','--pane',pane,'--session-id',a['hook_session_id']);(r/'placed.json').write_text(json.dumps(out));print(json.dumps(out))\n''')
   env['WB_TEST_ROOT']=str(root);env['WB_HELPER']=str(repo/'bin/wb-reorganise')
+  env['TMUX_ASSISTANT_RESURRECT_DIR']=str(root/'assistant-resurrect')
   env['TMUX_AGENT_WORKBENCH_BIN']=binary
+  subprocess.run([binary,'hooks','install','opencode'],env=env,check=True,capture_output=True)
   try:
    fixture=str(repo/'target/debug/examples/codex');command='env WORKBENCH_FIXTURE_SECONDS=300 '+shlex.quote(fixture)
    existing=[tmux('-f','/dev/null','new-session','-d','-x','140','-y','42','-s','Office-docs','-n','codex','-P','-F','#{pane_id}',command)]
@@ -101,6 +102,8 @@ try:
     agents=core('snapshot','--json')['agents'];a=next((a for a in agents if a['target']['pane_id']==pane and not a['exited']),None)
     print('hook bound:',bool(a and a.get('hook_session_id')),'requests:',len(Mock.seen))
     print('naming context:',any('The target capacity is' in json.dumps(body) for body in Mock.seen))
+    tracker=root/'assistant-resurrect'/('opencode-'+str(agent['process']['pid'])+'.json')
+    assert tracker.exists() and json.loads(tracker.read_text())['tool']=='opencode', 'existing assistant tracker stopped working'
     print('root steps:',Mock.root_step,'native child steps:',Mock.child_step)
     if not (root/'worker-done').exists():
      for body in Mock.seen:

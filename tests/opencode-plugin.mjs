@@ -36,7 +36,7 @@ process.stdin.on('end',()=>{
   };
   const source = readFileSync(new URL("../lib/opencode-workbench.js", import.meta.url), "utf8")
     .replace('process.execPath', JSON.stringify(version));
-  const { Workbench } = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"));
+  const { default: { server: Workbench } } = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"));
   const plugin = await Workbench({ client, directory: root });
   const chat = id => plugin["chat.message"]({ sessionID: id, agent: "build" }, { message: {} });
   const task = (args = {}) => plugin["tool.execute.before"]({ tool: "task", sessionID: "root" }, { args: { subagent_type: "general", ...args } });

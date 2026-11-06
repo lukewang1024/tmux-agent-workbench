@@ -291,10 +291,12 @@ exceed that limit, the command leaves the caller in its current window and
 returns a request for one native `reorganise-agents` subagent of the calling
 agent to split the selected direction semantically. Codex uses its resolved
 batch worker settings; other agents use their own native subagent defaults.
-OpenCode 1.18.32's plugin verifies that a fresh foreground native child has no
-broader permissions than the parent, both before dispatch and when the child
-starts. Other OpenCode versions need revalidation; if the check cannot prove
-this, the split is unavailable.
+The OpenCode 1.18.32 and 2.0.25 plugins verify that a fresh foreground native
+child has no broader permissions than the parent, both before dispatch and
+when the child starts. OpenCode 2.0.25 launched by Workbench uses a private
+`--standalone` service so its terminal can be verified; an explicitly selected
+shared server is preserved and does not auto-group. Other versions need
+revalidation; if the check cannot prove this, the split is unavailable.
 Some Trae CLI versions can report a missing native thread in interactive mode.
 If its native child cannot start or finish, mark the split unavailable and
 leave the task in place; Workbench does not substitute a different agent.

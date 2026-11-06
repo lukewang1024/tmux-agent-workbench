@@ -108,7 +108,9 @@ cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/auto-split.py" "$binary" "$repo/target/debug/examples/codex" --incoming-opencode
 if command -v node >/dev/null 2>&1; then
   node "$repo/tests/opencode-plugin.mjs"
+  node "$repo/tests/opencode-v2-plugin.mjs"
 fi
+"$python_runner" "$repo/tests/opencode-launch.py"
 "$python_runner" "$repo/tests/auto-split-concurrent.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/switcher.py" "$binary"
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"

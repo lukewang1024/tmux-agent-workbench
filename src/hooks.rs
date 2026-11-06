@@ -614,6 +614,10 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
         if !tracker.exists() || !fs::read_to_string(tracker)?.contains(HOOK_ID) {
             return Ok("missing assistant session tracker".into());
         }
+        let v2 = opencode_v2_path(&path);
+        if !v2.exists() || !fs::read_to_string(v2)?.contains(HOOK_ID) {
+            return Ok("missing OpenCode v2 plugin".into());
+        }
     }
     let count = content.matches(&needle).count();
     Ok(match count {
@@ -815,7 +819,8 @@ fn codex_entry_is_workbench(entry: &Table) -> bool {
 
 fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tracker = opencode_tracker_path(path);
-    for candidate in [path, tracker.as_path()] {
+    let v2 = opencode_v2_path(path);
+    for candidate in [path, tracker.as_path(), v2.as_path()] {
         if candidate.exists() && !fs::read_to_string(candidate)?.contains(HOOK_ID) {
             return Err(format!(
                 "refusing to replace non-Workbench plugin {}",
@@ -825,23 +830,48 @@ fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let content = include_str!("../lib/opencode-workbench.js");
+    // Preserve the upstream tracker body while exporting an entry point each
+    // OpenCode generation can load. The v2 tracker remains a no-op until its
+    // own session-restore adapter is available.
+    let tracker_source = include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js");
+    if !tracker_source.contains("export const SessionTracker =") {
+        return Err(
+            "OpenCode tracker entry point changed; refusing incompatible installation".into(),
+        );
+    }
+    let tracker_source =
+        tracker_source.replacen("export const SessionTracker =", "const SessionTracker =", 1);
     let tracker_content = format!(
-        "// {HOOK_ID}\n{}",
-        include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js")
+        "// {HOOK_ID}\n{tracker_source}\nexport default {{ id: \"workbench-tracker-v1-compat\", server: SessionTracker, setup: async () => {{}} }};\n"
     );
     atomic_write(path, content.as_bytes())?;
-    atomic_write(&tracker, tracker_content.as_bytes())
+    atomic_write(&tracker, tracker_content.as_bytes())?;
+    atomic_write(
+        &v2,
+        include_str!("../lib/opencode-workbench-v2.js").as_bytes(),
+    )
 }
 
 fn opencode_tracker_path(path: &Path) -> PathBuf {
     path.with_file_name("tmux-agent-workbench-resurrect.js")
 }
 
+fn opencode_v2_path(path: &Path) -> PathBuf {
+    path.with_file_name("tmux-agent-workbench-v2")
+        .join("index.js")
+}
+
 fn remove_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tracker = opencode_tracker_path(path);
-    for candidate in [path, tracker.as_path()] {
+    let v2 = opencode_v2_path(path);
+    for candidate in [path, tracker.as_path(), v2.as_path()] {
         if candidate.exists() && fs::read_to_string(candidate)?.contains(HOOK_ID) {
             fs::remove_file(candidate)?;
+        }
+    }
+    if let Some(directory) = v2.parent() {
+        if directory.exists() {
+            let _ = fs::remove_dir(directory);
         }
     }
     Ok(())
@@ -928,6 +958,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("tmux-agent-workbench.js");
         let tracker = opencode_tracker_path(&path);
+        let v2 = opencode_v2_path(&path);
         install_opencode(&path).unwrap();
         install_opencode(&path).unwrap();
         assert!(
@@ -935,8 +966,14 @@ mod tests {
                 .unwrap()
                 .contains("SessionTracker")
         );
+        assert!(
+            !fs::read_to_string(&tracker)
+                .unwrap()
+                .contains("export const SessionTracker")
+        );
+        assert!(fs::read_to_string(&v2).unwrap().contains("standaloneOwner"));
         remove_opencode(&path).unwrap();
-        assert!(!path.exists() && !tracker.exists());
+        assert!(!path.exists() && !tracker.exists() && !v2.exists());
         fs::write(&tracker, "user plugin").unwrap();
         assert!(install_opencode(&path).is_err());
         remove_opencode(&path).unwrap();
