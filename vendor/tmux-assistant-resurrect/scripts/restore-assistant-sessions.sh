@@ -206,6 +206,10 @@ while read -r entry; do
 		log "pane $pane does not exist (session '$tmux_session', window $window_index, pane $pane_index), skipping"
 		continue
 	fi
+	if [ -n "$(tmux show-option -pqv -t "$pane_id" @workbench_team_resume_blocked 2>/dev/null || true)" ]; then
+		log "team member in $pane is stopped or unconfirmed, skipping"
+		continue
+	fi
 	case "$claimed_panes" in
 	*"|${pane_id}|"*)
 		log "duplicate sidecar entry for pane $pane, skipping"

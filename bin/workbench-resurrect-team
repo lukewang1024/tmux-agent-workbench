@@ -16,6 +16,8 @@ import tempfile
 
 ID = re.compile(r'^[A-Za-z0-9_-]+$')
 SHELLS = {'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu'}
+SESSION_ID = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9._:/+=-]{0,255}$')
+ACTIVE_STATUS = {'running', 'ready', 'blocked', 'assigned'}
 ROOT = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'agent-team'
 SOCKET = os.environ.get('TMUX_AGENT_WORKBENCH_TMUX_SOCKET')
 
@@ -147,6 +149,91 @@ def remap_pane_contents(mapping):
             os.unlink(temporary)
 
 
+def session_candidates():
+    """Return every candidate per saved pane; ambiguous entries must not run."""
+    directory = sidecar().parent
+    candidates = {}
+    for filename, kind in (('assistant-sessions.json', 'assistant'),
+                           ('workbench-trae-sessions.json', 'traex')):
+        try:
+            data = json.loads((directory / filename).read_text())
+            entries = data if kind == 'traex' else data.get('sessions', []) + data.get('relaunch', [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                key = tuple('' if entry.get(field) is None else str(entry.get(field))
+                            for field in ('session_name', 'window_index', 'pane_index'))
+                if not all(key) and isinstance(entry.get('pane'), str):
+                    try:
+                        session, target = entry['pane'].rsplit(':', 1)
+                        window, pane = target.rsplit('.', 1)
+                        key = (session, window, pane)
+                    except ValueError:
+                        continue
+                if all(key):
+                    candidates.setdefault(key, []).append((entry.get('tool') if kind == 'assistant' else 'traex',
+                                                            entry.get('session_id')))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return candidates
+
+
+def resume_status(current, saved):
+    # A deliberate stop after the snapshot is authoritative. An exit after a
+    # server shutdown is common; a saved live state can safely survive it.
+    known = ACTIVE_STATUS | {'stopped', 'exited'}
+    if not isinstance(current, str) or current not in known:
+        return None
+    if saved is not None and (not isinstance(saved, str) or saved not in known):
+        return None
+    if current == 'stopped' or saved in ('stopped', 'exited'):
+        return None
+    if current in ACTIVE_STATUS:
+        return current
+    if current == 'exited' and (saved in ACTIVE_STATUS or saved is None):
+        return saved or 'running'  # pre-status sidecars recorded live panes
+    return None
+
+
+def finish_restore():
+    lines = tmux('list-panes', '-a', '-F', '#{pane_id}\t#{@workbench_team_resume_blocked}').splitlines()
+    for line in lines:
+        fields = line.split('\t')
+        if len(fields) == 2 and re.fullmatch(r'%[0-9]+', fields[0]) and ID.fullmatch(fields[1]):
+            tmux('set-option', '-pu', '-t', fields[0], '@workbench_team_resume_blocked')
+
+
+def block_unconfirmed(resolved, ident, existing_panes):
+    """Block fallback relaunch only in newly created, still-unclaimed shells."""
+    for _, (_, pane, marker, command), _ in resolved:
+        if pane not in existing_panes and not marker and command.lstrip('-') in SHELLS:
+            try:
+                tmux('set-option', '-p', '-t', pane, '@workbench_team_resume_blocked', ident)
+            except subprocess.CalledProcessError:
+                pass
+
+
+def block_saved_teams(saved, targets, existing_panes):
+    for team in saved.get('teams', []):
+        if not isinstance(team, dict):
+            continue
+        ident = team.get('id')
+        if not isinstance(ident, str) or not ID.fullmatch(ident):
+            continue
+        members = team.get('members')
+        if not isinstance(members, list):
+            continue
+        resolved = []
+        for record in members:
+            try:
+                resolved.append((record['member'], targets[(record['session'], record['window'], record['pane'])], record))
+            except (KeyError, TypeError):
+                continue
+        block_unconfirmed(resolved, ident, existing_panes)
+
+
 def save():
     pending = tmux('show-option', '-gqv', '@workbench_resurrect_pending_snapshot')
     tmux('set-option', '-gu', '@workbench_resurrect_pending_snapshot')
@@ -175,7 +262,9 @@ def save():
                 if state.get('id') != ident or state.get('window') != window or state.get('socket') != socket or state.get('closed'):
                     continue
                 members = {item.get('pane'): name for name, item in state['members'].items()}
-                mapped = [{'session': s, 'window': w, 'pane': indexes.get((s, w, p), p), 'member': members[pid]} for s, w, p, pid in panes if pid in members and indexes.get((s, w, p), p) is not None]
+                mapped = [{'session': s, 'window': w, 'pane': indexes.get((s, w, p), p),
+                           'member': members[pid], 'status': state['members'][members[pid]].get('status')}
+                          for s, w, p, pid in panes if pid in members and indexes.get((s, w, p), p) is not None]
                 if any(m['member'] == 'lead' for m in mapped):
                     result.append({'id': ident, 'members': mapped})
         except (OSError, ValueError, KeyError, TypeError):
@@ -215,50 +304,99 @@ def restore():
     stat = os.stat(socket)
     if (not isinstance(saved, dict) or not isinstance(before, dict)
             or not saved.get('snapshot_sha256') or saved['snapshot_sha256'] != snapshot_digest()
-            or 'assistant_sha256' not in saved or 'trae_sha256' not in saved
-            or saved['assistant_sha256'] != file_digest(sidecar().parent / 'assistant-sessions.json')
-            or saved['trae_sha256'] != file_digest(sidecar().parent / 'workbench-trae-sessions.json')
             or (before.get('socket_device'), before.get('socket_inode')) != (stat.st_dev, stat.st_ino)
             or not isinstance(before.get('panes'), list)):
+        return
+    if ('assistant_sha256' not in saved or 'trae_sha256' not in saved
+            or saved['assistant_sha256'] != file_digest(sidecar().parent / 'assistant-sessions.json')
+            or saved['trae_sha256'] != file_digest(sidecar().parent / 'workbench-trae-sessions.json')):
+        block_saved_teams(saved, targets, before['panes'])
         return
     token = tmux('show-option', '-gqv', '@workbench_team_restore_token')
     if not re.fullmatch(r'[0-9a-f]{32}', token):
         token = secrets.token_hex(16)
         tmux('set-option', '-g', '@workbench_team_restore_token', token)
+    candidates = session_candidates()
+    session_counts = {}
+    for entries in candidates.values():
+        for _, session in entries:
+            if isinstance(session, str) and SESSION_ID.fullmatch(session):
+                session_counts[session] = session_counts.get(session, 0) + 1
     for team in saved.get('teams', []):
+        ident = None
+        resolved = []
         try:
             ident, members = team['id'], team['members']
             if not isinstance(ident, str) or not ID.fullmatch(ident) or not isinstance(members, list):
                 continue
-            resolved = [(m['member'], targets[(m['session'], m['window'], m['pane'])]) for m in members]
-            if not resolved or sum(name == 'lead' for name, _ in resolved) != 1 or len({name for name, _ in resolved}) != len(resolved):
+            missing = False
+            for record in members:
+                try:
+                    resolved.append((record['member'], targets[(record['session'], record['window'], record['pane'])], record))
+                except (KeyError, TypeError):
+                    missing = True
+            if missing:
+                block_unconfirmed(resolved, ident, before['panes'])
                 continue
-            if len({item[0] for _, item in resolved}) != 1 or len({item[1] for _, item in resolved}) != len(resolved):
+            if not resolved or sum(name == 'lead' for name, _, _ in resolved) != 1 or len({name for name, _, _ in resolved}) != len(resolved):
+                block_unconfirmed(resolved, ident, before['panes'])
                 continue
-            if any(item[1] in before['panes'] for _, item in resolved):
+            if len({item[0] for _, item, _ in resolved}) != 1 or len({item[1] for _, item, _ in resolved}) != len(resolved):
+                block_unconfirmed(resolved, ident, before['panes'])
                 continue
-            if any(marker or cmd.lstrip('-') not in SHELLS for _, (_, _, marker, cmd) in resolved):
+            if any(item[1] in before['panes'] for _, item, _ in resolved):
+                block_unconfirmed(resolved, ident, before['panes'])
+                continue
+            if any(marker or cmd.lstrip('-') not in SHELLS for _, (_, _, marker, cmd), _ in resolved):
+                block_unconfirmed(resolved, ident, before['panes'])
                 continue
             directory = ROOT / ident
             with (directory / 'lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 path = directory / 'state.json'
                 state = json.loads(path.read_text())
-                if state.get('id') != ident or any(name not in state['members'] for name, _ in resolved):
+                if state.get('id') != ident or any(name not in state['members'] for name, _, _ in resolved):
+                    block_unconfirmed(resolved, ident, before['panes'])
                     continue
                 # Never take over a team still alive in this server.
                 if any(row[5] == ident for row in rows):
+                    block_unconfirmed(resolved, ident, before['panes'])
+                    continue
+                approved = {}
+                confirmed = set()
+                for name, (_, pane, _, _), record in resolved:
+                    status = resume_status(state['members'][name].get('status'), record.get('status'))
+                    key = (record['session'], record['window'], record['pane'])
+                    possible = candidates.get(key, [])
+                    if (len(possible) == 1 and possible[0][0] == state.get('tool')
+                            and isinstance(possible[0][1], str) and SESSION_ID.fullmatch(possible[0][1])
+                            and session_counts.get(possible[0][1]) == 1):
+                        confirmed.add(name)
+                        if status:
+                            approved[name] = (status, possible[0][1])
+                duplicates = {session for _, session in approved.values()
+                              if sum(other == session for _, other in approved.values()) > 1}
+                approved = {name: data for name, data in approved.items() if data[1] not in duplicates}
+                if 'lead' not in approved:
+                    block_unconfirmed(resolved, ident, before['panes'])
                     continue
                 state['socket'] = socket
                 state['window'] = resolved[0][1][0]
                 state['workbench_restore_token'] = token
                 state.pop('closed', None)
-                for item in state['members'].values():
+                for name, item in state['members'].items():
                     item['pane'] = ''
+                    if name not in approved and (name not in confirmed or item.get('status') in ACTIVE_STATUS):
+                        item['restore_status'] = 'unconfirmed'
+                    elif name in approved:
+                        item.pop('restore_status', None)
                 try:
-                    for name, (_, pane, _, _) in resolved:
+                    for name, (_, pane, _, _), _ in resolved:
+                        if name not in approved:
+                            tmux('set-option', '-p', '-t', pane, '@workbench_team_resume_blocked', ident)
+                            continue
                         state['members'][name]['pane'] = pane
-                        state['members'][name]['status'] = 'running'
+                        state['members'][name]['status'] = approved[name][0]
                         tmux('set-option', '-p', '-t', pane, '@agent_team', ident)
                         tmux('set-option', '-p', '-t', pane, '@agent_team_role', 'lead' if name == 'lead' else 'worker')
                         tmux('set-option', '-p', '-t', pane, '@agent_team_member', name)
@@ -267,8 +405,8 @@ def restore():
                     tmux('set-option', '-w', '-t', state['window'], 'pane-border-format', ' #{?@agent_team_role,#{@agent_team_role} | ,}#{pane_title} ')
                     atomic(path, state)
                 except (OSError, subprocess.CalledProcessError):
-                    for _, (_, pane, _, _) in resolved:
-                        for option in ('@agent_team', '@agent_team_role', '@agent_team_member'):
+                    for _, (_, pane, _, _), _ in resolved:
+                        for option in ('@agent_team', '@agent_team_role', '@agent_team_member', '@workbench_team_resume_blocked'):
                             try:
                                 tmux('set-option', '-pu', '-t', pane, option)
                             except subprocess.CalledProcessError:
@@ -279,6 +417,8 @@ def restore():
                         pass
                     raise
         except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
+            if isinstance(ident, str) and ID.fullmatch(ident):
+                block_unconfirmed(resolved, ident, before['panes'])
             continue
 
 
@@ -300,6 +440,8 @@ if __name__ == '__main__':
             before_restore()
         elif sys.argv[1:] == ['restore']:
             restore()
+        elif sys.argv[1:] == ['finish-restore']:
+            finish_restore()
         elif len(sys.argv) == 4 and sys.argv[1] == 'resume':
             sys.exit(resume(sys.argv[2], sys.argv[3]))
         else:

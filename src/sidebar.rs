@@ -246,13 +246,14 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
         if members
             .values()
             .filter_map(|m| m["pane"].as_str())
+            .filter(|pane| !pane.is_empty())
             .any(|pane| !seen.insert(pane))
         {
             continue;
         }
         let key = format!("{window}:{id}");
         for (name, member) in members {
-            let Some(pane) = member["pane"].as_str() else {
+            let Some(pane) = member["pane"].as_str().filter(|pane| !pane.is_empty()) else {
                 continue;
             };
             let pane_missing = !all_panes.contains(pane);
@@ -981,10 +982,9 @@ fn build_team_rows(
                 continue;
             }
             if member.name == "lead" && leads.get(&member.key) == Some(&agent.instance_id) {
-                if let Some(children) = workers.remove(&member.key) {
-                    entries.push((agent, Some((member.key.clone(), children))));
-                    continue;
-                }
+                let children = workers.remove(&member.key).unwrap_or_default();
+                entries.push((agent, Some((member.key.clone(), children))));
+                continue;
             }
         }
         entries.push((agent, None));
@@ -2533,6 +2533,27 @@ mod tests {
     }
 
     #[test]
+    fn verified_lead_remains_a_team_with_no_live_workers() {
+        let (mut snapshot, mut teams) = team_fixture();
+        snapshot
+            .agents
+            .retain(|agent| !agent.instance_id.starts_with("worker-"));
+        teams.retain(|_, member| member.name == "lead");
+        for sort in [AgentSort::Grouped, AgentSort::Prioritized] {
+            let rows = build_team_rows(&snapshot, false, sort, &teams, &HashSet::new());
+            let summary = rows
+                .iter()
+                .find_map(|row| match row {
+                    Row::Team(agent, summary) if agent.instance_id == "lead" => Some(summary),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(summary.workers, 0);
+            assert!(!rows.iter().any(|row| matches!(row, Row::TeamWorker(..))));
+        }
+    }
+
+    #[test]
     fn closed_team_workers_stay_hidden_after_lead_exits() {
         let (mut snapshot, mut teams) = team_fixture();
         snapshot.agents[1].exited = true;
@@ -2750,10 +2771,18 @@ mod tests {
             &teams,
             &HashSet::new(),
         );
-        assert!(!rows.iter().any(|r| matches!(r, Row::Team(..))));
+        let summary = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Team(_, summary) => Some(summary),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary.workers, 0);
+        assert!(!rows.iter().any(|r| matches!(r, Row::TeamWorker(..))));
         assert_eq!(
             rows.iter().filter(|r| matches!(r, Row::Agent(..))).count(),
-            4
+            3
         );
     }
 

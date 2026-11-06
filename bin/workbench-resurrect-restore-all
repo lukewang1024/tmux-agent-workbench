@@ -3,6 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 assistant_hook="$script_dir/../vendor/tmux-assistant-resurrect/scripts/restore-assistant-sessions.sh"
+trap '"$script_dir/workbench-resurrect-team" finish-restore >/dev/null 2>&1 || true' 0
 
 # Restore the integrated assistant sidecar first; TraeX uses Workbench's
 # native hook identity sidecar and is restored by the same composed hook.

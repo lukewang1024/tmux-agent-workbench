@@ -39,6 +39,9 @@ while IFS= read -r entry; do
 		awk -F "$separator" -v session="$session_name" -v window="$window_index" -v pane="$pane_index" \
 			'$1 == session && $2 == window && $3 == pane { print $4; exit }')
 	[ -n "$pane_id" ] || continue
+	if [ -n "$(wb_tmux show-option -pqv -t "$pane_id" @workbench_team_resume_blocked 2>/dev/null || true)" ]; then
+		continue
+	fi
 
 	client_wait=0
 	while [ "$(wb_tmux list-clients -t "$pane_id" 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ] && [ "$client_wait" -lt 50 ]; do

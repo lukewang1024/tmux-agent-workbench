@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise team resurrection on a private tmux server without model calls."""
 import json
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -98,6 +99,142 @@ class TeamResurrection(unittest.TestCase):
         self.assertEqual(self.tmux('show-option', '-wqv', '-t', state['window'], '@workbench_restored_team'), 'test-team')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', lead, '@agent_team_member'), 'lead')
 
+    def test_stopped_member_is_not_reactivated_even_if_saved_active(self):
+        state = json.loads(self.state_path.read_text())
+        state['members']['worker_a']['status'] = 'stopped'
+        for index in range(25):
+            state['members']['old_' + str(index)] = {'pane': '', 'status': 'stopped'}
+        self.state_path.write_text(json.dumps(state))
+        self.restart()
+        self.helper('restore')
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['worker_a']['status'], 'stopped')
+        self.assertEqual(state['members']['worker_a']['pane'], '')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team_member'), 'lead')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@agent_team_member'), '')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), 'test-team')
+        self.helper('finish-restore')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), '')
+
+    def test_saved_ready_status_survives_shutdown_exit(self):
+        state = json.loads(self.state_path.read_text())
+        state['members']['worker_a']['status'] = 'ready'
+        self.state_path.write_text(json.dumps(state))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        sidecar = json.loads((self.root / 'save/workbench-team-sessions.json').read_text())
+        self.assertEqual(next(m['status'] for m in sidecar['teams'][0]['members'] if m['member'] == 'worker_a'), 'ready')
+        state['members']['lead']['status'] = 'exited'
+        state['members']['worker_a']['status'] = 'exited'
+        state['closed'] = True
+        self.state_path.write_text(json.dumps(state))
+        self.restart()
+        self.helper('restore')
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['lead']['status'], 'running')
+        self.assertEqual(state['members']['worker_a']['status'], 'ready')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@agent_team_member'), 'worker_a')
+
+    def test_ambiguous_session_is_left_unconfirmed(self):
+        assistant = self.root / 'save/assistant-sessions.json'
+        data = json.loads(assistant.read_text())
+        data['sessions'].append(dict(data['sessions'][1], session_id='other-session'))
+        assistant.write_text(json.dumps(data))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        self.helper('restore')
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['worker_a']['pane'], '')
+        self.assertEqual(state['members']['worker_a']['status'], 'running')
+        self.assertEqual(state['members']['worker_a']['restore_status'], 'unconfirmed')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), 'test-team')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team_member'), 'lead')
+
+    def test_duplicate_session_id_blocks_the_team(self):
+        assistant = self.root / 'save/assistant-sessions.json'
+        data = json.loads(assistant.read_text())
+        data['sessions'][1]['session_id'] = data['sessions'][0]['session_id']
+        assistant.write_text(json.dumps(data))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        self.helper('restore')
+        self.assertEqual(json.loads(self.state_path.read_text()), self.state)
+        for pane in ('team:0.0', 'team:0.1'):
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), 'test-team')
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@agent_team'), '')
+
+    def test_missing_session_is_unconfirmed_and_not_launched(self):
+        assistant = self.root / 'save/assistant-sessions.json'
+        data = json.loads(assistant.read_text())
+        data['sessions'].pop()
+        assistant.write_text(json.dumps(data))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        self.helper('restore')
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['worker_a']['pane'], '')
+        self.assertEqual(state['members']['worker_a']['restore_status'], 'unconfirmed')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), 'test-team')
+        if os.environ.get('WORKBENCH_TEST_AGENT_TEAM_CLI'):
+            env = dict(self.env, AGENT_TEAM_DIR=str(self.directory), AGENT_TEAM_ROLE='lead')
+            status = json.loads(subprocess.check_output([os.environ['WORKBENCH_TEST_AGENT_TEAM_CLI'], 'status'],
+                                                        env=env, text=True, timeout=10))
+            self.assertFalse(status['worker_a']['alive'])
+            self.assertEqual(status['worker_a']['restore_status'], 'unconfirmed')
+
+    def test_stopped_member_without_session_stays_stopped_and_unconfirmed(self):
+        state = json.loads(self.state_path.read_text())
+        state['members']['worker_a']['status'] = 'stopped'
+        self.state_path.write_text(json.dumps(state))
+        assistant = self.root / 'save/assistant-sessions.json'
+        data = json.loads(assistant.read_text())
+        data['sessions'].pop()
+        assistant.write_text(json.dumps(data))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        self.helper('restore')
+        member = json.loads(self.state_path.read_text())['members']['worker_a']
+        self.assertEqual((member['status'], member['pane'], member['restore_status']),
+                         ('stopped', '', 'unconfirmed'))
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_TEST_TEAM_HISTORY_STATE'), 'historical state fixture not configured')
+    def test_historical_state_copy_keeps_stopped_members(self):
+        source = Path(os.environ['WORKBENCH_TEST_TEAM_HISTORY_STATE'])
+        original = source.read_bytes()
+        state = json.loads(original)
+        state['id'] = 'test-team'
+        state['socket'] = self.socket
+        state['window'] = self.state['window']
+        state['cwd'] = str(self.root)
+        state['members']['lead']['pane'] = self.state['members']['lead']['pane']
+        state['members']['v2_merge_review']['pane'] = self.state['members']['worker_a']['pane']
+        self.state_path.write_text(json.dumps(state))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        self.helper('restore')
+        restored = json.loads(self.state_path.read_text())
+        self.assertEqual(restored['members']['v2_merge_review']['status'], 'stopped')
+        self.assertEqual(restored['members']['v2_merge_review']['pane'], '')
+        self.assertEqual(len(restored['messages']), len(state['messages']))
+        self.assertEqual(len(restored['members']), len(state['members']))
+        for name, member in state['members'].items():
+            if name != 'lead':
+                self.assertEqual(restored['members'][name]['status'], member['status'])
+        self.assertEqual(sum(item['pane'] == '' for item in restored['members'].values()), len(state['members']) - 1)
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team_member'), 'lead')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), 'test-team')
+        cli = os.environ['WORKBENCH_TEST_AGENT_TEAM_CLI']
+        env = dict(self.env, AGENT_TEAM_DIR=str(self.directory), AGENT_TEAM_ROLE='lead')
+        status = json.loads(subprocess.check_output([cli, 'status'], env=env, text=True, timeout=15))
+        self.assertTrue(status['lead']['alive'])
+        self.assertTrue(all(not item['alive'] for name, item in status.items() if name != 'lead'))
+        self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), hashlib.sha256(original).digest())
+
     def test_refuses_partial_or_already_owned_targets(self):
         self.restart()
         worker = self.tmux('display-message', '-p', '-t', 'team:0.1', '#{pane_id}')
@@ -105,6 +242,22 @@ class TeamResurrection(unittest.TestCase):
         self.helper('restore')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', worker, '@agent_team'), 'other-team')
+        self.assertEqual(json.loads(self.state_path.read_text()), self.state)
+
+    def test_missing_state_blocks_generic_assistant_relaunch(self):
+        self.restart()
+        self.state_path.unlink()
+        self.helper('restore')
+        for pane in ('team:0.0', 'team:0.1'):
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@agent_team'), '')
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), 'test-team')
+
+    def test_missing_target_blocks_other_fresh_team_panes(self):
+        self.restart()
+        self.tmux('kill-pane', '-t', 'team:0.1')
+        self.helper('restore')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@workbench_team_resume_blocked'), 'test-team')
         self.assertEqual(json.loads(self.state_path.read_text()), self.state)
 
     def test_same_server_restore_does_not_take_existing_panes(self):
@@ -144,6 +297,8 @@ class TeamResurrection(unittest.TestCase):
         self.restart()
         self.helper('restore')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
+        for pane in ('team:0.0', 'team:0.1'):
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), 'test-team')
 
     def test_pre_restore_preserves_existing_hook(self):
         prior = self.root / 'prior hook'
@@ -290,6 +445,116 @@ class TeamResurrection(unittest.TestCase):
         lines = output.read_text().splitlines()
         self.assertIn(str(self.directory) + ':lead:saved-0', lines)
         self.assertIn(str(self.directory) + ':worker_a:saved-1', lines)
+
+    def test_composed_restore_never_relaunches_stopped_member(self):
+        state = json.loads(self.state_path.read_text())
+        state['members']['worker_a']['status'] = 'stopped'
+        self.state_path.write_text(json.dumps(state))
+        self.restart()
+        shim = self.root / 'bin'
+        shim.mkdir()
+        output = self.root / 'launched'
+        team_cli = shim / 'agent-team'
+        team_cli.write_text('#!/bin/sh\nprintf "%s:%s\\n" "$3" "$4" >> "$TEAM_TEST_OUTPUT"\nsleep 30\n')
+        team_cli.chmod(0o755)
+        real_tmux = subprocess.check_output(['which', 'tmux'], text=True).strip()
+        tmux_shim = shim / 'tmux'
+        tmux_shim.write_text('#!/bin/sh\nif [ "$1" = list-clients ]; then printf "client\\n"; exit 0; fi\nexec ' + real_tmux + ' "$@"\n')
+        tmux_shim.chmod(0o755)
+        path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
+        self.env.update(PATH=path, TEAM_TEST_OUTPUT=str(output))
+        self.tmux('set-environment', '-g', 'PATH', path)
+        self.tmux('set-environment', '-g', 'TEAM_TEST_OUTPUT', str(output))
+        self.tmux('kill-pane', '-t', 'team:0.1')
+        self.tmux('respawn-pane', '-k', '-t', 'team:0.0', '/bin/sh')
+        self.tmux('split-window', '-d', '-t', 'team:0.0', '/bin/sh')
+        env = dict(self.env, TMUX=self.socket + ',1,0')
+        result = subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')], env=env,
+                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not output.exists():
+            time.sleep(.05)
+        self.assertTrue(output.exists(), result.stderr.decode())
+        self.assertEqual(output.read_text().splitlines(), ['lead:saved-0'])
+        self.assertIn('stopped or unconfirmed', result.stderr.decode())
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['worker_a']['status'], 'stopped')
+        self.assertEqual(state['members']['worker_a']['pane'], '')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), '')
+
+    def test_composed_restore_never_launches_an_ambiguous_lead(self):
+        assistant = self.root / 'save/assistant-sessions.json'
+        data = json.loads(assistant.read_text())
+        data['sessions'].append(dict(data['sessions'][0], session_id='other-lead'))
+        assistant.write_text(json.dumps(data))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        shim = self.root / 'bin'
+        shim.mkdir()
+        output = self.root / 'unexpected-launch'
+        for name in ('agent-team', 'codex'):
+            executable = shim / name
+            executable.write_text('#!/bin/sh\nprintf launched >> "$TEAM_TEST_OUTPUT"\nsleep 30\n')
+            executable.chmod(0o755)
+        path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
+        self.env.update(PATH=path, TEAM_TEST_OUTPUT=str(output))
+        self.tmux('set-environment', '-g', 'PATH', path)
+        self.tmux('set-environment', '-g', 'TEAM_TEST_OUTPUT', str(output))
+        self.tmux('kill-pane', '-t', 'team:0.1')
+        self.tmux('respawn-pane', '-k', '-t', 'team:0.0', '/bin/sh')
+        self.tmux('split-window', '-d', '-t', 'team:0.0', '/bin/sh')
+        result = subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')],
+                                env=dict(self.env, TMUX=self.socket + ',1,0'),
+                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+        self.assertFalse(output.exists())
+        self.assertIn('stopped or unconfirmed', result.stderr.decode())
+        self.assertEqual(json.loads(self.state_path.read_text()), self.state)
+        for pane in ('team:0.0', 'team:0.1'):
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@agent_team'), '')
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), '')
+
+    def test_trae_restore_never_relaunches_stopped_member(self):
+        state = json.loads(self.state_path.read_text())
+        state['tool'] = 'traex'
+        state['members']['worker_a']['status'] = 'stopped'
+        self.state_path.write_text(json.dumps(state))
+        (self.root / 'save/assistant-sessions.json').write_text(json.dumps({'sessions': []}))
+        entries = [{'session_name': 'team', 'window_index': '0', 'pane_index': str(index),
+                    'session_id': 'trae-' + str(index)} for index in range(2)]
+        (self.root / 'save/workbench-trae-sessions.json').write_text(json.dumps(entries))
+        self.helper('stage', str(self.root / 'save/last'))
+        self.helper('save')
+        self.restart()
+        shim = self.root / 'bin'
+        shim.mkdir()
+        output = self.root / 'launched'
+        team_cli = shim / 'agent-team'
+        team_cli.write_text('#!/bin/sh\nprintf "%s:%s\\n" "$3" "$4" >> "$TEAM_TEST_OUTPUT"\nsleep 30\n')
+        team_cli.chmod(0o755)
+        real_tmux = subprocess.check_output(['which', 'tmux'], text=True).strip()
+        tmux_shim = shim / 'tmux'
+        tmux_shim.write_text('#!/bin/sh\nif [ "$1" = list-clients ]; then printf "client\\n"; exit 0; fi\nexec ' + real_tmux + ' "$@"\n')
+        tmux_shim.chmod(0o755)
+        path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
+        self.env.update(PATH=path, TEAM_TEST_OUTPUT=str(output))
+        self.tmux('set-environment', '-g', 'PATH', path)
+        self.tmux('set-environment', '-g', 'TEAM_TEST_OUTPUT', str(output))
+        self.tmux('kill-pane', '-t', 'team:0.1')
+        self.tmux('respawn-pane', '-k', '-t', 'team:0.0', '/bin/sh')
+        self.tmux('split-window', '-d', '-t', 'team:0.0', '/bin/sh')
+        env = dict(self.env, TMUX=self.socket + ',1,0')
+        subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')], env=env,
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not output.exists():
+            time.sleep(.05)
+        self.assertTrue(output.exists())
+        self.assertEqual(output.read_text().splitlines(), ['lead:trae-0'])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['members']['worker_a']['status'], 'stopped')
+        self.assertEqual(state['members']['worker_a']['pane'], '')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@workbench_team_resume_blocked'), '')
 
 
 if __name__ == '__main__':
