@@ -48,6 +48,10 @@ with tempfile.TemporaryDirectory(prefix='wb-rolling-', dir='/tmp') as directory:
                            str(old_binary) + ' sidebar')
             tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
             sidebar_pid = tmux('display-message', '-p', '-t', sidebar, '#{pane_pid}')
+            deadline = time.monotonic() + 10
+            while not tmux('show-option', '-pqv', '-t', sidebar, '@workbench_sidebar_runtime').startswith(sidebar_pid + ':'):
+                assert time.monotonic() < deadline, 'sidebar did not register its runtime identity'
+                time.sleep(.05)
             before = status()['pid']
             assert before == daemon.pid
             process = subprocess.Popen([str(client_binary), 'client', 'serve'], env=env,
@@ -58,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix='wb-rolling-', dir='/tmp') as directory:
                                    kind='termux', capabilities=[]))
                 assert select.select([process.stdout], [], [], 10)[0], 'client did not register'
                 header = process.stdout.read(4)
-                assert len(header) == 4, process.stderr.read().decode()
+                assert len(header) == 4, f'client closed before welcome: {process.poll()}'
                 reply = json.loads(process.stdout.read(struct.unpack('>I', header)[0]))
                 assert reply['type'] == 'welcome', reply
                 assert daemon.poll() is None and status()['pid'] == before
