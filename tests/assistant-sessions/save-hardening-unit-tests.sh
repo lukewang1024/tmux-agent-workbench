@@ -4,7 +4,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../lib/assistant-sessions" && pwd)"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT INT TERM
 export TMUX_RESURRECT_DIR="$SANDBOX/source-resurrect"
@@ -278,6 +278,28 @@ assert_eq "--secret-env-vars=VALUE form survives too" \
 assert_eq "a real secret flag alongside it is still stripped" \
 	"--secret-env-vars TOKEN --model gpt-4" \
 	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --api-key sk-xxx --model gpt-4")"
+
+echo "== preserve options and discard prompts across assistants =="
+for tool in claude opencode codex pi omp grok; do
+	assert_eq "$tool retains its model and drops the prompt tail" \
+		"--model fixture-model" \
+		"$(extract_cli_args "$tool" "$tool --model fixture-model explain --dangerously-skip-permissions")"
+done
+# Copilot accepts prompts through flags rather than positional arguments.
+assert_eq "copilot retains its model and drops the flagged prompt tail" \
+	"--model fixture-model" \
+	"$(extract_cli_args copilot "copilot --model fixture-model --prompt explain --dangerously-skip-permissions")"
+# The value-taking fallback matters even when help is incomplete or the
+# assistant executable cannot be found by a tmux hook.
+assert_eq "Pi retains session directory and model without complete help" \
+	"--session-dir /tmp/pi-sessions --model sonnet" \
+	"$(extract_cli_args pi "pi --session-dir /tmp/pi-sessions --model sonnet --session pi-session")"
+assert_eq "Claude retains permission mode while stripping session selection" \
+	"--permission-mode acceptEdits --model sonnet" \
+	"$(extract_cli_args claude "claude --permission-mode acceptEdits --model sonnet --resume session-id")"
+assert_eq "Codex retains sandbox mode while stripping session selection" \
+	"--sandbox read-only --model o3" \
+	"$(extract_cli_args codex "codex --sandbox read-only --model o3 resume session-id")"
 
 echo "== session-less relaunch diagnostics =="
 # A pane launched with an inline key is precisely the case that reaches the

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Persist and rebind agent-team pane identities across tmux resurrection."""
 import fcntl
+import base64
+import binascii
 import copy
 import hashlib
 import json
@@ -51,6 +53,14 @@ def snapshot_digest():
     return file_digest(sidecar().parent / 'last')
 
 
+def requires_sidecars():
+    try:
+        with (sidecar().parent / 'last').open('rb') as snapshot:
+            return any(line.rstrip(b'\r\n') == b'workbench-assistant-sidecars\t1' for line in snapshot)
+    except OSError:
+        return False
+
+
 def stage(snapshot):
     digest = file_digest(Path(snapshot))
     if digest is None:
@@ -68,6 +78,90 @@ def atomic(path, value):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def archive_sidecars():
+    """Bind each complete layout to its exact assistant and team sidecars."""
+    directory = sidecar().parent
+    digest = snapshot_digest()
+    if not digest:
+        raise ValueError('cannot archive sidecars without a snapshot')
+    files = {}
+    for name in ('assistant-sessions.json', 'workbench-trae-sessions.json', 'workbench-team-sessions.json'):
+        path = directory / name
+        files[name] = base64.b64encode(path.read_bytes()).decode('ascii') if path.exists() else None
+    if files['assistant-sessions.json'] is None or files['workbench-team-sessions.json'] is None:
+        raise ValueError('cannot archive incomplete assistant sidecars')
+    team = json.loads(base64.b64decode(files['workbench-team-sessions.json']))
+    if team.get('snapshot_sha256') != digest:
+        raise ValueError('cannot archive mismatched snapshot metadata')
+    for key, name in (('assistant_sha256', 'assistant-sessions.json'),
+                      ('trae_sha256', 'workbench-trae-sessions.json')):
+        value = files[name]
+        if key not in team or team[key] != (hashlib.sha256(base64.b64decode(value)).hexdigest() if value is not None else None):
+            raise ValueError('cannot archive mismatched assistant sidecars')
+    atomic(directory / 'workbench-snapshot-sidecars' / (digest + '.json'),
+           {'version': 1, 'snapshot_sha256': digest,
+            'team_sha256': hashlib.sha256(base64.b64decode(files['workbench-team-sessions.json'])).hexdigest(),
+            'files': files})
+
+
+def restore_archived_sidecars():
+    """Validate the whole archive before restoring any selected sidecar."""
+    directory = sidecar().parent
+    digest = snapshot_digest()
+    if not digest:
+        raise ValueError('selected snapshot is missing')
+    try:
+        bundle = json.loads((directory / 'workbench-snapshot-sidecars' / (digest + '.json')).read_text())
+        if bundle.get('version') != 1 or bundle.get('snapshot_sha256') != digest:
+            raise ValueError('snapshot sidecar archive does not match')
+        files = bundle['files']
+        names = ('assistant-sessions.json', 'workbench-trae-sessions.json', 'workbench-team-sessions.json')
+        decoded = {name: None if files[name] is None else base64.b64decode(files[name], validate=True)
+                   for name in names}
+        if (decoded[names[2]] is None or bundle.get('team_sha256') !=
+                hashlib.sha256(decoded[names[2]]).hexdigest()):
+            raise ValueError('team sidecar archive has mismatched contents')
+        team = json.loads(decoded['workbench-team-sessions.json'])
+        if (not isinstance(team, dict) or decoded['assistant-sessions.json'] is None
+                or team.get('snapshot_sha256') != digest or not isinstance(team.get('teams'), list)):
+            raise ValueError('snapshot sidecar archive is incomplete')
+        for group in team['teams']:
+            if (not isinstance(group, dict) or not isinstance(group.get('id'), str)
+                    or not ID.fullmatch(group['id']) or not isinstance(group.get('members'), list)):
+                raise ValueError('snapshot team metadata is invalid')
+            for member in group['members']:
+                if (not isinstance(member, dict) or not isinstance(member.get('member'), str)
+                        or not ID.fullmatch(member['member'])
+                        or any(not isinstance(member.get(key), str) or not member[key]
+                               for key in ('session', 'window', 'pane'))):
+                    raise ValueError('snapshot team member metadata is invalid')
+        assistants = json.loads(decoded[names[0]])
+        if (not isinstance(assistants, dict) or not isinstance(assistants.get('sessions', []), list)
+                or not isinstance(assistants.get('relaunch', []), list)):
+            raise ValueError('snapshot assistant metadata is invalid')
+        if decoded[names[1]] is not None and not isinstance(json.loads(decoded[names[1]]), list):
+            raise ValueError('snapshot Trae metadata is invalid')
+        for key, name in (('assistant_sha256', names[0]), ('trae_sha256', names[1])):
+            value = decoded[name]
+            if key not in team or team[key] != (hashlib.sha256(value).hexdigest() if value is not None else None):
+                raise ValueError('snapshot sidecar archive has mismatched contents')
+    except (OSError, AttributeError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise ValueError('matching snapshot sidecar archive is missing or invalid') from exc
+    for name, value in decoded.items():
+        destination = directory / name
+        if value is None:
+            destination.unlink(missing_ok=True)
+            continue
+        fd, temporary = tempfile.mkstemp(prefix='.restore-sidecar-', dir=directory)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(value)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def inventory():
@@ -238,8 +332,7 @@ def save():
     pending = tmux('show-option', '-gqv', '@workbench_resurrect_pending_snapshot')
     tmux('set-option', '-gu', '@workbench_resurrect_pending_snapshot')
     if not pending or pending != snapshot_digest():
-        print('workbench team restore: team snapshot requires a complete tmux-resurrect save', file=sys.stderr)
-        return
+        raise ValueError('team snapshot requires a complete tmux-resurrect save')
     rows = inventory()
     indexes = restored_indexes()
     remap_assistant_sidecars(indexes)
@@ -249,26 +342,41 @@ def save():
         print('workbench team restore: could not remap pane contents:', exc, file=sys.stderr)
     groups = {}
     for session, win, index, window, pane, ident, command in rows:
-        if ID.fullmatch(ident):
-            groups.setdefault((ident, window), []).append((session, win, index, pane))
+        if not ident:
+            continue
+        if not ID.fullmatch(ident):
+            raise ValueError('a pane has an invalid team identity')
+        groups.setdefault((ident, window), []).append((session, win, index, pane))
     result = []
     socket = tmux('display-message', '-p', '#{socket_path}')
     for (ident, window), panes in groups.items():
+        panes = [(s, w, p, pid) for s, w, p, pid in panes if indexes.get((s, w, p), p) is not None]
+        if not panes:
+            continue
         directory = ROOT / ident
         try:
             with (directory / 'lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 state = json.loads((directory / 'state.json').read_text())
                 if state.get('id') != ident or state.get('window') != window or state.get('socket') != socket or state.get('closed'):
-                    continue
-                members = {item.get('pane'): name for name, item in state['members'].items()}
+                    raise ValueError('team state does not match the pane')
+                members = {}
+                for name, item in state['members'].items():
+                    member_pane = item.get('pane')
+                    if member_pane:
+                        if member_pane in members:
+                            raise ValueError('team pane has multiple members')
+                        members[member_pane] = name
+                if any(pid not in members for _, _, _, pid in panes):
+                    raise ValueError('team pane has no matching member')
                 mapped = [{'session': s, 'window': w, 'pane': indexes.get((s, w, p), p),
                            'member': members[pid], 'status': state['members'][members[pid]].get('status')}
-                          for s, w, p, pid in panes if pid in members and indexes.get((s, w, p), p) is not None]
-                if any(m['member'] == 'lead' for m in mapped):
-                    result.append({'id': ident, 'members': mapped})
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
+                          for s, w, p, pid in panes]
+                if sum(m['member'] == 'lead' for m in mapped) != 1:
+                    raise ValueError('team lead is missing or ambiguous')
+                result.append({'id': ident, 'members': mapped})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError('cannot save incomplete team metadata for ' + ident) from exc
     stat = os.stat(socket)
     directory = sidecar().parent
     atomic(sidecar(), {'socket_device': stat.st_dev, 'socket_inode': stat.st_ino,
@@ -276,9 +384,13 @@ def save():
                        'assistant_sha256': file_digest(directory / 'assistant-sessions.json'),
                        'trae_sha256': file_digest(directory / 'workbench-trae-sessions.json'),
                        'teams': result})
+    if requires_sidecars():
+        archive_sidecars()
 
 
 def before_restore():
+    if requires_sidecars():
+        restore_archived_sidecars()
     socket = tmux('display-message', '-p', '#{socket_path}')
     stat = os.stat(socket)
     atomic(sidecar().with_name('workbench-team-restore-inventory.json'),
@@ -288,10 +400,13 @@ def before_restore():
 
 def restore():
     inventory_path = sidecar().with_name('workbench-team-restore-inventory.json')
+    required = requires_sidecars()
     try:
         saved = json.loads(sidecar().read_text())
         before = json.loads(inventory_path.read_text())
     except (OSError, ValueError):
+        if required:
+            raise ValueError('matching team sidecar or restore inventory is missing')
         return
     finally:
         try:
@@ -303,13 +418,21 @@ def restore():
     socket = tmux('display-message', '-p', '#{socket_path}')
     stat = os.stat(socket)
     if (not isinstance(saved, dict) or not isinstance(before, dict)
-            or not saved.get('snapshot_sha256') or saved['snapshot_sha256'] != snapshot_digest()
             or (before.get('socket_device'), before.get('socket_inode')) != (stat.st_dev, stat.st_ino)
             or not isinstance(before.get('panes'), list)):
+        if required:
+            raise ValueError('team sidecar or restore inventory is invalid')
+        return
+    if not saved.get('snapshot_sha256') or saved['snapshot_sha256'] != snapshot_digest():
+        if required:
+            raise ValueError('team sidecar does not match the selected snapshot')
+        block_saved_teams(saved, targets, before['panes'])
         return
     if ('assistant_sha256' not in saved or 'trae_sha256' not in saved
             or saved['assistant_sha256'] != file_digest(sidecar().parent / 'assistant-sessions.json')
             or saved['trae_sha256'] != file_digest(sidecar().parent / 'workbench-trae-sessions.json')):
+        if required:
+            raise ValueError('assistant sidecars do not match the selected snapshot')
         block_saved_teams(saved, targets, before['panes'])
         return
     token = tmux('show-option', '-gqv', '@workbench_team_restore_token')
@@ -346,6 +469,8 @@ def restore():
                 continue
             if any(item[1] in before['panes'] for _, item, _ in resolved):
                 block_unconfirmed(resolved, ident, before['panes'])
+                if required:
+                    raise RuntimeError('team restore would take over an existing pane')
                 continue
             if any(marker or cmd.lstrip('-') not in SHELLS for _, (_, _, marker, cmd), _ in resolved):
                 block_unconfirmed(resolved, ident, before['panes'])
@@ -436,6 +561,8 @@ if __name__ == '__main__':
             save()
         elif len(sys.argv) == 3 and sys.argv[1] == 'stage':
             stage(sys.argv[2])
+        elif sys.argv[1:] == ['abort-save']:
+            tmux('set-option', '-gu', '@workbench_resurrect_pending_snapshot')
         elif sys.argv[1:] == ['pre-restore']:
             before_restore()
         elif sys.argv[1:] == ['restore']:
@@ -446,6 +573,6 @@ if __name__ == '__main__':
             sys.exit(resume(sys.argv[2], sys.argv[3]))
         else:
             sys.exit(2)
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
         print('workbench team restore:', exc, file=sys.stderr)
         sys.exit(1)

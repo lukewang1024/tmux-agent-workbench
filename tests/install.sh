@@ -43,6 +43,19 @@ if "$test_root/bin/tmux-agent-workbench" conventions unexpected >/dev/null 2>&1;
 fi
 "$test_root/bin/wb" config check >/dev/null
 
+# Installed hooks include the absorbed session trackers without touching the
+# developer's real Claude or OpenCode configuration.
+"$test_root/bin/tmux-agent-workbench" hooks install claude >/dev/null
+"$test_root/bin/tmux-agent-workbench" hooks install opencode >/dev/null
+"$test_root/bin/tmux-agent-workbench" hooks check claude >/dev/null
+"$test_root/bin/tmux-agent-workbench" hooks check opencode >/dev/null
+grep 'hook track claude start' "$HOME/.claude/settings.json" >/dev/null
+grep 'hook track claude end' "$HOME/.claude/settings.json" >/dev/null
+test -f "$XDG_CONFIG_HOME/opencode/plugins/tmux-agent-workbench-resurrect.js"
+"$test_root/bin/tmux-agent-workbench" hooks remove claude >/dev/null
+"$test_root/bin/tmux-agent-workbench" hooks remove opencode >/dev/null
+test ! -e "$XDG_CONFIG_HOME/opencode/plugins/tmux-agent-workbench-resurrect.js"
+
 # A second run must be idempotent and must not create backup files.
 "$repo/install" "$test_root/bin" --no-git >/dev/null
 test ! -e "$test_root/bin/mux-agent~"

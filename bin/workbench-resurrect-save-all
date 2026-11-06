@@ -2,13 +2,29 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-assistant_hook="$script_dir/../vendor/tmux-assistant-resurrect/scripts/save-assistant-sessions.sh"
-
-# Workbench owns the complete assistant-resurrect chain. Keep the upstream
-# schema and detector implementation vendored here, then append Workbench's
-# TraeX pane/session sidecar for the native agent that the upstream plugin did
-# not know about.
-bash "$assistant_hook" || true
-"$script_dir/workbench-resurrect-merge-hooks" || true
-"$script_dir/workbench-resurrect-save-trae" || true
-"$script_dir/workbench-resurrect-team" save || true
+case $#:${1:-} in
+  0:) assistant_only=0 ;;
+  1:--assistant-only) assistant_only=1 ;;
+  *) printf '%s\n' 'usage: workbench-resurrect-save-all [--assistant-only]' >&2; exit 2 ;;
+esac
+# Detect the supported assistants before merging native lifecycle identities.
+# Keep the established sidecar schema, then save TraeX and team metadata.
+failed=0
+if ! "$script_dir/workbench-assistant-sessions" save; then
+  printf '%s\n' 'workbench resurrect: assistant session save failed' >&2
+  failed=1
+elif ! "$script_dir/workbench-resurrect-merge-hooks"; then
+  failed=1
+fi
+if ! "$script_dir/workbench-resurrect-save-trae"; then
+  failed=1
+fi
+if [ "$failed" -eq 0 ] && [ "$assistant_only" -eq 0 ]; then
+  "$script_dir/workbench-resurrect-team" save || failed=1
+elif [ "$failed" -eq 0 ]; then
+  printf '%s\n' 'workbench resurrect: saved assistant metadata only; use tmux-resurrect for a complete snapshot' >&2
+else
+  # Never bind an older or partial assistant sidecar to this layout.
+  "$script_dir/workbench-resurrect-team" abort-save || true
+fi
+exit "$failed"

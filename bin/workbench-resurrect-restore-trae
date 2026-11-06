@@ -9,20 +9,21 @@ wb_tmux() {
 	fi
 }
 
-data_home=${XDG_DATA_HOME:-$HOME/.local/share}
-resurrect_dir=$(wb_tmux show-option -gqv @resurrect-dir 2>/dev/null || true)
-[ -n "$resurrect_dir" ] || resurrect_dir="$data_home/tmux/resurrect"
-host_name=$(hostname 2>/dev/null || true)
-resurrect_dir=$(printf '%s\n' "$resurrect_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host_name,g; s,~,$HOME,g")
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/../lib/assistant-sessions/paths.sh"
+resurrect_dir=$(workbench_resurrect_dir)
 input="$resurrect_dir/workbench-trae-sessions.json"
 
 [ -f "$input" ] || exit 0
-command -v jq >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || { printf '%s\n' 'workbench resurrect: jq is required for Trae restore' >&2; exit 1; }
 sleep 2
 
 entries=$(mktemp "${TMPDIR:-/tmp}/workbench-trae-entries.XXXXXX")
 trap 'rm -f "$entries"' EXIT HUP INT TERM
-jq -c '.[]' "$input" >"$entries" 2>/dev/null || exit 0
+if [ ! -s "$input" ] || ! jq -c 'if type == "array" then .[] else error("invalid Trae sidecar") end' "$input" >"$entries" 2>/dev/null; then
+	printf '%s\n' 'workbench resurrect: invalid Trae sidecar' >&2
+	exit 1
+fi
 
 while IFS= read -r entry; do
 	session_id=$(printf '%s\n' "$entry" | jq -r '.session_id // empty')

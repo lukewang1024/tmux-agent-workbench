@@ -859,6 +859,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for _ in range(48):
             os.write(master, f'\x1b[<65;{footer_x};{footer_y}M'.encode())
             rendered += drain(.015)
+        # The last wheel event can still be queued even when host-48 is
+        # visible. Wait for host-49 so the click uses the final painted rows.
+        rendered = wait_for_text(menu, b'host-49', initial=rendered, attempts=100)
         visible = '\n'.join(screen_rows(rendered))
         assert 'host-48' in visible and 'host-00' not in visible, visible
         x, y = item_position(rendered, 'host-48')
@@ -868,7 +871,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         while not host_connected.exists():
             assert time.monotonic() < deadline, 'scrolled host action did not execute'
             drain(.05)
-        assert host_connected.read_text() == 'host-48\n'
+        actual_host = host_connected.read_text()
+        assert actual_host == 'host-48\n', (actual_host, visible)
         host_window = tmux('display-message', '-p', '-c', client, '#{window_id}')
         tmux('kill-window', '-t', host_window)
         hosts.write_text('dev-host\ntest-host\n')

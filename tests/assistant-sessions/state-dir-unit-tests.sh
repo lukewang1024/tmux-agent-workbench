@@ -23,7 +23,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../lib/assistant-sessions" && pwd)"
 
 SANDBOX="$(mktemp -d)" || exit 1
 [ -d "$SANDBOX" ] || exit 1

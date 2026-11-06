@@ -27,7 +27,7 @@ layout:   reorganise batch-worker|snapshot|apply|restore
 titles:   title set [task-name] [--session <direction>] | title status
 clients:  attach, client serve|status|setup|open-url
 ui:       menu, ui old|new|toggle|status, sidebar, popup, switch window|session|agent|pane, pick repo|project|session|agent
-tmux:     resurrect save|restore
+tmux:     resurrect save|restore|status|clean|relaunch candidates|seed|add
 system:   conventions, status, doctor, config, hooks, daemon
 EOF
 }
@@ -116,12 +116,22 @@ case $command_name in
   resurrect)
     [ $# -gt 0 ] || { usage >&2; exit 2; }
     case $1 in
-      save) shift; exec "$plugin_dir/bin/workbench-resurrect-save-all" "$@" ;;
+      save) shift; [ "$#" -eq 0 ] || exit 2; exec "$plugin_dir/bin/workbench-resurrect-save-all" --assistant-only ;;
       restore) shift; exec "$plugin_dir/bin/workbench-resurrect-restore-all" "$@" ;;
+      status) shift; [ "$#" -eq 0 ] || exit 2; exec python3 "$plugin_dir/bin/workbench-resurrect-relaunch" status ;;
+      clean) shift; [ "$#" -eq 0 ] || exit 2; exec python3 "$plugin_dir/bin/workbench-resurrect-relaunch" clean ;;
+      relaunch) shift; exec python3 "$plugin_dir/bin/workbench-resurrect-relaunch" "$@" ;;
       *) echo "tmux-agent-workbench resurrect: unknown command: $1" >&2; exit 2 ;;
     esac
     ;;
   hook)
+    if [ "${1:-}" = track ] && [ "${2:-}" = claude ] && [ "$#" -eq 3 ]; then
+      case $3 in
+        start) exec bash "$plugin_dir/lib/assistant-sessions/hooks/claude-session-track.sh" ;;
+        end) exec bash "$plugin_dir/lib/assistant-sessions/hooks/claude-session-cleanup.sh" ;;
+      esac
+      exit 2
+    fi
     need_core
     hook_state=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-workbench
     (umask 077; mkdir -p "$hook_state")

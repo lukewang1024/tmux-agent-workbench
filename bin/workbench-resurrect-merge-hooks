@@ -3,7 +3,7 @@ set -eu
 
 # Merge the native Workbench lifecycle-hook identities into the compatible
 # assistant-resurrect sidecar. This makes the Workbench hook the authority for
-# Claude, Codex, and OpenCode while retaining the vendored detector fallback
+# Claude, Codex, and OpenCode while retaining the detector fallback
 # for assistants that do not have a Workbench hook target.
 
 wb_tmux() {
@@ -15,22 +15,16 @@ wb_tmux() {
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-
-resurrect_dir=$(wb_tmux show-option -gqv @resurrect-dir 2>/dev/null || true)
-if [ -z "$resurrect_dir" ]; then
-	if [ -d "$HOME/.tmux/resurrect" ]; then
-		resurrect_dir=$HOME/.tmux/resurrect
-	else
-		resurrect_dir=${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect
-	fi
-fi
-host_name=$(hostname 2>/dev/null || true)
-resurrect_dir=$(printf '%s\n' "$resurrect_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host_name,g; s,~,$HOME,g")
+. "$script_dir/../lib/assistant-sessions/paths.sh"
+resurrect_dir=$(workbench_resurrect_dir)
 input_file=$resurrect_dir/assistant-sessions.json
-[ -f "$input_file" ] || exit 0
+[ -f "$input_file" ] || { printf '%s\n' 'workbench resurrect: assistant sidecar is missing' >&2; exit 1; }
 
-snapshot=$("$script_dir/tmux-agent-workbench-cli" snapshot --json 2>/dev/null || true)
-[ -n "$snapshot" ] || exit 0
+snapshot=$("$script_dir/tmux-agent-workbench-cli" snapshot --json 2>/dev/null) || {
+	printf '%s\n' 'workbench resurrect: could not read native assistant identities' >&2
+	exit 1
+}
+[ -n "$snapshot" ] || { printf '%s\n' 'workbench resurrect: empty native snapshot' >&2; exit 1; }
 
 overlay=$(mktemp)
 output=$(mktemp "${input_file}.workbench.XXXXXX")
@@ -61,15 +55,15 @@ if ! printf '%s\n' "$snapshot" | jq -ce '
 		]
 	end
 ' >"$overlay"; then
-	exit 0
+	printf '%s\n' 'workbench resurrect: invalid native snapshot' >&2
+	exit 1
 fi
 
 overlay_count=$(jq 'length' "$overlay")
 [ "$overlay_count" -gt 0 ] || exit 0
 
-# Replacing by pane/tool avoids duplicate entries when the detector fallback
-# and a native hook both identified the same live process. Existing relaunch
-# entries and sessions for unsupported assistants are left untouched.
+# Overlay only the identity for a unique detector entry. Its saved options,
+# environment and cwd must survive, and duplicates must remain ambiguous.
 if jq --slurpfile workbench "$overlay" '
 	if type != "object"
 	   or ((.sessions // []) | type) != "array"
@@ -77,10 +71,19 @@ if jq --slurpfile workbench "$overlay" '
 	then error("invalid assistant sidecar")
 	else
 		.sessions = ((.sessions // [])
-			| map(. as $entry | select(any($workbench[0][]; .pane == $entry.pane and .tool == $entry.tool) | not))
-			+ $workbench[0])
+			| reduce ($workbench[0] | group_by([.pane, .tool])[]) as $group (. ;
+				$group[0] as $new |
+				[ to_entries[] | select(.value.pane == $new.pane and .value.tool == $new.tool) | .key ] as $matches
+				| if ($group | length) > 1 then
+				    if ($matches | length) >= 2 then . else . + $group end
+				  elif ($matches | length) == 0 then . + [$new]
+				  elif ($matches | length) == 1 then .[$matches[0]].session_id = $new.session_id
+				  else . end))
 	end
 ' "$input_file" >"$output"; then
 	mv -f "$output" "$input_file"
 	printf '%s\n' "tmux-agent-workbench: merged $overlay_count native hook session(s) into $input_file" >&2
+else
+	printf '%s\n' 'workbench resurrect: invalid assistant sidecar; native identities were not merged' >&2
+	exit 1
 fi

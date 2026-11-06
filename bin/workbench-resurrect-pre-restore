@@ -10,4 +10,4 @@ if [ -n "$prior" ]; then
   bash -c "$prior"
 fi
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-"$script_dir/workbench-resurrect-team" pre-restore || true
+"$script_dir/workbench-resurrect-team" pre-restore

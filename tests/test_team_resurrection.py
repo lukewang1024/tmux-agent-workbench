@@ -5,8 +5,10 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import shlex
+import sys
 import tarfile
 import tempfile
 import time
@@ -14,6 +16,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / 'bin/workbench-resurrect-team'
+HISTORY_STATE = Path(os.environ.get('WORKBENCH_TEST_TEAM_HISTORY_STATE') or REPO / 'tests/fixtures/team-history.json')
 
 
 class TeamResurrection(unittest.TestCase):
@@ -201,9 +204,10 @@ class TeamResurrection(unittest.TestCase):
         self.assertEqual((member['status'], member['pane'], member['restore_status']),
                          ('stopped', '', 'unconfirmed'))
 
-    @unittest.skipUnless(os.environ.get('WORKBENCH_TEST_TEAM_HISTORY_STATE'), 'historical state fixture not configured')
+    @unittest.skipUnless(HISTORY_STATE.is_file() and os.environ.get('WORKBENCH_TEST_AGENT_TEAM_CLI'),
+                         'historical fixture or agent-team CLI not configured')
     def test_historical_state_copy_keeps_stopped_members(self):
-        source = Path(os.environ['WORKBENCH_TEST_TEAM_HISTORY_STATE'])
+        source = HISTORY_STATE
         original = source.read_bytes()
         state = json.loads(original)
         state['id'] = 'test-team'
@@ -252,6 +256,36 @@ class TeamResurrection(unittest.TestCase):
             self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@agent_team'), '')
             self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), 'test-team')
 
+    def test_save_rejects_missing_or_ambiguous_team_state(self):
+        sidecar = self.root / 'save/workbench-team-sessions.json'
+        original = sidecar.read_bytes()
+        snapshot = self.root / 'save/last'
+        for case in ('missing', 'unmapped', 'duplicate', 'invalid-marker'):
+            with self.subTest(case=case):
+                state = json.loads(json.dumps(self.state))
+                if case == 'unmapped':
+                    del state['members']['worker_a']
+                if case == 'duplicate':
+                    state['members']['worker_duplicate'] = dict(state['members']['worker_a'])
+                self.state_path.write_text(json.dumps(state))
+                if case == 'missing':
+                    self.state_path.unlink()
+                self.tmux('set-option', '-p', '-t', 'team:0.1', '@agent_team',
+                          'invalid/team' if case == 'invalid-marker' else 'test-team')
+                snapshot.write_text('snapshot-' + case + '\nworkbench-assistant-sidecars\t1\n')
+                self.helper('stage', str(snapshot))
+                result = subprocess.run([str(HELPER), 'save'], env=self.env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('team', result.stderr)
+                self.assertEqual(sidecar.read_bytes(), original)
+                digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+                self.assertFalse((self.root / 'save/workbench-snapshot-sidecars' / (digest + '.json')).exists())
+                pre = subprocess.run([str(HELPER), 'pre-restore'], env=self.env, capture_output=True)
+                self.assertNotEqual(pre.returncode, 0)
+                restore = subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')],
+                                         env=self.env, capture_output=True, timeout=20)
+                self.assertNotEqual(restore.returncode, 0)
+
     def test_missing_target_blocks_other_fresh_team_panes(self):
         self.restart()
         self.tmux('kill-pane', '-t', 'team:0.1')
@@ -275,11 +309,47 @@ class TeamResurrection(unittest.TestCase):
         self.helper('restore')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
 
+    def test_new_snapshot_refuses_to_take_over_existing_team_panes(self):
+        snapshot = self.root / 'save/last'
+        snapshot.write_text('snapshot\nworkbench-assistant-sidecars\t1\n')
+        self.helper('stage', str(snapshot))
+        self.helper('save')
+        self.helper('pre-restore')
+        result = subprocess.run([str(HELPER), 'restore'], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('existing pane', result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text()), self.state)
+
     def test_snapshot_mismatch_does_not_claim_panes(self):
         self.restart()
         (self.root / 'save/last').write_text('a different historical snapshot')
         self.helper('restore')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
+        for pane in ('team:0.0', 'team:0.1'):
+            self.assertEqual(self.tmux('show-option', '-pqv', '-t', pane, '@workbench_team_resume_blocked'), 'test-team')
+        self.assertEqual(json.loads(self.state_path.read_text()), self.state)
+
+    def test_mismatched_team_snapshot_never_falls_back_to_solo(self):
+        self.restart()
+        (self.root / 'save/last').write_text('a different historical snapshot')
+        shim = self.root / 'bin'
+        shim.mkdir()
+        launched = self.root / 'unexpected-launch'
+        codex = shim / 'codex'
+        codex.write_text('#!/bin/sh\nprintf launched > ' + shlex.quote(str(launched)) + '\n')
+        codex.chmod(0o755)
+        path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
+        self.env['PATH'] = path
+        self.tmux('set-environment', '-g', 'PATH', path)
+        for pane in ('team:0.0', 'team:0.1'):
+            self.tmux('respawn-pane', '-k', '-t', pane, '/bin/sh')
+        result = subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')],
+                                env=dict(self.env, TMUX=self.socket + ',1,0'),
+                                capture_output=True, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        time.sleep(.2)
+        self.assertFalse(launched.exists())
         self.assertEqual(json.loads(self.state_path.read_text()), self.state)
 
     def test_missing_team_sidecar_consumes_restore_inventory(self):
@@ -292,7 +362,8 @@ class TeamResurrection(unittest.TestCase):
         sidecar = self.root / 'save/workbench-team-sessions.json'
         original = sidecar.read_bytes()
         (self.root / 'save/assistant-sessions.json').write_text('{"sessions": []}')
-        self.helper('save')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.helper('save')
         self.assertEqual(sidecar.read_bytes(), original)
         self.restart()
         self.helper('restore')
@@ -372,6 +443,11 @@ class TeamResurrection(unittest.TestCase):
         self.tmux('kill-server')
         shim = self.root / 'bin'
         shim.mkdir()
+        # Restored login shells may reset PATH (for example in /etc/profile),
+        # which can select an older tmux/Python or even the real assistant.
+        # Keep all restored panes on this test's executables and fake CLI.
+        (shim / 'tmux').symlink_to(shutil.which('tmux'))
+        (shim / 'python3').symlink_to(sys.executable)
         log = self.root / 'real-launches'
         codex = shim / 'codex'
         codex.write_text('#!/bin/sh\nfor arg do last=$arg; done\nprintf "%s:%s\\n" "$AGENT_TEAM_ROLE" "$last" >> "$TEAM_TEST_OUTPUT"\nsleep 30\n')
@@ -382,6 +458,7 @@ class TeamResurrection(unittest.TestCase):
         self.env['TEAM_TEST_OUTPUT'] = str(log)
         self.tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'bootstrap', '-x', '120', '-y', '40')
         self.tmux('set-option', '-g', 'default-shell', '/bin/sh')
+        self.tmux('set-option', '-g', 'default-command', '/bin/sh')
         self.tmux('set-option', '-g', '@resurrect-dir', str(self.root / 'save'))
         self.tmux('set-option', '-g', '@resurrect-hook-pre-restore-all', shlex.quote(str(REPO / 'bin/workbench-resurrect-pre-restore')))
         self.tmux('set-option', '-g', '@resurrect-hook-post-restore-all', shlex.quote(str(REPO / 'bin/workbench-resurrect-restore-all')))

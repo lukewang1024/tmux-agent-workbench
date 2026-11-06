@@ -28,6 +28,13 @@ t list-panes -a \
 awk -F '\t' -v OFS='\t' -f "$script_dir/../lib/resurrect-layout.awk" \
   "$panes_file" "$normalized_file" > "$output_file"
 
+# tmux-resurrect ignores unknown record types. The marker distinguishes new
+# complete snapshots from historical layouts with no team sidecar. A unique
+# save ID makes the digest different even when two layouts are identical, so
+# each snapshot can retain its own assistant and team state.
+printf 'workbench-assistant-sidecars\t1\n' >> "$output_file"
+save_id=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
+printf 'workbench-assistant-save-id\t%s\n' "$save_id" >> "$output_file"
 mv "$output_file" "$save_file"
 t set-option -gu @workbench_resurrect_pending_snapshot 2>/dev/null || true
 "$script_dir/workbench-resurrect-team" stage "$save_file" || true

@@ -525,9 +525,7 @@ fn remove_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
         HookTarget::Codex => merge_codex(&codex_home()?.join("config.toml"), true),
         HookTarget::Opencode => {
             let path = config_home()?.join("opencode/plugins/tmux-agent-workbench.js");
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
+            remove_opencode(&path)?;
             Ok(())
         }
     }
@@ -582,11 +580,23 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
         if !exact {
             return Ok("missing or duplicate Workbench entries".into());
         }
+        if target == HookTarget::Claude
+            && (!content.contains("tmux-agent-workbench hook track claude start")
+                || !content.contains("tmux-agent-workbench hook track claude end"))
+        {
+            return Ok("missing assistant session tracker".into());
+        }
     }
     if target == HookTarget::Codex {
         let doc = content.parse::<DocumentMut>()?;
         if let Some(issue) = codex_hooks_issue(&doc, &path) {
             return Ok(issue.into());
+        }
+    }
+    if target == HookTarget::Opencode {
+        let tracker = opencode_tracker_path(&path);
+        if !tracker.exists() || !fs::read_to_string(tracker)?.contains(HOOK_ID) {
+            return Ok("missing assistant session tracker".into());
         }
     }
     let count = content.matches(&needle).count();
@@ -665,7 +675,28 @@ fn merge_json_hooks(
                 .contains("tmux-agent-workbench hook ingest")
         });
         if install && !remove {
-            list.push(json!({"matcher":"*","hooks":[{"type":"command","command":format!("tmux-agent-workbench hook ingest {agent} {event}"),"timeout":3}],"_workbench":HOOK_ID}));
+            let mut commands = vec![
+                json!({"type":"command","command":format!("tmux-agent-workbench hook ingest {agent} {event}"),"timeout":3}),
+            ];
+            if agent == "claude" && key == "SessionStart" {
+                commands.push(json!({"type":"command","command":"tmux-agent-workbench hook track claude start","timeout":3}));
+            }
+            list.push(json!({"matcher":"*","hooks":commands,"_workbench":HOOK_ID}));
+        }
+    }
+    if agent == "claude" {
+        let list = hooks
+            .entry("SessionEnd")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or("hook event must be an array")?;
+        list.retain(|entry| {
+            !entry
+                .to_string()
+                .contains("tmux-agent-workbench hook track claude end")
+        });
+        if install && !remove {
+            list.push(json!({"matcher":"*","hooks":[{"type":"command","command":"tmux-agent-workbench hook track claude end","timeout":3}],"_workbench":HOOK_ID}));
         }
     }
     atomic_json(path, &root)
@@ -767,6 +798,16 @@ fn codex_entry_is_workbench(entry: &Table) -> bool {
 }
 
 fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let tracker = opencode_tracker_path(path);
+    for candidate in [path, tracker.as_path()] {
+        if candidate.exists() && !fs::read_to_string(candidate)?.contains(HOOK_ID) {
+            return Err(format!(
+                "refusing to replace non-Workbench plugin {}",
+                candidate.display()
+            )
+            .into());
+        }
+    }
     let content = format!(
         r#"// {HOOK_ID}
 const {{ spawn }} = require("node:child_process");
@@ -778,7 +819,26 @@ module.exports = async () => ({{ event }}) => {{
 }};
 "#
     );
-    atomic_write(path, content.as_bytes())
+    let tracker_content = format!(
+        "// {HOOK_ID}\n{}",
+        include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js")
+    );
+    atomic_write(path, content.as_bytes())?;
+    atomic_write(&tracker, tracker_content.as_bytes())
+}
+
+fn opencode_tracker_path(path: &Path) -> PathBuf {
+    path.with_file_name("tmux-agent-workbench-resurrect.js")
+}
+
+fn remove_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let tracker = opencode_tracker_path(path);
+    for candidate in [path, tracker.as_path()] {
+        if candidate.exists() && fs::read_to_string(candidate)?.contains(HOOK_ID) {
+            fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
 }
 
 fn atomic_json(path: &Path, value: &Value) -> Result<(), Box<dyn std::error::Error>> {
@@ -846,12 +906,35 @@ mod tests {
         merge_json_hooks(&path, "claude", false, true).unwrap();
         let installed = fs::read_to_string(&path).unwrap();
         assert_eq!(installed.matches("hook ingest claude Stop").count(), 1);
+        assert_eq!(installed.matches("hook track claude start").count(), 1);
+        assert_eq!(installed.matches("hook track claude end").count(), 1);
         assert!(installed.contains("peon-ping"));
         assert!(installed.contains("\"theme\": \"dark\""));
         merge_json_hooks(&path, "claude", true, false).unwrap();
         let removed = fs::read_to_string(&path).unwrap();
         assert!(!removed.contains("tmux-agent-workbench hook ingest"));
+        assert!(!removed.contains("tmux-agent-workbench hook track claude"));
         assert!(removed.contains("peon-ping"));
+    }
+
+    #[test]
+    fn opencode_install_includes_tracker_and_preserves_foreign_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tmux-agent-workbench.js");
+        let tracker = opencode_tracker_path(&path);
+        install_opencode(&path).unwrap();
+        install_opencode(&path).unwrap();
+        assert!(
+            fs::read_to_string(&tracker)
+                .unwrap()
+                .contains("SessionTracker")
+        );
+        remove_opencode(&path).unwrap();
+        assert!(!path.exists() && !tracker.exists());
+        fs::write(&tracker, "user plugin").unwrap();
+        assert!(install_opencode(&path).is_err());
+        remove_opencode(&path).unwrap();
+        assert_eq!(fs::read_to_string(tracker).unwrap(), "user plugin");
     }
 
     #[test]

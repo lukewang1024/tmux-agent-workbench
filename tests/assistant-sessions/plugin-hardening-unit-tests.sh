@@ -3,10 +3,16 @@
 
 set -euo pipefail
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$TEST_DIR/../../lib/assistant-sessions" && pwd)
 TEST_ROOT=$(mktemp -d)
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 UNDER_TEST="${BASH:-bash}"
+LEGACY_ROOT="$TEST_ROOT/legacy-plugin"
+mkdir -p "$LEGACY_ROOT"
+ln -s "$ROOT_DIR/hooks" "$LEGACY_ROOT/hooks"
+ln -s "$ROOT_DIR/scripts" "$LEGACY_ROOT/scripts"
+cp "$TEST_DIR/fixtures/legacy-tpm.tmux" "$LEGACY_ROOT/tmux-assistant-resurrect.tmux"
 
 passes=0
 failures=0
@@ -59,7 +65,7 @@ chmod +x "$FAKE_BIN/tmux"
 # The entrypoint must generate executable hook commands even when its checkout
 # path contains a single quote, and new config files should be private.
 QUOTED_PLUGIN="$TEST_ROOT/plugin's copy"
-ln -s "$ROOT_DIR" "$QUOTED_PLUGIN"
+ln -s "$LEGACY_ROOT" "$QUOTED_PLUGIN"
 INSTALL_HOME="$TEST_ROOT/install-home"
 TMUX_CALLS="$TEST_ROOT/tmux-calls"
 export TMUX_CALLS
@@ -90,7 +96,7 @@ done
 ln -s "$FAKE_BIN/tmux" "$NO_JQ_BIN/tmux"
 NO_JQ_HOME="$TEST_ROOT/no-jq-home"
 HOME="$NO_JQ_HOME" PATH="$NO_JQ_BIN" \
-    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+    "$UNDER_TEST" "$LEGACY_ROOT/tmux-assistant-resurrect.tmux"
 if [ ! -e "$NO_JQ_HOME/.claude/settings.json" ]; then
     pass "missing jq does not create an unusable Claude settings file"
 else
@@ -102,7 +108,7 @@ COLLISION_HOME="$TEST_ROOT/collision-home"
 mkdir -p "$COLLISION_HOME/.config/opencode/plugins"
 printf 'user plugin\n' >"$COLLISION_HOME/.config/opencode/plugins/session-tracker.js"
 HOME="$COLLISION_HOME" PATH="$FAKE_BIN:$PATH" \
-    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux" 2>/dev/null
+    "$UNDER_TEST" "$LEGACY_ROOT/tmux-assistant-resurrect.tmux" 2>/dev/null
 assert_eq "OpenCode regular-file collision is preserved" "user plugin" \
     "$(sed -n '1p' "$COLLISION_HOME/.config/opencode/plugins/session-tracker.js")"
 
@@ -113,7 +119,7 @@ SYMLINK_TARGET="$TEST_ROOT/unrelated-directory"
 mkdir -p "$SYMLINK_HOME/.config/opencode/plugins" "$SYMLINK_TARGET"
 ln -s "$SYMLINK_TARGET" "$SYMLINK_HOME/.config/opencode/plugins/session-tracker.js"
 HOME="$SYMLINK_HOME" PATH="$FAKE_BIN:$PATH" \
-    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+    "$UNDER_TEST" "$LEGACY_ROOT/tmux-assistant-resurrect.tmux"
 if [ -L "$SYMLINK_HOME/.config/opencode/plugins/session-tracker.js" ] && \
    [ ! -e "$SYMLINK_TARGET/opencode-session-track.js" ]; then
     pass "OpenCode installer does not follow a destination directory symlink"
@@ -314,20 +320,16 @@ mkdir -p "$STATUS_HOME" "$STATUS_RESURRECT"
 cat >"$STATUS_RESURRECT/assistant-sessions.json" <<'JSON'
 {"timestamp":"2026-08-27T00:00:00Z","sessions":[{"tool":"claude","pane":"work:0.0","session_id":"status-test"}]}
 JSON
-if command -v just >/dev/null 2>&1; then
-    status_output=$(HOME="$STATUS_HOME" TMUX_RESURRECT_DIR="$STATUS_RESURRECT" \
-        just --justfile "$ROOT_DIR/justfile" --working-directory "$ROOT_DIR" status)
-    case "$status_output" in
-        *'Last save: 2026-08-27T00:00:00Z (1 session(s))'*'claude in work:0.0: status-test'*)
-            pass "status reads assistant sessions from resurrect_data_dir"
-            ;;
-        *)
-            fail "status reads assistant sessions from resurrect_data_dir"
-            ;;
-    esac
-else
-    printf 'SKIP: status resolver test (just is unavailable)\n'
-fi
+status_output=$(HOME="$STATUS_HOME" TMUX_RESURRECT_DIR="$STATUS_RESURRECT" \
+    "$TEST_DIR/../../bin/tmux-agent-workbench-cli" resurrect status)
+case "$status_output" in
+    *'Last save: 2026-08-27T00:00:00Z (1 session(s))'*'claude in work:0.0: status-test'*)
+        pass "status reads assistant sessions from resurrect_data_dir"
+        ;;
+    *)
+        fail "status reads assistant sessions from resurrect_data_dir"
+        ;;
+esac
 
 printf '\n%d passed, %d failed\n' "$passes" "$failures"
 [ "$failures" -eq 0 ]
