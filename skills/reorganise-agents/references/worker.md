@@ -1,6 +1,6 @@
 # Reorganisation worker
 
-You are the single worker selected by the batch settings resolver. Complete
+You are the single native worker selected by the current agent. Complete
 the parent's requested layout operation and return evidence. Do not dispatch
 this skill again or spawn other agents.
 

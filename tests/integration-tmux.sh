@@ -103,6 +103,7 @@ cargo build --quiet --manifest-path "$repo/Cargo.toml" --example codex
 "$python_runner" "$repo/tests/task-placement.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/auto-split.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/auto-split.py" "$binary" "$repo/target/debug/examples/codex" --daemon-auto-split-off
+"$python_runner" "$repo/tests/auto-split.py" "$binary" "$repo/target/debug/examples/codex" --incoming-claude
 "$python_runner" "$repo/tests/auto-split-concurrent.py" "$binary" "$repo/target/debug/examples/codex"
 "$python_runner" "$repo/tests/switcher.py" "$binary"
 "$python_runner" "$repo/tests/task-titles.py" "$binary" "$repo/target/debug/examples/codex"

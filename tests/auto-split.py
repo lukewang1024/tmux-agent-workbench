@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ binary, fixture = (str(Path(arg).resolve()) for arg in sys.argv[1:3])
 legacy_daemon = '--daemon-auto-split-off' in sys.argv[3:] or '--daemon-bin' in sys.argv[3:]
 daemon_binary = (str(Path(sys.argv[sys.argv.index('--daemon-bin') + 1]).resolve())
                  if '--daemon-bin' in sys.argv[3:] else binary)
+incoming_claude = '--incoming-claude' in sys.argv[3:]
 repo = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     socket = root + '/tmux.sock'
@@ -29,6 +31,10 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     bin_dir = Path(root, 'bin')
     bin_dir.mkdir()
     (bin_dir / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
+    claude_fixture = bin_dir / 'claude'
+    if incoming_claude:
+        shutil.copyfile(fixture, claude_fixture)
+        claude_fixture.chmod(0o755)
     env['PATH'] = str(bin_dir) + os.pathsep + env['PATH']
     config = Path(env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
     config.mkdir(parents=True)
@@ -44,8 +50,9 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
         return subprocess.check_output(['tmux', '-u', '-S', socket, *args], env=env,
                                        text=True, timeout=10).rstrip('\n')
 
-    def core(*args, data=None):
-        result = subprocess.run([binary, *args], env=env, text=True, capture_output=True,
+    def core(*args, data=None, pane=None):
+        command_env = dict(env, TMUX_PANE=pane) if pane is not None else env
+        result = subprocess.run([binary, *args], env=command_env, text=True, capture_output=True,
                                 input=json.dumps(data) if data is not None else None, timeout=10)
         assert result.returncode == 0, (args, result.stderr)
         return json.loads(result.stdout)
@@ -65,8 +72,9 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
 
     def report(pane, session, event='UserPromptSubmit'):
         agent = live(pane)
-        return core('hook', 'ingest', 'codex', event,
-                    data={'session_id': session, 'agent_pid': agent['process']['pid']})
+        return core('hook', 'ingest', agent['kind'], event,
+                    data={'session_id': session, 'agent_pid': agent['process']['pid']},
+                    pane=pane if agent['kind'] == 'claude' else None)
 
     def title(pane, session, name, direction):
         return core('title', 'set', name, '--session', direction,
@@ -84,8 +92,9 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             existing.append(tmux('new-window', '-d', '-t', 'Office文档:', '-n', 'codex',
                                  '-P', '-F', '#{pane_id}', command))
         tmux('new-window', '-d', '-t', 'Office文档:', '-n', 'human-shell', 'sleep 300')
-        incoming = tmux('new-session', '-d', '-s', 'launch-pad', '-n', 'codex',
-                        '-P', '-F', '#{pane_id}', command)
+        incoming_command = 'env WORKBENCH_FIXTURE_SECONDS=300 ' + shlex.quote(str(claude_fixture)) if incoming_claude else command
+        incoming = tmux('new-session', '-d', '-s', 'launch-pad', '-n', 'claude' if incoming_claude else 'codex',
+                        '-P', '-F', '#{pane_id}', incoming_command)
         tmux('new-session', '-d', '-s', 'unrelated', '-n', 'shell', 'sleep 300')
         env['TMUX'] = socket + ',' + tmux('display-message', '-p', '#{pid}') + ',0'
         tmux('set-option', '-w', '-t', existing[3], '@agent_focus', '1')
@@ -100,6 +109,7 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
                 wait(lambda: live(pane).get('hook_session_id') == sessions[pane], 'mock binding')
                 result = title(pane, sessions[pane], topic, 'Office文档')
                 assert result['status'] == 'renamed', result  # Five existing tasks are allowed.
+            assert live(incoming)['kind'] == ('claude' if incoming_claude else 'codex')
             report(incoming, sessions[incoming], 'SessionStart')
             wait(lambda: live(incoming).get('hook_session_id') == sessions[incoming], 'incoming binding')
             context = report(incoming, sessions[incoming])['hookSpecificOutput']['additionalContext']
@@ -114,6 +124,12 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             result = title(incoming, sessions[incoming], '图片拖拽定位', 'Office文档')
             assert result['status'] == 'needs_split' and result['current_tasks'] == result['limit'] == 5, result
             assert 'exactly one native subagent' in result['instruction'] and '--scope-session' in result['instruction']
+            if incoming_claude:
+                assert "Claude Code's native subagent" in result['instruction']
+                assert 'reorganise batch-worker' not in result['instruction']
+            else:
+                assert "Codex's native subagent" in result['instruction']
+                assert 'reorganise batch-worker' in result['instruction']
             source = result['source_session']
             ticket = result['ticket']
             assert location(incoming) == before_location
@@ -148,6 +164,6 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             assert live(incoming)['process']['pid'] == incoming_pid
             assert core('auto-split', 'status')['pending'] == []
             assert core('daemon', 'status')['pid'] == daemon_pid
-            print('PASS fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child; daemon kept running')
+            print('PASS ' + ('Claude' if incoming_claude else 'Codex') + ' caller: fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child; daemon kept running')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, capture_output=True, timeout=5)

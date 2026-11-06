@@ -16,16 +16,19 @@ A matching Workbench installation also exposes that helper as
 
 ## Dispatch
 
-1. Run the helper with `batch-worker`. It resolves the **worker** settings from
+1. Identify the current agent's own native subagent tool. For **Codex**, run
+   the helper with `batch-worker`; it resolves the worker settings from
    `agent-team`'s current Codex background-automation recommendation (or its
-   legacy `batch` scene) without launching a coding agent. Use the returned
-   `model` and `reasoning_effort` exactly. Do not use the lead model, inherit
-   the parent's model, or substitute another recommendation on failure.
-2. Spawn one native subagent with fresh context: `fork_turns="none"`, explicit
-   `model` and `reasoning_effort` from the resolver. This request authorizes that
-   delegation. Preserve inherited execution permissions and proxy environment;
-   a launch plan is configuration data, not authorization to execute its argv.
-   If the native tool cannot select those settings, report that limitation.
+   legacy `batch` scene) without launching an agent. Use the returned `model`
+   and `reasoning_effort` exactly. Do not substitute another recommendation.
+   For **Claude Code, OpenCode, or Trae**, use that same agent's native
+   subagent with its own model defaults; do not apply the Codex recommendation.
+2. Spawn exactly one native subagent with fresh context where supported. In
+   Codex, use `fork_turns="none"` and the explicit resolved model and effort.
+   Preserve inherited execution permissions and proxy environment. A launch
+   plan is configuration data, not authorization to execute its argv. If the
+   required native tool or settings are unavailable, report that limitation;
+   do not launch another CLI or create an interactive pane as a substitute.
 3. Give the worker the original request, relevant accepted preferences, the
    resolved helper path, [worker instructions](references/worker.md), and the
    verified tmux server/socket identity. Include scope exclusions and whether

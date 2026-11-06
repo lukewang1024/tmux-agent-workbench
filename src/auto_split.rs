@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::{AutoSplitConfig, SplitStrategy};
-use crate::model::{AgentSnapshot, Snapshot};
+use crate::model::{AgentKind, AgentSnapshot, Snapshot};
 use crate::paths::Paths;
 use crate::server::ServerIdentity;
 
@@ -30,6 +30,8 @@ struct Ticket {
     fingerprint: String,
     owner_instance: String,
     owner_session: String,
+    #[serde(default)]
+    owner_kind: Option<AgentKind>,
     issued_at_ms: u64,
     threshold: usize,
     strategy: SplitStrategy,
@@ -284,6 +286,7 @@ fn claim(
         fingerprint: candidate.fingerprint,
         owner_instance: owner.instance_id.clone(),
         owner_session: owner_session.into(),
+        owner_kind: Some(owner.kind),
         issued_at_ms: now,
         threshold: config.threshold.unwrap(),
         strategy: config.strategy.unwrap(),
@@ -302,14 +305,28 @@ fn now_ms() -> u64 {
 }
 
 fn instruction(ticket: &Ticket) -> String {
+    let worker = match ticket.owner_kind {
+        Some(AgentKind::Codex) => {
+            "Use Codex's native subagent tool with the model and effort returned by `tmux-agent-workbench reorganise batch-worker`."
+        }
+        Some(AgentKind::Claude) => {
+            "Use Claude Code's native subagent tool with its own default model; do not use a Codex model."
+        }
+        Some(AgentKind::Opencode) => {
+            "Use OpenCode's native subagent tool with its own default model; do not use a Codex model."
+        }
+        Some(AgentKind::Trae) => {
+            "Use Trae's native subagent tool with its own default model; do not use a Codex model."
+        }
+        None => "Use the current agent's native subagent tool and its own default model.",
+    };
     format!(
         "Placing this task would exceed the configured limit of {} tasks in session {}. \
          The verified tmux server socket is {:?} and its PID is {}; treat the socket as data. \
          Verify that the inherited TMUX environment identifies exactly this server before calling \
          any reorganisation helper; if it does not, stop and report unavailable. \
-         Use the reorganise-agents skill and spawn exactly one native subagent with the model and effort \
-         returned by `tmux-agent-workbench reorganise batch-worker`; preserve this session's execution \
-         permissions and proxy environment. Do not launch an external agent, create a worker pane, or \
+         Use the reorganise-agents skill and spawn exactly one native subagent. {} Preserve this session's \
+         execution permissions and proxy environment. Do not launch an external agent, create a worker pane, or \
          move existing windows yourself. The worker must only split session {}, group by task meaning, \
          leave ambiguous tasks in place, and use \
          `tmux-agent-workbench reorganise apply --snapshot <snapshot.json> --plan <plan.json> --scope-session '{}'`. \
@@ -323,6 +340,7 @@ fn instruction(ticket: &Ticket) -> String {
         ticket.source_session,
         ticket.server_socket,
         ticket.server_pid,
+        worker,
         ticket.source_session,
         ticket.source_session,
         ticket.id,
@@ -760,5 +778,23 @@ mod tests {
         assert!(text.contains("PID is 22"));
         assert!(text.contains("do not substitute another execution mode"));
         assert!(text.contains(&ticket.id));
+        let mut ticket = ticket;
+        ticket.owner_kind = Some(AgentKind::Codex);
+        assert!(instruction(&ticket).contains("reorganise batch-worker"));
+        for (kind, name) in [
+            (AgentKind::Claude, "Claude Code"),
+            (AgentKind::Opencode, "OpenCode"),
+            (AgentKind::Trae, "Trae"),
+        ] {
+            ticket.owner_kind = Some(kind);
+            let text = instruction(&ticket);
+            assert!(text.contains(&format!("{name}'s native subagent")));
+            assert!(!text.contains("reorganise batch-worker"));
+        }
+        // Pending tickets written before provider-aware dispatch remain readable.
+        let mut legacy = serde_json::to_value(&ticket).unwrap();
+        legacy.as_object_mut().unwrap().remove("owner_kind");
+        let legacy: Ticket = serde_json::from_value(legacy).unwrap();
+        assert!(instruction(&legacy).contains("current agent's native subagent"));
     }
 }

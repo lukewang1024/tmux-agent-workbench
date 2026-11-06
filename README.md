@@ -288,8 +288,9 @@ own agent chooses its direction by meaning, using the existing direction names
 and task titles. `title set` counts distinct windows with live local agents in
 the selected direction. Five tasks fit by default; when placing another would
 exceed that limit, the command leaves the caller in its current window and
-returns a request for one native `reorganise-agents` subagent to split the
-selected direction semantically. After a successful split, the caller chooses
+returns a request for one native `reorganise-agents` subagent of the calling
+agent to split the selected direction semantically. Codex uses its resolved
+batch worker settings; other agents use their own native subagent defaults. After a successful split, the caller chooses
 an appropriate child direction and retries placement. Unrelated full
 directions do not trigger work. The worker's scoped plan preserves other
 directions, non-agent windows, team windows, the personal assistant, panes,
