@@ -144,6 +144,24 @@ fn ledger_dir(paths: &Paths, server: &ServerIdentity) -> PathBuf {
     paths.state_dir.join("auto-split").join(&server.key)
 }
 
+/// Wait briefly for ledger writers, including a child process finishing an
+/// inherited descriptor handoff. Persistent contention still fails closed.
+fn try_lock_for(file: &File, timeout: Duration) -> io::Result<bool> {
+    let started = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= timeout {
+                    return Ok(false);
+                }
+                crate::compat::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Serialize client-side capacity checks and placement requests while an
 /// older daemon is kept alive. The daemon still performs its own check after
 /// it is eventually upgraded; the two locks protect different operations.
@@ -157,22 +175,13 @@ pub(crate) fn lock_placement(paths: &Paths, server: &ServerIdentity) -> io::Resu
         .truncate(false)
         .mode(0o600)
         .open(dir.join("placement.lock"))?;
-    let started = Instant::now();
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => return Ok(file),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if started.elapsed() >= Duration::from_secs(4) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "task placement is busy; retry shortly",
-                    ));
-                }
-                crate::compat::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error),
-        }
+    if !try_lock_for(&file, Duration::from_secs(4))? {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "task placement is busy; retry shortly",
+        ));
     }
+    Ok(file)
 }
 
 fn load_ledger(dir: &Path) -> io::Result<Ledger> {
@@ -235,7 +244,7 @@ fn claim(
         .create(true)
         .mode(0o600)
         .open(dir.join("lock"))?;
-    if lock.try_lock_exclusive().is_err() {
+    if !try_lock_for(&lock, Duration::from_millis(500))? {
         return Ok(None);
     }
     let mut ledger = load_ledger(&dir)?;
@@ -591,6 +600,45 @@ mod tests {
             .unwrap()
             .is_some()
         );
+    }
+
+    #[test]
+    fn claim_waits_for_a_short_lived_ledger_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(temp.path());
+        let server =
+            ServerIdentity::from_socket(PathBuf::from("/tmp/auto-split-lock.sock")).unwrap();
+        let dir = ledger_dir(&paths, &server);
+        private_dir(&dir).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let snapshot = fixture(3);
+            tx.send(()).unwrap();
+            claim(
+                &paths,
+                &server,
+                17,
+                &snapshot,
+                &snapshot.agents[0],
+                "thread-0",
+                "$1",
+                &enabled(3),
+                100,
+            )
+            .unwrap()
+        });
+        rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        FileExt::unlock(&lock).unwrap();
+        assert!(thread.join().unwrap().is_some());
     }
 
     #[test]
