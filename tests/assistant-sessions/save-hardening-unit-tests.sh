@@ -37,6 +37,16 @@ awk_detect_tool() {
 	printf '%s\n' "$1" | awk -v classify_only=1 -f "$REPO_DIR/scripts/lib-detect.awk"
 }
 
+echo "== live OpenCode session takes precedence over launch arguments =="
+printf '{"session_id":"ses_current"}\n' >"$STATE_DIR/opencode-876543.json"
+assert_eq "runtime session switch supersedes old -s argument" ses_current \
+	"$(get_opencode_session 876543 'opencode -s ses_initial' '' 0)"
+assert_eq "runtime session switch supersedes old --session argument" ses_current \
+	"$(get_opencode_session 876543 'opencode --session=ses_initial' '' 0)"
+rm "$STATE_DIR/opencode-876543.json"
+assert_eq "legacy argument remains a fallback" ses_initial \
+	"$(get_opencode_session 876543 'opencode -s ses_initial' '' 0)"
+
 echo "== executable-token detection =="
 for line in \
 	'vim /tmp/claude notes' \

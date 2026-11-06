@@ -58,7 +58,7 @@ try:
   config=root/'config';plugins=config/'opencode/plugins/tmux-agent-workbench-v2';plugins.mkdir(parents=True)
   wb=config/'tmux-agent-workbench';wb.mkdir();(wb/'config.toml').write_text('[notifications]\nenabled = false\n[auto_split]\nenabled = true\n')
   (project/'opencode.json').write_text(json.dumps({'autoupdate':False,'permissions':[{'action':'*','resource':'*','effect':'allow'}],'providers':{'wbmock':{'package':'aisdk:@ai-sdk/openai-compatible','name':'mock','settings':{'baseURL':f'http://127.0.0.1:{server.server_port}/v1','apiKey':'mock'},'models':{'mock':{'name':'Mock','limit':{'context':32000,'output':2048}}}}},'model':'wbmock/mock'}))
-  env=dict(os.environ,TERM='xterm-256color',PATH=str(bindir)+':'+os.environ['PATH'],XDG_CONFIG_HOME=str(config),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),XDG_DATA_HOME=str(root/'data'),XDG_RUNTIME_DIR=str(root/'run'),TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,OPENCODE_DISABLE_AUTOUPDATE='true',OPENCODE_DISABLE_MODELS_FETCH='true',NPM_CONFIG_REGISTRY='http://127.0.0.1:9',npm_config_registry='http://127.0.0.1:9',NPM_CONFIG_FETCH_RETRIES='0',npm_config_fetch_retries='0',NO_PROXY=(os.environ.get('NO_PROXY','')+',127.0.0.1,localhost').strip(','),no_proxy=(os.environ.get('no_proxy','')+',127.0.0.1,localhost').strip(','))
+  env=dict(os.environ,HOME=str(root),TERM='xterm-256color',PATH=str(bindir)+':'+os.environ['PATH'],XDG_CONFIG_HOME=str(config),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),XDG_DATA_HOME=str(root/'data'),XDG_RUNTIME_DIR=str(root/'run'),TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,OPENCODE_DISABLE_AUTOUPDATE='true',OPENCODE_DISABLE_MODELS_FETCH='true',NPM_CONFIG_REGISTRY='http://127.0.0.1:9',npm_config_registry='http://127.0.0.1:9',NPM_CONFIG_FETCH_RETRIES='0',npm_config_fetch_retries='0',NO_PROXY=(os.environ.get('NO_PROXY','')+',127.0.0.1,localhost').strip(','),no_proxy=(os.environ.get('no_proxy','')+',127.0.0.1,localhost').strip(','))
   for key in ('TMUX','TMUX_PANE','AGENT_TEAM_DIR','WORKBENCH_SESSION','WORKBENCH_TASK'):env.pop(key,None)
   def tmux(*args):return subprocess.check_output(['tmux','-u','-S',socket,*args],env=env,text=True,timeout=10).strip()
   def core(*args,data=None):return json.loads(subprocess.run([binary,*args],env=env,text=True,input=json.dumps(data) if data is not None else None,capture_output=True,timeout=10,check=True).stdout)
@@ -107,6 +107,14 @@ try:
     print('screen after:',tmux('capture-pane','-p','-t',pane)[-1800:])
     agents=core('snapshot','--json')['agents'];a=next((a for a in agents if a['target']['pane_id']==pane and not a['exited']),None)
     print('hook bound:',bool(a and a.get('hook_session_id')),'requests:',len(Mock.seen))
+    tracker=root/'assistant-resurrect'/('opencode-'+str(a['process']['pid'])+'.json')
+    deadline=time.monotonic()+5
+    while not tracker.exists() and time.monotonic()<deadline:time.sleep(.1)
+    assert tracker.exists(), 'foreground OpenCode TUI did not write a PID-matched tracker'
+    tracked=json.loads(tracker.read_text())
+    assert tracked['session_id']==a['hook_session_id'], (tracked, a.get('hook_session_id'))
+    assert tracked['env']['tmux_pane']==pane and tracker.stat().st_mode & 0o777==0o600
+    print('PID-matched foreground session tracker:',tracked['session_id'])
     print('naming context:',any('The target capacity is' in json.dumps(body) for body in Mock.seen))
     print('root steps:',Mock.root_step,'native child steps:',Mock.child_step)
     if not (root/'worker-done').exists():
@@ -127,6 +135,18 @@ try:
      if live and live['base_state']=='idle':break
      time.sleep(.2)
     else:raise AssertionError('OpenCode v2 did not report the completed turn as idle')
+    resurrect=os.environ.get('WORKBENCH_TEST_RESURRECT_SCRIPTS')
+    if resurrect:
+     savedir=root/'resurrect';savedir.mkdir();env['TMUX_RESURRECT_DIR']=str(savedir)
+     tmux('set-option','-g','@resurrect-dir',str(savedir))
+     for option,script in (('@resurrect-hook-post-save-layout','workbench-resurrect-save-hook'),('@resurrect-hook-post-save-all','workbench-resurrect-save-all')):
+      tmux('set-option','-g',option,shlex.quote(str(repo/'bin'/script)))
+     result=subprocess.run([str(Path(resurrect)/'save.sh'),'quiet'],env=env,capture_output=True,timeout=90)
+     assert result.returncode==0, (result.stdout.decode(),result.stderr.decode())
+     saved=json.loads((savedir/'assistant-sessions.json').read_text())
+     assert any(x['tool']=='opencode' and x['session_id']==tracked['session_id'] for x in saved['sessions']), saved
+     assert (savedir/'last').exists() and (savedir/'workbench-team-sessions.json').exists()
+     print('complete tmux-resurrect save includes the foreground OpenCode v2 session')
   finally:
    subprocess.run(['tmux','-S',socket,'kill-server'],env=env,capture_output=True,timeout=5)
 finally:

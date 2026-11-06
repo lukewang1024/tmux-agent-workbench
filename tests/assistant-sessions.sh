@@ -40,5 +40,9 @@ for suite in copilot-unit-tests grok-unit-tests relaunch-unit-tests \
   "$test_bash" "$tests/$suite.sh"
 done
 
+if command -v node >/dev/null 2>&1; then
+  node "$repo/tests/opencode-v2-session-tracker.mjs" "$repo/lib/opencode-session-track-v2.js"
+fi
+
 # This contract creates and destroys its own unique socket and uses no agents.
 PATH=$original_path "$test_bash" "$tests/tmux-target-contract-test.sh"

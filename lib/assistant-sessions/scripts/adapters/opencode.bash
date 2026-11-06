@@ -7,22 +7,9 @@ get_opencode_session() {
 	local cwd="${3:-}"
 	local allow_db_fallback="${4:-1}"
 
-	# Method 1: -s flag in process args (fastest)
+	# The active session can change after launch. Prefer the live plugin state
+	# over the initial -s/--session argument when both are available.
 	local sid
-	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 2: --session flag in process args (supports --session=<id> too)
-	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 3: plugin state file (handles runtime session switches)
 	local state_file="$STATE_DIR/opencode-${child_pid}.json"
 	if [ -f "$state_file" ]; then
 		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
@@ -30,6 +17,20 @@ get_opencode_session() {
 			echo "$sid"
 			return
 		fi
+	fi
+
+	# Method 2: -s flag in process args.
+	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
+	fi
+
+	# Method 3: --session flag (supports --session=<id> too).
+	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
 	fi
 
 	# Method 4: SQLite database (version-resilient fallback).

@@ -615,8 +615,23 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
             return Ok("missing assistant session tracker".into());
         }
         let v2 = opencode_v2_path(&path);
-        if !v2.exists() || !fs::read_to_string(v2)?.contains(HOOK_ID) {
+        if !v2.exists() || !fs::read_to_string(&v2)?.contains(HOOK_ID) {
             return Ok("missing OpenCode v2 plugin".into());
+        }
+        let tui = v2.with_file_name("tui.js");
+        let manifest = v2.with_file_name("package.json");
+        if !tui.exists() || !fs::read_to_string(tui)?.contains(HOOK_ID) {
+            return Ok("missing OpenCode v2 session tracker".into());
+        }
+        let package = fs::read_to_string(manifest)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok());
+        if package
+            .as_ref()
+            .and_then(|value| value["exports"]["./tui"].as_str())
+            != Some("./tui.js")
+        {
+            return Ok("missing OpenCode v2 tracker package entry".into());
         }
     }
     let count = content.matches(&needle).count();
@@ -820,7 +835,15 @@ fn codex_entry_is_workbench(entry: &Table) -> bool {
 fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tracker = opencode_tracker_path(path);
     let v2 = opencode_v2_path(path);
-    for candidate in [path, tracker.as_path(), v2.as_path()] {
+    let tui = v2.with_file_name("tui.js");
+    let manifest = v2.with_file_name("package.json");
+    for candidate in [
+        path,
+        tracker.as_path(),
+        v2.as_path(),
+        tui.as_path(),
+        manifest.as_path(),
+    ] {
         if candidate.exists() && !fs::read_to_string(candidate)?.contains(HOOK_ID) {
             return Err(format!(
                 "refusing to replace non-Workbench plugin {}",
@@ -831,8 +854,8 @@ fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     let content = include_str!("../lib/opencode-workbench.js");
     // Preserve the upstream tracker body while exporting an entry point each
-    // OpenCode generation can load. The v2 tracker remains a no-op until its
-    // own session-restore adapter is available.
+    // OpenCode generation can load. V2 tracks the actual foreground TUI route
+    // separately, since its server receives events for background sessions too.
     let tracker_source = include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js");
     if !tracker_source.contains("export const SessionTracker =") {
         return Err(
@@ -849,6 +872,14 @@ fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     atomic_write(
         &v2,
         include_str!("../lib/opencode-workbench-v2.js").as_bytes(),
+    )?;
+    atomic_write(
+        &tui,
+        include_str!("../lib/opencode-session-track-v2.js").as_bytes(),
+    )?;
+    atomic_write(
+        &manifest,
+        b"{\n  \"name\": \"tmux-agent-workbench-v1\",\n  \"type\": \"module\",\n  \"exports\": { \".\": \"./index.js\", \"./tui\": \"./tui.js\" }\n}\n",
     )
 }
 
@@ -864,7 +895,15 @@ fn opencode_v2_path(path: &Path) -> PathBuf {
 fn remove_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tracker = opencode_tracker_path(path);
     let v2 = opencode_v2_path(path);
-    for candidate in [path, tracker.as_path(), v2.as_path()] {
+    let tui = v2.with_file_name("tui.js");
+    let manifest = v2.with_file_name("package.json");
+    for candidate in [
+        path,
+        tracker.as_path(),
+        v2.as_path(),
+        tui.as_path(),
+        manifest.as_path(),
+    ] {
         if candidate.exists() && fs::read_to_string(candidate)?.contains(HOOK_ID) {
             fs::remove_file(candidate)?;
         }
@@ -959,6 +998,8 @@ mod tests {
         let path = temp.path().join("tmux-agent-workbench.js");
         let tracker = opencode_tracker_path(&path);
         let v2 = opencode_v2_path(&path);
+        let tui = v2.with_file_name("tui.js");
+        let manifest = v2.with_file_name("package.json");
         install_opencode(&path).unwrap();
         install_opencode(&path).unwrap();
         assert!(
@@ -972,8 +1013,22 @@ mod tests {
                 .contains("export const SessionTracker")
         );
         assert!(fs::read_to_string(&v2).unwrap().contains("standaloneOwner"));
+        assert!(fs::read_to_string(&tui).unwrap().contains("router.current"));
+        assert!(fs::read_to_string(&manifest).unwrap().contains("./tui"));
         remove_opencode(&path).unwrap();
-        assert!(!path.exists() && !tracker.exists() && !v2.exists());
+        assert!(
+            !path.exists()
+                && !tracker.exists()
+                && !v2.exists()
+                && !tui.exists()
+                && !manifest.exists()
+        );
+        fs::create_dir_all(tui.parent().unwrap()).unwrap();
+        fs::write(&tui, "user TUI plugin").unwrap();
+        assert!(install_opencode(&path).is_err());
+        remove_opencode(&path).unwrap();
+        assert_eq!(fs::read_to_string(&tui).unwrap(), "user TUI plugin");
+        fs::remove_file(&tui).unwrap();
         fs::write(&tracker, "user plugin").unwrap();
         assert!(install_opencode(&path).is_err());
         remove_opencode(&path).unwrap();

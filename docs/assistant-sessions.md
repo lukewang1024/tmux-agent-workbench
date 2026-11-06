@@ -16,7 +16,8 @@ appropriate assistant executable. Team restoration also requires an
 | --- | --- | --- |
 | Claude Code | Workbench hook, legacy PID hook state, or CLI session argument | `claude --resume` |
 | GitHub Copilot CLI | Live PID lock and session database, or a resumable CLI session argument | `copilot --resume=` |
-| OpenCode | Workbench hook, CLI argument, legacy plugin state, or cwd-scoped SQLite fallback | `opencode -s` |
+| OpenCode 1 | Workbench hook, live PID plugin state, CLI argument, or cwd-scoped SQLite fallback | `opencode -s` |
+| OpenCode 2 | Foreground TUI session tracker, CLI argument, or cwd-scoped SQLite fallback | `opencode -s` |
 | Codex CLI | Workbench hook, PID tags, CLI argument, SQLite or rollout fallback | `codex resume` |
 | Pi | CLI session argument or cwd-scoped session file | `pi --session` |
 | Oh My Pi (`omp`) | CLI session argument, terminal breadcrumb or session file | `omp --resume` |
@@ -37,6 +38,11 @@ stores its identity in `workbench-trae-sessions.json`; its independent resume
 does not currently reconstruct arbitrary original CLI flags. Team members are
 resumed by `agent-team`, which owns their context, model and permission settings
 and never replays the original prompt.
+
+OpenCode 2's TUI tracker records the currently displayed session, including
+switches after launch; background server events are not treated as pane
+identity. Existing OpenCode processes load updated plugins on their next start.
+The database fallback remains best-effort when a tracker is unavailable.
 
 ## Save and restore
 
