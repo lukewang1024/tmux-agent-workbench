@@ -555,7 +555,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         print('PASS Extract in both roots and renderers retains its filter, source pane, client and directory')
         # Workbench-owned selection and name dialogs use the same touch UI.
         # Stub only the external inventory/launch boundary, keeping the actual
-        # Sidebar New button, deferred popup transition, list and callbacks.
+        # Sidebar New action, deferred popup transition, list and callbacks.
         project_choice = root / 'project-choice'
         tmuxinator = shim / 'tmuxinator'
         tmuxinator.write_text('#!/bin/sh\nset -eu\ncase $1 in\n'
@@ -573,9 +573,23 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ui(mode)
             menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
                              env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'+ new', b'close', menu_footer=False)
-            x, y = item_position(rendered, '+ new')
+            rendered = wait_for_text(menu, b'menu', b'close', menu_footer=False)
+            # The compact priority sidebar puts New inside its header menu;
+            # older sidebars expose the same action as a direct button.
+            direct_new = b'+ new' in screen_text(rendered)
+            if direct_new:
+                x, y = item_position(rendered, '+ new')
+            else:
+                # Nerd-font icons can have different reported widths in a PTY.
+                # The header menu and popup Close are both right aligned, so
+                # the Close column is a stable hit target for the header menu.
+                _, y = item_position(rendered, 'menu')
+                x, _ = item_position(rendered, 'close')
             os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+            if not direct_new:
+                rendered = wait_for_text(client_process, b'workbench', b'New', menu_footer=False)
+                x, y = item_position(rendered, 'New')
+                os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
             rendered = wait_for_text(client_process, b'Workbench Projects', b'touch-project-00')
             menu.wait(timeout=5)
             assert menu.returncode == 0, menu.stderr.read()
@@ -605,7 +619,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             drain(.2)
             menu = open_menu([core, 'sidebar', '--popup', '--pane', pane, '--client', client],
                              env=selector_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for_text(menu, b'+ new', b'close', menu_footer=False)
+            wait_for_text(menu, b'menu', b'close', menu_footer=False)
             os.write(master, b'?')
             wait_for_text(client_process, b'Shortcuts', b'(back)')
             menu.wait(timeout=5)
