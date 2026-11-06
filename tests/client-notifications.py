@@ -13,8 +13,12 @@ import unittest
 
 FAKE_SSH = runpy.run_path(str(Path(__file__).with_name("client-terminals.py")))["FAKE_SSH"]
 FAKE_SSH = FAKE_SSH.replace('write(dict(type="heartbeat_ack", version=2, events=0))', '''
-            count = int((root / (case + ".beats")).read_text()) + 1 if (root / (case + ".beats")).exists() else 1
-            (root / (case + ".beats")).write_text(str(count))
+            beats = root / (case + ".beats")
+            count = int(beats.read_text()) + 1 if beats.exists() else 1
+            # The test polls concurrently and must not see a truncated counter.
+            temporary = root / (case + ".beats.tmp")
+            temporary.write_text(str(count))
+            temporary.replace(beats)
             write(dict(type="event_delivery", version=2, event_id="notification-probe",
                 category="completion", title="Test", body="Test", target=dict(
                     session_id="$1", session_name="test", window_id="@1", window_index=0,
@@ -75,12 +79,13 @@ class OptionalNotifications(unittest.TestCase):
                 for case, folder, process in processes:
                     if process.poll() is None:
                         process.kill()
-                    process.communicate(timeout=5)
+                    # The fake SSH children can still hold the stderr pipe.
                     for path in folder.glob("*.pid"):
                         try:
                             os.kill(int(path.read_text()), signal.SIGKILL)
-                        except ProcessLookupError:
+                        except (FileNotFoundError, ProcessLookupError, ValueError):
                             pass
+                    process.communicate(timeout=5)
                 for fd in fds:
                     os.close(fd)
 
