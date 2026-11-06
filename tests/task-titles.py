@@ -520,6 +520,17 @@ with tempfile.TemporaryDirectory(prefix='workbench-titles-', dir='/tmp') as root
             assert title(managed, 'Rename inspection')['status'] == 'preserved'
             managed = dict(managed, session_id=str(uuid.uuid4()))
             assert hook(managed, 'SessionStart', source='clear') == {}
+            # Clear hooks may be accepted asynchronously; observe both the
+            # detector binding and title owner before submitting a new prompt.
+            wait_hook_binding(managed)
+            deadline = time.monotonic() + 8
+            while True:
+                encoded = tmux('show-option', '-wqv', '-t', managed['pane'], '@workbench_task_title')
+                state = json.loads(encoded) if encoded else {}
+                if state.get('owner', {}).get('session') == managed['session_id']:
+                    break
+                assert time.monotonic() < deadline, ('clear title owner did not become ready', state)
+                time.sleep(.05)
             assert name(managed) == 'zsh'
             tmux('set-option', '-wu', '-t', managed['pane'], '@workbench_project_root')
             tmux('set-option', '-t', 'titles', '@workbench_task', '1')
