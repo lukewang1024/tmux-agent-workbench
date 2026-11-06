@@ -46,6 +46,11 @@ class TeamResurrection(unittest.TestCase):
         self.state_path.write_text(json.dumps(self.state))
         (self.root / 'save').mkdir(parents=True, exist_ok=True)
         (self.root / 'save/last').write_text('snapshot for team')
+        entries = [{'pane': 'team:0.' + str(index), 'tool': 'codex',
+                    'session_id': 'saved-' + str(index), 'session_name': 'team',
+                    'window_index': '0', 'pane_index': str(index)} for index in range(2)]
+        (self.root / 'save/assistant-sessions.json').write_text(json.dumps({'sessions': entries}))
+        self.helper('stage', str(self.root / 'save/last'))
         self.helper('save')
 
     def tearDown(self):
@@ -130,6 +135,16 @@ class TeamResurrection(unittest.TestCase):
         self.helper('restore')
         self.assertFalse((self.root / 'save/workbench-team-restore-inventory.json').exists())
 
+    def test_assistant_only_save_cannot_rebind_an_older_layout(self):
+        sidecar = self.root / 'save/workbench-team-sessions.json'
+        original = sidecar.read_bytes()
+        (self.root / 'save/assistant-sessions.json').write_text('{"sessions": []}')
+        self.helper('save')
+        self.assertEqual(sidecar.read_bytes(), original)
+        self.restart()
+        self.helper('restore')
+        self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
+
     def test_pre_restore_preserves_existing_hook(self):
         prior = self.root / 'prior hook'
         output = self.root / 'prior-ran'
@@ -169,6 +184,7 @@ class TeamResurrection(unittest.TestCase):
         self.env['TMUX_AGENT_WORKBENCH_BIN'] = str(REPO / 'target/debug/tmux-agent-workbench')
         subprocess.run([str(REPO / 'bin/workbench-resurrect-save-hook'), str(snapshot)],
                        env=self.env, check=True)
+        (self.root / 'save/last').write_text(snapshot.read_text())
         self.helper('save')
         records = [line.split('\t') for line in snapshot.read_text().splitlines() if line.startswith('pane\t')]
         self.assertEqual([row[5] for row in records], ['0', '1'])

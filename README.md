@@ -541,8 +541,11 @@ replayed. A missing session ID, unsupported saved option, missing team state,
 or an occupied target prevents that member or team from being resumed. Teams
 saved before this feature have no team sidecar and cannot be reconstructed by
 this mechanism. The team sidecar is private, stays in the resurrect folder, and
-is bound to the exact snapshot saved alongside it. Selecting an older snapshot
-without its matching sidecar will not restore it as a team.
+is bound to the exact snapshot and assistant session sidecars saved alongside
+it. Selecting an older snapshot without its matching sidecars will not restore
+it as a team. Capture a complete tmux-resurrect save (prefix then `Ctrl-s` with
+the default bindings); the assistant-only `resurrect save` command is not a
+replacement for saving the tmux layout.
 
 Like Herdr, Workbench renders one state per Agent pane. Claude `/btw` and Codex
 `/side` are classified from whichever thread is currently in the foreground;

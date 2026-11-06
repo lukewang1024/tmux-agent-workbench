@@ -29,3 +29,5 @@ awk -F '\t' -v OFS='\t' -f "$script_dir/../lib/resurrect-layout.awk" \
   "$panes_file" "$normalized_file" > "$output_file"
 
 mv "$output_file" "$save_file"
+t set-option -gu @workbench_resurrect_pending_snapshot 2>/dev/null || true
+"$script_dir/workbench-resurrect-team" stage "$save_file" || true

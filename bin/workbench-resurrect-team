@@ -34,15 +34,26 @@ def sidecar():
     return Path(os.path.expandvars(os.path.expanduser(directory))) / 'workbench-team-sessions.json'
 
 
-def snapshot_digest():
+def file_digest(path):
     try:
-        with (sidecar().parent / 'last').open('rb') as snapshot:
+        with path.open('rb') as snapshot:
             digest = hashlib.sha256()
             for block in iter(lambda: snapshot.read(65536), b''):
                 digest.update(block)
             return digest.hexdigest()
     except OSError:
         return None
+
+
+def snapshot_digest():
+    return file_digest(sidecar().parent / 'last')
+
+
+def stage(snapshot):
+    digest = file_digest(Path(snapshot))
+    if digest is None:
+        raise OSError('cannot read saved tmux snapshot')
+    tmux('set-option', '-g', '@workbench_resurrect_pending_snapshot', digest)
 
 
 def atomic(path, value):
@@ -137,6 +148,11 @@ def remap_pane_contents(mapping):
 
 
 def save():
+    pending = tmux('show-option', '-gqv', '@workbench_resurrect_pending_snapshot')
+    tmux('set-option', '-gu', '@workbench_resurrect_pending_snapshot')
+    if not pending or pending != snapshot_digest():
+        print('workbench team restore: team snapshot requires a complete tmux-resurrect save', file=sys.stderr)
+        return
     rows = inventory()
     indexes = restored_indexes()
     remap_assistant_sidecars(indexes)
@@ -165,8 +181,12 @@ def save():
         except (OSError, ValueError, KeyError, TypeError):
             continue
     stat = os.stat(socket)
+    directory = sidecar().parent
     atomic(sidecar(), {'socket_device': stat.st_dev, 'socket_inode': stat.st_ino,
-                       'snapshot_sha256': snapshot_digest(), 'teams': result})
+                       'snapshot_sha256': pending,
+                       'assistant_sha256': file_digest(directory / 'assistant-sessions.json'),
+                       'trae_sha256': file_digest(directory / 'workbench-trae-sessions.json'),
+                       'teams': result})
 
 
 def before_restore():
@@ -195,6 +215,9 @@ def restore():
     stat = os.stat(socket)
     if (not isinstance(saved, dict) or not isinstance(before, dict)
             or not saved.get('snapshot_sha256') or saved['snapshot_sha256'] != snapshot_digest()
+            or 'assistant_sha256' not in saved or 'trae_sha256' not in saved
+            or saved['assistant_sha256'] != file_digest(sidecar().parent / 'assistant-sessions.json')
+            or saved['trae_sha256'] != file_digest(sidecar().parent / 'workbench-trae-sessions.json')
             or (before.get('socket_device'), before.get('socket_inode')) != (stat.st_dev, stat.st_ino)
             or not isinstance(before.get('panes'), list)):
         return
@@ -271,6 +294,8 @@ if __name__ == '__main__':
     try:
         if sys.argv[1:] == ['save']:
             save()
+        elif len(sys.argv) == 3 and sys.argv[1] == 'stage':
+            stage(sys.argv[2])
         elif sys.argv[1:] == ['pre-restore']:
             before_restore()
         elif sys.argv[1:] == ['restore']:
