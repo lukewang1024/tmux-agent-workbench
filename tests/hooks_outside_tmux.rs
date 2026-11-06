@@ -32,7 +32,7 @@ fn run_hook_with_tmux(root: &std::path::Path, agent: &str, event: &str, stale_tm
         .stdin
         .take()
         .unwrap()
-        .write_all(br#"{"session_id":"outside-tmux-test","cwd":"/tmp","thread_name":"test"}"#)
+        .write_all(br#"{"session_id":"outside-tmux-test","cwd":"/tmp","thread_name":"test","agent_pid":42}"#)
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(
@@ -62,7 +62,14 @@ fn global_hooks_succeed_without_tmux_or_daemon_for_every_agent() {
 
 #[test]
 fn detached_codex_hook_tolerates_unmatched_pane_and_still_delivers_when_matched() {
-    for (matched, stale_tmux) in [(false, false), (true, false), (true, true)] {
+    for (agent, matched, stale_tmux) in [
+        ("codex", false, false),
+        ("codex", true, false),
+        ("codex", true, true),
+        ("trae", false, false),
+        ("trae", true, false),
+        ("trae", true, true),
+    ] {
         let temp = tempfile::tempdir_in("/tmp").unwrap();
         let runtime = temp.path().join("tmux-agent-workbench");
         std::fs::create_dir(&runtime).unwrap();
@@ -79,9 +86,103 @@ fn detached_codex_hook_tolerates_unmatched_pane_and_still_delivers_when_matched(
             };
             write_response(&stream, &response).unwrap();
         });
-        run_hook_with_tmux(temp.path(), "codex", "Stop", stale_tmux);
+        run_hook_with_tmux(temp.path(), agent, "Stop", stale_tmux);
         server.join().unwrap();
     }
+}
+
+#[test]
+fn trae_native_child_does_not_report_its_parent_pane() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let runtime = temp.path().join("tmux-agent-workbench");
+    std::fs::create_dir(&runtime).unwrap();
+    let listener = UnixListener::bind(runtime.join("daemon-test.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-agent-workbench"))
+        .args(["hook", "ingest", "trae", "UserPromptSubmit"])
+        .env("XDG_RUNTIME_DIR", temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"child","agent_id":"native-worker","cwd":"/tmp"}"#)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{}\n");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn trae_and_opencode_do_not_bind_an_unverified_shared_backend_by_cwd() {
+    for agent in ["trae", "opencode"] {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let runtime = temp.path().join("tmux-agent-workbench");
+        std::fs::create_dir(&runtime).unwrap();
+        let listener = UnixListener::bind(runtime.join("daemon-test.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-agent-workbench"))
+            .args(["hook", "ingest", agent, "UserPromptSubmit"])
+            .env("XDG_RUNTIME_DIR", temp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"session_id":"unbound","cwd":"/tmp"}"#)
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"{}\n");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+fn trae_install_uses_cli_home_and_preserves_existing_hooks() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let trae_home = temp.path().join("trae");
+    let cli_home = temp.path().join("custom-cli");
+    std::fs::create_dir_all(&cli_home).unwrap();
+    let path = cli_home.join("hooks.json");
+    std::fs::write(&path, br#"{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"foreign-hook"}]}]}}"#).unwrap();
+    let run = |action| {
+        Command::new(env!("CARGO_BIN_EXE_tmux-agent-workbench"))
+            .args(["hooks", action, "traex"])
+            .env("TRAE_HOME", &trae_home)
+            .env("TRAECLI_HOME", &cli_home)
+            .output()
+            .unwrap()
+    };
+    assert!(run("install").status.success());
+    assert!(run("install").status.success());
+    let installed = std::fs::read_to_string(&path).unwrap();
+    assert!(installed.contains("foreign-hook"));
+    assert_eq!(
+        installed
+            .matches("hook ingest trae UserPromptSubmit")
+            .count(),
+        1
+    );
+    assert!(run("check").status.success());
+    assert!(!trae_home.join("hooks.json").exists());
+    assert!(run("remove").status.success());
+    let removed = std::fs::read_to_string(path).unwrap();
+    assert!(removed.contains("foreign-hook"));
+    assert!(!removed.contains("hook ingest trae"));
 }
 
 #[test]

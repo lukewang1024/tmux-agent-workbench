@@ -290,7 +290,12 @@ the selected direction. Five tasks fit by default; when placing another would
 exceed that limit, the command leaves the caller in its current window and
 returns a request for one native `reorganise-agents` subagent of the calling
 agent to split the selected direction semantically. Codex uses its resolved
-batch worker settings; other agents use their own native subagent defaults. After a successful split, the caller chooses
+batch worker settings; other agents use their own native subagent defaults.
+OpenCode 1.18.32's plugin verifies that a fresh foreground native child has no
+broader permissions than the parent, both before dispatch and when the child
+starts. Other OpenCode versions need revalidation; if the check cannot prove
+this, the split is unavailable.
+After a successful split, the caller chooses
 an appropriate child direction and retries placement. Unrelated full
 directions do not trigger work. The worker's scoped plan preserves other
 directions, non-agent windows, team windows, the personal assistant, panes,
@@ -1023,14 +1028,18 @@ sockets are blocked, skip naming and continue the task. Recreating a pane does
 not grant socket access, and naming does not require changing the session's
 sandbox or network policy.
 
-Codex and Claude lifecycle hooks ask the model to choose a task name and a
+Codex, Claude, Trae, and OpenCode lifecycle hooks ask the model to choose a task name and a
 semantic session direction, supplying existing session names for reuse. The
 title reminder follows `[ui].language` (`auto` uses the system language; `zh`
 tags use Simplified Chinese and other tags use English). They also request
 grouping on prompt submission when a task already has a name.
-`SessionStart` and `UserPromptSubmit`
-provide short context; `Stop` requests at most one naming continuation after
-a submitted task. The continuation budget is stored with the tmux window, so
+`SessionStart` and `UserPromptSubmit` provide short context; for Codex and
+Claude, `Stop` requests at most one naming continuation after a submitted task.
+Trae's CLI must trust the installed hook using its normal trust prompt; Workbench
+does not bypass hook trust. Trae and OpenCode require a verified owning process,
+and shared-server sessions with no such identity do not auto-group. OpenCode
+binds one root session per plugin process and excludes native child sessions.
+The continuation budget is stored with the tmux window, so
 resume, compaction, duplicate hooks, and daemon restarts cannot reset it.
 Issued naming bindings remain attached to the CLI process when auxiliary
 sessions report hooks from that same process. The visible Codex thread identity

@@ -23,6 +23,11 @@ A matching Workbench installation also exposes that helper as
    and `reasoning_effort` exactly. Do not substitute another recommendation.
    For **Claude Code, OpenCode, or Trae**, use that same agent's native
    subagent with its own model defaults; do not apply the Codex recommendation.
+   OpenCode uses `task`: for automatic splits the Workbench plugin checks
+   that the chosen fresh foreground child has no broader permissions than the
+   parent. If that check cannot be completed, mark the split unavailable.
+   Trae uses `Agent`; wait for its native child to finish before settling a
+   split ticket.
 2. Spawn exactly one native subagent with fresh context where supported. In
    Codex, use `fork_turns="none"` and the explicit resolved model and effort.
    Preserve inherited execution permissions and proxy environment. A launch

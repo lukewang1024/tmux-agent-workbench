@@ -1538,10 +1538,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let agent = parse_agent_kind(&agent)?;
             let input = tmux_agent_workbench::hooks::read_stdin()?;
-            let output = if agent == tmux_agent_workbench::model::AgentKind::Codex {
-                // A shared app-server can outlive its launching pane and serve
-                // several Codex TUIs. Its inherited TMUX_PANE is never an
-                // event's owner; resolve each hook by its session identity.
+            let output = if matches!(
+                agent,
+                tmux_agent_workbench::model::AgentKind::Codex
+                    | tmux_agent_workbench::model::AgentKind::Trae
+                    | tmux_agent_workbench::model::AgentKind::Opencode
+            ) {
+                // Shared backends can outlive their launching pane. Their
+                // inherited TMUX_PANE is not evidence of an event's owner.
                 tmux_agent_workbench::hooks::ingest_detached(&paths, agent, &event, &input)?
             } else {
                 match ServerIdentity::discover() {

@@ -725,8 +725,10 @@ pub fn hook_output(
     event: &str,
     payload: &Value,
 ) -> Value {
-    if !matches!(kind, AgentKind::Codex | AgentKind::Claude)
-        || !matches!(event, "SessionStart" | "UserPromptSubmit" | "Stop")
+    if !matches!(
+        kind,
+        AgentKind::Codex | AgentKind::Claude | AgentKind::Trae | AgentKind::Opencode
+    ) || !matches!(event, "SessionStart" | "UserPromptSubmit" | "Stop")
     {
         return json!({});
     }
@@ -804,7 +806,8 @@ pub fn hook_output(
                         )
                     }
                     "Stop"
-                        if state.task_seen
+                        if !matches!(kind, AgentKind::Trae | AgentKind::Opencode)
+                            && state.task_seen
                             && !state.repair_used
                             && payload.get("stop_hook_active").and_then(Value::as_bool)
                                 != Some(true) =>

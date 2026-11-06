@@ -313,10 +313,10 @@ fn instruction(ticket: &Ticket) -> String {
             "Use Claude Code's native subagent tool with its own default model; do not use a Codex model."
         }
         Some(AgentKind::Opencode) => {
-            "Use OpenCode's native subagent tool with its own default model; do not use a Codex model."
+            "Use OpenCode's native subagent tool `task` with its own default model; do not use a Codex model. The Workbench plugin must verify that the chosen child has no broader permissions. Use a fresh foreground child; if verification fails, mark this ticket unavailable."
         }
         Some(AgentKind::Trae) => {
-            "Use Trae's native subagent tool with its own default model; do not use a Codex model."
+            "Use Trae's native subagent tool `Agent` with its own default model; do not use a Codex model."
         }
         None => "Use the current agent's native subagent tool and its own default model.",
     };

@@ -14,3 +14,16 @@ P0 protects the common task workflow and the routing/lifecycle boundaries where
 a regression can affect another task or leave a background process behind.
 P1 and P2 cover broader UI behavior, platform differences, packaging, and less
 common integration paths without extending the required PR gate.
+
+OpenCode's native split path can also be checked with the real OpenCode
+1.18.32 executable and a local mock model. This test owns a temporary tmux
+server and mock agents; it does not connect to an existing server or model:
+
+```sh
+cargo build --locked --bin tmux-agent-workbench --example codex
+node tests/opencode-plugin.mjs
+python3 tests/opencode-native-tmux.py
+```
+
+If another OpenCode version appears first in `PATH`, set `WB_TEST_OPENCODE` to
+the 1.18.32 executable for this test.

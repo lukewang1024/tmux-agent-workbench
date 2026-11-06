@@ -98,9 +98,26 @@ pub fn ingest_detached(
     } else {
         serde_json::from_slice(input)?
     };
+    // Trae emits UserPromptSubmit from native child agents too. The child's
+    // hook runs under the same process as its parent, so PID alone cannot
+    // identify a terminal window for it.
+    if agent == AgentKind::Trae
+        && payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(json!({}));
+    }
     let mut report = detached_report_from_payload(agent, event_name, &payload)?;
     if report.agent_pid.is_none() {
         report.agent_pid = crate::process::current_agent_ancestor(agent);
+    }
+    // Older running daemons can associate an unbound session by cwd. Shared
+    // backends make that unsafe, so enforce the stronger identity rule
+    // here as well; this also protects rolling upgrades without restarting it.
+    if matches!(agent, AgentKind::Trae | AgentKind::Opencode) && report.agent_pid.is_none() {
+        return Ok(json!({}));
     }
     let request = Request::new("agent.event.ingest", serde_json::to_value(&report)?);
     // Global hooks may run outside tmux; an unmatched daemon is a normal no-op.
@@ -144,8 +161,8 @@ pub fn ingest_detached(
         }
     }
     if accepted == 0 && !rejections.is_empty() {
-        return Err(format!("no Workbench daemon could associate the Codex hook with a live pane (session={}, pid={:?}): {}",
-            report.session_id, report.agent_pid, rejections.join("; ")).into());
+        return Err(format!("no Workbench daemon could associate the {:?} hook with a live pane (session={}, pid={:?}): {}",
+            report.agent, report.session_id, report.agent_pid, rejections.join("; ")).into());
     }
     Ok(output)
 }
@@ -489,12 +506,11 @@ fn install_one(target: HookTarget) -> Result<(), Box<dyn std::error::Error>> {
         ),
         HookTarget::Traex => {
             let paths = trae_hook_paths()?;
-            merge_json_hooks(&paths[0], "trae", false, true)?;
-            // Older Trae CLI releases read the legacy path. Keep an existing
-            // legacy config compatible while making ~/.trae/hooks.json the
-            // canonical path used by current TraeCode CLI releases.
-            if paths[1].exists() {
-                merge_json_hooks(&paths[1], "trae", false, true)?;
+            // Modern Trae CLI reads the CLI sidecar. Preserve the older IDE
+            // sidecar when it exists, without creating it unnecessarily.
+            merge_json_hooks(&paths[1], "trae", false, true)?;
+            if paths[0] != paths[1] && paths[0].exists() {
+                merge_json_hooks(&paths[0], "trae", false, true)?;
             }
             Ok(())
         }
@@ -611,20 +627,20 @@ fn check_one(target: HookTarget) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn trae_hook_paths() -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
-    let home = home()?;
-    Ok([
-        home.join(".trae/hooks.json"),
-        home.join(".trae/cli/hooks.json"),
-    ])
+    let root = std::env::var_os("TRAE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(home()?.join(".trae"));
+    let cli = std::env::var_os("TRAECLI_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("cli"));
+    Ok([root.join("hooks.json"), cli.join("hooks.json")])
 }
 
 fn trae_hook_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let paths = trae_hook_paths()?;
-    if paths[0].exists() || !paths[1].exists() {
-        Ok(paths[0].clone())
-    } else {
-        Ok(paths[1].clone())
-    }
+    Ok(paths[1].clone())
 }
 
 const EVENTS: [(&str, &str); 5] = [
@@ -808,17 +824,7 @@ fn install_opencode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
-    let content = format!(
-        r#"// {HOOK_ID}
-const {{ spawn }} = require("node:child_process");
-module.exports = async () => ({{ event }}) => {{
-  const names = {{"session.created":"SessionStart","session.busy":"busy","session.idle":"idle","session.error":"session-error","permission.asked":"permission-asked","tool.after":"activity"}};
-  const mapped = names[event?.type]; if (!mapped) return;
-  const child = spawn("tmux-agent-workbench", ["hook","ingest","opencode",mapped], {{stdio:["pipe","ignore","ignore"], env:process.env}});
-  child.stdin.end(JSON.stringify(event));
-}};
-"#
-    );
+    let content = include_str!("../lib/opencode-workbench.js");
     let tracker_content = format!(
         "// {HOOK_ID}\n{}",
         include_str!("../lib/assistant-sessions/hooks/opencode-session-track.js")

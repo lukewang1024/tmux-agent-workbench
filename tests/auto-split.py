@@ -18,6 +18,9 @@ legacy_daemon = '--daemon-auto-split-off' in sys.argv[3:] or '--daemon-bin' in s
 daemon_binary = (str(Path(sys.argv[sys.argv.index('--daemon-bin') + 1]).resolve())
                  if '--daemon-bin' in sys.argv[3:] else binary)
 incoming_claude = '--incoming-claude' in sys.argv[3:]
+incoming_trae = '--incoming-trae' in sys.argv[3:]
+incoming_opencode = '--incoming-opencode' in sys.argv[3:]
+assert sum((incoming_claude, incoming_trae, incoming_opencode)) <= 1
 repo = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     socket = root + '/tmux.sock'
@@ -31,10 +34,11 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     bin_dir = Path(root, 'bin')
     bin_dir.mkdir()
     (bin_dir / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
-    claude_fixture = bin_dir / 'claude'
-    if incoming_claude:
-        shutil.copyfile(fixture, claude_fixture)
-        claude_fixture.chmod(0o755)
+    incoming_kind = 'claude' if incoming_claude else 'trae' if incoming_trae else 'opencode' if incoming_opencode else 'codex'
+    incoming_fixture = bin_dir / ('traex' if incoming_trae else incoming_kind)
+    if incoming_kind != 'codex':
+        shutil.copyfile(fixture, incoming_fixture)
+        incoming_fixture.chmod(0o755)
     env['PATH'] = str(bin_dir) + os.pathsep + env['PATH']
     config = Path(env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
     config.mkdir(parents=True)
@@ -92,8 +96,8 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             existing.append(tmux('new-window', '-d', '-t', 'Office文档:', '-n', 'codex',
                                  '-P', '-F', '#{pane_id}', command))
         tmux('new-window', '-d', '-t', 'Office文档:', '-n', 'human-shell', 'sleep 300')
-        incoming_command = 'env WORKBENCH_FIXTURE_SECONDS=300 ' + shlex.quote(str(claude_fixture)) if incoming_claude else command
-        incoming = tmux('new-session', '-d', '-s', 'launch-pad', '-n', 'claude' if incoming_claude else 'codex',
+        incoming_command = 'env WORKBENCH_FIXTURE_SECONDS=300 ' + shlex.quote(str(incoming_fixture)) if incoming_kind != 'codex' else command
+        incoming = tmux('new-session', '-d', '-s', 'launch-pad', '-n', incoming_kind,
                         '-P', '-F', '#{pane_id}', incoming_command)
         tmux('new-session', '-d', '-s', 'unrelated', '-n', 'shell', 'sleep 300')
         env['TMUX'] = socket + ',' + tmux('display-message', '-p', '#{pid}') + ',0'
@@ -109,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
                 wait(lambda: live(pane).get('hook_session_id') == sessions[pane], 'mock binding')
                 result = title(pane, sessions[pane], topic, 'Office文档')
                 assert result['status'] == 'renamed', result  # Five existing tasks are allowed.
-            assert live(incoming)['kind'] == ('claude' if incoming_claude else 'codex')
+            assert live(incoming)['kind'] == incoming_kind
             report(incoming, sessions[incoming], 'SessionStart')
             wait(lambda: live(incoming).get('hook_session_id') == sessions[incoming], 'incoming binding')
             context = report(incoming, sessions[incoming])['hookSpecificOutput']['additionalContext']
@@ -126,6 +130,13 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             assert 'exactly one native subagent' in result['instruction'] and '--scope-session' in result['instruction']
             if incoming_claude:
                 assert "Claude Code's native subagent" in result['instruction']
+                assert 'reorganise batch-worker' not in result['instruction']
+            elif incoming_trae:
+                assert "Trae's native subagent" in result['instruction']
+                assert 'reorganise batch-worker' not in result['instruction']
+            elif incoming_opencode:
+                assert "OpenCode's native subagent" in result['instruction']
+                assert 'no broader permissions' in result['instruction']
                 assert 'reorganise batch-worker' not in result['instruction']
             else:
                 assert "Codex's native subagent" in result['instruction']
@@ -164,6 +175,6 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             assert live(incoming)['process']['pid'] == incoming_pid
             assert core('auto-split', 'status')['pending'] == []
             assert core('daemon', 'status')['pid'] == daemon_pid
-            print('PASS ' + ('Claude' if incoming_claude else 'Codex') + ' caller: fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child; daemon kept running')
+            print('PASS ' + incoming_kind + ' caller: fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child; daemon kept running')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, capture_output=True, timeout=5)
