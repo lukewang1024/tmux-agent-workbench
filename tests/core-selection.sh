@@ -7,6 +7,7 @@ trap 'rm -rf "$fixture"' 0
 trap 'exit 1' HUP INT TERM
 plugin="$fixture/plugin with spaces"
 export XDG_DATA_HOME="$fixture/data"
+export XDG_STATE_HOME="$fixture/state"
 export CORE_SELECTION_LOG="$fixture/selected"
 mkdir -p "$plugin/bin" "$plugin/lib" "$plugin/target/release" \
   "$XDG_DATA_HOME/tmux-agent-workbench/bin" "$fixture/bin"
@@ -106,6 +107,21 @@ check() {
   }
 }
 check 'tmux-agent-workbench 2.0.0-beta.14' "$installed"
+# Rolling upgrades route task and hook calls through the new client without
+# restarting the existing daemon or changing sidebar/client executables.
+routing="$XDG_DATA_HOME/tmux-agent-workbench/bin/tmux-agent-workbench-routing"
+make_core "$routing" 'tmux-agent-workbench routing'
+for args in 'title status' 'auto-split status' 'config check' 'hooks check' 'hook ingest codex Stop'; do
+  # The fixture words deliberately contain no shell metacharacters.
+  # shellcheck disable=SC2086
+  actual=$("$plugin/bin/tmux-agent-workbench-cli" $args)
+  [ "$actual" = 'tmux-agent-workbench routing' ] || { echo "wrong routing core for $args" >&2; exit 1; }
+done
+[ "$("$plugin/bin/tmux-agent-workbench-cli" daemon status)" = 'tmux-agent-workbench 2.0.0-beta.14' ]
+[ "$(MOCK_CLIENT_WIDTH=80 "$plugin/bin/wb-responsive" @1 /dev/pts/8)" = 'tmux-agent-workbench routing' ]
+TMUX_AGENT_WORKBENCH_BIN="$fixture/override" "$plugin/bin/tmux-agent-workbench-cli" title status > "$fixture/routing-override"
+[ "$(cat "$fixture/routing-override")" = 'tmux-agent-workbench override' ]
+rm "$routing"
 export TMUX_AGENT_WORKBENCH_BIN="$fixture/override"
 check 'tmux-agent-workbench override' "$fixture/override"
 unset TMUX_AGENT_WORKBENCH_BIN

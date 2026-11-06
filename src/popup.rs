@@ -78,10 +78,34 @@ pub(crate) fn open(
     // use a client-local input surface with a bounded card drawn inside it.
     // The surface consumes the closing click instead of forwarding it to the
     // underlying terminal. Persistent Sidebar panes do not use this surface.
+    // Keep the real status line outside the Sidebar overlay. tmux can redraw
+    // it independently every few seconds; covering it with a dim snapshot
+    // makes its colours flash through on terminals without synchronized output.
+    let mut popup_height = initial_height;
+    let mut status_visible = false;
+    if matches!(sizing, Sizing::Sidebar)
+        && let Some(status) = crate::tmux::Tmux::new(server.clone())
+            .client_format(client, "#{status}\t#{status-position}")?
+    {
+        let (value, position) = status.split_once('\t').unwrap_or((&status, "bottom"));
+        let lines = match value {
+            "on" => 1,
+            "off" => 0,
+            value => value.parse::<u16>().unwrap_or(0),
+        }
+        .min(initial_height.saturating_sub(1));
+        if lines > 0 && position == "bottom" {
+            popup_height = initial_height - lines;
+            status_visible = true;
+        }
+    }
     let surface = match sizing {
         Sizing::Menu { width, height } => format!("WORKBENCH_POPUP_SURFACE={width},{height} "),
         Sizing::List { width, height } => format!("WORKBENCH_POPUP_SURFACE=list,{width},{height} "),
-        Sizing::Sidebar => "WORKBENCH_POPUP_SURFACE=sidebar ".into(),
+        Sizing::Sidebar => format!(
+            "WORKBENCH_POPUP_SURFACE=sidebar WORKBENCH_POPUP_STATUS_VISIBLE={} ",
+            u8::from(status_visible)
+        ),
     };
     let termux = crate::paths::Paths::discover()
         .ok()
@@ -102,6 +126,8 @@ pub(crate) fn open(
             .join(" "),
     );
     let mut popup = Command::new("tmux");
+    let popup_height = popup_height.to_string();
+    let popup_y = if status_visible { "0" } else { "C" };
     popup.args(server.tmux_args()).args([
         "display-popup",
         "-E",
@@ -112,11 +138,11 @@ pub(crate) fn open(
         "-x",
         "C",
         "-y",
-        "C",
+        popup_y,
         "-w",
         width,
         "-h",
-        height,
+        &popup_height,
     ]);
     popup.arg("-B");
     for variable in [

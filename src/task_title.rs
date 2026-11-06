@@ -965,7 +965,7 @@ fn for_caller_action(
         }
     }
     let candidates = verified;
-    let [(socket, _, agent)] = candidates.as_slice() else {
+    let [(socket, snapshot, agent)] = candidates.as_slice() else {
         if candidates.is_empty() {
             if let Some(reason) = reason {
                 return Err(reason);
@@ -981,15 +981,79 @@ fn for_caller_action(
         }
         return Err("cannot uniquely verify the caller; use --pane and --session-id from the Workbench hook, never the focused window".into());
     };
-    call(
+    let mut selected = agent.clone();
+    // An existing daemon can stay alive during a non-disruptive upgrade. Run
+    // the same capacity gate in the new client before the old daemon places a
+    // task. Keep the server-scoped lock until the daemon has published the
+    // resulting placement, so simultaneous new clients cannot both take the
+    // final slot. A new daemon independently rechecks inside its state lock.
+    let mut placement_guard = None;
+    if let Some(destination) = tmux_session {
+        let config =
+            crate::config::Config::load(&paths.config_file()).map_err(|error| error.to_string())?;
+        if config.auto_split.enabled {
+            let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+                .map_err(|error| error.to_string())?;
+            placement_guard = Some(
+                crate::auto_split::lock_placement(paths, &server)
+                    .map_err(|error| error.to_string())?,
+            );
+            let current = call(
+                socket,
+                &Request::new("snapshot.get", Value::Null),
+                Duration::from_millis(750),
+            )
+            .map_err(|error| error.to_string())?;
+            let current: Snapshot = serde_json::from_value(current)
+                .map_err(|_| "daemon returned an invalid snapshot")?;
+            if current.server != snapshot.server {
+                return Err(
+                    "agent server changed before grouping; retry with its current identity".into(),
+                );
+            }
+            let fresh = current
+                .agents
+                .iter()
+                .find(|candidate| {
+                    candidate.instance_id == agent.instance_id
+                        && !candidate.exited
+                        && candidate.relay_focus.is_none()
+                        && candidate.target.pane_id == agent.target.pane_id
+                        && candidate.process == agent.process
+                })
+                .ok_or("agent process changed before grouping; retry with its current identity")?;
+            selected = foreground_agent(&current, fresh, session, false)?;
+            validate_grouping(
+                &current,
+                &selected,
+                selected
+                    .process
+                    .as_ref()
+                    .ok_or("agent process unavailable")?,
+            )?;
+            if let Some(outcome) = crate::auto_split::request_placement(
+                paths,
+                &current,
+                &selected,
+                destination,
+                &config.auto_split,
+            )? {
+                return Ok(outcome);
+            }
+        }
+    }
+    let result = call(
         socket,
         &Request::new(
             "task.title",
             serde_json::to_value(TitleRequest {
-                instance_id: agent.instance_id.clone(),
-                process: agent.process.clone().ok_or("agent process unavailable")?,
-                pane_id: agent.target.pane_id.clone(),
-                session_id: agent.hook_session_id.clone(),
+                instance_id: selected.instance_id.clone(),
+                process: selected
+                    .process
+                    .clone()
+                    .ok_or("agent process unavailable")?,
+                pane_id: selected.target.pane_id.clone(),
+                session_id: selected.hook_session_id.clone(),
                 title: title.map(str::to_owned),
                 tmux_session: tmux_session.map(str::to_owned),
             })
@@ -997,7 +1061,46 @@ fn for_caller_action(
         ),
         Duration::from_secs(3),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+    drop(placement_guard);
+    result
+}
+
+fn validate_grouping(
+    snapshot: &Snapshot,
+    agent: &AgentSnapshot,
+    process: &ProcessFingerprint,
+) -> Result<ServerIdentity, String> {
+    if !crate::process::accepts_terminal_input(&crate::process::AgentProcess {
+        kind: agent.kind,
+        fingerprint: process.clone(),
+        resume_session_id: None,
+    }) {
+        return Err(
+            "agent process changed before grouping; retry with its current identity".into(),
+        );
+    }
+    let server = ServerIdentity::from_socket(snapshot.server.clone().into())
+        .map_err(|error| error.to_string())?;
+    if snapshot.agents.iter().any(|other| {
+        !other.exited
+            && other.relay_focus.is_none()
+            && other.target.window_id == agent.target.window_id
+            && other.instance_id != agent.instance_id
+            && other.process.as_ref().is_some_and(|process| {
+                crate::process::accepts_terminal_input(&crate::process::AgentProcess {
+                    kind: other.kind,
+                    fingerprint: process.clone(),
+                    resume_session_id: None,
+                })
+            })
+    }) {
+        return Err(
+            "task window still contains another agent; retry after automatic pane separation"
+                .into(),
+        );
+    }
+    Ok(server)
 }
 
 /// The daemon serializes this tmux update with the corresponding shared-name
@@ -1026,37 +1129,9 @@ pub(crate) fn apply(
     }
     let mut snapshot = snapshot.clone();
     if let Some(session) = request.tmux_session.as_deref() {
-        if !crate::process::accepts_terminal_input(&crate::process::AgentProcess {
-            kind: agent.kind,
-            fingerprint: request.process.clone(),
-            resume_session_id: None,
-        }) {
-            return Err(
-                "agent process changed before grouping; retry with its current identity".into(),
-            );
-        }
-        let server = ServerIdentity::from_socket(snapshot.server.clone().into())
-            .map_err(|error| error.to_string())?;
         // Detection normally separates agents before publishing them. Do not
         // move a second agent along if a pane appeared between scans.
-        if snapshot.agents.iter().any(|other| {
-            !other.exited
-                && other.relay_focus.is_none()
-                && other.target.window_id == agent.target.window_id
-                && other.instance_id != agent.instance_id
-                && other.process.as_ref().is_some_and(|process| {
-                    crate::process::accepts_terminal_input(&crate::process::AgentProcess {
-                        kind: other.kind,
-                        fingerprint: process.clone(),
-                        resume_session_id: None,
-                    })
-                })
-        }) {
-            return Err(
-                "task window still contains another agent; retry after automatic pane separation"
-                    .into(),
-            );
-        }
+        let server = validate_grouping(&snapshot, &agent, &request.process)?;
         if let Some(outcome) =
             crate::auto_split::request_placement(paths, &snapshot, &agent, session, split)?
         {

@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         for option in ('mouse', 'focus-events'):
             tmux('set-option', '-g', option, 'on')
         tmux('set-option', '-g', 'status', 'off')
-        for name in ('b-agent', 'c-agent', 'd-agent', 'e-agent', 'z-source'):
+        for name in ('b-agent', 'c-agent', 'd-agent', 'e-agent', 'f-agent', 'g-agent', 'z-source'):
             tmux('new-session', '-d', '-s', name, '-n', f'Task {name}', '-x', '160', '-y', '24',
                  shlex.quote(fixture))
         tmux('new-session', '-d', '-s', 'm-shell', '-n', 'plain-shell', '-x', '160', '-y', '24',
@@ -97,6 +97,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
              and 'Priority task' in screen()[1] and 'plain-shell' in screen()[3], 'powerline header')
         assert 'a-target' in screen()[2] and 'm-shell' in screen()[4], screen()
         assert ('Agents' not in screen()[0] if language == 'zh' else '智能体' not in screen()[0]), screen()
+        assert not any('项已隐藏' in line or ' hidden' in line for line in screen()), screen()
         wait(lambda: any(line.strip().endswith('Priority task') for line in screen()[6:]),
              'ordinary agent card')
         before = tmux('list-panes', '-a', '-F', '#{session_name}:#{window_id}:#{pane_pid}')
@@ -128,12 +129,42 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         tmux('switch-client', '-c', client_name, '-t', 'z-source')
         tmux('select-pane', '-t', main)
 
+        # Keyboard navigation crosses from pinned cards to ordinary rows in
+        # both directions, and Enter opens the selected pinned card.
+        tmux('select-pane', '-t', sidebar)
+        tmux('send-keys', '-t', sidebar, 'Home', 'Down', 'Down', 'Up', 'Enter')
+        wait(lambda: tmux('list-clients', '-F', '#{session_name}:#{pane_id}') == f'm-shell:{shell_pane}',
+             'keyboard navigation did not return from ordinary rows to pinned cards')
+        tmux('switch-client', '-c', client_name, '-t', 'z-source')
+        tmux('select-pane', '-t', sidebar)
+        tmux('send-keys', '-t', sidebar, 'Home')
+        drain(.2)
+        os.write(master, b'\x1b[<35;5;2M\x1b[<65;5;2M')
+        drain(.2)
+        tmux('send-keys', '-t', sidebar, 'Enter')
+        wait(lambda: tmux('list-clients', '-F', '#{session_name}:#{pane_id}') == f'm-shell:{shell_pane}',
+             'mouse wheel did not move between pinned cards')
+        tmux('switch-client', '-c', client_name, '-t', 'z-source')
+        tmux('select-pane', '-t', sidebar)
+        tmux('send-keys', '-t', sidebar, 'Home')
+        drain(.2)
+        # A touch drag keeps its press cancelled and can cross from a pinned
+        # card into ordinary rows without activating anything on release.
+        os.write(master, b'\x1b[<0;5;2M\x1b[<32;5;1M\x1b[<0;5;1m')
+        drain(.2)
+        tmux('send-keys', '-t', sidebar, 'Down', 'Down', 'Enter')
+        b_pane = tmux('display-message', '-p', '-t', 'b-agent', '#{pane_id}')
+        wait(lambda: tmux('list-clients', '-F', '#{session_name}:#{pane_id}') == f'b-agent:{b_pane}',
+             'touch drag did not cross from pinned cards into ordinary rows')
+        tmux('switch-client', '-c', client_name, '-t', 'z-source')
+        tmux('select-pane', '-t', main)
+
         # Normal scrolling never dislodges the focus cards.
         tmux('send-keys', '-t', sidebar, '-N', '12', 'Down')
         wait(lambda: screen()[6].strip() != 'a-target', 'ordinary list did not scroll')
         assert 'Priority task' in screen()[1] and 'plain-shell' in screen()[3], screen()
-        os.write(master, b'\x1b[<0;2;1M\x1b[<0;2;1m')
-        wait(lambda: screen()[6].strip() == 'a-target', 'Agents segment did not restore the top')
+        tmux('send-keys', '-t', sidebar, 'Home')
+        wait(lambda: screen()[6].strip() == 'a-target', 'Home did not restore the top')
 
         # The selected ordinary agent can be toggled without visiting its pane.
         tmux('select-pane', '-t', sidebar)
@@ -143,7 +174,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         os.write(master, b'\x1b[<35;5;4M')
         drain(.2)
         tmux('send-keys', '-t', sidebar, 'Home')
-        tmux('send-keys', '-t', sidebar, 'Down')
+        tmux('send-keys', '-t', sidebar, '-N', '3', 'Down')
         drain(.3)
         b_window = tmux('display-message', '-p', '-t', 'b-agent', '#{window_id}')
         os.write(master, b'p')
@@ -157,6 +188,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         os.write(master, b'p')
         wait(lambda: tmux('show-option', '-wqv', '-t', target_window, '@agent_focus') == '', 'remove with p')
         wait(lambda: 'plain-shell' in screen()[1], 'updated focus cards')
+        tmux('send-keys', '-t', sidebar, 'Home', 'Down')
         os.write(master, b'p')
         wait(lambda: tmux('show-option', '-wqv', '-t', target_window, '@agent_focus') == '1', 'add with p')
         wait(lambda: 'Priority task' in screen()[1], 'focus card returns')

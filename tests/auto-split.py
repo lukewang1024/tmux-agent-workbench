@@ -12,7 +12,10 @@ import uuid
 
 from daemon_fixture import running_daemon
 
-binary, fixture = (str(Path(arg).resolve()) for arg in sys.argv[1:])
+binary, fixture = (str(Path(arg).resolve()) for arg in sys.argv[1:3])
+legacy_daemon = '--daemon-auto-split-off' in sys.argv[3:] or '--daemon-bin' in sys.argv[3:]
+daemon_binary = (str(Path(sys.argv[sys.argv.index('--daemon-bin') + 1]).resolve())
+                 if '--daemon-bin' in sys.argv[3:] else binary)
 repo = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     socket = root + '/tmux.sock'
@@ -30,6 +33,12 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
     config = Path(env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
     config.mkdir(parents=True)
     (config / 'config.toml').write_text('[notifications]\nenabled = false\n[auto_split]\nenabled = true\n')
+    daemon_env = env.copy()
+    if legacy_daemon:
+        daemon_env['XDG_CONFIG_HOME'] = root + '/daemon-config'
+        daemon_config = Path(daemon_env['XDG_CONFIG_HOME'], 'tmux-agent-workbench')
+        daemon_config.mkdir(parents=True)
+        (daemon_config / 'config.toml').write_text('[notifications]\nenabled = false\n')
 
     def tmux(*args):
         return subprocess.check_output(['tmux', '-u', '-S', socket, *args], env=env,
@@ -81,7 +90,8 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
         env['TMUX'] = socket + ',' + tmux('display-message', '-p', '#{pid}') + ',0'
         tmux('set-option', '-w', '-t', existing[3], '@agent_focus', '1')
         with ExitStack() as stack:
-            stack.enter_context(running_daemon(binary, env))
+            stack.enter_context(running_daemon(daemon_binary, daemon_env))
+            daemon_pid = core('daemon', 'status')['pid']
             wait(lambda: all(live(p) for p in existing + [incoming]), 'mock agent discovery')
             sessions = {pane: str(uuid.uuid4()) for pane in existing + [incoming]}
             topics = ['文字光标', '文本样式', '协作评论', '图片排版', '页面布局']
@@ -137,6 +147,7 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             assert result['status'] == 'renamed' and location(incoming)[1] == 'Office文档·布局', result
             assert live(incoming)['process']['pid'] == incoming_pid
             assert core('auto-split', 'status')['pending'] == []
-            print('PASS fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child')
+            assert core('daemon', 'status')['pid'] == daemon_pid
+            print('PASS fifth task allowed; sixth triggers one scoped split; incoming task joins semantic child; daemon kept running')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, capture_output=True, timeout=5)

@@ -74,6 +74,36 @@ struct FocusCard {
     team: Option<TeamSummary>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarView {
+    Agents,
+    Sessions,
+}
+
+impl SidebarView {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Agents => Self::Sessions,
+            Self::Sessions => Self::Agents,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PinnedCard {
+    Agent(FocusCard),
+    Session(SessionSnapshot),
+}
+
+impl PinnedCard {
+    fn action(&self) -> Action {
+        match self {
+            Self::Agent(card) => Action::Focus(card.window.id.clone()),
+            Self::Session(session) => Action::FocusSession(session.session_id.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FocusWindow {
     id: String,
@@ -87,6 +117,7 @@ struct FocusWindow {
 }
 
 type FocusWindows = HashMap<String, FocusWindow>;
+type FocusSessions = HashSet<String>;
 
 fn assistant_window(paths: &Paths, snapshot: &Snapshot) -> Option<String> {
     let path = paths.state_dir.join("personal-assistant.json");
@@ -195,14 +226,14 @@ fn read_inventory(
     paths: &Paths,
     server: &ServerIdentity,
     snapshot: &Snapshot,
-) -> Option<(TeamIndex, FocusWindows)> {
+) -> Option<(TeamIndex, FocusWindows, FocusSessions)> {
     let inventory = crate::tmux::Tmux::new(server.clone())
         .output_with_timeout(
             &[
                 "list-panes",
                 "-a",
                 "-F",
-                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}\t#{@agent_focus}\t#{session_id}\t#{session_name}\t#{window_name}\t#{window_index}\t#{pane_active}\t#{@workbench_window_state}\t#{@pane_role}\t#{@workbench_assistant}",
+                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}\t#{@agent_focus}\t#{session_id}\t#{session_name}\t#{window_name}\t#{window_index}\t#{pane_active}\t#{@workbench_window_state}\t#{@pane_role}\t#{@workbench_assistant}\t#{@workbench_session_focus}",
             ],
             Duration::from_millis(250),
         )
@@ -210,11 +241,15 @@ fn read_inventory(
     let mut marked: HashMap<(String, String), HashSet<String>> = HashMap::new();
     let mut all_panes = HashSet::new();
     let mut focused = FocusWindows::new();
+    let mut focused_sessions = FocusSessions::new();
     let saved_assistant = assistant_window(paths, snapshot);
     for line in inventory.lines() {
         let fields: Vec<_> = line.split('\t').collect();
-        if fields.len() == 13 {
+        if fields.len() == 14 {
             all_panes.insert(fields[1].to_owned());
+            if fields[13] == "1" && safe_target(fields[5], '$') {
+                focused_sessions.insert(fields[5].to_owned());
+            }
             let assistant = fields[12] == "1" || saved_assistant.as_deref() == Some(fields[0]);
             if (fields[4] == "1" || assistant)
                 && fields[11] != "sidebar"
@@ -246,7 +281,7 @@ fn read_inventory(
                 }
             }
         }
-        if fields.len() != 13
+        if fields.len() != 14
             || fields[3] != "0"
             || fields[2].is_empty()
             || !fields[2]
@@ -376,7 +411,7 @@ fn read_inventory(
             }
         }
     }
-    Some((index, focused))
+    Some((index, focused, focused_sessions))
 }
 
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
@@ -388,14 +423,12 @@ struct SidebarViewport {
 }
 
 impl SidebarViewport {
-    fn new(content_height: usize, total: usize, notice: Option<&str>, focus_cards: usize) -> Self {
+    fn new(content_height: usize, notice: Option<&str>, focus_cards: usize) -> Self {
         // The status bar and pinned cards stay above the scrolling body.
         let first_row = 2 + focus_cards * 2 + usize::from(notice.is_some());
         let available = content_height.saturating_sub(first_row);
         let row_height = if notice == Some("disconnected") {
             0
-        } else if total > available {
-            available.saturating_sub(1)
         } else {
             available
         };
@@ -425,12 +458,14 @@ impl SidebarViewport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
-    Agents,
+    View,
     Pinned,
     Menu,
     Close,
     Sort,
     Focus(String),
+    FocusSession(String),
+    ToggleSession(String),
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
@@ -517,6 +552,27 @@ fn refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 1 } else { 5 })
 }
 
+fn switch_sidebar_view(
+    paths: &Paths,
+    view: &mut SidebarView,
+    snapshot: Option<&Snapshot>,
+    detailed: bool,
+    sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+    rows: &mut Vec<Row>,
+    navigation: &mut NavigationList<Action>,
+) -> io::Result<()> {
+    *view = view.toggle();
+    persist_sidebar_view(paths, *view)?;
+    *rows = snapshot
+        .map(|value| view_rows(value, detailed, sort, teams, expanded, *view))
+        .unwrap_or_default();
+    *navigation = NavigationList::default();
+    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    Ok(())
+}
+
 fn event_loop(
     terminal: &mut Terminal<crate::popup_surface::Surface<CrosstermBackend<io::Stdout>>>,
     paths: &Paths,
@@ -557,19 +613,26 @@ fn event_loop(
     if let Some(saved) = persisted_agent_sort(paths) {
         agent_sort = saved;
     }
+    let mut view = persisted_sidebar_view(paths).unwrap_or(SidebarView::Agents);
     let initial_state = initial_snapshot
         .map_err(|error| error.to_string())
         .and_then(|snapshot| sidebar_state(paths, server, snapshot));
-    let (mut snapshot, mut teams, mut focused) = match initial_state {
-        Ok((snapshot, teams, focused)) => (Some(snapshot), teams, focused),
-        Err(_) => (None, TeamIndex::new(), FocusWindows::new()),
+    let (mut snapshot, mut teams, mut focused, mut focused_sessions) = match initial_state {
+        Ok((snapshot, teams, focused, sessions)) => (Some(snapshot), teams, focused, sessions),
+        Err(_) => (
+            None,
+            TeamIndex::new(),
+            FocusWindows::new(),
+            FocusSessions::new(),
+        ),
     };
     let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
-        .map(|snapshot| build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded))
+        .map(|snapshot| view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view))
         .unwrap_or_default();
-    let mut focus_cards = build_focus_cards(&rows, &focused);
+    let mut focus_cards =
+        build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
@@ -593,10 +656,11 @@ fn event_loop(
             visible = now_visible;
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
-                Ok((fetched, fetched_teams, fetched_focused)) => {
+                Ok((fetched, fetched_teams, fetched_focused, fetched_sessions)) => {
                     teams = fetched_teams;
                     focused = fetched_focused;
-                    rows = build_team_rows(&fetched, detailed, agent_sort, &teams, &expanded);
+                    focused_sessions = fetched_sessions;
+                    rows = view_rows(&fetched, detailed, agent_sort, &teams, &expanded, view);
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
@@ -640,7 +704,18 @@ fn event_loop(
             {
                 agent_sort = saved;
                 if let Some(snapshot) = &snapshot {
-                    rows = build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                    navigation.replace_rows(rows.iter().map(selection_key).collect());
+                }
+                dirty = true;
+            }
+            if let Some(saved) = persisted_sidebar_view(paths)
+                && saved != view
+            {
+                view = saved;
+                if let Some(snapshot) = &snapshot {
+                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                    navigation = NavigationList::default();
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                 }
                 dirty = true;
@@ -657,30 +732,45 @@ fn event_loop(
         }
         let notice = connection_notice(disconnected, snapshot.is_some());
         if dirty {
-            focus_cards = build_focus_cards(&rows, &focused);
+            focus_cards =
+                build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
         }
         let shown_focus = visible_focus_cards(content_height, notice, focus_cards.len());
-        let viewport = SidebarViewport::new(content_height, rows.len(), notice, shown_focus);
+        let viewport = SidebarViewport::new(content_height, notice, shown_focus);
         navigation.set_viewport(Rect::new(
             0,
             viewport.first_row as u16,
             size.width,
             viewport.row_height as u16,
         ));
+        let leading: Vec<_> = action_regions(
+            Rect::new(0, 0, size.width, size.height),
+            view,
+            agent_sort,
+            popup_mode(),
+            &focus_cards[..shown_focus],
+            focus_cards.len(),
+        )
+        .into_iter()
+        .filter(|(_, action)| matches!(action, Action::Focus(_) | Action::FocusSession(_)))
+        .collect();
+        navigation.set_leading_actions(&leading);
         if dirty {
             terminal.draw(|frame| {
                 let area = frame.area();
                 let mut header = vec![render_header(
                     area.width,
+                    view,
                     agent_sort,
                     focus_cards.len(),
                     shown_focus,
                     footer_hover.as_ref(),
                 )];
                 for (index, card) in focus_cards.iter().take(shown_focus).enumerate() {
-                    let highlighted =
-                        footer_hover.as_ref() == Some(&Action::Focus(card.window.id.clone()));
-                    header.extend(render_focus_card(card, index + 1, highlighted, area.width));
+                    let action = card.action();
+                    let highlighted = footer_hover.as_ref() == Some(&action)
+                        || navigation.is_highlighted(&Hit::Action(action));
+                    header.extend(render_pinned_card(card, index + 1, highlighted, area.width));
                 }
                 if let Some(notice) = notice {
                     let notice = match notice {
@@ -698,33 +788,43 @@ fn event_loop(
                     Rect::new(0, (viewport.first_row - 1) as u16, area.width, 1),
                 );
                 navigation.render(frame, |index, selected| {
-                    render_row(&rows[index], selected, area.width)
+                    let row = &rows[index];
+                    if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
+                        && area.width >= 8
+                    {
+                        let mut line = render_row(row, selected, area.width - 3);
+                        let mut style = Style::default().fg(
+                            if focused_sessions.contains(&session.session_id) {
+                                Color::Green
+                            } else {
+                                Color::DarkGray
+                            },
+                        );
+                        if selected {
+                            style = style.bg(Color::DarkGray);
+                        }
+                        line.spans.push(Span::styled("  ", style));
+                        line
+                    } else {
+                        render_row(row, selected, area.width)
+                    }
                 });
                 if rows.is_empty() && notice != Some("disconnected") {
                     frame.render_widget(
-                        Paragraph::new(crate::ui_language::text("no sessions", "暂无会话"))
-                            .style(muted_style()),
+                        Paragraph::new(match view {
+                            SidebarView::Agents => {
+                                crate::ui_language::text("no agents", "暂无智能体")
+                            }
+                            SidebarView::Sessions => {
+                                crate::ui_language::text("no sessions", "暂无会话")
+                            }
+                        })
+                        .style(muted_style()),
                         Rect::new(
                             0,
                             viewport.first_row as u16,
                             area.width,
                             1.min(area.height.saturating_sub(viewport.first_row as u16)),
-                        ),
-                    );
-                }
-                let shown = navigation.visible_rows().len();
-                let hidden = rows.len().saturating_sub(shown);
-                if hidden > 0 && viewport.first_row + viewport.row_height < content_height {
-                    frame.render_widget(
-                        Paragraph::new(format!(
-                            "↕ {hidden} {}",
-                            crate::ui_language::text("hidden", "项已隐藏")
-                        )),
-                        Rect::new(
-                            0,
-                            (viewport.first_row + viewport.row_height) as u16,
-                            area.width,
-                            1,
                         ),
                     );
                 }
@@ -775,7 +875,9 @@ fn event_loop(
                 // selecting the current agent here can scroll a different row
                 // underneath the pending mouse coordinates. Initial selection
                 // is resolved when the first snapshot arrives above.
-                navigation.selection_visible = true;
+                if navigation.focused_action().is_none() {
+                    navigation.selection_visible = true;
+                }
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 navigation.cancel_press();
@@ -800,35 +902,63 @@ fn event_loop(
                     KeyCode::Char(number @ '1'..='9') => {
                         let index = number as usize - '1' as usize;
                         if let Some(card) = focus_cards.iter().take(shown_focus).nth(index)
-                            && activate_focus(card)?
+                            && activate_pinned(card)?
                             && popup_mode()
                         {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('p') => {
-                        let window = match footer_hover.as_ref() {
-                            Some(Action::Focus(window)) => Some(window.as_str()),
+                        let result = match navigation.focused_action().or(footer_hover.as_ref()) {
+                            Some(Action::Focus(window)) => {
+                                let assistant =
+                                    focused.get(window).is_some_and(|item| item.assistant);
+                                Some(toggle_focus(server, window, assistant))
+                            }
+                            Some(Action::FocusSession(session)) => {
+                                Some(toggle_session_focus(server, session))
+                            }
                             _ if navigation.selection_visible => {
-                                selected_window(&rows, navigation.selected)
+                                match rows.get(navigation.selected) {
+                                    Some(Row::Session(session) | Row::SessionSub(session)) => {
+                                        Some(toggle_session_focus(server, &session.session_id))
+                                    }
+                                    _ => {
+                                        selected_window(&rows, navigation.selected).map(|window| {
+                                            let assistant = focused
+                                                .get(window)
+                                                .is_some_and(|item| item.assistant);
+                                            toggle_focus(server, window, assistant)
+                                        })
+                                    }
+                                }
                             }
                             _ => None,
                         };
-                        if let Some(window) = window {
-                            let assistant = focused.get(window).is_some_and(|item| item.assistant);
-                            if let Err(error) = toggle_focus(server, window, assistant) {
-                                // A task can close between rendering and the keypress.
-                                // Refresh the list instead of terminating the sidebar.
+                        if let Some(result) = result {
+                            if let Err(error) = result {
                                 append_sidebar_log(paths, &format!("focus-toggle error={error}"));
                             }
                             let _ = refresh_tx.try_send(true);
                             next_refresh = Instant::now();
                         }
                     }
+                    KeyCode::Tab => switch_sidebar_view(
+                        paths,
+                        &mut view,
+                        snapshot.as_ref(),
+                        detailed,
+                        agent_sort,
+                        &teams,
+                        &expanded,
+                        &mut rows,
+                        &mut navigation,
+                    )?,
                     _ if navigation.navigate(key.code) => {}
                     KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
-                        if let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
-                            rows.get(navigation.selected)
+                        if navigation.selection_visible
+                            && let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
+                                rows.get(navigation.selected)
                         {
                             let team_key = summary.key.clone();
                             let open =
@@ -842,31 +972,58 @@ fn event_loop(
                                 expanded.remove(&team_key);
                             }
                             if let Some(snapshot) = &snapshot {
-                                rows = build_team_rows(
-                                    snapshot, detailed, agent_sort, &teams, &expanded,
+                                rows = view_rows(
+                                    snapshot, detailed, agent_sort, &teams, &expanded, view,
                                 );
                                 navigation.replace_rows(rows.iter().map(selection_key).collect());
                             }
                         }
                     }
                     KeyCode::Enter => {
-                        let navigated = activate(&rows, navigation.selected)?;
+                        let navigated = match navigation.focused_action() {
+                            Some(action @ (Action::Focus(_) | Action::FocusSession(_))) => {
+                                focus_cards
+                                    .iter()
+                                    .take(shown_focus)
+                                    .find(|card| card.action() == *action)
+                                    .map(activate_pinned)
+                                    .transpose()?
+                                    .unwrap_or(false)
+                            }
+                            _ => activate(&rows, navigation.selected)?,
+                        };
                         if popup_mode() && navigated {
                             return Ok(());
                         }
                     }
                     KeyCode::Char('m') => {
-                        if show_row_menu(
-                            &rows,
-                            navigation.selected,
-                            Some((
-                                0,
-                                (viewport.first_row
-                                    + navigation.selected.saturating_sub(navigation.scroll))
-                                    as u16,
-                            )),
-                            &focused,
-                        )? {
+                        let shown = match navigation.focused_action() {
+                            Some(action @ (Action::Focus(_) | Action::FocusSession(_))) => {
+                                if let Some((index, card)) = focus_cards
+                                    .iter()
+                                    .take(shown_focus)
+                                    .enumerate()
+                                    .find(|(_, card)| card.action() == *action)
+                                {
+                                    show_pinned_card_menu(card, Some((0, 1 + 2 * index as u16)))?
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => show_row_menu(
+                                &rows,
+                                navigation.selected,
+                                Some((
+                                    0,
+                                    (viewport.first_row
+                                        + navigation.selected.saturating_sub(navigation.scroll))
+                                        as u16,
+                                )),
+                                &focused,
+                                &focused_sessions,
+                            )?,
+                        };
+                        if shown {
                             return Ok(());
                         }
                     }
@@ -874,7 +1031,7 @@ fn event_loop(
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
                             rows =
-                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
@@ -926,18 +1083,36 @@ fn event_loop(
                 }
             }
             Event::Mouse(mouse) => {
-                let actions = action_regions(
+                let mut actions = action_regions(
                     Rect::new(0, 0, size.width, size.height),
+                    view,
                     agent_sort,
                     popup_mode(),
                     &focus_cards[..shown_focus],
                     focus_cards.len(),
                 );
+                if view == SidebarView::Sessions && size.width >= 8 {
+                    for index in navigation.visible_rows() {
+                        if let Some(Row::Session(session)) = rows.get(index) {
+                            let y = viewport.first_row + index - navigation.scroll;
+                            actions.push((
+                                Rect::new(size.width - 3, y as u16, 3, 1),
+                                Action::ToggleSession(session.session_id.clone()),
+                            ));
+                        }
+                    }
+                }
                 let hit = navigation.mouse(mouse, &actions);
                 let hit = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
                     navigation
                         .hit(mouse.column, mouse.row, &actions)
-                        .filter(|hit| matches!(hit, Hit::Item(_) | Hit::Action(Action::Focus(_))))
+                        .filter(|hit| {
+                            matches!(
+                                hit,
+                                Hit::Item(_)
+                                    | Hit::Action(Action::Focus(_) | Action::FocusSession(_))
+                            )
+                        })
                 } else {
                     hit
                 };
@@ -947,14 +1122,28 @@ fn event_loop(
                 };
                 match hit {
                     Some(Hit::Action(Action::Close)) => return Ok(()),
-                    Some(Hit::Action(Action::Agents)) => {
-                        navigation.navigate(KeyCode::Home);
-                        navigation.scroll = 0;
-                    }
+                    Some(Hit::Action(Action::View)) => switch_sidebar_view(
+                        paths,
+                        &mut view,
+                        snapshot.as_ref(),
+                        detailed,
+                        agent_sort,
+                        &teams,
+                        &expanded,
+                        &mut rows,
+                        &mut navigation,
+                    )?,
                     Some(Hit::Action(Action::Pinned)) => {
-                        if show_pinned_menu(&focus_cards, Some((mouse.column, mouse.row)))? {
+                        if show_pinned_menu(&focus_cards, view, Some((mouse.column, mouse.row)))? {
                             return Ok(());
                         }
+                    }
+                    Some(Hit::Action(Action::ToggleSession(session))) => {
+                        if let Err(error) = toggle_session_focus(server, &session) {
+                            append_sidebar_log(paths, &format!("focus-toggle error={error}"));
+                        }
+                        let _ = refresh_tx.try_send(true);
+                        next_refresh = Instant::now();
                     }
                     Some(Hit::Action(Action::Menu)) => {
                         if show_global_menu(Some((mouse.column, mouse.row)))? {
@@ -969,22 +1158,22 @@ fn event_loop(
                         persist_agent_sort(paths, agent_sort)?;
                         if let Some(snapshot) = &snapshot {
                             rows =
-                                build_team_rows(snapshot, detailed, agent_sort, &teams, &expanded);
+                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
                             navigation = NavigationList::default();
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
-                    Some(Hit::Action(Action::Focus(window))) => {
+                    Some(Hit::Action(action @ (Action::Focus(_) | Action::FocusSession(_)))) => {
                         if let Some(card) = focus_cards
                             .iter()
                             .take(shown_focus)
-                            .find(|card| card.window.id == window)
+                            .find(|card| card.action() == action)
                         {
                             let navigated =
                                 if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
-                                    show_focus_menu(card, Some((mouse.column, mouse.row)))?
+                                    show_pinned_card_menu(card, Some((mouse.column, mouse.row)))?
                                 } else {
-                                    activate_focus(card)?
+                                    activate_pinned(card)?
                                 };
                             if popup_mode() && navigated {
                                 return Ok(());
@@ -1002,8 +1191,8 @@ fn event_loop(
                                     expanded.insert(key);
                                 }
                                 if let Some(snapshot) = &snapshot {
-                                    rows = build_team_rows(
-                                        snapshot, detailed, agent_sort, &teams, &expanded,
+                                    rows = view_rows(
+                                        snapshot, detailed, agent_sort, &teams, &expanded, view,
                                     );
                                     navigation
                                         .replace_rows(rows.iter().map(selection_key).collect());
@@ -1017,6 +1206,7 @@ fn event_loop(
                                 navigation.selected,
                                 Some((mouse.column, mouse.row)),
                                 &focused,
+                                &focused_sessions,
                             )?
                         } else {
                             activate(&rows, navigation.selected)?
@@ -1071,10 +1261,10 @@ fn sidebar_state(
     paths: &Paths,
     server: &ServerIdentity,
     snapshot: Snapshot,
-) -> Result<(Snapshot, TeamIndex, FocusWindows), String> {
-    let (teams, focused) = read_inventory(paths, server, &snapshot)
+) -> Result<(Snapshot, TeamIndex, FocusWindows, FocusSessions), String> {
+    let (teams, focused, sessions) = read_inventory(paths, server, &snapshot)
         .ok_or_else(|| "team pane inventory unavailable".to_owned())?;
-    Ok((snapshot, teams, focused))
+    Ok((snapshot, teams, focused, sessions))
 }
 
 #[cfg(test)]
@@ -1242,6 +1432,65 @@ fn build_team_rows(
     rows
 }
 
+fn view_rows(
+    snapshot: &Snapshot,
+    detailed: bool,
+    sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+    view: SidebarView,
+) -> Vec<Row> {
+    if view == SidebarView::Agents {
+        let mut rows = build_team_rows(snapshot, detailed, sort, teams, expanded);
+        if let Some(section) = rows
+            .iter()
+            .position(|row| matches!(row, Row::Section("sessions")))
+        {
+            rows.truncate(section.saturating_sub(1));
+        }
+        rows
+    } else {
+        let mut sessions = snapshot.sessions.clone();
+        sessions.sort_by_key(|session| {
+            let priority = if sort == AgentSort::Prioritized {
+                std::cmp::Reverse(agent_attention_priority_state(session.rollup_state))
+            } else {
+                std::cmp::Reverse(0)
+            };
+            (priority, stable_session_key(session))
+        });
+        sessions
+            .into_iter()
+            .flat_map(|session| [Row::Session(session.clone()), Row::SessionSub(session)])
+            .collect()
+    }
+}
+
+fn build_pinned_cards(
+    view: SidebarView,
+    rows: &[Row],
+    focused: &FocusWindows,
+    focused_sessions: &FocusSessions,
+    snapshot: Option<&Snapshot>,
+) -> Vec<PinnedCard> {
+    match view {
+        SidebarView::Agents => build_focus_cards(rows, focused)
+            .into_iter()
+            .map(PinnedCard::Agent)
+            .collect(),
+        SidebarView::Sessions => {
+            let mut sessions: Vec<_> = snapshot
+                .into_iter()
+                .flat_map(|value| value.sessions.iter())
+                .filter(|session| focused_sessions.contains(&session.session_id))
+                .cloned()
+                .collect();
+            sessions.sort_by_key(stable_session_key);
+            sessions.into_iter().map(PinnedCard::Session).collect()
+        }
+    }
+}
+
 fn build_focus_cards(rows: &[Row], focused: &FocusWindows) -> Vec<FocusCard> {
     let mut cards: Vec<_> = focused
         .values()
@@ -1352,6 +1601,29 @@ fn render_focus_card(
     [title, subtitle]
 }
 
+fn render_pinned_card(
+    card: &PinnedCard,
+    number: usize,
+    selected: bool,
+    width: u16,
+) -> [Line<'static>; 2] {
+    match card {
+        PinnedCard::Agent(card) => render_focus_card(card, number, selected, width),
+        PinnedCard::Session(session) => {
+            let mut title = render_row(
+                &Row::Session(session.clone()),
+                selected,
+                width.saturating_sub(2),
+            );
+            title
+                .spans
+                .insert(0, Span::styled(format!("{number} "), muted_style()));
+            let subtitle = render_row(&Row::SessionSub(session.clone()), selected, width);
+            [title, subtitle]
+        }
+    }
+}
+
 fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bool) {
     if detailed {
         let pid = agent
@@ -1387,12 +1659,38 @@ fn append_agent_details(rows: &mut Vec<Row>, agent: &AgentSnapshot, detailed: bo
 }
 
 fn agent_attention_priority(agent: &AgentSnapshot) -> u8 {
-    match agent.display_state {
+    agent_attention_priority_state(agent.display_state)
+}
+
+fn agent_attention_priority_state(state: DisplayState) -> u8 {
+    match state {
         DisplayState::Blocked => 4,
         DisplayState::Done => 3,
         DisplayState::Working => 2,
         DisplayState::Idle => 1,
         DisplayState::Unknown => 0,
+    }
+}
+
+fn persist_sidebar_view(paths: &Paths, view: SidebarView) -> io::Result<()> {
+    std::fs::create_dir_all(&paths.state_dir)?;
+    std::fs::write(
+        paths.state_dir.join("sidebar-view"),
+        match view {
+            SidebarView::Agents => "agents\n",
+            SidebarView::Sessions => "sessions\n",
+        },
+    )
+}
+
+fn persisted_sidebar_view(paths: &Paths) -> Option<SidebarView> {
+    match std::fs::read_to_string(paths.state_dir.join("sidebar-view"))
+        .ok()?
+        .trim()
+    {
+        "agents" => Some(SidebarView::Agents),
+        "sessions" => Some(SidebarView::Sessions),
+        _ => None,
     }
 }
 
@@ -1711,8 +2009,11 @@ struct HeaderLayout {
 }
 
 impl HeaderLayout {
-    fn new(width: u16, sort: AgentSort, total: usize, shown: usize) -> Self {
-        let agents = crate::ui_language::text("Agents", "智能体");
+    fn new(width: u16, view: SidebarView, sort: AgentSort, total: usize, shown: usize) -> Self {
+        let (label, view_icon) = match view {
+            SidebarView::Agents => (crate::ui_language::text("Agents", "智能体"), "󰚩"),
+            SidebarView::Sessions => (crate::ui_language::text("Sessions", "会话"), ""),
+        };
         let menu = crate::ui_language::text("menu", "菜单");
         let icon = match sort {
             AgentSort::Grouped => "",
@@ -1723,36 +2024,45 @@ impl HeaderLayout {
         } else {
             total.to_string()
         };
+        let sort_text = match (view, sort) {
+            (SidebarView::Sessions, AgentSort::Grouped) => crate::ui_language::text("name", "名称"),
+            _ => sort_label(sort),
+        };
         let short_sort = match sort {
-            AgentSort::Grouped => sort_label(sort),
+            AgentSort::Grouped => sort_text,
             AgentSort::Prioritized => crate::ui_language::text("priority", "优先"),
         };
         let candidates = [
             [
-                format!(" 󰚩 {agents} "),
+                format!(" {view_icon} {label} "),
                 format!("  {count} "),
-                format!(" {icon} {} ", sort_label(sort)),
+                format!(" {icon} {sort_text} "),
                 format!("  {menu} "),
             ],
             [
-                format!(" 󰚩 {agents} "),
+                format!(" {view_icon} {label} "),
                 format!("  {count} "),
-                format!(" {icon} {} ", sort_label(sort)),
+                format!(" {icon} {sort_text} "),
                 "  ".into(),
             ],
             [
-                format!(" 󰚩 {agents} "),
+                format!(" {view_icon} {label} "),
                 format!("  {count} "),
                 format!(" {icon} {short_sort} "),
                 "  ".into(),
             ],
             [
-                " 󰚩 ".into(),
+                format!(" {view_icon} "),
                 format!("  {total} "),
                 format!(" {icon} "),
                 "  ".into(),
             ],
-            ["󰚩".into(), format!("{total}"), icon.into(), "".into()],
+            [
+                view_icon.into(),
+                format!("{total}"),
+                icon.into(),
+                "".into(),
+            ],
         ];
         let required = |labels: &[String; 4]| {
             labels
@@ -1785,7 +2095,7 @@ impl HeaderLayout {
             widths[0] + widths[1] + self.gap,
             widths[0] + widths[1] + self.gap + widths[2],
         ];
-        [Action::Agents, Action::Pinned, Action::Sort, Action::Menu]
+        [Action::View, Action::Pinned, Action::Sort, Action::Menu]
             .into_iter()
             .enumerate()
             .filter_map(|(index, action)| {
@@ -1804,12 +2114,13 @@ impl HeaderLayout {
 
 fn render_header(
     width: u16,
+    view: SidebarView,
     sort: AgentSort,
     total: usize,
     shown: usize,
     hovered: Option<&Action>,
 ) -> Line<'static> {
-    let layout = HeaderLayout::new(width, sort, total, shown);
+    let layout = HeaderLayout::new(width, view, sort, total, shown);
     // Match the tmux status bar: ANSI green, One Dark surfaces, and its
     // left/right Powerline separators. Hover keeps the separators connected.
     let background = Color::Rgb(40, 44, 52);
@@ -1824,7 +2135,7 @@ fn render_header(
             color
         }
     };
-    let first = if hovered == Some(&Action::Agents) {
+    let first = if hovered == Some(&Action::View) {
         Color::LightGreen
     } else {
         Color::Green
@@ -1863,9 +2174,10 @@ fn render_close(width: u16, hovered: Option<&Action>) -> Line<'static> {
 
 fn action_regions(
     area: Rect,
+    view: SidebarView,
     agent_sort: AgentSort,
     is_popup: bool,
-    focus_cards: &[FocusCard],
+    focus_cards: &[PinnedCard],
     total_focus: usize,
 ) -> Vec<(Rect, Action)> {
     let mut actions = vec![];
@@ -1887,14 +2199,15 @@ fn action_regions(
         }
     }
     actions.extend(
-        HeaderLayout::new(area.width, agent_sort, total_focus, focus_cards.len()).regions(area),
+        HeaderLayout::new(area.width, view, agent_sort, total_focus, focus_cards.len())
+            .regions(area),
     );
     for (index, card) in focus_cards.iter().enumerate() {
         let y = 1 + 2 * index as u16;
         if y < area.height {
             actions.push((
                 Rect::new(0, y, area.width, 2.min(area.height - y)),
-                Action::Focus(card.window.id.clone()),
+                card.action(),
             ));
         }
     }
@@ -1913,8 +2226,12 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
             "-click team arrow · collapse / expand",
             "-点击团队箭头 · 收起 / 展开",
         ),
-        crate::ui_language::text("-p · pin / unpin task", "-p · 置顶 / 取消置顶任务"),
-        crate::ui_language::text("-1–9 · open a pinned task", "-1–9 · 打开置顶任务"),
+        crate::ui_language::text(
+            "-Tab · switch Agents / Sessions",
+            "-Tab · 切换智能体 / 会话",
+        ),
+        crate::ui_language::text("-p · pin / unpin item", "-p · 置顶 / 取消置顶"),
+        crate::ui_language::text("-1–9 · open a pinned item", "-1–9 · 打开置顶项"),
         crate::ui_language::text("-m · item menu", "-m · 项目菜单"),
         crate::ui_language::text("-N · projects", "-N · 项目"),
         crate::ui_language::text("-i · temporary Git tool", "-i · 临时 Git 工具"),
@@ -2310,6 +2627,31 @@ fn toggle_focus(
     Ok(())
 }
 
+fn toggle_session_focus(
+    server: &ServerIdentity,
+    session: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !safe_target(session, '$') {
+        return Ok(());
+    }
+    let target = shell_quote(session);
+    let unset = format!("set-option -u -t {target} @workbench_session_focus");
+    let set = format!("set-option -t {target} @workbench_session_focus 1");
+    crate::tmux::Tmux::new(server.clone()).output_with_timeout(
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            session,
+            "#{==:#{@workbench_session_focus},1}",
+            &unset,
+            &set,
+        ],
+        Duration::from_millis(500),
+    )?;
+    Ok(())
+}
+
 fn activate_focus(card: &FocusCard) -> Result<bool, Box<dyn std::error::Error>> {
     let pane = card
         .agent
@@ -2344,14 +2686,63 @@ fn activate_focus(card: &FocusCard) -> Result<bool, Box<dyn std::error::Error>> 
         .success())
 }
 
+fn activate_pinned(card: &PinnedCard) -> Result<bool, Box<dyn std::error::Error>> {
+    match card {
+        PinnedCard::Agent(card) => activate_focus(card),
+        PinnedCard::Session(session) => activate(&[Row::Session(session.clone())], 0),
+    }
+}
+
 fn show_pinned_menu(
-    cards: &[FocusCard],
+    cards: &[PinnedCard],
+    view: SidebarView,
     anchor: Option<(u16, u16)>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let source = source_pane().ok_or("sidebar source pane unavailable")?;
     let mut owned = Vec::new();
-    for card in cards {
+    for pinned in cards {
+        if let PinnedCard::Session(session) = pinned {
+            if !safe_target(&session.session_id, '$') {
+                continue;
+            }
+            let label: String = session
+                .session_name
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
+            let label = format!(" {}", label.replace('#', "##"));
+            let key = if owned.len() < 9 {
+                (owned.len() + 1).to_string()
+            } else {
+                String::new()
+            };
+            let mut focus = format!(
+                "{} focus --responsive --session {} --source-pane {}",
+                shell_quote(&executable.to_string_lossy()),
+                shell_quote(&session.session_id),
+                source
+            );
+            if let Some(window) = session
+                .last_active_window_id
+                .as_ref()
+                .filter(|id| safe_target(id, '@'))
+            {
+                focus.push_str(&format!(" --window {window}"));
+            }
+            if let Some(pane) = session
+                .last_active_pane_id
+                .as_ref()
+                .filter(|id| safe_target(id, '%'))
+            {
+                focus.push_str(&format!(" --pane {pane}"));
+            }
+            owned.push((label, key, format!("run-shell {}", shell_quote(&focus))));
+            continue;
+        }
+        let PinnedCard::Agent(card) = pinned else {
+            unreachable!()
+        };
         let pane = card
             .agent
             .as_ref()
@@ -2403,7 +2794,15 @@ fn show_pinned_menu(
     }
     if owned.is_empty() {
         owned.push((
-            crate::ui_language::text("-No pinned agents", "-没有置顶的智能体").into(),
+            match view {
+                SidebarView::Agents => {
+                    crate::ui_language::text("-No pinned agents", "-没有置顶的智能体")
+                }
+                SidebarView::Sessions => {
+                    crate::ui_language::text("-No pinned sessions", "-没有置顶的会话")
+                }
+            }
+            .into(),
             String::new(),
             String::new(),
         ));
@@ -2413,11 +2812,37 @@ fn show_pinned_menu(
         .map(|(label, key, command)| (label.as_str(), key.as_str(), command.clone()))
         .collect();
     show_menu(
-        crate::ui_language::text("Pinned agents", "置顶的智能体"),
+        match view {
+            SidebarView::Agents => crate::ui_language::text("Pinned agents", "置顶的智能体"),
+            SidebarView::Sessions => crate::ui_language::text("Pinned sessions", "置顶的会话"),
+        },
         anchor,
         false,
         &items,
     )
+}
+
+fn show_pinned_card_menu(
+    card: &PinnedCard,
+    anchor: Option<(u16, u16)>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match card {
+        PinnedCard::Agent(card) => show_focus_menu(card, anchor),
+        PinnedCard::Session(session) if safe_target(&session.session_id, '$') => show_menu(
+            crate::ui_language::text("Pinned session", "置顶会话"),
+            anchor,
+            false,
+            &[(
+                crate::ui_language::text("Unpin session", "取消置顶会话"),
+                "p",
+                format!(
+                    "set-option -u -t {} @workbench_session_focus",
+                    shell_quote(&session.session_id)
+                ),
+            )],
+        ),
+        _ => Ok(false),
+    }
 }
 
 fn show_focus_menu(
@@ -2556,11 +2981,13 @@ fn show_row_menu(
     selected: usize,
     anchor: Option<(u16, u16)>,
     focused: &FocusWindows,
+    focused_sessions: &FocusSessions,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session))
             if safe_target(&session.session_id, '$') =>
         {
+            let pinned = focused_sessions.contains(&session.session_id);
             show_menu(
                 crate::ui_language::text("session", "会话"),
                 anchor,
@@ -2574,6 +3001,25 @@ fn show_row_menu(
                             shell_quote(&current_client()?),
                             session.session_id
                         ),
+                    ),
+                    (
+                        if pinned {
+                            crate::ui_language::text("Unpin session", "取消置顶会话")
+                        } else {
+                            crate::ui_language::text("Pin session", "置顶会话")
+                        },
+                        "p",
+                        if pinned {
+                            format!(
+                                "set-option -u -t {} @workbench_session_focus",
+                                shell_quote(&session.session_id)
+                            )
+                        } else {
+                            format!(
+                                "set-option -t {} @workbench_session_focus 1",
+                                shell_quote(&session.session_id)
+                            )
+                        },
                     ),
                     (
                         crate::ui_language::text("New task", "新建任务"),
@@ -3088,7 +3534,7 @@ mod tests {
     #[test]
     fn stale_banner_clicks_stay_on_the_rendered_agent() {
         let rows = ["agent A", "A subtitle", "agent B", "B subtitle"];
-        let viewport = SidebarViewport::new(10, rows.len(), Some("stale · reconnecting"), 0);
+        let viewport = SidebarViewport::new(10, Some("stale · reconnecting"), 0);
         assert_eq!(viewport.row_at(0, 0, rows.len()), None);
         assert_eq!(
             rows[viewport.row_at(4, 0, rows.len()).unwrap()],
@@ -3100,10 +3546,10 @@ mod tests {
 
     #[test]
     fn scrolled_viewport_excludes_banner_overflow_and_footer() {
-        // Eight lines include the header, a banner, divider, rows and overflow;
+        // Eight lines include the header, a banner, divider and rows;
         // the popup footer follows and must not activate any hidden row.
-        let viewport = SidebarViewport::new(8, 20, Some("stale · reconnecting"), 0);
-        assert_eq!(viewport.row_height, 4);
+        let viewport = SidebarViewport::new(8, Some("stale · reconnecting"), 0);
+        assert_eq!(viewport.row_height, 5);
         assert_eq!(viewport.row_at(0, 7, 20), None);
         assert_eq!(viewport.row_at(1, 7, 20), None);
         assert_eq!(viewport.row_at(2, 7, 20), None);
@@ -3111,33 +3557,35 @@ mod tests {
         assert_eq!(viewport.row_at(4, 7, 20), Some(8));
         assert_eq!(viewport.row_at(5, 7, 20), Some(9));
         assert_eq!(viewport.row_at(6, 7, 20), Some(10));
-        for row in [7, 8, 9] {
+        assert_eq!(viewport.row_at(7, 7, 20), Some(11));
+        for row in [8, 9] {
             assert_eq!(viewport.row_at(row, 7, 20), None);
         }
     }
 
     #[test]
     fn banner_uses_space_even_when_rows_previously_fitted() {
-        let normal = SidebarViewport::new(8, 6, None, 0);
+        let normal = SidebarViewport::new(8, None, 0);
         assert_eq!(normal.row_at(7, 0, 6), Some(5));
-        let stale = SidebarViewport::new(8, 6, Some("stale · reconnecting"), 0);
-        assert_eq!(stale.row_height, 4);
-        assert_eq!(stale.row_at(7, 0, 6), None);
-        let overflow = SidebarViewport::new(6, 10, None, 0);
+        let stale = SidebarViewport::new(8, Some("stale · reconnecting"), 0);
+        assert_eq!(stale.row_height, 5);
+        assert_eq!(stale.row_at(7, 0, 6), Some(4));
+        let overflow = SidebarViewport::new(6, None, 0);
         assert_eq!(overflow.row_at(2, 0, 10), Some(0));
-        assert_eq!(overflow.row_at(5, 0, 10), None);
+        assert_eq!(overflow.row_at(5, 0, 10), Some(3));
+        assert_eq!(overflow.row_at(6, 0, 10), None);
     }
 
     #[test]
     fn empty_disconnected_and_tiny_viewports_have_no_agent_targets() {
         for height in [0, 1] {
-            let viewport = SidebarViewport::new(height, 10, Some("stale · reconnecting"), 0);
+            let viewport = SidebarViewport::new(height, Some("stale · reconnecting"), 0);
             for row in 0..3 {
                 assert_eq!(viewport.row_at(row, 0, 10), None);
             }
         }
-        assert_eq!(SidebarViewport::new(10, 0, None, 0).row_at(0, 0, 0), None);
-        let disconnected = SidebarViewport::new(10, 4, Some("disconnected"), 0);
+        assert_eq!(SidebarViewport::new(10, None, 0).row_at(0, 0, 0), None);
+        let disconnected = SidebarViewport::new(10, Some("disconnected"), 0);
         assert_eq!(disconnected.row_at(1, 0, 4), None);
     }
 
@@ -3270,15 +3718,19 @@ mod tests {
             &teams,
             &HashSet::new(),
         );
-        let cards = build_focus_cards(&rows, &focused);
+        let cards: Vec<_> = build_focus_cards(&rows, &focused)
+            .into_iter()
+            .map(PinnedCard::Agent)
+            .collect();
         let actions = action_regions(
             Rect::new(0, 0, 36, 16),
+            SidebarView::Agents,
             AgentSort::Grouped,
             false,
             &cards,
             cards.len(),
         );
-        let viewport = SidebarViewport::new(16, 30, None, cards.len());
+        let viewport = SidebarViewport::new(16, None, cards.len());
         let mut list = NavigationList::<Action>::default();
         list.replace_rows((0..30).map(|i| Some(i.to_string())).collect());
         list.set_viewport(Rect::new(
@@ -3294,7 +3746,7 @@ mod tests {
                 Some(Hit::Action(Action::Focus("@9".into())))
             );
         }
-        assert_eq!(list.hit(1, 0, &actions), Some(Hit::Action(Action::Agents)));
+        assert_eq!(list.hit(1, 0, &actions), Some(Hit::Action(Action::View)));
         assert_eq!(list.hit(35, 0, &actions), Some(Hit::Action(Action::Menu)));
         assert_eq!(selected_window(&[Row::Agent(agent)], 0), Some("@9"));
         assert_eq!(visible_focus_cards(12, None, 3), 3);
@@ -3309,7 +3761,9 @@ mod tests {
             ("ja-JP", "Agents", "prioritized"),
         ] {
             crate::ui_language::set_language(Some(language));
-            let heading = render_header(48, AgentSort::Prioritized, 2, 2, None).to_string();
+            let heading =
+                render_header(48, SidebarView::Agents, AgentSort::Prioritized, 2, 2, None)
+                    .to_string();
             assert!(
                 heading.contains(agents) && heading.contains(" 2") && heading.contains(sort),
                 "{heading}"
@@ -3318,6 +3772,7 @@ mod tests {
             for width in [18, 26, 36, 48] {
                 let actions = action_regions(
                     Rect::new(0, 0, width, 10),
+                    SidebarView::Agents,
                     AgentSort::Prioritized,
                     false,
                     &[],
@@ -3325,7 +3780,7 @@ mod tests {
                 );
                 let mut list = NavigationList::<Action>::default();
                 list.replace_rows(vec![]);
-                for expected in [Action::Agents, Action::Pinned, Action::Sort, Action::Menu] {
+                for expected in [Action::View, Action::Pinned, Action::Sort, Action::Menu] {
                     let (area, _) = actions
                         .iter()
                         .find(|(_, action)| *action == expected)
@@ -3727,8 +4182,15 @@ mod tests {
     #[test]
     fn top_actions_span_left_and_right_without_help() {
         let list = NavigationList::<Action>::default();
-        let actions = action_regions(Rect::new(0, 0, 40, 20), AgentSort::Grouped, true, &[], 0);
-        assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::Agents)));
+        let actions = action_regions(
+            Rect::new(0, 0, 40, 20),
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            true,
+            &[],
+            0,
+        );
+        assert_eq!(list.hit(0, 0, &actions), Some(Hit::Action(Action::View)));
         assert_eq!(list.hit(20, 1, &actions), None);
         assert_eq!(list.hit(39, 0, &actions), Some(Hit::Action(Action::Menu)));
         assert_eq!(list.hit(33, 19, &actions), Some(Hit::Action(Action::Close)));

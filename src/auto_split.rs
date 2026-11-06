@@ -1,11 +1,11 @@
 //! Request a native worker only when a task is being routed into a full direction.
 //! This module never classifies tasks, launches agents, or moves tmux windows.
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,37 @@ fn private_dir(path: &Path) -> io::Result<()> {
 
 fn ledger_dir(paths: &Paths, server: &ServerIdentity) -> PathBuf {
     paths.state_dir.join("auto-split").join(&server.key)
+}
+
+/// Serialize client-side capacity checks and placement requests while an
+/// older daemon is kept alive. The daemon still performs its own check after
+/// it is eventually upgraded; the two locks protect different operations.
+pub(crate) fn lock_placement(paths: &Paths, server: &ServerIdentity) -> io::Result<File> {
+    let dir = ledger_dir(paths, server);
+    private_dir(&dir)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("placement.lock"))?;
+    let started = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= Duration::from_secs(4) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "task placement is busy; retry shortly",
+                    ));
+                }
+                crate::compat::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn load_ledger(dir: &Path) -> io::Result<Ledger> {

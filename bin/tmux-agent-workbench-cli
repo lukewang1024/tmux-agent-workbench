@@ -55,6 +55,17 @@ run_and_reconcile()
 [ $# -gt 0 ] || { usage; exit 2; }
 command_name=$1
 shift
+# A rolling local upgrade may keep the existing daemon and attached clients
+# alive while routing newly launched task commands through the updated core.
+# Explicit developer/test binary selections always take precedence.
+if [ -z "${TMUX_AGENT_WORKBENCH_BIN:-}" ]; then
+  routing_core=${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agent-workbench/bin/tmux-agent-workbench-routing
+  case $command_name in
+    hook|hooks|title|auto-split|config|sidebar|popup|switch|pick|display-menu|status-menu)
+      [ ! -x "$routing_core" ] || core=$routing_core
+      ;;
+  esac
+fi
 export WB_SHIM_CALL=1
 case $command_name in
   conventions)

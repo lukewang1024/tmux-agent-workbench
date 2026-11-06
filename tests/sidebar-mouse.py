@@ -80,6 +80,9 @@ def check(height, target, section='agent'):
             # Let the initial snapshot select the current agent, then browse back
             # to the top without giving the sidebar focus, as mouse scrolling does.
             drain(1.3)
+            if section == 'session':
+                tmux('send-keys', '-t', sidebar, 'Tab')
+                wait_for(lambda: 'Sessions' in screen()[0], 'session view did not open')
             tmux('send-keys', '-t', sidebar, '-N', '40', 'Up')
             wait_for(lambda: any('a-target' in line for line in screen()), 'scroll did not finish')
             # Group headings add rows between sessions. Browse far enough to
@@ -96,7 +99,7 @@ def check(height, target, section='agent'):
             wait_for(lambda: any(target_row(line) for line in screen()), 'target card not visible')
             drain(0.15)
             rows = screen()
-            assert 'Agents' in rows[0] and '' in rows[0], rows
+            assert ('Sessions' if section == 'session' else 'Agents') in rows[0] and '' in rows[0], rows
             row = next(i for i, line in enumerate(rows) if target_row(line))
             assert tmux('list-clients', '-F', '#{pane_id}') == main
             # tmux before 3.8 cannot scroll native menus. Keep the menu test

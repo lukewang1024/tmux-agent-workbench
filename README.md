@@ -318,34 +318,25 @@ All attention bindings can be changed with `@workbench-key-sidebar`,
 `@workbench-key-sidebar-all`, `@workbench-key-session`,
 `@workbench-key-agent`, and `@workbench-key-attention` before the plugin loads.
 
-The sidebar shows all sessions and all detected agents from the current tmux
-server in separate sections. A Powerline-style top bar contains an Agents
-control, pinned count, sort mode, and menu. Click Agents to return to the top of
-the list, or the pinned count to open all pinned tasks. The sort and menu are
-also touchable; the menu includes the new-task and workspace actions. Pinned
-cards stay directly below the bar and show each task's current state and original
-direction. Select an Agent in the sidebar and
-press `p`, or use its right-click menu, to add or remove its window. Click a
-Pinned card, or press its `1`–`9` shortcut in the sidebar, to visit it. Pinned
-tasks also remain in their normal direction below. The list is shared by all
-sidebars on the same tmux server; its window-scoped `@agent_focus` markers
-follow window moves and disappear when the window or server closes. On short
-screens the count shows visible/total when space permits; the pinned menu still
-contains all tasks. A designated personal
-assistant stays first and is automatically pinned again when the same agent
-thread resumes in another window. It is kept pinned until its designation is
-changed. The Agents heading and controls stay above the selected tasks.
-Agents always appear above Sessions, on every screen size.
-Session groups in Agents follow one another without blank rows. A single blank
-row separates Agents from Sessions. Both sections use one continuous scrolling
-list, without rebuilding or sorting it on resize. Help remains available from `?`
-without taking space in the mouse action row. Session and Agent targets use
-two-line cards so the full card is easier to click. The label at the right of
-the Agents header toggles between `grouped`
-(stable session/window/pane order) and `prioritized` (blocked > done > working >
-idle > unknown; newest state entry first within each group); the choice is
-remembered and synchronized across all running sidebar instances. Press `d` to toggle a more detailed view with
-Agent kind, human-readable window/pane indices, process id, state source, hook
+The sidebar switches between Agents and Sessions from the current tmux server.
+Click the first Powerline segment or press `Tab` to switch views. The adjacent
+pinned count opens the pinned menu for the current view; the sort and global
+menu segments are also touchable. Pinned cards stay just below the bar. Select
+an Agent or session and press `p`, or use its item menu, to pin or unpin it.
+In Sessions, tap the pin icon at the right of a row to toggle its pin.
+Click a pinned card, or press its `1`–`9` shortcut, to visit it. Each view has
+its own pinned items, which also remain in its scrolling list. Keyboard, wheel,
+and touch navigation can move between pinned cards and ordinary rows. On short
+screens, the pinned menu still contains every pinned item.
+
+Window-scoped `@agent_focus` markers follow Agent window moves; session pins use
+a session-scoped `@workbench_session_focus` marker. A designated personal
+assistant stays first in the Agents view and is automatically pinned again
+when the same thread resumes in another window. The view and sort selection are
+remembered across sidebars. Agents can be sorted by `grouped` (stable
+session/window/pane order) or `prioritized` (blocked > done > working > idle >
+unknown). Sessions can be sorted by name or priority. Press `d` to toggle
+more detail, including Agent kind, human-readable window/pane indices, process id, state source, hook
 health, and matched rule. Enter or left-click focuses a row; `m` or right-click
 opens session/agent actions. The top row opens the tmuxinator-project picker and
 the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
