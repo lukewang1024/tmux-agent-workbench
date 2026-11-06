@@ -178,13 +178,17 @@ def before_restore():
 
 
 def restore():
+    inventory_path = sidecar().with_name('workbench-team-restore-inventory.json')
     try:
         saved = json.loads(sidecar().read_text())
-        inventory_path = sidecar().with_name('workbench-team-restore-inventory.json')
         before = json.loads(inventory_path.read_text())
-        inventory_path.unlink()
     except (OSError, ValueError):
         return
+    finally:
+        try:
+            inventory_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     rows = inventory()
     targets = {(s, w, p): (window, pane, marker, cmd) for s, w, p, window, pane, marker, cmd in rows}
     socket = tmux('display-message', '-p', '#{socket_path}')

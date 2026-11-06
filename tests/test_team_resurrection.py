@@ -124,6 +124,12 @@ class TeamResurrection(unittest.TestCase):
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), '')
         self.assertEqual(json.loads(self.state_path.read_text()), self.state)
 
+    def test_missing_team_sidecar_consumes_restore_inventory(self):
+        self.helper('pre-restore')
+        (self.root / 'save/workbench-team-sessions.json').unlink()
+        self.helper('restore')
+        self.assertFalse((self.root / 'save/workbench-team-restore-inventory.json').exists())
+
     def test_pre_restore_preserves_existing_hook(self):
         prior = self.root / 'prior hook'
         output = self.root / 'prior-ran'
