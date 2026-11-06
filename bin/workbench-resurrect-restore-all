@@ -6,5 +6,7 @@ assistant_hook="$script_dir/../vendor/tmux-assistant-resurrect/scripts/restore-a
 
 # Restore the integrated assistant sidecar first; TraeX uses Workbench's
 # native hook identity sidecar and is restored by the same composed hook.
+"$script_dir/workbench-resurrect-team" restore || true
+export WORKBENCH_TEAM_RESTORE_HELPER="$script_dir/workbench-resurrect-team"
 bash "$assistant_hook" || true
 "$script_dir/workbench-resurrect-restore-trae" || true

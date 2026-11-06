@@ -190,8 +190,23 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
         }
     }
     let mut index = TeamIndex::new();
+    // A random server-lifetime token lets a deliberately rebound team retain
+    // provenance even after its last window disappears.
+    let restore_token = crate::tmux::Tmux::new(server.clone())
+        .output_with_timeout(
+            &["show-option", "-gqv", "@workbench_team_restore_token"],
+            Duration::from_millis(250),
+        )
+        .unwrap_or_default();
+    let restore_token = restore_token.trim();
     for id in candidates {
         let file = root.join(&id).join("state.json");
+        let state = std::fs::metadata(&file)
+            .ok()
+            .filter(|m| m.len() < 4 * 1024 * 1024)
+            .and_then(|_| std::fs::read(file).ok())
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+        let Some(state) = state else { continue };
         // A tmux socket path and pane IDs can be reused after a server restart.
         // Old team directories must not claim snapshots from the new server.
         if let (Ok(team_created), Ok(socket_created)) = (
@@ -199,15 +214,15 @@ fn read_teams(paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) -> Op
             std::fs::metadata(&server.socket_path).and_then(|m| m.created()),
         ) {
             if team_created < socket_created {
-                continue;
+                // A restored team is rebound explicitly before its assistants
+                // restart; old directories alone must not claim reused IDs.
+                let restored = !restore_token.is_empty()
+                    && state["workbench_restore_token"].as_str() == Some(restore_token);
+                if !restored {
+                    continue;
+                }
             }
         }
-        let state = std::fs::metadata(&file)
-            .ok()
-            .filter(|m| m.len() < 4 * 1024 * 1024)
-            .and_then(|_| std::fs::read(file).ok())
-            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
-        let Some(state) = state else { continue };
         let Some(window) = state["window"].as_str() else {
             continue;
         };

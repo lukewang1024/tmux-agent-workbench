@@ -91,12 +91,20 @@ function checksum(s,    i, sum) {
 }
 BEGIN { for (code = 32; code < 127; code++) ascii[sprintf("%c", code)] = code }
 FILENAME == ARGV[1] {
-  sidebar[$1, $2, $3] = 1
-  removed[$1, $2, substr($4, 2)] = 1
-  affected[$1, $2] = 1
+  if ($5 == "sidebar") {
+    sidebar[$1, $2, $3] = 1
+    removed[$1, $2, substr($4, 2)] = 1
+    affected[$1, $2] = 1
+  } else {
+    pane_index[$1, $2, $3] = ($6 + 0) + pane_count[$1, $2]++
+  }
   next
 }
 $1 == "pane" && (($2 SUBSEP $3 SUBSEP $6) in sidebar) { next }
+$1 == "pane" && (($2 SUBSEP $3) in affected) {
+  if (!(($2 SUBSEP $3 SUBSEP $6) in pane_index)) fail()
+  $6 = pane_index[$2, $3, $6]
+}
 $1 == "window" && (($2 SUBSEP $3) in affected) {
   window_key = $2 SUBSEP $3
   input = substr($7, 6)

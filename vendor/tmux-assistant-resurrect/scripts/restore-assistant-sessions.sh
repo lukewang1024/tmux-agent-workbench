@@ -517,6 +517,22 @@ while read -r entry; do
 		full_cmd="$resume_cmd"
 	fi
 
+	# Workbench has already rebound team ownership before any assistant starts.
+	# Run the original shell command under its member context and lifecycle.
+	team_member=$(tmux show-option -pqv -t "$pane_id" @agent_team_member 2>/dev/null || true)
+	if [ -n "$team_member" ] && [ -n "${WORKBENCH_TEAM_RESTORE_HELPER:-}" ]; then
+		if [ "$kind" != session ]; then
+			log "team member $pane has no saved session id, skipping relaunch"
+			continue
+		fi
+		case "$pane_cmd" in
+		nu) team_launcher='^env' ;;
+		csh | tcsh) team_launcher='\env' ;;
+		*) team_launcher='env' ;;
+		esac
+		full_cmd="$team_launcher python3 $(shell_quote "$pane_cmd" "$WORKBENCH_TEAM_RESTORE_HELPER") resume $(shell_quote "$pane_cmd" "$pane_id") $(shell_quote "$pane_cmd" "$session_id")"
+	fi
+
 	if [ "$kind" = "relaunch" ]; then
 		log "relaunching $tool in $pane (cmd: $log_cmd)"
 	else

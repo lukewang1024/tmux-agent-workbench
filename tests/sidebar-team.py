@@ -71,6 +71,10 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         os.write(master, f'\x1b[<0;{column+1};{row+1}M\x1b[<0;{column+1};{row+1}m'.encode())
 
     try:
+        # A restored team directory predates the new tmux socket. Its explicit
+        # restored marker, rather than age alone, proves the rebind is fresh.
+        team_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-test'
+        team_dir.mkdir(parents=True)
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'a-team', '-n', 'Team Task',
              '-x', '160', '-y', '40', shlex.quote(fixture))
         lead = tmux('display-message', '-p', '-t', 'a-team', '#{pane_id}')
@@ -78,12 +82,13 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         worker = tmux('split-window', '-d', '-t', lead, '-P', '-F', '#{pane_id}', shlex.quote(fixture))
         for pane in (lead, worker):
             tmux('set-option', '-p', '-t', pane, '@agent_team', 'team-test')
-        team_dir = Path(env['XDG_STATE_HOME']) / 'agent-team/team-test'
-        team_dir.mkdir(parents=True)
-        state = {'id': 'team-test', 'socket': socket, 'window': window,
+        token = '0123456789abcdef0123456789abcdef'
+        tmux('set-option', '-g', '@workbench_team_restore_token', token)
+        state = {'id': 'team-test', 'socket': socket, 'window': window, 'workbench_restore_token': token,
                  'members': {'lead': {'pane': lead}, 'worker_a': {'pane': worker, 'brief': '目标：核对注册信息；只读'}}}
         state_file = team_dir / 'state.json'
         state_file.write_text(json.dumps(state))
+        tmux('set-option', '-w', '-t', window, '@workbench_restored_team', 'team-test')
         tmux('new-session', '-d', '-s', 'b-destination', '-n', 'Destination', '-x', '160', '-y', '40')
         tmux('new-session', '-d', '-s', 'z-source', '-n', 'Source', '-x', '160', '-y', '40',
              shlex.quote(fixture))

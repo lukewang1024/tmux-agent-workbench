@@ -58,5 +58,17 @@ while IFS= read -r entry; do
 		continue
 		;;
 	esac
-	wb_tmux send-keys -t "$pane_id" "command traex --resume $session_id" C-m
+	team_member=$(wb_tmux show-option -pqv -t "$pane_id" @agent_team_member 2>/dev/null || true)
+	if [ -n "$team_member" ]; then
+		helper=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/workbench-resurrect-team
+		quoted_helper=$(printf '%s' "$helper" | sed "s/'/'\\\\''/g")
+		case "$pane_cmd" in
+		nu) team_launcher='^env' ;;
+		csh|tcsh) team_launcher='\env' ;;
+		*) team_launcher='env' ;;
+		esac
+		wb_tmux send-keys -t "$pane_id" "$team_launcher python3 '$quoted_helper' resume '$pane_id' '$session_id'" C-m
+	else
+		wb_tmux send-keys -t "$pane_id" "command traex --resume $session_id" C-m
+	fi
 done <"$entries"

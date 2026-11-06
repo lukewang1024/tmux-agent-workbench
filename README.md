@@ -533,6 +533,17 @@ Copilot, Pi, Oh My Pi, and Grok sessions, and uses Workbench's native hooks for
 Claude, Codex, OpenCode, and TraeX. No separate assistant-resurrect TPM entry
 is needed.
 
+Pane teams are saved as a group and rebound to the restored panes before their
+sessions resume. This requires an `agent-team` version with `resume-pane` and
+the original team state under `$XDG_STATE_HOME/agent-team`. Each member resumes
+with its team instructions, model and permission options; saved prompts are not
+replayed. A missing session ID, unsupported saved option, missing team state,
+or an occupied target prevents that member or team from being resumed. Teams
+saved before this feature have no team sidecar and cannot be reconstructed by
+this mechanism. The team sidecar is private, stays in the resurrect folder, and
+is bound to the exact snapshot saved alongside it. Selecting an older snapshot
+without its matching sidecar will not restore it as a team.
+
 Like Herdr, Workbench renders one state per Agent pane. Claude `/btw` and Codex
 `/side` are classified from whichever thread is currently in the foreground;
 main and side threads are not shown as separate rows.

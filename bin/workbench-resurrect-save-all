@@ -11,3 +11,4 @@ assistant_hook="$script_dir/../vendor/tmux-assistant-resurrect/scripts/save-assi
 bash "$assistant_hook" || true
 "$script_dir/workbench-resurrect-merge-hooks" || true
 "$script_dir/workbench-resurrect-save-trae" || true
+"$script_dir/workbench-resurrect-team" save || true

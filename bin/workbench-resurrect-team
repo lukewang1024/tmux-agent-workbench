@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Persist and rebind agent-team pane identities across tmux resurrection."""
+import fcntl
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import socket as socket_module
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+ID = re.compile(r'^[A-Za-z0-9_-]+$')
+SHELLS = {'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu'}
+ROOT = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'agent-team'
+SOCKET = os.environ.get('TMUX_AGENT_WORKBENCH_TMUX_SOCKET')
+
+
+def tmux(*args):
+    cmd = ['tmux'] + (['-S', SOCKET] if SOCKET else []) + list(args)
+    return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def sidecar():
+    directory = os.environ.get('TMUX_RESURRECT_DIR') or tmux('show-option', '-gqv', '@resurrect-dir')
+    if not directory:
+        legacy = Path.home() / '.tmux/resurrect'
+        directory = str(legacy if legacy.is_dir() else Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'tmux/resurrect')
+    directory = directory.replace('$HOSTNAME', socket_module.gethostname())
+    return Path(os.path.expandvars(os.path.expanduser(directory))) / 'workbench-team-sessions.json'
+
+
+def snapshot_digest():
+    try:
+        with (sidecar().parent / 'last').open('rb') as snapshot:
+            digest = hashlib.sha256()
+            for block in iter(lambda: snapshot.read(65536), b''):
+                digest.update(block)
+            return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def atomic(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.team-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            json.dump(value, out, ensure_ascii=False)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def inventory():
+    rows = tmux('list-panes', '-a', '-F', '#{session_name}\t#{window_index}\t#{pane_index}\t#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_current_command}').splitlines()
+    return [line.split('\t') for line in rows if len(line.split('\t')) == 7]
+
+
+def restored_indexes():
+    rows = tmux('list-panes', '-a', '-F', '#{session_name}\t#{window_index}\t#{pane_index}\t#{@pane_role}\t#{pane-base-index}').splitlines()
+    panes = [line.split('\t') for line in rows if len(line.split('\t')) == 5]
+    affected = {(s, w) for s, w, _, role, _ in panes if role == 'sidebar'}
+    counts = {}
+    mapping = {}
+    for session, window, pane, role, base in panes:
+        key = (session, window)
+        if key in affected:
+            if role == 'sidebar':
+                mapping[(session, window, pane)] = None
+            else:
+                index = int(base) + counts.get(key, 0)
+                counts[key] = counts.get(key, 0) + 1
+                mapping[(session, window, pane)] = str(index)
+    return mapping
+
+
+def remap_assistant_sidecars(mapping):
+    directory = sidecar().parent
+    for filename in ('assistant-sessions.json', 'workbench-trae-sessions.json'):
+        path = directory / filename
+        try:
+            data = json.loads(path.read_text())
+            entries = data if isinstance(data, list) else data.get('sessions', []) + data.get('relaunch', [])
+            changed = False
+            for entry in entries:
+                key = tuple(str(entry.get(field, '')) for field in ('session_name', 'window_index', 'pane_index'))
+                if not all(key) and isinstance(entry.get('pane'), str):
+                    try:
+                        session, target = entry['pane'].rsplit(':', 1)
+                        window, pane = target.rsplit('.', 1)
+                        key = (session, window, pane)
+                    except ValueError:
+                        continue
+                if key in mapping and mapping[key] is not None and key[2] != mapping[key]:
+                    entry['session_name'], entry['window_index'] = key[:2]
+                    entry['pane_index'] = mapping[key]
+                    if 'pane' in entry:
+                        entry['pane'] = key[0] + ':' + key[1] + '.' + mapping[key]
+                    changed = True
+            if changed:
+                atomic(path, data)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+
+def remap_pane_contents(mapping):
+    archive = sidecar().parent / 'pane_contents.tar.gz'
+    if not mapping or not archive.is_file():
+        return
+    names = {}
+    for (session, window, pane), index in mapping.items():
+        old = 'pane_contents/pane-' + session + ':' + window + '.' + pane
+        names[old] = None if index is None else 'pane_contents/pane-' + session + ':' + window + '.' + index
+    fd, temporary = tempfile.mkstemp(prefix='.team-archive-', dir=archive.parent)
+    os.close(fd)
+    try:
+        with tarfile.open(archive, 'r:gz') as original, tarfile.open(temporary, 'w:gz') as updated:
+            for entry in original:
+                normalized = entry.name[2:] if entry.name.startswith('./') else entry.name
+                target = names.get(normalized, normalized)
+                if target is None:
+                    continue
+                item = copy.copy(entry)
+                item.name = './' + target if entry.name.startswith('./') else target
+                source = original.extractfile(entry) if entry.isfile() else None
+                updated.addfile(item, source)
+        os.replace(temporary, archive)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def save():
+    rows = inventory()
+    indexes = restored_indexes()
+    remap_assistant_sidecars(indexes)
+    try:
+        remap_pane_contents(indexes)
+    except (OSError, EOFError, tarfile.TarError) as exc:
+        print('workbench team restore: could not remap pane contents:', exc, file=sys.stderr)
+    groups = {}
+    for session, win, index, window, pane, ident, command in rows:
+        if ID.fullmatch(ident):
+            groups.setdefault((ident, window), []).append((session, win, index, pane))
+    result = []
+    socket = tmux('display-message', '-p', '#{socket_path}')
+    for (ident, window), panes in groups.items():
+        directory = ROOT / ident
+        try:
+            with (directory / 'lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                state = json.loads((directory / 'state.json').read_text())
+                if state.get('id') != ident or state.get('window') != window or state.get('socket') != socket or state.get('closed'):
+                    continue
+                members = {item.get('pane'): name for name, item in state['members'].items()}
+                mapped = [{'session': s, 'window': w, 'pane': indexes.get((s, w, p), p), 'member': members[pid]} for s, w, p, pid in panes if pid in members and indexes.get((s, w, p), p) is not None]
+                if any(m['member'] == 'lead' for m in mapped):
+                    result.append({'id': ident, 'members': mapped})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    stat = os.stat(socket)
+    atomic(sidecar(), {'socket_device': stat.st_dev, 'socket_inode': stat.st_ino,
+                       'snapshot_sha256': snapshot_digest(), 'teams': result})
+
+
+def before_restore():
+    socket = tmux('display-message', '-p', '#{socket_path}')
+    stat = os.stat(socket)
+    atomic(sidecar().with_name('workbench-team-restore-inventory.json'),
+           {'socket_device': stat.st_dev, 'socket_inode': stat.st_ino,
+            'panes': [row[4] for row in inventory()]})
+
+
+def restore():
+    try:
+        saved = json.loads(sidecar().read_text())
+        inventory_path = sidecar().with_name('workbench-team-restore-inventory.json')
+        before = json.loads(inventory_path.read_text())
+        inventory_path.unlink()
+    except (OSError, ValueError):
+        return
+    rows = inventory()
+    targets = {(s, w, p): (window, pane, marker, cmd) for s, w, p, window, pane, marker, cmd in rows}
+    socket = tmux('display-message', '-p', '#{socket_path}')
+    stat = os.stat(socket)
+    if (not isinstance(saved, dict) or not isinstance(before, dict)
+            or not saved.get('snapshot_sha256') or saved['snapshot_sha256'] != snapshot_digest()
+            or (before.get('socket_device'), before.get('socket_inode')) != (stat.st_dev, stat.st_ino)
+            or not isinstance(before.get('panes'), list)):
+        return
+    token = tmux('show-option', '-gqv', '@workbench_team_restore_token')
+    if not re.fullmatch(r'[0-9a-f]{32}', token):
+        token = secrets.token_hex(16)
+        tmux('set-option', '-g', '@workbench_team_restore_token', token)
+    for team in saved.get('teams', []):
+        try:
+            ident, members = team['id'], team['members']
+            if not isinstance(ident, str) or not ID.fullmatch(ident) or not isinstance(members, list):
+                continue
+            resolved = [(m['member'], targets[(m['session'], m['window'], m['pane'])]) for m in members]
+            if not resolved or sum(name == 'lead' for name, _ in resolved) != 1 or len({name for name, _ in resolved}) != len(resolved):
+                continue
+            if len({item[0] for _, item in resolved}) != 1 or len({item[1] for _, item in resolved}) != len(resolved):
+                continue
+            if any(item[1] in before['panes'] for _, item in resolved):
+                continue
+            if any(marker or cmd.lstrip('-') not in SHELLS for _, (_, _, marker, cmd) in resolved):
+                continue
+            directory = ROOT / ident
+            with (directory / 'lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                path = directory / 'state.json'
+                state = json.loads(path.read_text())
+                if state.get('id') != ident or any(name not in state['members'] for name, _ in resolved):
+                    continue
+                # Never take over a team still alive in this server.
+                if any(row[5] == ident for row in rows):
+                    continue
+                state['socket'] = socket
+                state['window'] = resolved[0][1][0]
+                state['workbench_restore_token'] = token
+                state.pop('closed', None)
+                for item in state['members'].values():
+                    item['pane'] = ''
+                try:
+                    for name, (_, pane, _, _) in resolved:
+                        state['members'][name]['pane'] = pane
+                        state['members'][name]['status'] = 'running'
+                        tmux('set-option', '-p', '-t', pane, '@agent_team', ident)
+                        tmux('set-option', '-p', '-t', pane, '@agent_team_role', 'lead' if name == 'lead' else 'worker')
+                        tmux('set-option', '-p', '-t', pane, '@agent_team_member', name)
+                    tmux('set-option', '-w', '-t', state['window'], '@workbench_restored_team', ident)
+                    tmux('set-option', '-w', '-t', state['window'], 'pane-border-status', 'top')
+                    tmux('set-option', '-w', '-t', state['window'], 'pane-border-format', ' #{?@agent_team_role,#{@agent_team_role} | ,}#{pane_title} ')
+                    atomic(path, state)
+                except (OSError, subprocess.CalledProcessError):
+                    for _, (_, pane, _, _) in resolved:
+                        for option in ('@agent_team', '@agent_team_role', '@agent_team_member'):
+                            try:
+                                tmux('set-option', '-pu', '-t', pane, option)
+                            except subprocess.CalledProcessError:
+                                pass
+                    try:
+                        tmux('set-option', '-wu', '-t', state['window'], '@workbench_restored_team')
+                    except subprocess.CalledProcessError:
+                        pass
+                    raise
+        except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
+            continue
+
+
+def resume(pane, session_id):
+    ident = tmux('show-option', '-pqv', '-t', pane, '@agent_team')
+    name = tmux('show-option', '-pqv', '-t', pane, '@agent_team_member')
+    if not ID.fullmatch(ident) or not ID.fullmatch(name):
+        raise ValueError('invalid team identity')
+    return subprocess.call(['agent-team', 'resume-pane', str(ROOT / ident), name, session_id])
+
+
+if __name__ == '__main__':
+    try:
+        if sys.argv[1:] == ['save']:
+            save()
+        elif sys.argv[1:] == ['pre-restore']:
+            before_restore()
+        elif sys.argv[1:] == ['restore']:
+            restore()
+        elif len(sys.argv) == 4 and sys.argv[1] == 'resume':
+            sys.exit(resume(sys.argv[2], sys.argv[3]))
+        else:
+            sys.exit(2)
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+        print('workbench team restore:', exc, file=sys.stderr)
+        sys.exit(1)

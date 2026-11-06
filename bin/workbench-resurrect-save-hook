@@ -18,8 +18,8 @@ else
   t() { command tmux "$@"; }
 fi
 
-t list-panes -a -f '#{==:#{@pane_role},sidebar}' \
-  -F "#{session_name}${tab}#{window_index}${tab}#{pane_index}${tab}#{pane_id}" > "$panes_file"
+t list-panes -a \
+  -F "#{session_name}${tab}#{window_index}${tab}#{pane_index}${tab}#{pane_id}${tab}#{@pane_role}${tab}#{pane-base-index}" > "$panes_file"
 
 # tmux 3.8 emits versioned JSON. Keep the pruning parser and saved layouts
 # compatible with older tmux/resurrect versions through the Workbench core.
