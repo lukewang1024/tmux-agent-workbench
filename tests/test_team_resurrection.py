@@ -225,6 +225,10 @@ class TeamResurrection(unittest.TestCase):
         self.assertCountEqual(log.read_text().splitlines(), ['lead:saved-lead', 'worker_a:saved-worker'])
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.0', '@agent_team'), 'test-team')
         self.assertEqual(self.tmux('show-option', '-pqv', '-t', 'team:0.1', '@agent_team'), 'test-team')
+        for role in ('lead', 'worker_a'):
+            doctor_env = dict(self.env, AGENT_TEAM_DIR=str(self.directory), AGENT_TEAM_ROLE=role)
+            result = subprocess.check_output([str(team_cli), 'doctor'], env=doctor_env, text=True)
+            self.assertEqual(json.loads(result)['role'], role)
 
     def test_composed_restore_relaunches_members_with_team_context(self):
         self.restart()
