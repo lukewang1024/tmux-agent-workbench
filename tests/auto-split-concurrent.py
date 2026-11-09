@@ -23,6 +23,12 @@ with tempfile.TemporaryDirectory(prefix='wb-split-race-', dir='/tmp') as root:
         env.pop(name, None)
     for name in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME'):
         env[name] = root + '/' + name
+    bin_dir = Path(root) / 'bin'
+    bin_dir.mkdir()
+    codex_stub = bin_dir / 'codex'
+    codex_stub.write_text('#!/bin/sh\ncase "$1" in\n  exec) printf \'%s\\n\' \'{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}\' ;;\n  queue) exit 0 ;;\n  --no-alt-screen) exec sleep 300 ;;\nesac\nexit 0\n')
+    codex_stub.chmod(0o755)
+    env['PATH'] = str(bin_dir) + os.pathsep + env['PATH']
     config = Path(env['XDG_CONFIG_HOME']) / 'tmux-agent-workbench'
     config.mkdir(parents=True)
     (config / 'config.toml').write_text('[notifications]\nenabled = false\n[auto_split]\nenabled = true\n')
@@ -80,7 +86,7 @@ with tempfile.TemporaryDirectory(prefix='wb-split-race-', dir='/tmp') as root:
                             '--pane', p, '--session-id', sessions[p])
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(place, range(2)))
-            assert sorted(r['status'] for r in results) == ['needs_split', 'renamed'], results
+            assert sorted(r['status'] for r in results) == ['manager_pending', 'renamed'], results
             assert len(tmux('list-windows', '-t', '方向', '-F', '#{window_id}').splitlines()) == 5
             assert len(core('auto-split', 'status')['pending']) == 1
             assert core('daemon', 'status')['pid'] == before

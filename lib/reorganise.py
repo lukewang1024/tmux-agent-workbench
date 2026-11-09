@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _datetime
 import hashlib
 import json
@@ -253,6 +254,8 @@ def take_snapshot(context_lines: int = 0) -> dict[str, Any]:
                     "pane_pid": int(_format(tmux, pane_id, "#{pane_pid}") or "0"),
                     "current_path": _format(tmux, pane_id, "#{pane_current_path}"),
                     "current_command": _format(tmux, pane_id, "#{pane_current_command}"),
+                    "pane_role": _format(tmux, pane_id, "#{@pane_role}"),
+                    "sidebar_runtime": _format(tmux, pane_id, "#{@workbench_sidebar_runtime}"),
                     "dead": _format(tmux, pane_id, "#{pane_dead}") == "1",
                     "agent_team": _format(tmux, pane_id, "#{@agent_team}"),
                     "agent_team_role": _format(tmux, pane_id, "#{@agent_team_role}"),
@@ -481,6 +484,19 @@ def _window_to_group(plan: dict[str, Any]) -> dict[str, str]:
     return {window_id: group["session"] for group in plan["groups"] for window_id in group["windows"]}
 
 
+def _protect_manager_session(snapshot: dict[str, Any], plan: dict[str, Any]) -> None:
+    """Keep the machine-wide manager session intact in every regrouping plan."""
+    prefix = "__workbench_manager_"
+    destination = _window_to_group(plan)
+    for window in snapshot.get("windows", []):
+        origin = window["session_name"]
+        target = destination[window["window_id"]]
+        if origin.startswith(prefix) and target != origin:
+            raise ReorganiseError("the Workbench manager session and its windows are protected")
+        if target.startswith(prefix) and target != origin:
+            raise ReorganiseError("plans cannot move windows into the protected Workbench manager session")
+
+
 def _validate_split_scope(snapshot: dict[str, Any], plan: dict[str, Any], source_id: str) -> None:
     """Limit an automatic split to live task windows in one original direction."""
     if not re.fullmatch(r"\$[0-9]+", source_id):
@@ -596,6 +612,30 @@ class Mutator:
         return output
 
 
+SIDEBAR_SUPPRESS_OPTION = "@workbench_reorganise_sidebar_suppressed"
+
+
+@contextlib.contextmanager
+def _suppress_sidebar_creation(mutator: Mutator):
+    marker = str(os.getpid())
+    existing = mutator.tmux.call("show-option", "-gqv", SIDEBAR_SUPPRESS_OPTION, check=False).strip()
+    if existing:
+        raise ReorganiseError("another reorganisation is suppressing temporary sidebars")
+    mutator.command(
+        "suppress automatic sidebars while creating a temporary placeholder",
+        "set-option", "-g", SIDEBAR_SUPPRESS_OPTION, marker,
+    )
+    try:
+        yield
+    finally:
+        current = mutator.tmux.call("show-option", "-gqv", SIDEBAR_SUPPRESS_OPTION, check=False).strip()
+        if current == marker:
+            mutator.command(
+                "restore automatic sidebars after creating a temporary placeholder",
+                "set-option", "-gu", SIDEBAR_SUPPRESS_OPTION,
+            )
+
+
 def _write_run_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
     temporary = run_dir / "run.json.tmp"
     _write_private(temporary, manifest)
@@ -611,15 +651,21 @@ def _new_session(mutator: Mutator, name: str, cwd: str | None, *, label: str) ->
         "-n", "scratchpad" if label == "scratch" else "__wb_reorganise__",
         "-P", "-F", "#{session_id}\t#{window_id}", "/bin/sh",
     ])
-    output = mutator.command(f"create {label} session {name}", *args)
-    try:
-        session_id, window_id = output.split("\t", 1)
-    except ValueError as exc:
-        raise ReorganiseError(f"tmux did not report IDs for created session {name!r}") from exc
-    mutator.command(
-        f"disable automatic rename for placeholder {window_id}",
-        "set-window-option", "-t", window_id, "automatic-rename", "off",
-    )
+    with _suppress_sidebar_creation(mutator):
+        output = mutator.command(f"create {label} session {name}", *args)
+        try:
+            session_id, window_id = output.split("\t", 1)
+        except ValueError as exc:
+            raise ReorganiseError(f"tmux did not report IDs for created session {name!r}") from exc
+        if label == "group":
+            mutator.command(
+                f"disable automatic sidebar for placeholder {window_id}",
+                "set-option", "-w", "-t", window_id, "@workbench_sidebar_disabled", "1",
+            )
+        mutator.command(
+            f"disable automatic rename for placeholder {window_id}",
+            "set-window-option", "-t", window_id, "automatic-rename", "off",
+        )
     return session_id, window_id
 
 
@@ -631,8 +677,14 @@ def _new_placeholder(mutator: Mutator, session_id: str, name: str, cwd: str | No
         "-n", "scratchpad" if label == "scratch" else "__wb_reorganise__",
         "-P", "-F", "#{window_id}", "/bin/sh",
     ])
-    window_id = mutator.command(f"create {label} placeholder in {name}", *args)
-    mutator.command(f"disable automatic rename for placeholder {window_id}", "set-window-option", "-t", window_id, "automatic-rename", "off")
+    with _suppress_sidebar_creation(mutator):
+        window_id = mutator.command(f"create {label} placeholder in {name}", *args)
+        if label == "group":
+            mutator.command(
+                f"disable automatic sidebar for placeholder {window_id}",
+                "set-option", "-w", "-t", window_id, "@workbench_sidebar_disabled", "1",
+            )
+        mutator.command(f"disable automatic rename for placeholder {window_id}", "set-window-option", "-t", window_id, "automatic-rename", "off")
     return window_id
 
 
@@ -650,12 +702,16 @@ def _placeholder_identity(tmux: Tmux, window_id: str) -> dict[str, Any]:
             "pane_pid": int(_format(tmux, pane, "#{pane_pid}") or "0"),
             "current_command": _format(tmux, pane, "#{pane_current_command}"),
             "current_path": _format(tmux, pane, "#{pane_current_path}"),
+            "pane_role": _format(tmux, pane, "#{@pane_role}"),
+            "sidebar_runtime": _format(tmux, pane, "#{@workbench_sidebar_runtime}"),
             "history_size": int(_format(tmux, pane, "#{history_size}") or "0"),
             "visible_sha256": hashlib.sha256(visible.encode("utf-8", "replace")).hexdigest(),
         })
     return {
         "window_id": window_id,
         "window_name": _format(tmux, window_id, "#{window_name}"),
+        "session_id": _format(tmux, window_id, "#{session_id}"),
+        "session_name": _format(tmux, window_id, "#{session_name}"),
         "panes": pane_rows,
     }
 
@@ -666,11 +722,47 @@ def _placeholder_matches(tmux: Tmux, identity: dict[str, Any]) -> bool:
         current = _placeholder_identity(tmux, window_id)
     except ReorganiseError:
         return False
-    return current == {
-        "window_id": identity.get("window_id"),
-        "window_name": identity.get("window_name"),
-        "panes": identity.get("panes"),
-    }
+    for key in ("window_id", "window_name", "session_id", "session_name"):
+        if key in identity and current.get(key) != identity[key]:
+            return False
+    expected_panes = identity.get("panes", [])
+    current_panes = {row.get("pane_id"): row for row in current.get("panes", [])}
+    if set(current_panes) != {row.get("pane_id") for row in expected_panes}:
+        return False
+    return all(
+        all(current_panes[row["pane_id"]].get(key) == value for key, value in row.items())
+        for row in expected_panes
+    )
+
+
+def _managed_sidebar_additions(tmux: Tmux, identity: dict[str, Any]) -> list[str] | None:
+    """Return added Workbench sidebar pane IDs when the recorded shell is intact."""
+    window_id = identity.get("window_id")
+    try:
+        current = _placeholder_identity(tmux, window_id)
+    except ReorganiseError:
+        return None
+    for key in ("window_id", "window_name", "session_id", "session_name"):
+        if key in identity and current.get(key) != identity[key]:
+            return None
+    expected_panes = identity.get("panes", [])
+    current_panes = {row.get("pane_id"): row for row in current.get("panes", [])}
+    expected_ids = {row.get("pane_id") for row in expected_panes}
+    if not expected_ids.issubset(current_panes):
+        return None
+    for row in expected_panes:
+        live = current_panes[row["pane_id"]]
+        if any(live.get(key) != value for key, value in row.items()):
+            return None
+    extras = [row for pane_id, row in current_panes.items() if pane_id not in expected_ids]
+    if not extras:
+        return []
+    if any(row.get("pane_role") != "sidebar" or not row.get("sidebar_runtime") for row in extras):
+        return None
+    attached_windows = set(tmux.lines("list-clients", "-F", "#{window_id}"))
+    if window_id in attached_windows:
+        return None
+    return [row["pane_id"] for row in extras]
 
 
 def _cwd_for_group(snapshot: dict[str, Any], window_ids: list[str]) -> str | None:
@@ -839,12 +931,184 @@ def _verify_apply(snapshot: dict[str, Any], plan: dict[str, Any], after: dict[st
             )
 
 
+def _managed_sidebar_pane(row: dict[str, Any], *, legacy: bool = False) -> bool:
+    if row.get("pane_role") == "sidebar" and row.get("sidebar_runtime"):
+        return True
+    return bool(
+        legacy
+        and row.get("current_command") == "tmux-agent-workbench-core"
+        and not row.get("agent")
+        and not row.get("agent_team")
+        and not row.get("agent_team_role")
+        and not row.get("personal_assistant")
+    )
+
+
+def _verify_recovered_originals(snapshot: dict[str, Any], current: dict[str, Any]) -> None:
+    before_names = {row["window_id"]: row["window_name"] for row in snapshot.get("windows", [])}
+    current_windows = {row["window_id"]: row for row in current.get("windows", [])}
+    if any(current_windows.get(window_id, {}).get("window_name") != name
+           for window_id, name in before_names.items()):
+        raise ReorganiseError("original window name changed since the failed apply")
+    original_window_ids = set(before_names)
+    before_panes = {row["pane_id"]: row for row in snapshot.get("panes", [])}
+    current_panes = {
+        row["pane_id"]: row for row in current.get("panes", [])
+        if row.get("window_id") in original_window_ids
+    }
+    stable_panes = {
+        pane_id: row for pane_id, row in before_panes.items()
+        if not _managed_sidebar_pane(row, legacy=True)
+    }
+    for pane_id, row in stable_panes.items():
+        live = current_panes.get(pane_id)
+        core_handoff = bool(
+            live
+            and row.get("current_command") == "tmux-agent-workbench-core"
+            and live.get("current_command") == "tmux-agent-workbench-core"
+            and live.get("window_id") == row.get("window_id")
+            and live.get("personal_assistant") == row.get("personal_assistant")
+            and live.get("agent_team") == row.get("agent_team")
+            and live.get("agent_team_role") == row.get("agent_team_role")
+        )
+        if (not live or (live.get("pane_pid") != row.get("pane_pid") and not core_handoff)
+                or live.get("window_id") != row.get("window_id")
+                or live.get("dead") != row.get("dead")
+                or _identity_tuple(live.get("agent")) != _identity_tuple(row.get("agent"))):
+            raise ReorganiseError(f"original task pane {pane_id} changed during the failed apply")
+    unexpected = [
+        row["pane_id"] for row in current.get("panes", [])
+        if row.get("window_id") in original_window_ids
+        and row["pane_id"] not in stable_panes
+        and not _managed_sidebar_pane(row, legacy=True)
+    ]
+    if unexpected:
+        raise ReorganiseError("current layout contains unrecognized pane changes: " + ", ".join(unexpected))
+def _verify_recovered_apply(
+    snapshot: dict[str, Any],
+    plan: dict[str, Any],
+    after: dict[str, Any],
+    clients_before_recovery: list[dict[str, Any]],
+) -> None:
+    expected = {group["session"]: group["windows"][:] for group in plan["groups"]}
+    if _current_groups(after) != expected:
+        raise ReorganiseError("recovery verification found unexpected session window grouping or order")
+    _verify_recovered_originals(snapshot, after)
+    client_fields = ("client_name", "session_id", "session_name", "window_id", "pane_id")
+    before_clients = sorted(tuple(row.get(field) for field in client_fields) for row in clients_before_recovery)
+    after_clients = sorted(tuple(row.get(field) for field in client_fields) for row in after.get("clients", []))
+    if after_clients != before_clients:
+        raise ReorganiseError("client focus changed during placeholder recovery")
+
+
 def _session_counts(snapshot: dict[str, Any]) -> dict[str, Any]:
     counts = [
         {"session": row["session_name"], "windows": row["window_count"]}
         for row in sorted(snapshot.get("sessions", []), key=lambda row: row["session_name"])
     ]
     return {"session_count": len(counts), "window_count": sum(row["windows"] for row in counts), "sessions": counts}
+
+
+def recover_failed_run(run_dir_text: str) -> dict[str, Any]:
+    run_dir = Path(run_dir_text).expanduser().resolve()
+    state_root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
+    allowed_root = (state_root / "tmux-agent-workbench" / "reorganise").resolve()
+    if run_dir == allowed_root or allowed_root not in run_dir.parents:
+        raise ReorganiseError("recovery run must be inside the Workbench reorganise state directory")
+    before = _read_json(run_dir / "before.json")
+    plan = _read_json(run_dir / "plan.json")
+    manifest = _read_json(run_dir / "run.json")
+    if not all(isinstance(value, dict) for value in (before, plan, manifest)):
+        raise ReorganiseError("failed run journal is incomplete or malformed")
+    if manifest.get("status") != "failed":
+        raise ReorganiseError("recovery requires a failed apply run")
+    if manifest.get("scratch_shell"):
+        raise ReorganiseError("recovery does not clean runs with a retained scratch shell")
+
+    socket, server_pid, _origin_index = _tmux_origin()
+    server = Tmux(socket, server_pid)
+    live_server = server.server_identity()
+    recorded_server = manifest.get("server") or {}
+    if (live_server.get("socket_path") != recorded_server.get("socket_path")
+            or live_server.get("server_pid") != recorded_server.get("server_pid")):
+        raise ReorganiseError("failed run belongs to a different tmux server")
+
+    current = take_snapshot(0)
+    if current.get("server", {}).get("socket_path") != socket or str(current.get("server", {}).get("server_pid")) != server_pid:
+        raise ReorganiseError("current snapshot does not match the failed run server")
+    placeholders = manifest.get("placeholders")
+    if not isinstance(placeholders, list) or any(
+        not isinstance(row, dict) or row.get("role") != "group" for row in placeholders
+    ):
+        raise ReorganiseError("failed run does not contain only group placeholders")
+    placeholder_ids = {row.get("window_id") for row in placeholders}
+    before_windows = {row["window_id"]: row for row in before.get("windows", [])}
+    current_windows = {row["window_id"]: row for row in current.get("windows", [])}
+    if set(current_windows) - placeholder_ids != set(before_windows):
+        raise ReorganiseError("current layout contains missing or unexpected original windows")
+
+    wanted_groups = {row["session"]: row["windows"] for row in plan.get("groups", [])}
+    current_groups = {
+        name: [window_id for window_id in ids if window_id not in placeholder_ids]
+        for name, ids in _current_groups(current).items()
+    }
+    current_groups = {name: ids for name, ids in current_groups.items() if ids}
+    if current_groups != wanted_groups:
+        raise ReorganiseError("current layout is not the planned grouping apart from recorded placeholders")
+    _verify_recovered_originals(before, current)
+
+    attached_windows = set(server.lines("list-clients", "-F", "#{window_id}"))
+    cleanup: list[tuple[dict[str, Any], list[str]]] = []
+    for identity in placeholders:
+        window_id = identity.get("window_id")
+        if window_id not in current_windows:
+            continue
+        if window_id in attached_windows:
+            raise ReorganiseError(f"placeholder {window_id} has an attached client")
+        if _placeholder_matches(server, identity):
+            extra_sidebars: list[str] = []
+        else:
+            extra_sidebars = _managed_sidebar_additions(server, identity)
+            if extra_sidebars is None:
+                raise ReorganiseError(f"placeholder {window_id} changed beyond a managed sidebar")
+        cleanup.append((identity, extra_sidebars))
+
+    mutator = Mutator(server, Journal(run_dir))
+    previous_failure = manifest.get("failure")
+    try:
+        for identity, extra_sidebars in cleanup:
+            window_id = identity["window_id"]
+            mutator.command(
+                f"disable future automatic sidebars for placeholder {window_id}",
+                "set-option", "-w", "-t", window_id, "@workbench_sidebar_disabled", "1",
+            )
+            for pane_id in extra_sidebars:
+                mutator.command(
+                    f"remove managed sidebar {pane_id} from placeholder {window_id}",
+                    "kill-pane", "-t", pane_id,
+                )
+            if not _placeholder_matches(server, identity):
+                raise ReorganiseError(f"placeholder {window_id} changed during recovery")
+            mutator.command(f"remove task-owned placeholder {window_id}", "kill-window", "-t", window_id)
+
+        clients_before_recovery = current.get("clients", [])
+        after = take_snapshot(0)
+        _verify_recovered_apply(before, plan, after, clients_before_recovery)
+        _write_private(run_dir / "after.json", after)
+        manifest["status"] = "complete"
+        manifest["completed_at"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat()
+        manifest["recovered_from_failure"] = previous_failure
+        manifest.pop("failure", None)
+        _write_run_manifest(run_dir, manifest)
+        result = _session_counts(after)
+        result.update({"run_dir": str(run_dir), "status": "complete", "recovered": True})
+        return result
+    except BaseException as exc:
+        manifest["recovery_failure"] = str(exc)
+        _write_run_manifest(run_dir, manifest)
+        if isinstance(exc, ReorganiseError):
+            raise
+        raise
 
 
 def _is_noop(snapshot: dict[str, Any], plan: dict[str, Any], tmux: Tmux) -> bool:
@@ -893,11 +1157,13 @@ def apply_plan(snapshot_path: str, plan_path: str, scope_session: str | None = N
         raise ReorganiseError("snapshot belongs to a different tmux server")
     _ensure_unlinked_ungrouped(snapshot)
     normalized_plan = _validate_plan(snapshot, plan)
+    _protect_manager_session(snapshot, normalized_plan)
     if scope_session is not None:
         _validate_split_scope(snapshot, normalized_plan, scope_session)
     current = take_snapshot(0)
     _check_fresh(snapshot, current)
     _ensure_unlinked_ungrouped(current)
+    _protect_manager_session(current, normalized_plan)
     if scope_session is not None:
         _validate_split_scope(current, normalized_plan, scope_session)
     destination_by_window = _window_to_group(normalized_plan)
@@ -1292,6 +1558,8 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--scope-session", help="restrict an automatic split to this exact source session ID")
     restore = sub.add_parser("restore", help="restore the original grouping from a completed run")
     restore.add_argument("run_dir")
+    recover = sub.add_parser("recover", help="safely clean placeholders from a failed but otherwise applied run")
+    recover.add_argument("run_dir")
     return parser
 
 
@@ -1307,6 +1575,8 @@ def main(argv: list[str] | None = None) -> int:
             result = apply_plan(args.snapshot, args.plan, args.scope_session)
         elif args.command == "restore":
             result = restore_run(args.run_dir)
+        elif args.command == "recover":
+            result = recover_failed_run(args.run_dir)
         else:
             parser.error("unknown command")
             return 2

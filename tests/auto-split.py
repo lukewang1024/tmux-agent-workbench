@@ -31,9 +31,15 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
         env.pop(key, None)
     for key in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME'):
         env[key] = root + '/' + key
+    state_real = Path(root, 'state-real')
+    state_real.mkdir()
+    Path(env['XDG_STATE_HOME']).symlink_to(state_real, target_is_directory=True)
     bin_dir = Path(root, 'bin')
     bin_dir.mkdir()
     (bin_dir / 'tmux-agent-workbench').symlink_to(repo / 'bin/tmux-agent-workbench-cli')
+    codex_stub = bin_dir / 'codex'
+    codex_stub.write_text('#!/bin/sh\ncase "$1" in\n  exec) printf \'%s\\n\' \'{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}\' ;;\n  queue) exit 0 ;;\n  --no-alt-screen) exec sleep 300 ;;\nesac\nexit 0\n')
+    codex_stub.chmod(0o755)
     incoming_kind = 'claude' if incoming_claude else 'trae' if incoming_trae else 'opencode' if incoming_opencode else 'codex'
     incoming_fixture = bin_dir / ('traex' if incoming_trae else incoming_kind)
     if incoming_kind != 'codex':
@@ -126,28 +132,44 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
             assert core('auto-split', 'status')['pending'] == []
             before_location = location(incoming)
             result = title(incoming, sessions[incoming], '图片拖拽定位', 'Office文档')
-            assert result['status'] == 'needs_split' and result['current_tasks'] == result['limit'] == 5, result
-            assert 'exactly one native subagent' in result['instruction'] and '--scope-session' in result['instruction']
-            if incoming_claude:
-                assert "Claude Code's native subagent" in result['instruction']
-                assert 'reorganise batch-worker' not in result['instruction']
-            elif incoming_trae:
-                assert "Trae's native subagent" in result['instruction']
-                assert 'reorganise batch-worker' not in result['instruction']
-            elif incoming_opencode:
-                assert "OpenCode's native subagent" in result['instruction']
-                assert 'no broader permissions' in result['instruction']
-                assert 'reorganise batch-worker' not in result['instruction']
-            else:
-                assert "Codex's native subagent" in result['instruction']
-                assert 'reorganise batch-worker' in result['instruction']
+            assert result['status'] == 'manager_pending' and result['current_tasks'] == result['limit'] == 5, result
+            assert 'single machine-wide coding-agent manager session' in result['instruction']
+            assert 'Do not spawn or delegate to another agent' in result['instruction']
             source = result['source_session']
             ticket = result['ticket']
             assert location(incoming) == before_location
-            assert title(incoming, sessions[incoming], '图片拖拽定位', 'Office文档')['status'] == 'split_pending'
+            repeated = title(incoming, sessions[incoming], '图片拖拽定位', 'Office文档')
+            assert repeated['status'] == 'manager_pending' and repeated['ticket'] == ticket
             assert len(core('auto-split', 'status')['pending']) == 1
+            wait(lambda: core('auto-split', 'status')['manager']['submitted_ticket_count'] == 1,
+                 'singleton manager queue')
+            manager = core('auto-split', 'status')['manager']
+            manager_pane = tmux('list-panes', '-s', '-t', manager['session_name'],
+                                '-F', '#{pane_id}').splitlines()[0]
+            access = tmux('show-option', '-qv', '-p', '-t', manager_pane,
+                          '@workbench_manager_access')
+            assert access.startswith('danger-full-access-v1:'), access
+            assert env['XDG_STATE_HOME'] + '/tmux-agent-workbench' in access, access
+            assert str(Path(env['XDG_STATE_HOME']).resolve()) in access, access
+            assert str(Path(socket).parent.resolve()) in access, access
 
-            # Simulate the native worker's result only on this disposable server.
+            # An existing manager thread with stale sandbox access is replaced in
+            # the same reserved session, then receives the still-pending ticket.
+            manager_state_file = (Path(env['XDG_STATE_HOME']).resolve() /
+                                  'tmux-agent-workbench/manager/state.json')
+            manager_state = json.loads(manager_state_file.read_text())
+            manager_state['access_profile'] = 'stale-profile'
+            manager_state_file.write_text(json.dumps(manager_state))
+            previous_manager_pid = int(tmux('display-message', '-p', '-t', manager_pane, '#{pane_pid}'))
+            retried = title(incoming, sessions[incoming], '图片拖拽定位', 'Office文档')
+            assert retried['status'] == 'manager_pending' and retried['ticket'] == ticket, retried
+            wait(lambda: int(tmux('display-message', '-p', '-t', manager_pane, '#{pane_pid}')) !=
+                 previous_manager_pid, 'manager sandbox profile migration')
+            assert len([name for name in tmux('list-sessions', '-F', '#{session_name}').splitlines()
+                        if name.startswith('__workbench_manager_')]) == 1
+            assert core('auto-split', 'status')['manager']['last_error'] is None
+
+            # Simulate the singleton manager's scoped result on this disposable server.
             helper = str(repo / 'bin/wb-reorganise')
             before = json.loads(subprocess.check_output([helper, 'snapshot'], env=env, text=True))
             moving = {location(pane)[2] for pane in existing[3:]}
