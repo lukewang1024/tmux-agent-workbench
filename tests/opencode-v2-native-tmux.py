@@ -1,4 +1,4 @@
-"""End-to-end OpenCode 2.0.25 native split on a disposable tmux server."""
+"""End-to-end OpenCode 2.0.25 manager-routed split on a disposable tmux server."""
 import http.server,json,os,shlex,shutil,subprocess,sys,tempfile,threading,time
 from pathlib import Path
 
@@ -24,7 +24,7 @@ class Mock(http.server.BaseHTTPRequestHandler):
   if 'shell' in tools and 'subagent' in tools and not is_child:
    step=type(self).root_step;type(self).root_step+=1
    if step==0:call=('shell',{'command':'python3 '+shlex.quote(str(self.scripts/'place.py'))})
-   elif step==1:call=('subagent',{'description':'split test direction','prompt':'WB_CHILD_DIRECTION: Split only the designated private tmux session by task meaning. Run the supplied isolated worker script.','agent':'general'})
+   elif step==1:call=('shell',{'command':'python3 '+shlex.quote(str(self.scripts/'worker.py'))})
    elif step==2:call=('shell',{'command':'python3 '+shlex.quote(str(self.scripts/'finish.py'))})
   elif 'shell' in tools and is_child:
    step=type(self).child_step;type(self).child_step+=1
@@ -53,6 +53,7 @@ try:
   Mock.scripts=root
   project=root/'project';project.mkdir();bindir=root/'bin';bindir.mkdir()
   (bindir/'tmux-agent-workbench').symlink_to(repo/'bin/tmux-agent-workbench-cli')
+  codex_stub=bindir/'codex';codex_stub.write_text('#!/bin/sh\ncase "$1" in\n  exec) printf \'%s\\n\' \'{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}\' ;;\n  queue) exit 0 ;;\n  --no-alt-screen) exec sleep 300 ;;\nesac\nexit 0\n');codex_stub.chmod(0o755)
   (bindir/'opencode').symlink_to(opencode)
   team=bindir/'agent-team';team.write_text('#!/bin/sh\n[ "$1" = start ] && [ "$2" = opencode ] || exit 2\nshift 2\nexec opencode "$@"\n');team.chmod(0o755)
   config=root/'config';plugins=config/'opencode/plugins/tmux-agent-workbench-v2';plugins.mkdir(parents=True)
@@ -62,8 +63,8 @@ try:
   for key in ('TMUX','TMUX_PANE','AGENT_TEAM_DIR','WORKBENCH_SESSION','WORKBENCH_TASK'):env.pop(key,None)
   def tmux(*args):return subprocess.check_output(['tmux','-u','-S',socket,*args],env=env,text=True,timeout=10).strip()
   def core(*args,data=None):return json.loads(subprocess.run([binary,*args],env=env,text=True,input=json.dumps(data) if data is not None else None,capture_output=True,timeout=10,check=True).stdout)
-  common='''import json,os,subprocess\nfrom pathlib import Path\nr=Path(os.environ['WB_TEST_ROOT'])\ndef core(*args):return json.loads(subprocess.check_output(['tmux-agent-workbench',*args],text=True))\n'''
-  (root/'place.py').write_text(common+'''pane=(r/'pane').read_text()\na=next(x for x in core('snapshot','--json')['agents'] if x['target']['pane_id']==pane and not x['exited'])\nresult=core('title','set','Picture layout','--session','Office-docs','--pane',pane,'--session-id',a['hook_session_id'])\n(r/'split.json').write_text(json.dumps(result))\nprint(json.dumps(result))\n''')
+  common='''import json,os,subprocess,time\nfrom pathlib import Path\nr=Path(os.environ['WB_TEST_ROOT'])\ndef core(*args):return json.loads(subprocess.check_output(['tmux-agent-workbench',*args],text=True))\n'''
+  (root/'place.py').write_text(common+'''pane=(r/'pane').read_text()\na=next(x for x in core('snapshot','--json')['agents'] if x['target']['pane_id']==pane and not x['exited'])\nresult=core('title','set','Picture layout','--session','Office-docs','--pane',pane,'--session-id',a['hook_session_id'])\n(r/'split.json').write_text(json.dumps(result))\ndeadline=time.monotonic()+20\nwhile core('auto-split','status')['manager']['submitted_ticket_count']<1 and time.monotonic()<deadline:time.sleep(.05)\nassert time.monotonic()<deadline,'manager dispatcher did not queue the ticket'\nprint(json.dumps(result))\n''')
   (root/'worker.py').write_text(common+'''helper=os.environ['WB_HELPER']; result=json.loads((r/'split.json').read_text()); snap=json.loads(subprocess.check_output([helper,'snapshot'],text=True)); move=set(json.loads((r/'move.json').read_text())); groups=[]\nfor session in snap['sessions']:\n ids=[w['window_id'] for w in snap['windows'] if w['session_id']==session['session_id']]\n if session['session_id']==result['source_session']:\n  groups.append({'session':'Office-docs','windows':[w for w in ids if w not in move]});groups.append({'session':'Office-docs·layout','windows':[w for w in ids if w in move]})\n else:groups.append({'session':session['session_name'],'windows':ids})\n(r/'snapshot.json').write_text(json.dumps(snap));(r/'plan.json').write_text(json.dumps({'groups':groups}));subprocess.run([helper,'apply','--snapshot',str(r/'snapshot.json'),'--plan',str(r/'plan.json'),'--scope-session',result['source_session']],check=True);(r/'worker-done').write_text('native child completed')\n''')
   (root/'finish.py').write_text(common+'''result=json.loads((r/'split.json').read_text());assert (r/'worker-done').exists();core('auto-split','finish','--ticket',result['ticket'],'--result','completed');pane=(r/'pane').read_text();a=next(x for x in core('snapshot','--json')['agents'] if x['target']['pane_id']==pane and not x['exited']);out=core('title','set','Picture layout','--session','Office-docs·layout','--pane',pane,'--session-id',a['hook_session_id']);(r/'placed.json').write_text(json.dumps(out));print(json.dumps(out))\n''')
   env['WB_TEST_ROOT']=str(root);env['WB_HELPER']=str(repo/'bin/wb-reorganise')
@@ -126,7 +127,7 @@ try:
     if (root/'split.json').exists():print('placement decision:',json.loads((root/'split.json').read_text()).get('status'))
     if (root/'placed.json').exists():print('final placement:',json.loads((root/'placed.json').read_text()).get('status'),tmux('display-message','-p','-t',pane,'#{session_name}'))
     assert (root/'placed.json').exists() and (root/'worker-done').exists(), 'native split did not complete'
-    assert json.loads((root/'split.json').read_text())['status']=='needs_split'
+    assert json.loads((root/'split.json').read_text())['status']=='manager_pending'
     assert json.loads((root/'placed.json').read_text())['status']=='renamed'
     assert tmux('display-message','-p','-t',pane,'#{session_name}')=='Office-docs·layout'
     deadline=time.monotonic()+8

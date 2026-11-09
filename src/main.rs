@@ -313,11 +313,21 @@ enum TitleCommand {
 #[derive(Debug, Subcommand)]
 enum AutoSplitCommand {
     Status,
+    #[command(hide = true)]
+    Dispatch {
+        #[arg(long)]
+        ticket: String,
+    },
     Finish {
         #[arg(long)]
         ticket: String,
         #[arg(long, value_parser = ["completed", "no_change", "unavailable", "failed"])]
         result: String,
+    },
+    /// Reopen one failed or unavailable ticket after its cause has been fixed.
+    Retry {
+        #[arg(long)]
+        ticket: String,
     },
 }
 
@@ -1436,9 +1446,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 serde_json::to_string_pretty(&tmux_agent_workbench::auto_split::status(&paths)?)?
             ),
+            AutoSplitCommand::Dispatch { ticket } => {
+                tmux_agent_workbench::auto_split::dispatch(&paths, &ticket)?;
+            }
             AutoSplitCommand::Finish { ticket, result } => {
                 tmux_agent_workbench::auto_split::finish(&paths, &ticket, &result)?;
                 println!("{{\"status\":\"recorded\"}}");
+            }
+            AutoSplitCommand::Retry { ticket } => {
+                tmux_agent_workbench::auto_split::retry(&paths, &ticket)?;
+                println!("{{\"status\":\"retry_ready\"}}");
             }
         },
         Command::NormalizeResurrectLayout { path } => {

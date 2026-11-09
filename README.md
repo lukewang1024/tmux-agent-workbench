@@ -284,37 +284,41 @@ port = 19999
 ```
 
 Automatic direction splitting is disabled by default. When enabled, a task's
-own agent chooses its direction by meaning, using the existing direction names
-and task titles. `title set` counts distinct windows with live local agents in
-the selected direction. Five tasks fit by default; when placing another would
-exceed that limit, the command leaves the caller in its current window and
-returns a request for one native `reorganise-agents` subagent of the calling
-agent to split the selected direction semantically. Codex uses its resolved
-batch worker settings; other agents use their own native subagent defaults.
-The OpenCode 1.18.32 and 2.0.25 plugins verify that a fresh foreground native
-child has no broader permissions than the parent, both before dispatch and
-when the child starts. OpenCode 2.0.25 launched by Workbench uses a private
-`--standalone` service so its terminal can be verified; an explicitly selected
-shared server is preserved and does not auto-group. Other versions need
-revalidation; if the check cannot prove this, the split is unavailable.
-Some Trae CLI versions can report a missing native thread in interactive mode.
-If its native child cannot start or finish, mark the split unavailable and
-leave the task in place; Workbench does not substitute a different agent.
-After a successful split, the caller chooses
-an appropriate child direction and retries placement. Unrelated full
-directions do not trigger work. The worker's scoped plan preserves other
-directions, non-agent windows, team windows, the personal assistant, panes,
-clients, and manually marked focus windows. If native delegation is unavailable or the tasks cannot
-be split confidently, the caller stays in its current window and continues its
-task; no alternative worker is launched. A task started inside an already full
-direction can temporarily bring that direction above the limit.
+own agent chooses its direction by meaning, using existing direction names and
+task titles. `title set` counts distinct windows with live local agents in the
+selected direction. Five tasks fit by default. If another placement would
+exceed that limit, Workbench leaves the caller in its current window and queues
+the request for one machine-wide Codex manager session. A global XDG state lock
+serializes manager creation and ticket submission across tmux servers; the
+manager session lives in a reserved tmux session and processes tickets in its
+persistent Codex conversation. Callers must not start another worker or move
+windows themselves. The manager handles one exact source session at a time and
+its scoped apply preserves unrelated directions, non-agent windows, team
+windows, the personal assistant, panes, clients, and manually marked focus
+windows. The manager session is excluded from task capacity and protected from
+reorganisation plans. Its Codex sandbox is `danger-full-access` so it can read
+Workbench state and control local tmux sockets; the configured approval policy
+is unchanged.
 
-`tmux-agent-workbench auto-split status` shows pending requests. A request
-remains pending if its owner disappears, so another worker cannot start while
-the first might still be operating. After confirming that its native worker is
-no longer running, recover it with `tmux-agent-workbench auto-split finish
---ticket <id> --result failed`. A change to the server, task windows, or task
-titles permits a fresh request when a task next attempts placement.
+After the manager finishes, the caller chooses an appropriate child direction
+and retries placement. Unrelated full directions do not trigger work. If the
+tasks cannot be split confidently or the manager cannot start, the caller stays
+in its current window and continues its task. A task started inside an already
+full direction can temporarily bring that direction above the limit.
+
+`tmux-agent-workbench auto-split status` shows pending tickets and manager
+session status. Tickets remain pending until the manager settles them; a
+repeated placement request requeues the same active manager ticket instead of
+creating another manager. The manager checks the exact ticket ID before acting,
+so duplicate queue deliveries are harmless. After fixing the cause of a failed
+or unavailable ticket, reopen only that ticket with
+`tmux-agent-workbench auto-split retry --ticket <id>`, then retry placement.
+Unchanged failures use the normal retry backoff.
+Tickets created by older releases keep their original worker ownership and are
+not transferred automatically. After confirming that the old worker stopped,
+settle one with
+`tmux-agent-workbench auto-split finish --ticket <id> --result failed`; the next
+placement attempt can then use the singleton manager.
 
 On macOS, clicking an overlay resolves the tmux client attached to the target
 session, focuses its exact iTerm2 or Terminal TTY/tab, and then selects the
@@ -876,19 +880,13 @@ The installer also exposes the bundled `handoff` skill through the shared
 the whole active task, select an exact profile when the user did not, and make
 `tmux-agent-workbench agent handoff` its final action.
 
-The bundled `reorganise-agents` skill groups existing agent windows into
-sessions by task. It resolves `agent-team`'s Codex `batch` worker model and
-effort and delegates the operation to one native subagent with fresh context.
-It preserves the caller's execution permissions; it does not launch a second
-interactive CLI or use the scene's lead model. Group names follow the current
-tasks, and retaining a scratchpad session such as `0` is optional.
-
-`tmux-agent-workbench reorganise batch-worker` prints the resolved worker
-settings. The `snapshot`, `apply --snapshot FILE --plan FILE`, and
-`restore RUN_DIR` subcommands provide the deterministic layout operations.
-Migration records live under `$XDG_STATE_HOME/tmux-agent-workbench/reorganise`.
-The worker instructions and plan format are maintained in the
-[skill](skills/reorganise-agents/SKILL.md).
+The bundled `reorganise-agents` skill runs inside the single machine-wide
+manager session for automatic overflow tickets. The manager classifies and
+applies each exact-source split itself; it never launches another agent. The
+`snapshot`, `apply --snapshot FILE --plan FILE`, and `restore RUN_DIR`
+subcommands provide deterministic layout operations. Migration records live
+under `$XDG_STATE_HOME/tmux-agent-workbench/reorganise`; the scoped manager
+workflow is documented in the [skill](skills/reorganise-agents/SKILL.md).
 
 ### Layer 2 — isolated task worktrees (`git/bin/`)
 

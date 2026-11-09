@@ -346,6 +346,16 @@ fn toggle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(window, '@')?;
     refuse_old_sidebar(server)?;
+    if create_only
+        && !option(server, "@workbench_reorganise_sidebar_suppressed")?
+            .trim()
+            .is_empty()
+    {
+        return Ok(());
+    }
+    if create_only && display(server, window, "#{@workbench_sidebar_disabled}")?.trim() == "1" {
+        return Ok(());
+    }
     let existing = sidebar_panes(server, window)?;
     if !existing.is_empty() {
         for duplicate in existing.iter().skip(1) {

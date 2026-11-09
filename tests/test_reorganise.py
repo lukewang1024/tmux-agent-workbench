@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import pty
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -16,6 +18,107 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "bin" / "wb-reorganise"
 TMUX = shutil.which("tmux")
+REORG_SPEC = importlib.util.spec_from_file_location("reorganise_helper", ROOT / "lib" / "reorganise.py")
+REORG = importlib.util.module_from_spec(REORG_SPEC)
+sys.modules[REORG_SPEC.name] = REORG
+REORG_SPEC.loader.exec_module(REORG)
+
+
+class PlaceholderRecoveryTests(unittest.TestCase):
+    def test_only_runtime_registered_sidebar_additions_are_recoverable(self):
+        class FakeTmux:
+            def __init__(self):
+                self.window = {
+                    "window_id": "@451",
+                    "window_name": "__wb_reorganise__",
+                    "session_id": "$28",
+                    "session_name": "CCM基建",
+                }
+                self.panes = {
+                    "%1": {
+                        "pane_id": "%1", "pane_pid": "100", "current_command": "sh",
+                        "current_path": "/tmp", "pane_role": "", "sidebar_runtime": "",
+                        "history_size": "0", "visible": "",
+                    }
+                }
+                self.clients = []
+
+            def lines(self, *args):
+                if args[0] == "list-panes":
+                    return list(self.panes)
+                if args[0] == "list-clients":
+                    return list(self.clients)
+                raise AssertionError(args)
+
+            def call(self, *args, **kwargs):
+                if args[0] == "capture-pane":
+                    return self.panes[args[-1]]["visible"]
+                if args[0] == "display-message":
+                    target, fmt = args[args.index("-t") + 1], args[-1]
+                    values = self.panes.get(target, self.window)
+                    fields = {
+                        "#{pane_pid}": "pane_pid", "#{pane_current_command}": "current_command",
+                        "#{pane_current_path}": "current_path", "#{@pane_role}": "pane_role",
+                        "#{@workbench_sidebar_runtime}": "sidebar_runtime", "#{history_size}": "history_size",
+                        "#{window_name}": "window_name", "#{session_id}": "session_id",
+                        "#{session_name}": "session_name",
+                    }
+                    return str(values[fields[fmt]])
+                raise AssertionError(args)
+
+        tmux = FakeTmux()
+        recorded = REORG._placeholder_identity(tmux, "@451")
+        tmux.panes["%2"] = {
+            "pane_id": "%2", "pane_pid": "200", "current_command": "tmux-agent-work",
+            "current_path": "/tmp", "pane_role": "sidebar", "sidebar_runtime": "200:engine",
+            "history_size": "0", "visible": "sidebar",
+        }
+        self.assertEqual(REORG._managed_sidebar_additions(tmux, recorded), ["%2"])
+        tmux.clients.append("@451")
+        self.assertIsNone(REORG._managed_sidebar_additions(tmux, recorded))
+        tmux.clients.clear()
+        tmux.panes["%3"] = {
+            "pane_id": "%3", "pane_pid": "300", "current_command": "sh",
+            "current_path": "/tmp", "pane_role": "", "sidebar_runtime": "",
+            "history_size": "0", "visible": "user work",
+        }
+        self.assertIsNone(REORG._managed_sidebar_additions(tmux, recorded))
+
+    def test_recovery_allows_managed_sidebar_lifecycle_but_preserves_task_panes(self):
+        before = {
+            "windows": [{"window_id": "@1", "window_name": "Task"}],
+            "panes": [
+                {"pane_id": "%1", "window_id": "@1", "pane_pid": 100, "dead": False,
+                 "current_command": "codex", "agent": None, "personal_assistant": False},
+                {"pane_id": "%2", "window_id": "@1", "pane_pid": 200, "dead": False,
+                 "current_command": "tmux-agent-workbench-core", "agent": None,
+                 "personal_assistant": True},
+            ],
+            "clients": [{"client_name": "client", "session_id": "$1", "session_name": "alpha",
+                         "window_id": "@1", "pane_id": "%old"}],
+        }
+        current = {
+            "windows": [{"window_id": "@1", "window_name": "Task", "session_name": "alpha",
+                          "window_index": 0}],
+            "panes": [
+                {"pane_id": "%1", "window_id": "@1", "pane_pid": 100, "dead": False,
+                 "current_command": "codex", "agent": None, "personal_assistant": False},
+                {"pane_id": "%2", "window_id": "@1", "pane_pid": 201, "dead": False,
+                 "current_command": "tmux-agent-workbench-core", "agent": None,
+                 "personal_assistant": True},
+                {"pane_id": "%3", "window_id": "@1", "pane_pid": 300, "dead": False,
+                 "current_command": "tmux-agent-workbench-core", "pane_role": "sidebar",
+                 "sidebar_runtime": "300:engine", "agent": None, "personal_assistant": False},
+            ],
+            "clients": [{"client_name": "client", "session_id": "$1", "session_name": "alpha",
+                         "window_id": "@1", "pane_id": "%1"}],
+        }
+        REORG._verify_recovered_originals(before, current)
+        REORG._verify_recovered_apply(before, {"groups": [{"session": "alpha", "windows": ["@1"]}]},
+                                      current, current["clients"])
+        current["panes"][0]["pane_pid"] = 101
+        with self.assertRaises(REORG.ReorganiseError):
+            REORG._verify_recovered_originals(before, current)
 
 
 @unittest.skipUnless(TMUX, "tmux is required")

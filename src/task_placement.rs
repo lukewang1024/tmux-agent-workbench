@@ -12,6 +12,11 @@ const SEP: char = '\u{1f}';
 
 pub(crate) fn validate_session(name: &str) -> Result<&str, String> {
     let name = name.trim();
+    if name.starts_with(crate::manager_session::SESSION_PREFIX) {
+        return Err(
+            "the Workbench manager session is reserved and cannot receive task windows".into(),
+        );
+    }
     if name.is_empty()
         || name.chars().count() > 64
         || name.starts_with('-')

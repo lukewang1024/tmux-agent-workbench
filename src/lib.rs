@@ -14,6 +14,7 @@ pub mod hooks;
 pub mod host_metrics;
 pub mod ipc;
 pub mod layout;
+pub(crate) mod manager_session;
 pub mod manifest;
 pub mod menu;
 mod menu_context;

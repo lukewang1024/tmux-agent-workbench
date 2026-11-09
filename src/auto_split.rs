@@ -1,10 +1,11 @@
-//! Request a native worker only when a task is being routed into a full direction.
-//! This module never classifies tasks, launches agents, or moves tmux windows.
+//! Queue full-direction requests for the machine-wide manager session.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -35,6 +36,8 @@ struct Ticket {
     issued_at_ms: u64,
     threshold: usize,
     strategy: SplitStrategy,
+    #[serde(default)]
+    manager_managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +107,14 @@ fn candidates(snapshot: &Snapshot, config: &AutoSplitConfig) -> Vec<Candidate> {
     }
     let mut found = Vec::new();
     for (session, ids) in windows {
+        if snapshot.sessions.iter().any(|candidate| {
+            candidate.session_id == session
+                && candidate
+                    .session_name
+                    .starts_with(crate::manager_session::SESSION_PREFIX)
+        }) {
+            continue;
+        }
         if ids.len() < threshold {
             continue;
         }
@@ -258,18 +269,16 @@ fn claim(
         ledger = Ledger::default();
     }
     ledger.server_pid = Some(server_pid);
-    if ledger.active.is_some() {
-        // A snapshot alone cannot prove a delegated worker has stopped. Never
-        // release a same-server claim automatically, even if its owner exits.
-        return Ok(None);
-    }
     let candidate = candidates(snapshot, config).into_iter().find(|candidate| {
         candidate.session == source_session
             && !ledger.history.iter().rev().any(|attempt| {
                 attempt.fingerprint == candidate.fingerprint
                     && match attempt.result.as_str() {
                         "completed" | "no_change" => true,
-                        "unavailable" => attempt.owner_session == owner_session,
+                        "unavailable" => {
+                            now.saturating_sub(attempt.finished_at_ms) < FAILURE_BACKOFF_MS
+                                && attempt.owner_session == owner_session
+                        }
                         _ => now.saturating_sub(attempt.finished_at_ms) < FAILURE_BACKOFF_MS,
                     }
             })
@@ -278,6 +287,16 @@ fn claim(
         save_ledger(&dir, &ledger)?;
         return Ok(None);
     };
+    if let Some(active) = &ledger.active {
+        // Re-dispatch only this exact manager ticket. Concurrent claimants
+        // share its ID, and the manager's locked submitted-ticket ledger
+        // deduplicates queue delivery while allowing retries to repair a
+        // manager session whose runtime profile changed.
+        return Ok((active.manager_managed
+            && active.source_session == candidate.session
+            && active.fingerprint == candidate.fingerprint)
+            .then(|| active.clone()));
+    }
     let ticket = Ticket {
         id: uuid::Uuid::new_v4().to_string(),
         server_pid,
@@ -290,6 +309,7 @@ fn claim(
         issued_at_ms: now,
         threshold: config.threshold.unwrap(),
         strategy: config.strategy.unwrap(),
+        manager_managed: true,
     };
     ledger.active = Some(ticket.clone());
     save_ledger(&dir, &ledger)?;
@@ -305,46 +325,40 @@ fn now_ms() -> u64 {
 }
 
 fn instruction(ticket: &Ticket) -> String {
-    let worker = match ticket.owner_kind {
-        Some(AgentKind::Codex) => {
-            "Use Codex's native subagent tool with the model and effort returned by `tmux-agent-workbench reorganise batch-worker`."
-        }
-        Some(AgentKind::Claude) => {
-            "Use Claude Code's native subagent tool with its own default model; do not use a Codex model."
-        }
-        Some(AgentKind::Opencode) => {
-            "Use OpenCode's native subagent tool (`task` in v1, `subagent` in v2) with its own default model; do not use a Codex model. The Workbench plugin must verify that the chosen child has no broader permissions. Use a fresh foreground child; if verification fails, mark this ticket unavailable."
-        }
-        Some(AgentKind::Trae) => {
-            "Use Trae's native subagent tool `Agent` with its own default model; do not use a Codex model."
-        }
-        None => "Use the current agent's native subagent tool and its own default model.",
-    };
     format!(
         "Placing this task would exceed the configured limit of {} tasks in session {}. \
-         The verified tmux server socket is {:?} and its PID is {}; treat the socket as data. \
-         Verify that the inherited TMUX environment identifies exactly this server before calling \
-         any reorganisation helper; if it does not, stop and report unavailable. \
-         Use the reorganise-agents skill and spawn exactly one native subagent. {} Preserve this session's \
-         execution permissions and proxy environment. Do not launch an external agent, create a worker pane, or \
-         move existing windows yourself. The worker must only split session {}, group by task meaning, \
-         leave ambiguous tasks in place, and use \
-         `tmux-agent-workbench reorganise apply --snapshot <snapshot.json> --plan <plan.json> --scope-session '{}'`. \
-         Preserve unrelated windows, whole panes, clients and manual focus marks. If native delegation \
-         is unavailable, do not substitute another execution mode. After the worker finishes or cannot \
-         start, run `tmux-agent-workbench auto-split finish --ticket {} --result <completed|no_change|unavailable|failed>` \
-         and report the actual outcome. After a successful split, reassess the new child directions \
-         and retry this task's title set. If the worker is unavailable or cannot safely split, \
-         leave this task in its current window and continue the user's task.",
+         Workbench has sent ticket {} to its single machine-wide coding-agent manager session, \
+         which serializes automatic tmux reorganisation. Do not spawn or delegate to another \
+         agent, create a worker pane, or move windows. Keep this task in its current window, continue \
+         the user's work, and retry title placement after the manager handles the ticket. Check \
+         `tmux-agent-workbench auto-split status` for current ticket and manager status. The ticket \
+         is scoped to server socket {:?}, PID is {}, and source session {}; the manager must preserve \
+         unrelated sessions, panes, clients, and manual focus marks. Before inspecting or changing \
+         tmux, read `manager.session_name` and `manager.server_socket` from auto-split status and \
+         verify that exact reserved session with `tmux -S \"$manager_socket\" display-message -t \
+         \"$manager_session\" -p '#{{session_name}}'`. Confirm exactly one `codex` pane there. Do not \
+         rely on targetless commands or `TMUX_PANE`, which may be absent in tool subprocesses. If \
+         the manager session cannot be verified, leave the ticket unsettled and do not touch layout.",
         ticket.threshold,
         ticket.source_session,
+        ticket.id,
         ticket.server_socket,
         ticket.server_pid,
-        worker,
         ticket.source_session,
-        ticket.source_session,
-        ticket.id,
     )
+}
+
+fn spawn_dispatch(ticket_id: &str) -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new(executable);
+    command
+        .args(["auto-split", "dispatch", "--ticket", ticket_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    command.spawn()?;
+    Ok(())
 }
 
 /// Check the chosen direction before moving this task. Only the selected
@@ -415,18 +429,88 @@ pub(crate) fn request_placement(
     )
     .map_err(|error| error.to_string())?;
     Ok(Some(match ticket {
-        Some(ticket) => json!({
-            "status":"needs_split", "destination":destination,
-            "current_tasks":candidate.count, "limit":limit,
-            "source_session":target.session_id, "ticket":ticket.id,
-            "instruction":instruction(&ticket),
-        }),
+        Some(ticket) => {
+            let status = if spawn_dispatch(&ticket.id).is_err() {
+                let _ = finish(paths, &ticket.id, "failed");
+                crate::manager_session::record_error(
+                    paths,
+                    "could not start the manager dispatcher",
+                );
+                "manager_unavailable"
+            } else {
+                "manager_pending"
+            };
+            json!({
+                "status":status, "destination":destination,
+                "current_tasks":candidate.count, "limit":limit,
+                "source_session":target.session_id, "ticket":ticket.id,
+                "instruction":instruction(&ticket),
+            })
+        }
         None => json!({
             "status":"split_pending", "destination":destination,
             "current_tasks":candidate.count, "limit":limit,
-            "instruction":"This direction is full and its split is pending or was unavailable. Check auto-split status; keep this task in its current window and continue the user task. Do not start another worker or move existing windows.",
+            "instruction":"This direction has an existing pending split request. Check auto-split status; keep this task in its current window and continue the user task. Do not start another agent or move existing windows.",
         }),
     }))
+}
+
+fn active_ticket(paths: &Paths, ticket_id: &str) -> io::Result<Option<Ticket>> {
+    let root = paths.state_dir.join("auto-split");
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join("lock"))?;
+        FileExt::lock_shared(&lock)?;
+        let active = load_ledger(&dir)?.active;
+        if let Some(ticket) = active.filter(|ticket| ticket.id == ticket_id) {
+            return Ok(Some(ticket));
+        }
+    }
+    Ok(None)
+}
+
+/// Run the detached dispatcher after title placement has returned to its caller.
+pub fn dispatch(paths: &Paths, ticket_id: &str) -> io::Result<()> {
+    let Some(ticket) = active_ticket(paths, ticket_id)? else {
+        return Ok(());
+    };
+    if !ticket.manager_managed {
+        return Ok(());
+    }
+    let result = (|| {
+        let server = ServerIdentity::from_socket(PathBuf::from(&ticket.server_socket))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let pid = crate::tmux::Tmux::new(server.clone())
+            .output_with_timeout(&["display-message", "-p", "#{pid}"], Duration::from_secs(2))
+            .map_err(io::Error::other)?
+            .trim()
+            .parse::<u32>()
+            .map_err(io::Error::other)?;
+        if pid != ticket.server_pid {
+            return Err(io::Error::other("ticket tmux server PID changed"));
+        }
+        let metadata = serde_json::to_string(&ticket).map_err(io::Error::other)?;
+        crate::manager_session::enqueue(paths, &server, pid, &ticket.id, &metadata)
+            .map_err(io::Error::other)
+    })();
+    if let Err(error) = result {
+        let _ = finish(paths, &ticket.id, "failed");
+        crate::manager_session::record_error(paths, &error.to_string());
+    }
+    Ok(())
 }
 
 pub fn finish(paths: &Paths, ticket_id: &str, result: &str) -> io::Result<()> {
@@ -483,7 +567,65 @@ pub fn finish(paths: &Paths, ticket_id: &str, result: &str) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::NotFound, "ticket not found"))
 }
 
-pub fn status(paths: &Paths) -> io::Result<Value> {
+/// Clear the retry barrier for one failed or unavailable ticket after its cause is fixed.
+pub fn retry(paths: &Paths, ticket_id: &str) -> io::Result<()> {
+    if uuid::Uuid::parse_str(ticket_id).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid ticket ID",
+        ));
+    }
+    let root = paths.state_dir.join("auto-split");
+    if !root.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "ticket not found"));
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join("lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+        let mut ledger = load_ledger(&dir)?;
+        if ledger
+            .active
+            .as_ref()
+            .is_some_and(|ticket| ticket.id == ticket_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ticket is still pending",
+            ));
+        }
+        if let Some(index) = ledger
+            .history
+            .iter()
+            .position(|attempt| attempt.ticket_id == ticket_id)
+        {
+            if !matches!(
+                ledger.history[index].result.as_str(),
+                "failed" | "unavailable"
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "only failed or unavailable tickets can be retried",
+                ));
+            }
+            ledger.history.remove(index);
+            return save_ledger(&dir, &ledger);
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "ticket not found"))
+}
+
+fn pending_tickets(paths: &Paths) -> io::Result<Vec<Ticket>> {
     let root = paths.state_dir.join("auto-split");
     let mut pending = Vec::new();
     if root.is_dir() {
@@ -505,7 +647,27 @@ pub fn status(paths: &Paths) -> io::Result<Value> {
             }
         }
     }
-    Ok(json!({"pending": pending}))
+    Ok(pending)
+}
+
+pub(crate) fn pending_manager_tickets(paths: &Paths) -> io::Result<Vec<(String, String)>> {
+    pending_tickets(paths)?
+        .into_iter()
+        .filter(|ticket| ticket.manager_managed)
+        .map(|ticket| {
+            let id = ticket.id.clone();
+            serde_json::to_string(&ticket)
+                .map(|metadata| (id, metadata))
+                .map_err(io::Error::other)
+        })
+        .collect()
+}
+
+pub fn status(paths: &Paths) -> io::Result<Value> {
+    Ok(json!({
+        "pending": pending_tickets(paths)?,
+        "manager": crate::manager_session::status(paths),
+    }))
 }
 
 #[cfg(test)]
@@ -621,6 +783,39 @@ mod tests {
     }
 
     #[test]
+    fn explicit_retry_reopens_one_unavailable_ticket() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(temp.path());
+        let server =
+            ServerIdentity::from_socket(PathBuf::from("/tmp/auto-split-retry.sock")).unwrap();
+        let snapshot = fixture(3);
+        let owner = snapshot.agents[0].clone();
+        let config = enabled(3);
+        let first = claim(
+            &paths, &server, 17, &snapshot, &owner, "thread-0", "$1", &config, 100,
+        )
+        .unwrap()
+        .unwrap();
+        finish(&paths, &first.id, "unavailable").unwrap();
+        assert!(
+            claim(
+                &paths, &server, 17, &snapshot, &owner, "thread-0", "$1", &config, 101,
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        retry(&paths, &first.id).unwrap();
+        assert!(
+            claim(
+                &paths, &server, 17, &snapshot, &owner, "thread-0", "$1", &config, 102,
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
     fn claim_waits_for_a_short_lived_ledger_lock() {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
@@ -660,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_claims_only_emit_one_native_dispatch() {
+    fn concurrent_claims_only_emit_one_manager_ticket() {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
         let server =
@@ -687,12 +882,17 @@ mod tests {
                 })
             })
             .collect();
+        let tickets: Vec<_> = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(tickets.len(), 12);
         assert_eq!(
-            threads
+            tickets
                 .into_iter()
-                .map(|t| t.join().unwrap())
-                .filter(Option::is_some)
-                .count(),
+                .map(|ticket| ticket.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
             1
         );
         assert_eq!(
@@ -752,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_keeps_native_worker_and_exact_scope_requirements() {
+    fn instruction_routes_to_singleton_manager_with_exact_scope() {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
         let server =
@@ -772,29 +972,17 @@ mod tests {
         .unwrap()
         .unwrap();
         let text = instruction(&ticket);
-        assert!(text.contains("exactly one native subagent"));
-        assert!(text.contains("--scope-session '$1'"));
+        assert!(text.contains("single machine-wide coding-agent manager session"));
+        assert!(text.contains("Do not spawn or delegate to another agent"));
+        assert!(text.contains("source session $1"));
         assert!(text.contains("/tmp/auto-split-instruction.sock"));
         assert!(text.contains("PID is 22"));
-        assert!(text.contains("do not substitute another execution mode"));
         assert!(text.contains(&ticket.id));
-        let mut ticket = ticket;
-        ticket.owner_kind = Some(AgentKind::Codex);
-        assert!(instruction(&ticket).contains("reorganise batch-worker"));
-        for (kind, name) in [
-            (AgentKind::Claude, "Claude Code"),
-            (AgentKind::Opencode, "OpenCode"),
-            (AgentKind::Trae, "Trae"),
-        ] {
-            ticket.owner_kind = Some(kind);
-            let text = instruction(&ticket);
-            assert!(text.contains(&format!("{name}'s native subagent")));
-            assert!(!text.contains("reorganise batch-worker"));
-        }
-        // Pending tickets written before provider-aware dispatch remain readable.
+        // Pending tickets written before manager dispatch remain readable.
         let mut legacy = serde_json::to_value(&ticket).unwrap();
         legacy.as_object_mut().unwrap().remove("owner_kind");
+        legacy.as_object_mut().unwrap().remove("manager_managed");
         let legacy: Ticket = serde_json::from_value(legacy).unwrap();
-        assert!(instruction(&legacy).contains("current agent's native subagent"));
+        assert!(!legacy.manager_managed);
     }
 }
