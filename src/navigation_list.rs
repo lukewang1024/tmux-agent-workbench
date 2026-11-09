@@ -17,11 +17,14 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 pub(crate) fn separator(frame: &mut ratatui::Frame, area: Rect) {
+    separator_with_color(frame, area, Color::DarkGray);
+}
+
+pub(crate) fn separator_with_color(frame: &mut ratatui::Frame, area: Rect, color: Color) {
     let area = area.intersection(frame.area());
     if area.height > 0 {
         frame.render_widget(
-            Paragraph::new("─".repeat(usize::from(area.width)))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("─".repeat(usize::from(area.width))).style(Style::default().fg(color)),
             Rect::new(area.x, area.y, area.width, 1),
         );
     }
