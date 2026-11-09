@@ -446,7 +446,7 @@ fn create(
         .unwrap_or(0);
     let width = option_u16(server, "@sidebar_width", 26).clamp(
         option_u16(server, "@sidebar_min_width", 18),
-        option_u16(server, "@sidebar_max_width", 36).min(64),
+        option_u16(server, "@sidebar_max_width", 64).min(64),
     );
     let main_min = option_u16(server, "@sidebar_main_min_width", 80);
     let viewport_width = sidebar_viewport_width(server, window, window_width)?;
@@ -1003,7 +1003,7 @@ fn remember(server: &ServerIdentity, pane: &str) -> Result<(), Box<dyn std::erro
         .parse::<u16>()
         .unwrap_or(26);
     let min = option_u16(server, "@sidebar_min_width", 18);
-    let max = option_u16(server, "@sidebar_max_width", 36).min(64);
+    let max = option_u16(server, "@sidebar_max_width", 64).min(64);
     let main_min = option_u16(server, "@sidebar_main_min_width", 80);
     let saved = option_u16(server, "@sidebar_width", 26);
     let mut effective_max = max;

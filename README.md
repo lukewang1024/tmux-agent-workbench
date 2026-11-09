@@ -253,7 +253,7 @@ stale_grace_ms = 3000
 [sidebar]
 width = 26
 min_width = 18
-max_width = 36
+max_width = 64
 main_min_width = 80
 position = "left"
 auto_create = true
