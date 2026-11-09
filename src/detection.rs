@@ -473,7 +473,6 @@ impl Detector {
             .filter(|pane| agents.contains_key(&pane.root_pid))
             .map(|pane| pane.target.pane_id.clone())
             .collect();
-
         let exited: Vec<_> = self
             .pane_instances
             .iter()
@@ -486,7 +485,6 @@ impl Detector {
             self.last_classification.remove(&pane);
             self.next_capture.remove(&pane);
         }
-
         self.panes = panes
             .into_iter()
             .map(|pane| (pane.target.pane_id.clone(), pane))
@@ -702,12 +700,23 @@ impl Detector {
             }
         }
         let snapshot = if kind == AgentKind::Codex {
-            snapshot
+            let snapshot = snapshot
                 .hook_session_id
                 .as_deref()
                 .and_then(crate::hooks::codex_thread_name)
                 .and_then(|name| self.machine.set_thread_name(&snapshot.instance_id, name))
-                .unwrap_or(snapshot)
+                .unwrap_or(snapshot);
+            // A bound hook session is authoritative even before it reports a
+            // title. The pane title can still show the previous Codex task
+            // while the new session is starting, so only use it before a
+            // session identity has been bound.
+            if snapshot.thread_name.is_none() && snapshot.hook_session_id.is_none() {
+                codex_thread_name_from_pane_title(&pane.title)
+                    .and_then(|name| self.machine.set_thread_name(&snapshot.instance_id, name))
+                    .unwrap_or(snapshot)
+            } else {
+                snapshot
+            }
         } else {
             snapshot
         };
@@ -741,6 +750,71 @@ fn codex_task_progress(
     let completed = values[1].parse().ok()?;
     let total = values[2].parse().ok()?;
     (total > 0 && completed <= total).then_some(crate::model::TaskProgress { completed, total })
+}
+
+fn codex_thread_name_from_pane_title(title: &str) -> Option<String> {
+    let (app, rest) = title.trim().split_once(" | ")?;
+    if !app.trim().eq_ignore_ascii_case("codex") {
+        return None;
+    }
+    let rest = rest.trim();
+    let candidate = if let Some((state, name)) = rest.split_once(" | ") {
+        if !codex_title_state(state) {
+            return None;
+        }
+        name.trim()
+    } else {
+        let (state, activity_and_name) = rest.split_once(char::is_whitespace)?;
+        if !codex_title_state(state) {
+            return None;
+        }
+        strip_codex_activity(activity_and_name.trim_start())
+    };
+
+    static PROGRESS_SUFFIX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let progress_suffix = PROGRESS_SUFFIX.get_or_init(|| {
+        regex::Regex::new(r"(?i)(?:\s*\|\s*|\s+)\d+\s*/\s*\d+(?:\s+(?:tasks?|steps?))?$").unwrap()
+    });
+    let name = progress_suffix.replace(candidate, "");
+    let name = name.trim();
+    (meaningful_window_label(name)
+        && name.chars().count() <= 128
+        && !name.chars().any(char::is_control))
+    .then(|| name.to_owned())
+}
+
+fn codex_title_state(value: &str) -> bool {
+    matches!(
+        value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "ready"
+            | "working"
+            | "waiting"
+            | "blocked"
+            | "approval"
+            | "permission"
+            | "error"
+            | "starting"
+            | "connecting"
+            | "compacting"
+            | "reviewing"
+    )
+}
+
+fn strip_codex_activity(value: &str) -> &str {
+    if let Some((activity, name)) = value.split_once(char::is_whitespace)
+        && !activity.is_empty()
+        && activity
+            .chars()
+            .all(|character| !character.is_alphanumeric())
+    {
+        return name.trim_start();
+    }
+    value
 }
 
 fn valid_pane_id(value: &str) -> bool {

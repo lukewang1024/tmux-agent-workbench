@@ -97,11 +97,11 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
         owned = json.loads(tmux('show-option', '-wqv', '-t', main, '@workbench_task_title'))
         if not session.startswith(owned['owner']['session']):
             return False
-        # An unnamed agent with a generic window title has an explicit placeholder.
+        # An unnamed agent uses its tmux session name until the agent reports a task title.
         rendered = screen()
-        if (name or 'Blank session') not in rendered:
+        if (name or 'projection-test') not in rendered:
             return False
-        if name and 'Blank session' in rendered:
+        if not name and 'Blank session' in rendered:
             return False
         checkpoints = list(Path(env['XDG_STATE_HOME']).glob('tmux-agent-workbench/servers/*.json'))
         return any(any(session.startswith(runtime.get('hook_session_id') or '!')
@@ -125,11 +125,13 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
                                        '-t', 'projection-test'], env=env, stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             wait(lambda: agent() is not None, 'agent discovery')
-            wait(lambda: 'Blank session' in screen(), 'unnamed agent rendered in sidebar')
+            wait(lambda: 'projection-test' in screen() and 'Blank session' not in screen(),
+                 'unnamed agent uses its tmux session name in sidebar')
             manual = str(uuid.uuid4())
             hook(manual)
-            wait(lambda: agent().get('hook_session_id') == manual and 'Blank session' in screen(),
-                 'unnamed hooked session rendered in sidebar')
+            wait(lambda: agent().get('hook_session_id') == manual and 'projection-test' in screen()
+                 and 'Blank session' not in screen(),
+                 'unnamed hooked session uses its tmux session name in sidebar')
             name_command(manual, '统一名称 Alpha')
             hook(manual, 'PostToolUse', thread_name='Cached provider name')
             index = Path(env['CODEX_HOME'], 'session_index.jsonl')

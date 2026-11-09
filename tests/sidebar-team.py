@@ -216,12 +216,15 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         tmux('kill-pane', '-t', worker)
         tmux('kill-pane', '-t', lead)
         wait_for(stopped_snapshot, 'stopped worker snapshot disappeared before closure check')
-        # Invalid provenance must expose the retained snapshot again, proving
-        # it still exists and that the subsequent suppression uses team state.
+        # Invalid provenance may not restore a closed pane's retained
+        # tombstone to the sidebar. Confirm the daemon still retains it while
+        # the visible projection continues to suppress the closed team.
         state['socket'] = '/tmp/not-the-same-socket'
         state_file.write_text(json.dumps(state, ensure_ascii=False))
-        wait_for(lambda: sum('Team Task' in line for line in screen()) >= 2,
-                 'retained worker snapshot was not observable')
+        wait_for(lambda: stopped_snapshot()
+                 and not any('Stopped worker unique task' in line for line in screen())
+                 and sum('Team Task' in line for line in screen()) <= 1,
+                 'closed worker tombstone leaked with invalid team provenance')
         state['socket'] = socket
         state_file.write_text(json.dumps(state, ensure_ascii=False))
         wait_for(lambda: sum('Team Task' in line for line in screen()) <= 1,

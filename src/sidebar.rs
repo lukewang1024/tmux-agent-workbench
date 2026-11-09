@@ -119,6 +119,182 @@ struct FocusWindow {
 type FocusWindows = HashMap<String, FocusWindow>;
 type FocusSessions = HashSet<String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarPalette {
+    background: Color,
+    foreground: Color,
+    selection: Color,
+    muted: Color,
+    raised: Color,
+    hover: Color,
+    header_foreground: Color,
+    header_hover_foreground: Color,
+    accent: Color,
+    warning: Color,
+    alert: Color,
+    info: Color,
+}
+
+impl SidebarPalette {
+    fn light() -> Self {
+        Self {
+            background: Color::Rgb(250, 250, 250),
+            foreground: Color::Rgb(56, 58, 66),
+            selection: Color::Rgb(229, 229, 230),
+            muted: Color::Rgb(98, 102, 111),
+            raised: Color::Rgb(208, 210, 216),
+            hover: Color::Rgb(98, 102, 111),
+            header_foreground: Color::Rgb(56, 58, 66),
+            header_hover_foreground: Color::White,
+            accent: Color::Rgb(80, 161, 79),
+            warning: Color::Rgb(193, 132, 1),
+            alert: Color::Rgb(228, 86, 73),
+            info: Color::Rgb(64, 120, 242),
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            background: Color::Rgb(40, 44, 52),
+            foreground: Color::Rgb(170, 178, 191),
+            selection: Color::Rgb(62, 68, 82),
+            muted: Color::Rgb(141, 149, 163),
+            raised: Color::Rgb(75, 82, 99),
+            hover: Color::Rgb(92, 99, 112),
+            header_foreground: Color::White,
+            header_hover_foreground: Color::White,
+            accent: Color::Rgb(152, 195, 121),
+            warning: Color::Rgb(229, 192, 123),
+            alert: Color::Rgb(224, 108, 117),
+            info: Color::Rgb(97, 175, 239),
+        }
+    }
+
+    fn from_tmux(server: &ServerIdentity) -> Option<Self> {
+        let tmux = crate::tmux::Tmux::new(server.clone());
+        if let Ok(serialized) = tmux.output_with_timeout(
+            &["show-option", "-gqv", "@adaptive_palette"],
+            Duration::from_millis(250),
+        ) && let Some(palette) = Self::from_json(&serialized, Self::default())
+        {
+            return Some(palette);
+        }
+
+        let output = tmux
+            .output_with_timeout(&["show-options", "-g"], Duration::from_millis(250))
+            .ok()?;
+        let options: HashMap<_, _> = output
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .filter(|(name, _)| name.starts_with("@adaptive_"))
+            .map(|(name, value)| {
+                (
+                    name.to_owned(),
+                    value.trim().trim_matches('\'').trim_matches('"').to_owned(),
+                )
+            })
+            .collect();
+
+        let fallback = if options.get("@adaptive_appearance").map(String::as_str) == Some("light") {
+            Self::light()
+        } else {
+            Self::dark()
+        };
+        if let Some(serialized) = options.get("@adaptive_palette")
+            && let Some(palette) = Self::from_json(serialized, fallback)
+        {
+            return Some(palette);
+        }
+
+        let mut palette = fallback;
+        if options.get("@adaptive_mode").map(String::as_str) == Some("full") {
+            palette.accent = options
+                .get("@adaptive_accent")
+                .and_then(|color| tmux_color(color))
+                .unwrap_or(Color::Indexed(2));
+            palette.warning = Color::Indexed(3);
+            palette.alert = Color::Indexed(1);
+            palette.info = Color::Indexed(4);
+        }
+        Some(palette)
+    }
+
+    fn from_json(serialized: &str, fallback: Self) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(serialized).ok()?;
+        if value.get("version")?.as_u64()? != 1 {
+            return None;
+        }
+        let color = |name: &str, default| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .and_then(tmux_color)
+                .unwrap_or(default)
+        };
+        Some(Self {
+            background: color("background", fallback.background),
+            foreground: color("foreground", fallback.foreground),
+            selection: color("selection", fallback.selection),
+            muted: color("muted", fallback.muted),
+            raised: color("raised", fallback.raised),
+            hover: color("hover", fallback.hover),
+            header_foreground: color("header_foreground", fallback.header_foreground),
+            header_hover_foreground: color(
+                "header_hover_foreground",
+                fallback.header_hover_foreground,
+            ),
+            accent: color("accent", fallback.accent),
+            warning: color("warning", fallback.warning),
+            alert: color("alert", fallback.alert),
+            info: color("info", fallback.info),
+        })
+    }
+}
+
+impl Default for SidebarPalette {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+fn tmux_color(value: &str) -> Option<Color> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#')
+        && hex.len() == 6
+    {
+        let channel = |start| u8::from_str_radix(&hex[start..start + 2], 16).ok();
+        return Some(Color::Rgb(channel(0)?, channel(2)?, channel(4)?));
+    }
+    let lower = value.to_ascii_lowercase();
+    if let Some(index) = lower
+        .strip_prefix("colour")
+        .or_else(|| lower.strip_prefix("color"))
+        .and_then(|index| index.parse::<u8>().ok())
+    {
+        return Some(Color::Indexed(index));
+    }
+    Some(match lower.as_str() {
+        "default" => Color::Reset,
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::White,
+        "brightblack" | "bright-black" => Color::DarkGray,
+        "brightred" | "bright-red" => Color::LightRed,
+        "brightgreen" | "bright-green" => Color::LightGreen,
+        "brightyellow" | "bright-yellow" => Color::LightYellow,
+        "brightblue" | "bright-blue" => Color::LightBlue,
+        "brightmagenta" | "bright-magenta" => Color::LightMagenta,
+        "brightcyan" | "bright-cyan" => Color::LightCyan,
+        "brightwhite" | "bright-white" => Color::White,
+        _ => return None,
+    })
+}
+
 fn assistant_window(paths: &Paths, snapshot: &Snapshot) -> Option<String> {
     let path = paths.state_dir.join("personal-assistant.json");
     let metadata = std::fs::symlink_metadata(&path).ok()?;
@@ -226,7 +402,7 @@ fn read_inventory(
     paths: &Paths,
     server: &ServerIdentity,
     snapshot: &Snapshot,
-) -> Option<(TeamIndex, FocusWindows, FocusSessions)> {
+) -> Option<(TeamIndex, FocusWindows, FocusSessions, HashSet<String>)> {
     let inventory = crate::tmux::Tmux::new(server.clone())
         .output_with_timeout(
             &[
@@ -411,7 +587,7 @@ fn read_inventory(
             }
         }
     }
-    Some((index, focused, focused_sessions))
+    Some((index, focused, focused_sessions, all_panes))
 }
 
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
@@ -647,12 +823,17 @@ fn event_loop(
     let mut visible = true;
     let mut next_refresh = Instant::now();
     let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
+    let mut palette = SidebarPalette::from_tmux(server).unwrap_or_default();
+    let mut next_palette_sync = Instant::now() + Duration::from_secs(1);
     let mut dirty = true;
     let mut initial_selection = snapshot.is_none();
     let mut last_content_height = usize::MAX;
     let mut runtime_registered = is_popup;
     loop {
         if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
+            if now_visible && !visible {
+                next_palette_sync = Instant::now();
+            }
             visible = now_visible;
             next_refresh = Instant::now() + refresh_interval(visible);
             match result {
@@ -721,6 +902,16 @@ fn event_loop(
                 dirty = true;
             }
         }
+        let now = Instant::now();
+        if now >= next_palette_sync {
+            next_palette_sync = now + refresh_interval(visible);
+            if let Some(updated) = SidebarPalette::from_tmux(server)
+                && updated != palette
+            {
+                palette = updated;
+                dirty = true;
+            }
+        }
 
         let size = terminal.size()?;
         let body_height = usize::from(size.height).max(1);
@@ -758,19 +949,25 @@ fn event_loop(
         if dirty {
             terminal.draw(|frame| {
                 let area = frame.area();
-                let mut header = vec![render_header(
+                let mut header = vec![render_header_with_palette(
                     area.width,
                     view,
                     agent_sort,
                     focus_cards.len(),
                     shown_focus,
                     footer_hover.as_ref(),
+                    palette,
                 )];
                 for card in focus_cards.iter().take(shown_focus) {
                     let action = card.action();
                     let highlighted = footer_hover.as_ref() == Some(&action)
                         || navigation.is_highlighted(&Hit::Action(action));
-                    header.extend(render_pinned_card(card, highlighted, area.width));
+                    header.extend(render_pinned_card_with_palette(
+                        card,
+                        highlighted,
+                        area.width,
+                        palette,
+                    ));
                 }
                 if let Some(notice) = notice {
                     let notice = match notice {
@@ -780,33 +977,45 @@ fn event_loop(
                         }
                         _ => notice,
                     };
-                    header.push(Line::from(Span::styled(notice, muted_style())));
+                    header.push(Line::from(Span::styled(
+                        notice,
+                        muted_style_with_palette(palette),
+                    )));
                 }
                 frame.render_widget(Paragraph::new(header), area);
-                crate::navigation_list::separator(
+                crate::navigation_list::separator_with_color(
                     frame,
                     Rect::new(0, (viewport.first_row - 1) as u16, area.width, 1),
+                    palette.muted,
                 );
                 navigation.render(frame, |index, selected| {
                     let row = &rows[index];
                     if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
                         && area.width >= 8
                     {
-                        let mut line = render_sidebar_row(row, selected, area.width - 3, &focused);
+                        let mut line = render_sidebar_row_with_palette(
+                            row,
+                            selected,
+                            area.width - 3,
+                            &focused,
+                            palette,
+                        );
                         let mut style = Style::default().fg(
                             if focused_sessions.contains(&session.session_id) {
-                                Color::Green
+                                palette.accent
                             } else {
-                                Color::DarkGray
+                                palette.muted
                             },
                         );
                         if selected {
-                            style = style.bg(Color::DarkGray);
+                            style = style.bg(palette.selection);
                         }
                         line.spans.push(Span::styled("  ", style));
                         line
                     } else {
-                        render_sidebar_row(row, selected, area.width, &focused)
+                        render_sidebar_row_with_palette(
+                            row, selected, area.width, &focused, palette,
+                        )
                     }
                 });
                 if rows.is_empty() && notice != Some("disconnected") {
@@ -819,7 +1028,7 @@ fn event_loop(
                                 crate::ui_language::text("no sessions", "暂无会话")
                             }
                         })
-                        .style(muted_style()),
+                        .style(muted_style_with_palette(palette)),
                         Rect::new(
                             0,
                             viewport.first_row as u16,
@@ -829,7 +1038,7 @@ fn event_loop(
                     );
                 }
                 if popup_mode() && area.height > 0 {
-                    crate::navigation_list::separator(
+                    crate::navigation_list::separator_with_color(
                         frame,
                         Rect::new(
                             0,
@@ -837,9 +1046,14 @@ fn event_loop(
                             area.width,
                             u16::from(area.height > 1),
                         ),
+                        palette.muted,
                     );
                     frame.render_widget(
-                        Paragraph::new(render_close(area.width, footer_hover.as_ref())),
+                        Paragraph::new(render_close_with_palette(
+                            area.width,
+                            footer_hover.as_ref(),
+                            palette,
+                        )),
                         Rect::new(0, area.height - 1, area.width, 1),
                     );
                 }
@@ -866,6 +1080,7 @@ fn event_loop(
             visible = true;
             next_refresh = Instant::now() + refresh_interval(true);
             next_sort_sync = Instant::now();
+            next_palette_sync = Instant::now();
         }
         dirty = true;
         match input {
@@ -1260,11 +1475,26 @@ fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::err
 fn sidebar_state(
     paths: &Paths,
     server: &ServerIdentity,
-    snapshot: Snapshot,
+    mut snapshot: Snapshot,
 ) -> Result<(Snapshot, TeamIndex, FocusWindows, FocusSessions), String> {
-    let (teams, focused, sessions) = read_inventory(paths, server, &snapshot)
+    let (teams, focused, sessions, live_panes) = read_inventory(paths, server, &snapshot)
         .ok_or_else(|| "team pane inventory unavailable".to_owned())?;
+    prune_closed_pane_tombstones(&mut snapshot, &live_panes);
     Ok((snapshot, teams, focused, sessions))
+}
+
+fn prune_closed_pane_tombstones(snapshot: &mut Snapshot, live_panes: &HashSet<String>) {
+    let active_panes: HashSet<_> = snapshot
+        .agents
+        .iter()
+        .filter(|agent| !agent.exited)
+        .map(|agent| agent.target.pane_id.clone())
+        .collect();
+    snapshot.agents.retain(|agent| {
+        !agent.exited
+            || (live_panes.contains(&agent.target.pane_id)
+                && !active_panes.contains(&agent.target.pane_id))
+    });
 }
 
 #[cfg(test)]
@@ -1544,61 +1774,91 @@ fn visible_focus_cards(content_height: usize, notice: Option<&str>, count: usize
         .min(content_height.saturating_sub(3 + usize::from(notice.is_some())) / 2)
 }
 
+#[cfg(test)]
 fn render_focus_card(card: &FocusCard, selected: bool, width: u16) -> [Line<'static>; 2] {
+    render_focus_card_with_palette(card, selected, width, SidebarPalette::default())
+}
+
+fn render_focus_card_with_palette(
+    card: &FocusCard,
+    selected: bool,
+    width: u16,
+    palette: SidebarPalette,
+) -> [Line<'static>; 2] {
     let title = if let Some(agent) = &card.agent {
         let mut agent = agent.clone();
         if card.window.assistant {
             agent.thread_name =
                 Some(crate::ui_language::text("Personal assistant", "个人助理").into());
         }
-        render_row(&Row::Agent(agent), selected, width)
+        render_row_with_palette(&Row::Agent(agent), selected, width, palette)
     } else {
-        icon_title_line(
+        let title = if card.window.assistant {
+            crate::ui_language::text("Personal assistant", "个人助理")
+        } else if meaningful_topic(&card.window.name) {
+            &card.window.name
+        } else if !card.window.session_name.trim().is_empty() {
+            card.window.session_name.trim()
+        } else {
+            crate::ui_language::text("Blank session", "空白会话")
+        };
+        icon_title_line_with_palette(
             glyph(card.window.state),
-            if card.window.assistant {
-                crate::ui_language::text("Personal assistant", "个人助理")
-            } else {
-                &card.window.name
-            },
+            title,
             width,
-            Style::default().fg(state_color(card.window.state)),
-            Style::default().fg(Color::Rgb(235, 235, 245)),
+            Style::default().fg(state_color_with_palette(card.window.state, palette)),
+            Style::default().fg(palette.foreground),
             selected,
+            palette,
         )
     };
     let subtitle = if let Some(agent) = &card.agent {
         if let Some(team) = &card.team {
-            render_row(
+            render_row_with_palette(
                 &Row::TeamSub(agent.clone(), AgentSort::Prioritized, team.clone()),
                 selected,
                 width,
+                palette,
             )
         } else {
-            render_row(
+            render_row_with_palette(
                 &Row::AgentSub(agent.clone(), AgentSort::Prioritized),
                 selected,
                 width,
+                palette,
             )
         }
     } else {
-        aligned_line(
+        aligned_line_with_palette(
             format!("   {}", card.window.session_name),
             state_name(card.window.state).into(),
             width,
-            muted_style(),
-            Style::default().fg(state_color(card.window.state)),
+            muted_style_with_palette(palette),
+            Style::default().fg(state_color_with_palette(card.window.state, palette)),
             selected,
+            palette,
         )
     };
     [title, subtitle]
 }
 
-fn render_pinned_card(card: &PinnedCard, selected: bool, width: u16) -> [Line<'static>; 2] {
+fn render_pinned_card_with_palette(
+    card: &PinnedCard,
+    selected: bool,
+    width: u16,
+    palette: SidebarPalette,
+) -> [Line<'static>; 2] {
     match card {
-        PinnedCard::Agent(card) => render_focus_card(card, selected, width),
+        PinnedCard::Agent(card) => render_focus_card_with_palette(card, selected, width, palette),
         PinnedCard::Session(session) => {
-            let title = render_row(&Row::Session(session.clone()), selected, width);
-            let subtitle = render_row(&Row::SessionSub(session.clone()), selected, width);
+            let title =
+                render_row_with_palette(&Row::Session(session.clone()), selected, width, palette);
+            let subtitle = render_row_with_palette(
+                &Row::SessionSub(session.clone()),
+                selected,
+                width,
+                palette,
+            );
             [title, subtitle]
         }
     }
@@ -1784,7 +2044,17 @@ fn sort_label(sort: AgentSort) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
+    render_row_with_palette(row, selected, width, SidebarPalette::default())
+}
+
+fn render_row_with_palette(
+    row: &Row,
+    selected: bool,
+    width: u16,
+    palette: SidebarPalette,
+) -> Line<'static> {
     match row {
         Row::Section(label) => Line::from(Span::styled(
             if *label == "sessions" {
@@ -1792,34 +2062,38 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             } else {
                 *label
             },
-            muted_style().add_modifier(Modifier::BOLD),
+            muted_style_with_palette(palette).add_modifier(Modifier::BOLD),
         )),
         Row::AgentGroup(name) => Line::from(Span::styled(
             fit_text(name, usize::from(width)),
-            muted_style().add_modifier(Modifier::BOLD),
+            muted_style_with_palette(palette).add_modifier(Modifier::BOLD),
         )),
-        Row::Session(session) => icon_title_line(
+        Row::Session(session) => icon_title_line_with_palette(
             glyph(session.rollup_state),
             &session.session_name,
             width,
-            Style::default().fg(state_color(session.rollup_state)),
+            Style::default().fg(state_color_with_palette(session.rollup_state, palette)),
             if session.active {
                 Style::default()
-                    .fg(Color::Rgb(235, 235, 245))
+                    .fg(palette.foreground)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(235, 235, 245))
+                Style::default().fg(palette.foreground)
             },
             selected,
+            palette,
         ),
-        Row::SessionSub(session) => context_line(&session_context(session), width, selected),
-        Row::Team(agent, summary) => icon_title_line(
+        Row::SessionSub(session) => {
+            context_line_with_palette(&session_context(session), width, selected, palette)
+        }
+        Row::Team(agent, summary) => icon_title_line_with_palette(
             if summary.expanded { "▾" } else { "▸" },
             agent_topic(agent),
             width,
-            Style::default().fg(state_color(agent.display_state)),
-            Style::default().fg(Color::Rgb(235, 235, 245)),
+            Style::default().fg(state_color_with_palette(agent.display_state, palette)),
+            Style::default().fg(palette.foreground),
             selected,
+            palette,
         ),
         Row::TeamSub(agent, sort, summary) => {
             let mut text = if crate::ui_language::name() == "zh" {
@@ -1842,49 +2116,53 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
                 status.push_str(&format!(" ✓{}", summary.done));
             }
             status.push_str(&format!(" · {}", agent_kind_name(agent.kind)));
-            aligned_line(
+            aligned_line_with_palette(
                 text,
                 status,
                 width,
-                muted_style(),
-                Style::default().fg(state_color(agent.display_state)),
+                muted_style_with_palette(palette),
+                Style::default().fg(state_color_with_palette(agent.display_state, palette)),
                 selected,
+                palette,
             )
         }
         Row::TeamWorker(agent, display) => {
             let title = format!("   └ {} {}", glyph(agent.display_state), display.title);
-            aligned_line(
+            aligned_line_with_palette(
                 title,
                 String::new(),
                 width,
-                Style::default().fg(Color::Rgb(235, 235, 245)),
-                muted_style(),
+                Style::default().fg(palette.foreground),
+                muted_style_with_palette(palette),
                 selected,
+                palette,
             )
         }
-        Row::TeamWorkerSub(agent, display) => aligned_line(
+        Row::TeamWorkerSub(agent, display) => aligned_line_with_palette(
             format!("       {}", display.name),
             agent_status(agent),
             width,
-            muted_style(),
-            Style::default().fg(state_color(agent.display_state)),
+            muted_style_with_palette(palette),
+            Style::default().fg(state_color_with_palette(agent.display_state, palette)),
             selected,
+            palette,
         ),
         Row::Agent(agent) => {
             let title = if agent.visible && agent.state_source != StateSource::Screen {
                 Style::default()
-                    .fg(Color::Rgb(235, 235, 245))
+                    .fg(palette.foreground)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(235, 235, 245))
+                Style::default().fg(palette.foreground)
             };
-            icon_title_line(
+            icon_title_line_with_palette(
                 glyph(agent.display_state),
                 agent_topic(agent),
                 width,
-                Style::default().fg(state_color(agent.display_state)),
+                Style::default().fg(state_color_with_palette(agent.display_state, palette)),
                 title,
                 selected,
+                palette,
             )
         }
         Row::AgentSub(agent, sort) => {
@@ -1898,19 +2176,18 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
                 }
                 context.push_str(&agent.target.session_name);
             }
-            aligned_line(
+            aligned_line_with_palette(
                 format!("   {context}"),
                 format!("{} · {}", agent_status(agent), agent_kind_name(agent.kind)),
                 width,
                 if selected {
-                    Style::default().fg(Color::Rgb(235, 235, 245))
+                    Style::default().fg(palette.foreground)
                 } else {
-                    Style::default().fg(Color::Rgb(150, 150, 170))
+                    muted_style_with_palette(palette)
                 },
-                Style::default()
-                    .fg(state_color(agent.display_state))
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(state_color_with_palette(agent.display_state, palette)),
                 selected,
+                palette,
             )
         }
         Row::Conversation(_, conversation) => {
@@ -1919,7 +2196,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             } else {
                 state_name(conversation.display_state)
             };
-            aligned_line(
+            aligned_line_with_palette(
                 format!(
                     "   {} {}",
                     glyph(conversation.display_state),
@@ -1929,15 +2206,23 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
                 width,
                 if conversation.active {
                     Style::default()
-                        .fg(state_color(conversation.display_state))
+                        .fg(state_color_with_palette(
+                            conversation.display_state,
+                            palette,
+                        ))
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(state_color(conversation.display_state))
+                    Style::default().fg(state_color_with_palette(
+                        conversation.display_state,
+                        palette,
+                    ))
                 },
-                Style::default()
-                    .fg(state_color(conversation.display_state))
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(state_color_with_palette(
+                    conversation.display_state,
+                    palette,
+                )),
                 selected,
+                palette,
             )
         }
         Row::Detail(left, right) => {
@@ -1948,7 +2233,7 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
             };
             Line::from(Span::styled(
                 text.chars().take(usize::from(width)).collect::<String>(),
-                Style::default().add_modifier(Modifier::DIM),
+                muted_style_with_palette(palette),
             ))
         }
         Row::Spacer => Line::default(),
@@ -1981,24 +2266,25 @@ fn row_agent_mut(row: &mut Row) -> Option<&mut AgentSnapshot> {
     }
 }
 
-fn render_sidebar_row(
+fn render_sidebar_row_with_palette(
     row: &Row,
     selected: bool,
     width: u16,
     focused: &FocusWindows,
+    palette: SidebarPalette,
 ) -> Line<'static> {
     let assistant = row_agent(row)
         .and_then(|agent| focused.get(&agent.target.window_id))
         .is_some_and(|window| window.assistant);
     if !assistant {
-        return render_row(row, selected, width);
+        return render_row_with_palette(row, selected, width, palette);
     }
 
     let mut row = row.clone();
     if let Some(agent) = row_agent_mut(&mut row) {
         agent.thread_name = Some(crate::ui_language::text("Personal assistant", "个人助理").into());
     }
-    render_row(&row, selected, width)
+    render_row_with_palette(&row, selected, width, palette)
 }
 
 fn popup_mode() -> bool {
@@ -2012,20 +2298,24 @@ fn source_pane() -> Option<String> {
         .filter(|pane| safe_target(pane, '%'))
 }
 
-fn button_style(button: Action, hovered: Option<&Action>) -> Style {
-    let style = muted_style();
+fn button_style_with_palette(
+    button: Action,
+    hovered: Option<&Action>,
+    palette: SidebarPalette,
+) -> Style {
     if hovered == Some(&button) {
-        style.add_modifier(Modifier::REVERSED)
+        Style::default()
+            .fg(palette.header_hover_foreground)
+            .bg(palette.hover)
     } else {
-        style
+        muted_style_with_palette(palette)
     }
 }
 
-fn muted_style() -> Style {
-    // ANSI bright-black is the theme-pack `term-muted` semantic color. Keep it
-    // undimmed: DIM makes muted text illegible, while an accent such as Cyan
-    // gives structural labels and secondary actions too much visual weight.
-    Style::default().fg(Color::DarkGray)
+fn muted_style_with_palette(palette: SidebarPalette) -> Style {
+    // Use the theme's explicit muted token; terminal DIM varies by palette and
+    // makes small labels difficult to read in light mode.
+    Style::default().fg(palette.muted)
 }
 
 /// One layout drives both the Powerline spans and their mouse/touch hit areas.
@@ -2138,6 +2428,7 @@ impl HeaderLayout {
     }
 }
 
+#[cfg(test)]
 fn render_header(
     width: u16,
     view: SidebarView,
@@ -2146,51 +2437,99 @@ fn render_header(
     shown: usize,
     hovered: Option<&Action>,
 ) -> Line<'static> {
+    render_header_with_palette(
+        width,
+        view,
+        sort,
+        total,
+        shown,
+        hovered,
+        SidebarPalette::default(),
+    )
+}
+
+fn render_header_with_palette(
+    width: u16,
+    view: SidebarView,
+    sort: AgentSort,
+    total: usize,
+    shown: usize,
+    hovered: Option<&Action>,
+    palette: SidebarPalette,
+) -> Line<'static> {
     let layout = HeaderLayout::new(width, view, sort, total, shown);
-    // Match the tmux status bar's One Dark surfaces and Powerline separators.
-    // Hover keeps the separators connected.
-    let background = Color::Rgb(40, 44, 52);
-    let foreground = Color::Rgb(170, 178, 191);
-    let surface = Color::Rgb(62, 68, 82);
-    let raised = Color::Rgb(75, 82, 99);
-    let highlight = Color::Rgb(92, 99, 112);
+    // Share the status bar's adaptive palette and keep Powerline joins aligned.
     let selected = |action: Action, color: Color| {
         if hovered == Some(&action) {
-            highlight
+            palette.hover
         } else {
             color
         }
     };
-    let first = selected(Action::View, raised);
-    let pinned = selected(Action::Pinned, surface);
-    let sorting = selected(Action::Sort, surface);
-    let menu = selected(Action::Menu, raised);
+    let view_hovered = hovered == Some(&Action::View);
+    let pinned_hovered = hovered == Some(&Action::Pinned);
+    let sort_hovered = hovered == Some(&Action::Sort);
+    let menu_hovered = hovered == Some(&Action::Menu);
+    let first = selected(Action::View, palette.raised);
+    let pinned = selected(Action::Pinned, palette.selection);
+    let sorting = selected(Action::Sort, palette.selection);
+    let menu = selected(Action::Menu, palette.raised);
+    let view_fg = if view_hovered {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let pinned_fg = if pinned_hovered {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let sort_fg = if sort_hovered {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let menu_fg = if menu_hovered {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
     let [agents, count, sort, menu_label] = layout.labels;
     Line::from(vec![
         Span::styled(
             agents,
             Style::default()
-                .fg(background)
+                .fg(view_fg)
                 .bg(first)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("", Style::default().fg(first).bg(pinned)),
-        Span::styled(count, Style::default().fg(foreground).bg(pinned)),
-        Span::styled("", Style::default().fg(pinned).bg(background)),
-        Span::styled(" ".repeat(layout.gap), Style::default().bg(background)),
-        Span::styled("", Style::default().fg(sorting).bg(background)),
-        Span::styled(sort, Style::default().fg(foreground).bg(sorting)),
+        Span::styled(count, Style::default().fg(pinned_fg).bg(pinned)),
+        Span::styled("", Style::default().fg(pinned).bg(palette.background)),
+        Span::styled(
+            " ".repeat(layout.gap),
+            Style::default().bg(palette.background),
+        ),
+        Span::styled("", Style::default().fg(sorting).bg(palette.background)),
+        Span::styled(sort, Style::default().fg(sort_fg).bg(sorting)),
         Span::styled("", Style::default().fg(menu).bg(sorting)),
-        Span::styled(menu_label, Style::default().fg(foreground).bg(menu)),
+        Span::styled(menu_label, Style::default().fg(menu_fg).bg(menu)),
     ])
 }
 
-fn render_close(width: u16, hovered: Option<&Action>) -> Line<'static> {
+fn render_close_with_palette(
+    width: u16,
+    hovered: Option<&Action>,
+    palette: SidebarPalette,
+) -> Line<'static> {
     let close = crate::ui_language::text("× close", "× 关闭");
     let gap = usize::from(width).saturating_sub(Span::raw(close).width());
     Line::from(vec![
         Span::raw(" ".repeat(gap)),
-        Span::styled(close, button_style(Action::Close, hovered)),
+        Span::styled(
+            close,
+            button_style_with_palette(Action::Close, hovered, palette),
+        ),
     ])
 }
 
@@ -2295,7 +2634,7 @@ pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
         .thread_name
         .as_deref()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|name| meaningful_topic(name))
     {
         return name;
     }
@@ -2304,11 +2643,14 @@ pub(crate) fn agent_topic(agent: &AgentSnapshot) -> &str {
         return agent.label.trim();
     }
     let topic = agent.target.window_name.trim();
-    if !meaningful_topic(topic) {
-        crate::ui_language::text("Blank session", "空白会话")
-    } else {
-        topic
+    if meaningful_topic(topic) {
+        return topic;
     }
+    let session = agent.target.session_name.trim();
+    if !session.is_empty() {
+        return session;
+    }
+    crate::ui_language::text("Blank session", "空白会话")
 }
 
 fn meaningful_topic(topic: &str) -> bool {
@@ -2438,28 +2780,39 @@ fn fit_text(text: &str, width: usize) -> String {
 }
 
 pub(crate) fn context_line(text: &str, width: u16, selected: bool) -> Line<'static> {
+    context_line_with_palette(text, width, selected, SidebarPalette::default())
+}
+
+fn context_line_with_palette(
+    text: &str,
+    width: u16,
+    selected: bool,
+    palette: SidebarPalette,
+) -> Line<'static> {
     let style = Style::default().fg(if selected {
-        Color::Rgb(235, 235, 245)
+        palette.foreground
     } else {
-        Color::Rgb(150, 150, 170)
+        palette.muted
     });
-    aligned_line(
+    aligned_line_with_palette(
         format!("   {text}"),
         String::new(),
         width,
         style,
         style,
         selected,
+        palette,
     )
 }
 
-fn aligned_line(
+fn aligned_line_with_palette(
     left: String,
     right: String,
     width: u16,
     mut left_style: Style,
     mut right_style: Style,
     selected: bool,
+    palette: SidebarPalette,
 ) -> Line<'static> {
     let width = usize::from(width);
     let right = fit_text(&right, width);
@@ -2471,15 +2824,15 @@ fn aligned_line(
     if selected {
         left_style = left_style
             .remove_modifier(Modifier::DIM)
-            .bg(Color::DarkGray);
+            .bg(palette.selection);
         right_style = right_style
             .remove_modifier(Modifier::DIM)
-            .bg(Color::DarkGray);
-        if left_style.fg == Some(Color::DarkGray) {
-            left_style = left_style.fg(Color::White);
+            .bg(palette.selection);
+        if left_style.fg == Some(palette.muted) {
+            left_style = left_style.fg(palette.foreground);
         }
-        if right_style.fg == Some(Color::DarkGray) {
-            right_style = right_style.fg(Color::White);
+        if right_style.fg == Some(palette.muted) {
+            right_style = right_style.fg(palette.foreground);
         }
     }
     Line::from(vec![
@@ -2493,9 +2846,29 @@ pub(crate) fn icon_title_line(
     icon: &str,
     title: &str,
     width: u16,
+    icon_style: Style,
+    title_style: Style,
+    selected: bool,
+) -> Line<'static> {
+    icon_title_line_with_palette(
+        icon,
+        title,
+        width,
+        icon_style,
+        title_style,
+        selected,
+        SidebarPalette::default(),
+    )
+}
+
+fn icon_title_line_with_palette(
+    icon: &str,
+    title: &str,
+    width: u16,
     mut icon_style: Style,
     mut title_style: Style,
     selected: bool,
+    palette: SidebarPalette,
 ) -> Line<'static> {
     let width = usize::from(width);
     let prefix = format!(" {icon} ");
@@ -2507,11 +2880,11 @@ pub(crate) fn icon_title_line(
     if selected {
         icon_style = icon_style
             .remove_modifier(Modifier::DIM)
-            .bg(Color::DarkGray);
+            .bg(palette.selection);
         title_style = title_style
             .remove_modifier(Modifier::DIM)
             .add_modifier(Modifier::BOLD)
-            .bg(Color::DarkGray);
+            .bg(palette.selection);
     }
     Line::from(vec![
         Span::styled(prefix, icon_style),
@@ -2521,12 +2894,16 @@ pub(crate) fn icon_title_line(
 }
 
 pub(crate) fn state_color(state: DisplayState) -> Color {
+    state_color_with_palette(state, SidebarPalette::default())
+}
+
+fn state_color_with_palette(state: DisplayState, palette: SidebarPalette) -> Color {
     match state {
-        DisplayState::Blocked => Color::Red,
-        DisplayState::Working => Color::Yellow,
-        DisplayState::Done => Color::Cyan,
-        DisplayState::Idle => Color::Green,
-        DisplayState::Unknown => Color::DarkGray,
+        DisplayState::Blocked => palette.alert,
+        DisplayState::Working => palette.warning,
+        DisplayState::Done => palette.info,
+        DisplayState::Idle => palette.accent,
+        DisplayState::Unknown => palette.muted,
     }
 }
 
@@ -2778,12 +3155,14 @@ fn show_pinned_menu(
         }
         let title = if card.window.assistant {
             crate::ui_language::text("Personal assistant", "个人助理")
+        } else if let Some(agent) = &card.agent {
+            agent_topic(agent)
+        } else if meaningful_topic(&card.window.name) {
+            &card.window.name
+        } else if !card.window.session_name.trim().is_empty() {
+            card.window.session_name.trim()
         } else {
-            card.agent
-                .as_ref()
-                .and_then(|agent| agent.thread_name.as_deref())
-                .filter(|title| !title.is_empty())
-                .unwrap_or(&card.window.name)
+            crate::ui_language::text("Blank session", "空白会话")
         };
         // tmux expands # formats in menu labels; do not interpret task titles
         // as formats, and keep arbitrary control characters out of the menu.
@@ -4384,10 +4763,11 @@ mod tests {
     }
 
     #[test]
-    fn selected_card_uses_one_background_across_both_rows() {
+    fn selected_card_uses_adaptive_background_across_both_rows() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let agent = snapshot.agents[0].clone();
+        let palette = SidebarPalette::default();
         for row in [
             Row::Agent(agent.clone()),
             Row::AgentSub(agent, AgentSort::Grouped),
@@ -4396,14 +4776,13 @@ mod tests {
             assert!(
                 line.spans
                     .iter()
-                    .all(|span| span.style.bg == Some(Color::DarkGray))
+                    .all(|span| span.style.bg == Some(palette.selection))
             );
         }
         let session = snapshot.sessions[0].clone();
         let line = render_row(&Row::SessionSub(session), true, 40);
         assert!(line.spans.iter().all(|span| {
-            span.style.bg == Some(Color::DarkGray)
-                && span.style.fg == Some(Color::Rgb(235, 235, 245))
+            span.style.bg == Some(palette.selection) && span.style.fg == Some(palette.foreground)
         }));
     }
 
@@ -4443,7 +4822,7 @@ mod tests {
     }
 
     #[test]
-    fn unnamed_agent_cards_show_a_blank_session() {
+    fn unnamed_agent_cards_fall_back_to_the_tmux_session_name() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
         let mut agent = snapshot.agents[0].clone();
@@ -4459,8 +4838,11 @@ mod tests {
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect::<String>();
-                assert!(text.contains("Blank session"), "{window:?}: {text:?}");
-                assert!(!text.contains(&agent.target.session_name));
+                assert!(
+                    text.contains(&agent.target.session_name),
+                    "{window:?}: {text:?}"
+                );
+                assert!(!text.contains("Blank session"));
             }
         }
 
@@ -4489,14 +4871,14 @@ mod tests {
             }
         }
         agent.target.window_name.clear();
-        assert_eq!(agent_topic(&agent), "Blank session");
+        assert_eq!(agent_topic(&agent), "文档体验优化方向");
     }
 
     #[test]
     fn card_titles_are_white_while_status_stays_on_icons_and_agent_status() {
         let snapshot: Snapshot =
             serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
-        let title_color = Color::Rgb(235, 235, 245);
+        let title_color = SidebarPalette::default().foreground;
 
         let mut session = snapshot.sessions[0].clone();
         for agent_count in [0, 2] {
@@ -4549,7 +4931,7 @@ mod tests {
                 .iter()
                 .filter(|span| !span.content.trim().is_empty())
             {
-                assert_eq!(span.style.fg, Some(Color::DarkGray));
+                assert_eq!(span.style.fg, Some(SidebarPalette::default().muted));
                 assert!(!span.style.add_modifier.contains(Modifier::DIM));
             }
         }

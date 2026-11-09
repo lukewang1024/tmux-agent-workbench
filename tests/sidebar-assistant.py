@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='wb-assistant-pin-', dir='/tmp') as root
     def wait(predicate, label):
         deadline = time.monotonic() + 15
         while not predicate():
-            assert time.monotonic() < deadline, label
+            assert time.monotonic() < deadline, (label, screen())
             time.sleep(.05)
     def bind(pane):
         wait(lambda: live(pane), 'agent detection')
@@ -80,8 +80,9 @@ with tempfile.TemporaryDirectory(prefix='wb-assistant-pin-', dir='/tmp') as root
             sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', observer,
                            '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
             tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+            # Generic window titles such as "shell" use the tmux session name.
             wait(lambda: len(screen()) > 5 and ' 2' in screen()[0]
-                 and 'Personal assistant' in screen()[1] and 'shell' in screen()[3],
+                 and 'Personal assistant' in screen()[1] and 'a-observer' in screen()[3],
                  'assistant is pinned ahead of an alphabetically earlier task')
             assert tmux('show-option', '-wqv', '-t', original, '@agent_focus') == ''
             assert tmux('show-option', '-wqv', '-t', original, '@workbench_assistant') == ''

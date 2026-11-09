@@ -356,9 +356,11 @@ close action. Those exit keys are popup-only and do not terminate a persistent
 sidebar pane. Activating a session or Agent with Enter or a left click also
 closes the popup after the navigation succeeds.
 
-Agent cards show the agent thread-name on the first line, falling back to the
-tmux window title before a name is available. If that title is generic, the card
-shows `Blank session` until the task has a name.
+Agent cards show the agent thread-name on the first line. For Codex sessions
+without hook metadata, Workbench reads the thread title from the Codex terminal
+title; it then falls back to a meaningful tmux window title and the tmux session
+name. This keeps several unnamed task windows in one direction distinguishable
+without displaying generic titles such as `zsh`.
 The second line shows task progress (when available), workspace session name,
 status, and agent type. Grouped mode shows the session name once above its
 agents; prioritized mode keeps it on each agent card, so
