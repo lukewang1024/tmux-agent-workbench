@@ -2147,8 +2147,8 @@ fn render_header(
     hovered: Option<&Action>,
 ) -> Line<'static> {
     let layout = HeaderLayout::new(width, view, sort, total, shown);
-    // Match the tmux status bar: ANSI green, One Dark surfaces, and its
-    // left/right Powerline separators. Hover keeps the separators connected.
+    // Match the tmux status bar's One Dark surfaces and Powerline separators.
+    // Hover keeps the separators connected.
     let background = Color::Rgb(40, 44, 52);
     let foreground = Color::Rgb(170, 178, 191);
     let surface = Color::Rgb(62, 68, 82);
@@ -2161,11 +2161,7 @@ fn render_header(
             color
         }
     };
-    let first = if hovered == Some(&Action::View) {
-        Color::LightGreen
-    } else {
-        Color::Green
-    };
+    let first = selected(Action::View, raised);
     let pinned = selected(Action::Pinned, surface);
     let sorting = selected(Action::Sort, surface);
     let menu = selected(Action::Menu, raised);
