@@ -766,11 +766,11 @@ fn event_loop(
                     shown_focus,
                     footer_hover.as_ref(),
                 )];
-                for (index, card) in focus_cards.iter().take(shown_focus).enumerate() {
+                for card in focus_cards.iter().take(shown_focus) {
                     let action = card.action();
                     let highlighted = footer_hover.as_ref() == Some(&action)
                         || navigation.is_highlighted(&Hit::Action(action));
-                    header.extend(render_pinned_card(card, index + 1, highlighted, area.width));
+                    header.extend(render_pinned_card(card, highlighted, area.width));
                 }
                 if let Some(notice) = notice {
                     let notice = match notice {
@@ -792,7 +792,7 @@ fn event_loop(
                     if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
                         && area.width >= 8
                     {
-                        let mut line = render_row(row, selected, area.width - 3);
+                        let mut line = render_sidebar_row(row, selected, area.width - 3, &focused);
                         let mut style = Style::default().fg(
                             if focused_sessions.contains(&session.session_id) {
                                 Color::Green
@@ -806,7 +806,7 @@ fn event_loop(
                         line.spans.push(Span::styled("  ", style));
                         line
                     } else {
-                        render_row(row, selected, area.width)
+                        render_sidebar_row(row, selected, area.width, &focused)
                     }
                 });
                 if rows.is_empty() && notice != Some("disconnected") {
@@ -1544,19 +1544,14 @@ fn visible_focus_cards(content_height: usize, notice: Option<&str>, count: usize
         .min(content_height.saturating_sub(3 + usize::from(notice.is_some())) / 2)
 }
 
-fn render_focus_card(
-    card: &FocusCard,
-    number: usize,
-    selected: bool,
-    width: u16,
-) -> [Line<'static>; 2] {
-    let mut title = if let Some(agent) = &card.agent {
+fn render_focus_card(card: &FocusCard, selected: bool, width: u16) -> [Line<'static>; 2] {
+    let title = if let Some(agent) = &card.agent {
         let mut agent = agent.clone();
         if card.window.assistant {
             agent.thread_name =
                 Some(crate::ui_language::text("Personal assistant", "个人助理").into());
         }
-        render_row(&Row::Agent(agent), selected, width.saturating_sub(2))
+        render_row(&Row::Agent(agent), selected, width)
     } else {
         icon_title_line(
             glyph(card.window.state),
@@ -1565,15 +1560,12 @@ fn render_focus_card(
             } else {
                 &card.window.name
             },
-            width.saturating_sub(2),
+            width,
             Style::default().fg(state_color(card.window.state)),
             Style::default().fg(Color::Rgb(235, 235, 245)),
             selected,
         )
     };
-    title
-        .spans
-        .insert(0, Span::styled(format!("{number} "), muted_style()));
     let subtitle = if let Some(agent) = &card.agent {
         if let Some(team) = &card.team {
             render_row(
@@ -1601,23 +1593,11 @@ fn render_focus_card(
     [title, subtitle]
 }
 
-fn render_pinned_card(
-    card: &PinnedCard,
-    number: usize,
-    selected: bool,
-    width: u16,
-) -> [Line<'static>; 2] {
+fn render_pinned_card(card: &PinnedCard, selected: bool, width: u16) -> [Line<'static>; 2] {
     match card {
-        PinnedCard::Agent(card) => render_focus_card(card, number, selected, width),
+        PinnedCard::Agent(card) => render_focus_card(card, selected, width),
         PinnedCard::Session(session) => {
-            let mut title = render_row(
-                &Row::Session(session.clone()),
-                selected,
-                width.saturating_sub(2),
-            );
-            title
-                .spans
-                .insert(0, Span::styled(format!("{number} "), muted_style()));
+            let title = render_row(&Row::Session(session.clone()), selected, width);
             let subtitle = render_row(&Row::SessionSub(session.clone()), selected, width);
             [title, subtitle]
         }
@@ -1973,6 +1953,52 @@ fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
         }
         Row::Spacer => Line::default(),
     }
+}
+
+fn row_agent(row: &Row) -> Option<&AgentSnapshot> {
+    match row {
+        Row::Agent(agent)
+        | Row::AgentSub(agent, _)
+        | Row::Team(agent, _)
+        | Row::TeamSub(agent, _, _)
+        | Row::TeamWorker(agent, _)
+        | Row::TeamWorkerSub(agent, _)
+        | Row::Conversation(agent, _) => Some(agent),
+        _ => None,
+    }
+}
+
+fn row_agent_mut(row: &mut Row) -> Option<&mut AgentSnapshot> {
+    match row {
+        Row::Agent(agent)
+        | Row::AgentSub(agent, _)
+        | Row::Team(agent, _)
+        | Row::TeamSub(agent, _, _)
+        | Row::TeamWorker(agent, _)
+        | Row::TeamWorkerSub(agent, _)
+        | Row::Conversation(agent, _) => Some(agent),
+        _ => None,
+    }
+}
+
+fn render_sidebar_row(
+    row: &Row,
+    selected: bool,
+    width: u16,
+    focused: &FocusWindows,
+) -> Line<'static> {
+    let assistant = row_agent(row)
+        .and_then(|agent| focused.get(&agent.target.window_id))
+        .is_some_and(|window| window.assistant);
+    if !assistant {
+        return render_row(row, selected, width);
+    }
+
+    let mut row = row.clone();
+    if let Some(agent) = row_agent_mut(&mut row) {
+        agent.thread_name = Some(crate::ui_language::text("Personal assistant", "个人助理").into());
+    }
+    render_row(&row, selected, width)
 }
 
 fn popup_mode() -> bool {
@@ -3684,13 +3710,13 @@ mod tests {
             assert_eq!(cards[0].team.as_ref().unwrap().workers, 2);
             crate::ui_language::set_language(Some("en"));
             assert!(
-                render_focus_card(&cards[0], 1, false, 50)[0]
+                render_focus_card(&cards[0], false, 50)[0]
                     .to_string()
                     .contains("Personal assistant")
             );
             crate::ui_language::set_language(None);
             assert!(cards[1].agent.is_none());
-            let [title, subtitle] = render_focus_card(&cards[1], 2, false, 50);
+            let [title, subtitle] = render_focus_card(&cards[1], false, 50);
             assert!(title.to_string().contains("shell task"));
             assert!(subtitle.to_string().contains("other direction"));
         }

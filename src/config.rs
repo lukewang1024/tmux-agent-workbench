@@ -125,7 +125,7 @@ impl Default for SidebarConfig {
         Self {
             width: 26,
             min_width: 18,
-            max_width: 36,
+            max_width: 64,
             main_min_width: 80,
             position: SidebarPosition::Left,
             auto_create: true,
