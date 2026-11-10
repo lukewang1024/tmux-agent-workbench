@@ -142,6 +142,10 @@ pub struct MenuOptions {
     pub from_menu: bool,
     #[arg(long, hide = true)]
     radar_prepared: bool,
+    #[arg(long, hide = true)]
+    no_fast: bool,
+    #[arg(long, hide = true)]
+    yolo: bool,
     #[arg(long, value_enum, default_value = "daily")]
     pub scene: Scene,
     #[arg(long, hide = true, value_parser = parse_recommendation_id)]
@@ -202,6 +206,12 @@ impl MenuOptions {
         if self.radar_prepared {
             route.push_str(" --radar-prepared");
         }
+        if self.tool == Tool::Codex && self.no_fast {
+            route.push_str(" --no-fast");
+        }
+        if self.tool == Tool::Codex && self.yolo {
+            route.push_str(" --yolo");
+        }
         route
     }
 
@@ -226,7 +236,15 @@ struct LaunchSettings {
     scene: Option<Scene>,
     #[serde(default)]
     recommendation: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    no_fast: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    yolo: bool,
     panes: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl LaunchSettings {
@@ -240,6 +258,8 @@ impl LaunchSettings {
             } else {
                 None
             },
+            no_fast: options.tool == Tool::Codex && options.no_fast,
+            yolo: options.tool == Tool::Codex && options.yolo,
             panes: options.preset.is_team() && options.panes,
         }
     }
@@ -250,6 +270,8 @@ impl LaunchSettings {
             preset: self.preset,
             scene: self.scene.unwrap_or_default(),
             recommendation: self.recommendation.clone(),
+            no_fast: self.no_fast,
+            yolo: self.yolo,
             panes: self.panes,
             launch_error: None,
             ..options.clone()
@@ -290,21 +312,45 @@ impl LaunchSettings {
     }
 
     fn description(&self) -> String {
-        let mut parts = vec![self.tool.label().to_owned(), self.preset.label().to_owned()];
         if self.tool == Tool::Codex {
-            parts.insert(
-                1,
-                self.recommendation
-                    .as_deref()
-                    .and_then(|id| codex_radar_recommendation(id))
-                    .and_then(|item| {
-                        item.get("label")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
+            let recommendation = self
+                .recommendation
+                .as_deref()
+                .and_then(codex_radar_recommendation);
+            let mut parts = vec![self.tool.label().to_owned()];
+            parts.push(
+                recommendation
+                    .as_ref()
+                    .and_then(|item| item.get("model").and_then(serde_json::Value::as_str))
+                    .map(sanitize_remote_label)
                     .unwrap_or_else(|| tr("Codex defaults", "Codex 默认值").into()),
             );
-        } else if self.tool == Tool::Traex {
+            parts.push(if self.preset.is_team() {
+                format!("Team/{}", if self.panes { "tmux" } else { "native" })
+            } else {
+                "Single".into()
+            });
+            parts.push(
+                if self.yolo {
+                    "YOLO"
+                } else {
+                    tr("Auto", "自动")
+                }
+                .into(),
+            );
+            parts.push(codex_quick_fast_summary(
+                &MenuOptions {
+                    recommendation: self.recommendation.clone(),
+                    no_fast: self.no_fast,
+                    ..Default::default()
+                },
+                recommendation.as_ref(),
+            ));
+            return parts.join(" · ");
+        }
+
+        let mut parts = vec![self.tool.label().to_owned(), self.preset.label().to_owned()];
+        if self.tool == Tool::Traex {
             if let Some(scene) = self.scene {
                 parts.insert(1, scene.name().into());
             }
@@ -315,6 +361,66 @@ impl LaunchSettings {
         parts.push("Auto approval".into());
         parts.join(" · ")
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodexPermissionPreference {
+    yolo: bool,
+}
+
+impl CodexPermissionPreference {
+    fn load(paths: &Paths) -> Result<bool> {
+        match std::fs::read(paths.state_dir.join("codex-menu-permission.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice::<Self>(&bytes)?.yolo),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(paths: &Paths, yolo: bool) -> Result<()> {
+        save_codex_preference(paths, "codex-menu-permission", &Self { yolo })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodexFastPreference {
+    force_off: bool,
+}
+
+impl CodexFastPreference {
+    fn load(paths: &Paths) -> Result<bool> {
+        match std::fs::read(paths.state_dir.join("codex-menu-fast.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice::<Self>(&bytes)?.force_off),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(paths: &Paths, force_off: bool) -> Result<()> {
+        save_codex_preference(paths, "codex-menu-fast", &Self { force_off })
+    }
+}
+
+fn save_codex_preference<T: Serialize>(paths: &Paths, name: &str, preference: &T) -> Result<()> {
+    std::fs::create_dir_all(&paths.state_dir)?;
+    let target = paths.state_dir.join(format!("{name}.json"));
+    let temporary = paths
+        .state_dir
+        .join(format!(".{name}-{}.json", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        serde_json::to_writer(file, preference)?;
+        std::fs::rename(&temporary, &target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 // Callbacks pass through tmux format expansion as well as the shell. Keep
@@ -666,42 +772,44 @@ fn run_with_context(
     {
         return message(client, "Pane or agent changed. Reopen the menu.");
     }
-    let prepared_options = if !options.json
-        && options.view == View::Configure
-        && options.tool == Tool::Codex
-        && !options.radar_prepared
-    {
-        let preparation = Command::new("agent-team")
-            .args(["recommendations", "prepare"])
-            .output();
+    let prepared_options = if options.view == View::Configure && options.tool == Tool::Codex {
         let mut next = options.clone();
-        next.radar_prepared = true;
-        match preparation {
-            Ok(output) if output.status.success() => {
-                let recommendations = codex_radar_menu_recommendations();
-                let recommendation_is_available =
-                    next.recommendation.as_deref().is_some_and(|id| {
-                        recommendations.iter().any(|item| {
-                            item.get("id").and_then(serde_json::Value::as_str) == Some(id)
-                        })
-                    });
-                if !recommendation_is_available {
-                    next.recommendation = recommendations
-                        .first()
-                        .and_then(|item| item.get("id"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned);
+        if let Ok(paths) = Paths::discover() {
+            next.no_fast |= CodexFastPreference::load(&paths).unwrap_or(false);
+            next.yolo |= CodexPermissionPreference::load(&paths).unwrap_or(false);
+        }
+        if !options.json && !options.radar_prepared {
+            let preparation = Command::new("agent-team")
+                .args(["recommendations", "prepare"])
+                .output();
+            next.radar_prepared = true;
+            match preparation {
+                Ok(output) if output.status.success() => {
+                    let recommendations = codex_radar_menu_recommendations();
+                    let recommendation_is_available =
+                        next.recommendation.as_deref().is_some_and(|id| {
+                            recommendations.iter().any(|item| {
+                                item.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                            })
+                        });
+                    if !recommendation_is_available {
+                        next.recommendation = recommendations
+                            .first()
+                            .and_then(|item| item.get("id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                    }
                 }
+                Ok(output) => {
+                    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    next.launch_error = Some(if detail.is_empty() {
+                        "Could not prepare Codex recommendations".into()
+                    } else {
+                        detail
+                    });
+                }
+                Err(error) => next.launch_error = Some(error.to_string()),
             }
-            Ok(output) => {
-                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                next.launch_error = Some(if detail.is_empty() {
-                    "Could not prepare Codex recommendations".into()
-                } else {
-                    detail
-                });
-            }
-            Err(error) => next.launch_error = Some(error.to_string()),
         }
         Some(next)
     } else {
@@ -719,6 +827,36 @@ fn run_with_context(
         // Direct action invocations also require a guard, not just callbacks.
         if options.guard.is_none() {
             return Err("menu action requires a pane identity guard".into());
+        }
+        if matches!(selected.id.as_str(), "fast:toggle" | "permission:toggle") {
+            let save_result = (|| -> Result<()> {
+                let paths = Paths::discover()?;
+                match (&*selected.id, &selected.command) {
+                    ("fast:toggle", ActionCommand::Navigate(_, next)) => {
+                        CodexFastPreference::save(&paths, next.no_fast)
+                    }
+                    ("permission:toggle", ActionCommand::Navigate(_, next)) => {
+                        CodexPermissionPreference::save(&paths, next.yolo)
+                    }
+                    _ => unreachable!("Codex preference toggle must navigate"),
+                }
+            })();
+            if let Err(error) = save_result {
+                let next = MenuOptions {
+                    launch_error: Some(format!("Could not save preference: {error}")),
+                    ..options.clone()
+                };
+                return run_with_context(
+                    kind,
+                    pane,
+                    client,
+                    None,
+                    usize::MAX,
+                    stay_open,
+                    &next,
+                    context,
+                );
+            }
         }
         if let ActionCommand::Navigate(next_kind, next) = &selected.command {
             if *next_kind == StatusMenuKind::Agent && next.focus_agent {
@@ -1201,7 +1339,47 @@ fn actions(
                     ));
                 }
             }
-            actions.push(Action::note("Auto approval"));
+            if options.tool == Tool::Codex {
+                actions.push(Action::note(tr("Options", "选项")));
+                actions.push(nav(
+                    "permission:toggle",
+                    if options.yolo {
+                        tr("Permission: YOLO · toggle", "权限：YOLO · 切换")
+                    } else {
+                        tr(
+                            "Permission: Auto approval · toggle",
+                            "权限：自动审批 · 切换",
+                        )
+                    },
+                    'p',
+                    kind,
+                    MenuOptions {
+                        yolo: !options.yolo,
+                        launch_error: None,
+                        ..options.at(View::Configure)
+                    },
+                ));
+                actions.push(nav(
+                    "fast:toggle",
+                    if options.no_fast {
+                        tr("Fast: force off · toggle", "Fast：强制关闭 · 切换")
+                    } else {
+                        tr(
+                            "Fast: follow recommendation · toggle",
+                            "Fast：跟随推荐 · 切换",
+                        )
+                    },
+                    'f',
+                    kind,
+                    MenuOptions {
+                        no_fast: !options.no_fast,
+                        launch_error: None,
+                        ..options.at(View::Configure)
+                    },
+                ));
+            } else {
+                actions.push(Action::note("Auto approval"));
+            }
             actions.push(Action {
                 id: "summary".into(),
                 ..Action::note("")
@@ -1713,8 +1891,12 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
     let team = options.preset.is_team();
     if options.tool == Tool::Codex {
         let mut config = serde_json::Map::new();
-        if let Some(id) = options.recommendation.as_deref() {
-            if let Some(recommendation) = codex_radar_recommendation(id) {
+        let recommendation = options
+            .recommendation
+            .as_deref()
+            .and_then(codex_radar_recommendation);
+        if options.recommendation.is_some() {
+            if let Some(recommendation) = recommendation.as_ref() {
                 for key in ["model", "effort"] {
                     if let Some(value) = recommendation.get(key).and_then(serde_json::Value::as_str)
                     {
@@ -1732,10 +1914,16 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
                         }
                     }
                 }
+                if let Some(fast) = recommendation
+                    .get("fast")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    config.insert("fast".into(), serde_json::Value::Bool(fast));
+                }
             }
         }
-        config.insert("fast".into(), serde_json::Value::Bool(false));
         let missing = resolve_codex_summary_tiers(&mut config, team);
+        config.remove("fast");
         let mut lines = summary_lines(&serde_json::Value::Object(config), team)?;
         if missing {
             lines.push(
@@ -1746,6 +1934,19 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
                 .into(),
             );
         }
+        lines.insert(
+            0,
+            format!(
+                "{}: {}",
+                tr("Permission", "权限"),
+                if options.yolo {
+                    "YOLO"
+                } else {
+                    tr("Auto approval", "自动审批")
+                }
+            ),
+        );
+        lines.insert(1, codex_fast_summary(options, recommendation.as_ref()));
         return Ok(lines);
     }
 
@@ -1801,6 +2002,49 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
         config.extend(extra.clone());
     }
     summary_lines(&serde_json::Value::Object(config), team)
+}
+
+fn codex_fast_summary(options: &MenuOptions, recommendation: Option<&serde_json::Value>) -> String {
+    let value = if options.no_fast {
+        tr("off · forced", "关闭 · 强制")
+    } else if options.recommendation.is_none() {
+        tr("Codex default · no recommendation", "Codex 默认值 · 无推荐")
+    } else if recommendation.is_none() {
+        tr(
+            "Codex default · recommendation unavailable",
+            "Codex 默认值 · 推荐不可用",
+        )
+    } else {
+        match recommendation
+            .and_then(|item| item.get("fast"))
+            .and_then(serde_json::Value::as_bool)
+        {
+            Some(true) => tr("on · recommendation", "开启 · 推荐值"),
+            Some(false) => tr("off · recommendation", "关闭 · 推荐值"),
+            None => tr("not specified by recommendation", "推荐未指定"),
+        }
+    };
+    format!("Fast: {value}")
+}
+
+fn codex_quick_fast_summary(
+    options: &MenuOptions,
+    recommendation: Option<&serde_json::Value>,
+) -> String {
+    if options.no_fast {
+        tr("Fast off (forced)", "Fast 关闭（强制）").into()
+    } else if options.recommendation.is_none() || recommendation.is_none() {
+        tr("Fast default", "Fast 默认").into()
+    } else {
+        match recommendation
+            .and_then(|item| item.get("fast"))
+            .and_then(serde_json::Value::as_bool)
+        {
+            Some(true) => tr("Fast on", "Fast 开启").into(),
+            Some(false) => tr("Fast off", "Fast 关闭").into(),
+            None => tr("Fast unspecified", "Fast 未指定").into(),
+        }
+    }
 }
 
 fn valid_recommendation_id(value: &str) -> bool {
@@ -2056,6 +2300,9 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
             }
             args.extend(["--recommendation".into(), recommendation.into()]);
         }
+        if options.no_fast {
+            args.push("--no-fast".into());
+        }
     } else if options.tool == Tool::Traex {
         if !Scene::choices(options.tool)
             .iter()
@@ -2076,14 +2323,19 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
             args.push("--tmux".into());
         }
     }
-    // agent-team otherwise defaults Team to YOLO, which conflicts with Codex's
-    // automatic reviewer flag. Select auto explicitly for every tool and mode.
-    args.push("--no-yolo".into());
-    args.extend(match options.tool {
-        Tool::Codex => vec!["--approve-for-me".into()],
-        Tool::Claude | Tool::Traex => vec!["--permission-mode".into(), "auto".into()],
-        Tool::Opencode => vec!["--auto".into()],
-    });
+    if options.tool == Tool::Codex && options.yolo {
+        args.push("--yolo".into());
+    } else {
+        // agent-team otherwise defaults Team to YOLO, which conflicts with
+        // Codex's automatic reviewer flag. Select auto explicitly for every
+        // non-YOLO mode and keep other tools' existing behavior.
+        args.push("--no-yolo".into());
+        args.extend(match options.tool {
+            Tool::Codex => vec!["--approve-for-me".into()],
+            Tool::Claude | Tool::Traex => vec!["--permission-mode".into(), "auto".into()],
+            Tool::Opencode => vec!["--auto".into()],
+        });
+    }
     Ok(args)
 }
 
@@ -2586,22 +2838,60 @@ mod tests {
         );
     }
     #[test]
-    fn every_launch_combination_uses_automatic_approval_without_yolo() {
-        for tool in [Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode] {
+    fn codex_permission_and_fast_combinations_use_compatible_argv() {
+        for preset in [Preset::Single, Preset::Team] {
+            for panes in [false, true] {
+                for no_fast in [false, true] {
+                    for yolo in [false, true] {
+                        let args = launch_argv(&MenuOptions {
+                            tool: Tool::Codex,
+                            preset,
+                            panes,
+                            no_fast,
+                            yolo,
+                            recommendation: Some("daily-development-a1b2c3d4".into()),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                        assert_eq!(args.contains(&"--tmux".into()), panes && preset.is_team());
+                        assert_eq!(args.contains(&"--no-fast".into()), no_fast);
+                        assert_eq!(args.contains(&"--yolo".into()), yolo);
+                        assert_eq!(args.contains(&"--no-yolo".into()), !yolo);
+                        assert_eq!(args.contains(&"--approve-for-me".into()), !yolo);
+                        assert!(
+                            !(args.contains(&"--yolo".into())
+                                && args.contains(&"--approve-for-me".into()))
+                        );
+                        assert!(
+                            !(args.contains(&"--yolo".into())
+                                && args.contains(&"--no-yolo".into()))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_codex_launches_keep_their_existing_automatic_approval_flags() {
+        for tool in [Tool::Claude, Tool::Traex, Tool::Opencode] {
             for preset in [Preset::Single, Preset::Team] {
                 for panes in [false, true] {
                     let args = launch_argv(&MenuOptions {
                         tool,
                         preset,
                         panes,
+                        no_fast: true,
+                        yolo: true,
                         ..Default::default()
                     })
                     .unwrap();
                     assert_eq!(args.contains(&"--tmux".into()), panes && preset.is_team());
                     assert!(args.contains(&"--no-yolo".into()));
                     assert!(!args.contains(&"--yolo".into()));
+                    assert!(!args.contains(&"--no-fast".into()));
                     let flags: &[&str] = match tool {
-                        Tool::Codex => &["--approve-for-me"],
+                        Tool::Codex => unreachable!(),
                         Tool::Claude | Tool::Traex => &["--permission-mode", "auto"],
                         Tool::Opencode => &["--auto"],
                     };
@@ -2609,6 +2899,131 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn codex_preferences_default_safely_and_persist_atomically() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: directory.path().join("config"),
+            state_dir: directory.path().join("state"),
+            cache_dir: directory.path().join("cache"),
+            runtime_dir: directory.path().join("runtime"),
+        };
+        assert!(!CodexPermissionPreference::load(&paths).unwrap());
+        assert!(!CodexFastPreference::load(&paths).unwrap());
+        CodexPermissionPreference::save(&paths, true).unwrap();
+        CodexFastPreference::save(&paths, true).unwrap();
+        assert!(CodexPermissionPreference::load(&paths).unwrap());
+        assert!(CodexFastPreference::load(&paths).unwrap());
+        for name in ["codex-menu-permission.json", "codex-menu-fast.json"] {
+            assert_eq!(
+                std::fs::metadata(paths.state_dir.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        CodexPermissionPreference::save(&paths, false).unwrap();
+        CodexFastPreference::save(&paths, false).unwrap();
+        assert!(!CodexPermissionPreference::load(&paths).unwrap());
+        assert!(!CodexFastPreference::load(&paths).unwrap());
+    }
+
+    #[test]
+    fn codex_fast_preview_reports_the_resolved_recommendation_or_default() {
+        let recommendation = serde_json::json!({"fast": true});
+        let options = MenuOptions {
+            tool: Tool::Codex,
+            recommendation: Some("daily-development-a1b2c3d4".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            codex_fast_summary(&options, Some(&recommendation)),
+            format!("Fast: {}", tr("on · recommendation", "开启 · 推荐值"))
+        );
+        assert_eq!(
+            codex_fast_summary(
+                &MenuOptions {
+                    no_fast: true,
+                    ..options.clone()
+                },
+                Some(&recommendation)
+            ),
+            format!("Fast: {}", tr("off · forced", "关闭 · 强制"))
+        );
+        assert_eq!(
+            codex_fast_summary(
+                &MenuOptions {
+                    recommendation: None,
+                    ..options.clone()
+                },
+                None
+            ),
+            format!(
+                "Fast: {}",
+                tr("Codex default · no recommendation", "Codex 默认值 · 无推荐")
+            )
+        );
+        assert_eq!(
+            codex_fast_summary(&options, None),
+            format!(
+                "Fast: {}",
+                tr(
+                    "Codex default · recommendation unavailable",
+                    "Codex 默认值 · 推荐不可用"
+                )
+            )
+        );
+        assert_eq!(
+            codex_fast_summary(&options, Some(&serde_json::json!({}))),
+            format!(
+                "Fast: {}",
+                tr("not specified by recommendation", "推荐未指定")
+            )
+        );
+        assert_eq!(
+            codex_fast_summary(&options, Some(&serde_json::json!({"fast": false}))),
+            format!("Fast: {}", tr("off · recommendation", "关闭 · 推荐值"))
+        );
+    }
+
+    #[test]
+    fn codex_config_exposes_keyboard_accessible_permission_and_fast_controls() {
+        let (_, choices) = actions(
+            StatusMenuKind::Tmux,
+            &MenuOptions {
+                view: View::Configure,
+                tool: Tool::Codex,
+                radar_prepared: true,
+                recommendation: Some("daily-development-a1b2c3d4".into()),
+                ..Default::default()
+            },
+            &context(None, BaseState::Idle),
+        );
+        let permission = choices
+            .iter()
+            .find(|action| action.id == "permission:toggle")
+            .unwrap();
+        let fast = choices
+            .iter()
+            .find(|action| action.id == "fast:toggle")
+            .unwrap();
+        assert_eq!(permission.key, 'p');
+        assert_eq!(fast.key, 'f');
+        assert!(permission.label.contains("Auto approval"));
+        assert!(fast.label.contains("follow recommendation"));
+        assert!(matches!(
+            &permission.command,
+            ActionCommand::Navigate(_, next) if next.yolo && !next.no_fast
+        ));
+        assert!(matches!(
+            &fast.command,
+            ActionCommand::Navigate(_, next) if next.no_fast && !next.yolo
+        ));
     }
 
     #[test]
@@ -2631,6 +3046,9 @@ mod tests {
             scene: Scene::Computer,
             preset: Preset::Team,
             panes: true,
+            recommendation: Some("daily-development-a1b2c3d4".into()),
+            no_fast: true,
+            yolo: true,
             launch_error: Some("old failure".into()),
             ..Default::default()
         };
@@ -2648,9 +3066,18 @@ mod tests {
         );
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 4);
+        assert_eq!(json.as_object().unwrap().len(), 6);
+        assert_eq!(json["no_fast"], true);
+        assert_eq!(json["yolo"], true);
+        let quick_args = launch_argv(&settings.options(&MenuOptions::default())).unwrap();
+        assert!(quick_args.contains(&"--no-fast".into()));
+        assert!(quick_args.contains(&"--yolo".into()));
+        assert!(!quick_args.contains(&"--no-yolo".into()));
+        assert!(!quick_args.contains(&"--approve-for-me".into()));
         assert!(settings.description().contains("Codex"));
         assert!(settings.description().contains("tmux"));
+        assert!(settings.description().contains("YOLO"));
+        assert!(settings.description().contains("Fast off (forced)"));
         std::fs::write(
             &saved,
             r#"{"tool":"codex","preset":"team","scene":"unknown","panes":true}"#,
