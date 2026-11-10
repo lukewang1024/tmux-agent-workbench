@@ -1253,7 +1253,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert ui(mode) == mode
             menu = open_menu([str(repo / 'bin/workbench-agent-usage'), 'menu', client],
                              env=reset_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Schedule card', b'View / adjust')
+            # Usage is assembled by a shell provider and guarded callbacks.
+            # Give it the same startup budget as the narrow Usage menu above.
+            rendered = wait_for_text(menu, b'Schedule card', b'View / adjust', attempts=120)
             os.write(master, b'a')
             menu.wait(timeout=3)
             wait_for_pane_text('reschedule it.', pane)
@@ -1286,7 +1288,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu.wait(timeout=3)
         # Wait for the reopened menu, then for the callback to finish after
         # Escape. Otherwise it may open over the next test's native menu.
-        wait_for_text(client_process, 'Usage · Claude Code'.encode())
+        wait_for_text(client_process, 'Usage · Claude Code'.encode(), attempts=120)
         assert tmux('show-option', '-gqv', '@workbench-usage-source') == 'claude'
         os.write(master, b'\x1b')
         deadline = time.monotonic() + 10
