@@ -1377,6 +1377,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert '--no-yolo' in default_start and '--approve-for-me' in default_start, default_start
         assert '--yolo' not in default_start and '--no-fast' not in default_start, default_start
         assert tmux('display-message', '-p', '-t', launched, '#{pane_current_path}') == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
+        tmux('switch-client', '-c', client, '-t', original_window)
         tmux('kill-window', '-t', launched)
         drain()
         print('PASS one-panel default Enter launch preserves source cwd')
@@ -1405,6 +1406,10 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert json.loads(fast_preference.read_text()) == {'force_off': True}
         os.write(master, b'\x1b')
         menu.wait(timeout=3)
+        # Toggling reopens the menu in an asynchronous callback, so the
+        # original process may already have exited. Let tmux consume Escape
+        # (configured above with a 500ms timeout) before opening another menu.
+        drain(0.7)
 
         # A new process reloads both preferences and the same recommendation.
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
@@ -1413,6 +1418,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         rendered = wait_for_text(menu, b'Permission: YOLO', b'Fast: off')
         before = tmux('list-windows', '-F', '#{window_id}').splitlines()
         os.write(master, b'\r')
+        menu.wait(timeout=6)
         for _ in range(60):
             drain(0.05)
             after = tmux('list-windows', '-F', '#{window_id}').splitlines()
@@ -1425,11 +1431,16 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert '--no-yolo' not in configured_start and '--approve-for-me' not in configured_start, configured_start
         tmux('switch-client', '-c', client, '-t', original_window)
         tmux('kill-window', '-t', configured_window)
-        menu.wait(timeout=3)
-        saved_single = last_launch.read_text()
-        assert json.loads(saved_single) == {
+        expected_single = {
             'tool': 'codex', 'preset': 'single', 'recommendation': 'pick-daily-sol-high',
             'no_fast': True, 'yolo': True, 'panes': False}
+        deadline = time.monotonic() + 5
+        while True:
+            saved_single = last_launch.read_text()
+            if json.loads(saved_single) == expected_single:
+                break
+            assert time.monotonic() < deadline, 'configured launch was not remembered'
+            drain(.05)
         print('PASS Codex Fast and permission defaults persist across menu restarts')
         # A different source directory must be used for the new conversation.
         quick_cwd = root / 'quick-project'
