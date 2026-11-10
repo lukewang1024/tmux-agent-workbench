@@ -457,7 +457,9 @@ version in each category. When recommendations exist, the first one is selected
 on entry and the Codex defaults choice is hidden. Without recommendations, the
 menu offers Codex defaults. Trae keeps its daily, hard and batch scenes. All
 tools expose Single/Team and, for Team, Native/tmux choices in the same panel.
-Codex Fast remains off unless explicitly passed with `--fast` to the launcher.
+Codex has a Fast control that follows the selected recommendation by default or
+forces Fast off. The preview shows the recommendation's Fast value, the
+explicit override, or the Codex default when no recommendation is available.
 
 The panel previews the selected model and effort from the CodexRadar cache; it
 does not query a model catalog. Opening Create Agent → Codex prepares the cache
@@ -476,13 +478,16 @@ agent start opencode --team
 ```
 
 Dynamic Codex recommendation rows use numbered shortcuts. Trae scene shortcuts
-remain `d/h/b`; `s/t` selects mode and `n/m` selects Native/tmux.
-Menu launches, including Quick Agent, use automatic approval: Codex's
-`--approve-for-me`, Claude and Trae's `--permission-mode auto`, or OpenCode's
-`--auto`. Workbench passes `--no-yolo` to the launcher so Team's default
-does not conflict with automatic review. Single and native Team open one new
-window; pane Team lets `agent-team` create its own window, with no launcher
-pane left behind. Presentation is chosen at launch and never mixed mid-session.
+remain `d/h/b`; `s/t` selects mode and `n/m` selects Native/tmux. The Codex
+panel's Permission control (`p`) defaults to Auto approval and can persistently
+switch to YOLO. Fast (`f`) follows the selected recommendation by default and
+can persistently force Fast off. Auto approval launches Codex with
+`--no-yolo --approve-for-me`; YOLO uses `--yolo` alone. Other tools keep their
+existing automatic approval flags.
+Quick Agent repeats the last successful launch's permission and Fast choices.
+Single and native Team open one new window; pane Team lets `agent-team` create
+its own window, with no launcher pane left behind. Presentation is chosen at
+launch and never mixed mid-session.
 
 The Agent menu includes **Usage summary** (`u`) to open plan limits and token
 usage for its current CLI, including when the narrow status bar hides the usage

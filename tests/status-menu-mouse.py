@@ -72,8 +72,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
     radar_cache_dir = Path(env['XDG_CACHE_HOME']) / 'agent-team'
     radar_cache_dir.mkdir(parents=True)
     radar_items = [
-        {'id': 'pick-daily-sol-high', 'source_key': 'daily_development', 'label': 'Daily development · GPT-6.1 Sol high', 'model': 'gpt-6.1-sol', 'effort': 'high'},
-        {'id': 'pick-computer-terra-max', 'source_key': 'computer_automation', 'label': 'Computer automation · GPT-6.1 Terra max', 'model': 'gpt-6.1-terra', 'effort': 'max'},
+        {'id': 'pick-daily-sol-high', 'source_key': 'daily_development', 'label': 'Daily development · GPT-6.1 Sol high + Fast', 'model': 'gpt-6.1-sol', 'effort': 'high', 'fast': True},
+        {'id': 'pick-computer-terra-max', 'source_key': 'computer_automation', 'label': 'Computer automation · GPT-6.1 Terra max', 'model': 'gpt-6.1-terra', 'effort': 'max', 'fast': False},
         {'id': 'pick-hard-astra-xhigh', 'source_key': 'hard_problems', 'label': 'Hard problems · GPT-6 Astra xhigh', 'model': 'gpt-6-astra', 'effort': 'xhigh'},
         {'id': 'pick-background-luna-max', 'source_key': 'background_automation', 'label': 'Background automation · GPT-5.6 Luna max', 'model': 'gpt-5.6-luna', 'effort': 'max'},
         {'id': 'pick-background-gpt6-luna-max', 'source_key': 'background_automation', 'label': 'Background automation · GPT-6 Luna max', 'model': 'gpt-6-luna', 'effort': 'max'},
@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         'version': 2, 'source_url': 'https://api.codexradar.com/api/v1/radar-insights',
         'recommendations': {'items': radar_items},
     }))
-    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/codexradar-recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["model"],"worker_effort":item["effort"],"fast":False} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
+    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/codexradar-recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["model"],"worker_effort":item["effort"],"fast":item.get("fast",False)} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
     # Panel previews read the same declarative settings as agent-team. Any
     # --dry-run process on the interaction path is a regression, including
     # the very first agent selection with an empty cache.
@@ -1373,7 +1373,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         assert len(after) == len(before) + 1
         launched = next(w for w in after if w not in before)
         wait_for_pane_command(launched, 'node')
-        assert '--approve-for-me' in tmux('display-message', '-p', '-t', launched, '#{pane_start_command}')
+        default_start = tmux('display-message', '-p', '-t', launched, '#{pane_start_command}')
+        assert '--no-yolo' in default_start and '--approve-for-me' in default_start, default_start
+        assert '--yolo' not in default_start and '--no-fast' not in default_start, default_start
         assert tmux('display-message', '-p', '-t', launched, '#{pane_current_path}') == tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')
         tmux('kill-window', '-t', launched)
         drain()
@@ -1386,6 +1388,49 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         saved_single = last_launch.read_text()
         assert json.loads(saved_single) == {
             'tool': 'codex', 'preset': 'single', 'recommendation': 'pick-daily-sol-high', 'panes': False}
+        state_dir = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench'
+        permission_preference = state_dir / 'codex-menu-permission.json'
+        fast_preference = state_dir / 'codex-menu-fast.json'
+        assert not permission_preference.exists() and not fast_preference.exists()
+        menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                          '--view', 'configure', '--tool', 'codex'], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, b'Permission: Auto approval', b'Fast: on')
+        os.write(master, b'p')
+        rendered = wait_for_text(client_process, b'Permission: YOLO')
+        assert b'Permission: YOLO' in screen_text(rendered)
+        os.write(master, b'f')
+        rendered = wait_for_text(client_process, b'Fast: off')
+        assert json.loads(permission_preference.read_text()) == {'yolo': True}
+        assert json.loads(fast_preference.read_text()) == {'force_off': True}
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+
+        # A new process reloads both preferences and the same recommendation.
+        menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                          '--view', 'configure', '--tool', 'codex'], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rendered = wait_for_text(menu, b'Permission: YOLO', b'Fast: off')
+        before = tmux('list-windows', '-F', '#{window_id}').splitlines()
+        os.write(master, b'\r')
+        for _ in range(60):
+            drain(0.05)
+            after = tmux('list-windows', '-F', '#{window_id}').splitlines()
+            if len(after) > len(before): break
+        assert len(after) == len(before) + 1, (before, after)
+        configured_window = next(w for w in after if w not in before)
+        wait_for_pane_command(configured_window, 'node')
+        configured_start = tmux('display-message', '-p', '-t', configured_window, '#{pane_start_command}')
+        assert '--no-fast' in configured_start and '--yolo' in configured_start, configured_start
+        assert '--no-yolo' not in configured_start and '--approve-for-me' not in configured_start, configured_start
+        tmux('switch-client', '-c', client, '-t', original_window)
+        tmux('kill-window', '-t', configured_window)
+        menu.wait(timeout=3)
+        saved_single = last_launch.read_text()
+        assert json.loads(saved_single) == {
+            'tool': 'codex', 'preset': 'single', 'recommendation': 'pick-daily-sol-high',
+            'no_fast': True, 'yolo': True, 'panes': False}
+        print('PASS Codex Fast and permission defaults persist across menu restarts')
         # A different source directory must be used for the new conversation.
         quick_cwd = root / 'quick-project'
         quick_cwd.mkdir()
@@ -1394,7 +1439,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             ui(mode)
             menu = open_menu([core, 'status-menu', 'tmux', '--pane', quick_source, '--client', client,
                               '--view', 'create'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'GPT-6.1 Sol', b'Single')
+            rendered = wait_for_text(menu, b'Quick Agent', b'Codex', b'gpt-6.1-sol', b'Single')
             x, y = item_position(rendered, 'Quick Agent')
             before = tmux('list-windows', '-F', '#{window_id}').splitlines()
             # The gray subtitle is part of the same action in both renderers.
@@ -1413,12 +1458,16 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             wait_for_pane_command(quick_window, 'node')
             assert Path(tmux('display-message', '-p', '-t', quick_window, '#{pane_current_path}')).samefile(quick_cwd)
             start = tmux('display-message', '-p', '-t', quick_window, '#{pane_start_command}')
-            assert '--approve-for-me' in start and 'resume' not in start and 'fork' not in start, start
+            assert '--no-fast' in start and '--yolo' in start, start
+            assert '--no-yolo' not in start and '--approve-for-me' not in start, start
+            assert 'resume' not in start and 'fork' not in start, start
             tmux('switch-client', '-c', client, '-t', original_window)
             tmux('kill-window', '-t', quick_window)
             drain(.3)
         tmux('kill-window', '-t', quick_source)
         ui('new')
+        permission_preference.unlink()
+        fast_preference.unlink()
         # Invalid local state disables Quick Agent while ordinary Agent stays usable.
         last_launch.write_text('invalid json')
         model = json.loads(subprocess.check_output([core, 'status-menu', 'tmux', '--pane', pane,
@@ -1550,7 +1599,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             if recommendation_id == 'pick-computer-terra-max':
                 menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                   '--view', 'create'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                rendered = wait_for_text(menu, b'Quick Agent', b'Computer automation', b'Team')
+                rendered = wait_for_text(menu, b'Quick Agent', b'gpt-6.1-terra', b'Team')
                 # The subtitle may be clipped on this narrow client; the
                 # launch trace below verifies the saved backend selection.
                 before = tmux('list-windows', '-F', '#{window_id}').splitlines()
@@ -1724,8 +1773,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         menu = open_menu([core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                                  '--view', 'configure', '--tool', 'codex'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         rendered = wait_for_text(menu, b'(enter)', b'(back)', b'(esc)')
-        # The pinned model summary remains inert on a keyboard-sized screen.
-        x, y = item_position(rendered, 'gpt-6.1-sol')
+        # The pinned permission summary remains inert on a keyboard-sized screen.
+        x, y = item_position(rendered, 'Permission: Auto approval')
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         rendered += drain(.15)
         assert menu.poll() is None

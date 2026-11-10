@@ -279,11 +279,15 @@ remain active. A successful background update is promoted on the next menu open.
 If no usable recommendation exists, the menu offers no Codex tiers and still
 launches with Codex's native model and effort defaults.
 
-Each remote recommendation can be selected in Single or Team mode. Fast is not
-part of the cached tier and stays off unless the caller explicitly passes
-`--fast`. Launch summaries show the selected remote model/effort or state that
-Codex defaults will be used. Agent-team resolves the recommendation ID against
-the active cache at launch; a missing ID falls back to Codex defaults without
+Each remote recommendation can be selected in Single or Team mode. The Fast
+control (`f`) follows the selected recommendation's `fast` value by default and
+can persistently force Fast off with `--no-fast`. Launch summaries show the resolved
+recommendation value, the explicit off override, or a Codex default / unspecified
+recommendation when the value cannot be resolved. The Permission control (`p`)
+defaults to Auto approval and can persistently select YOLO. These preferences
+live in `$XDG_STATE_HOME/tmux-agent-workbench/codex-menu-fast.json` and
+`codex-menu-permission.json`. Agent-team resolves recommendation IDs against the
+active cache at launch; a missing ID falls back to Codex defaults without
 blocking creation.
 
 Trae retains its daily, hard and batch scenes. Claude and OpenCode have only
@@ -315,13 +319,14 @@ mode: normal accent, prefix blue, OFF red.
 The tmux root menu exposes Create (`c`), Switch (`s`), Layout (`l`), Kill (`k`)
 and Detach (`d`), in that order. Create's first item is Quick Agent (`q`),
 whose gray subtitle shows the last successful menu launch's tool, scene,
-Single/Team and Native/tmux choices. Either row starts a fresh conversation
+Single/Team, Native/tmux, Codex permission and Fast choices. Either row starts a fresh conversation
 in the source pane's current directory. The choices are saved atomically in
 `$XDG_STATE_HOME/tmux-agent-workbench/last-agent-launch.json`; they are updated
 only after a successful launch, and missing or invalid state disables Quick
-Agent. Ordinary Agent creation remains available. All menu launches use each
-CLI's automatic approval mode and explicitly disable the launcher's default
-YOLO flags with `--no-yolo`.
+Agent. Ordinary Agent creation remains available. Codex defaults to Auto
+approval and uses `--no-yolo --approve-for-me`; its Permission control can select
+YOLO, which uses `--yolo` without automatic-approval flags. Claude, Trae and
+OpenCode keep their existing automatic approval options.
 
 Create then offers Agent (`a`), Window (`w`), Pane (`p`) and Session (`s`);
 Switch and Kill start with those four objects. Back returns to the immediate
