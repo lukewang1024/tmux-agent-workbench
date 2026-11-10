@@ -171,21 +171,32 @@ with tempfile.TemporaryDirectory(prefix='wb-auto-split-', dir='/tmp') as root:
 
             # Simulate the singleton manager's scoped result on this disposable server.
             helper = str(repo / 'bin/wb-reorganise')
-            before = json.loads(subprocess.check_output([helper, 'snapshot'], env=env, text=True))
-            moving = {location(pane)[2] for pane in existing[3:]}
-            groups = []
-            for session in before['sessions']:
-                ids = [w['window_id'] for w in before['windows'] if w['session_id'] == session['session_id']]
-                if session['session_id'] == source:
-                    groups.append({'session': 'Office文档', 'windows': [w for w in ids if w not in moving]})
-                    groups.append({'session': 'Office文档·布局', 'windows': [w for w in ids if w in moving]})
-                else:
-                    groups.append({'session': session['session_name'], 'windows': ids})
             snapshot_file, plan_file = Path(root, 'snapshot.json'), Path(root, 'plan.json')
-            snapshot_file.write_text(json.dumps(before))
-            plan_file.write_text(json.dumps({'groups': groups}))
-            subprocess.check_output([helper, 'apply', '--snapshot', str(snapshot_file),
-                                     '--plan', str(plan_file), '--scope-session', source], env=env, text=True)
+            deadline = time.monotonic() + 10
+            while True:
+                before = json.loads(subprocess.check_output([helper, 'snapshot'], env=env, text=True))
+                moving = {location(pane)[2] for pane in existing[3:]}
+                groups = []
+                for session in before['sessions']:
+                    ids = [w['window_id'] for w in before['windows'] if w['session_id'] == session['session_id']]
+                    if session['session_id'] == source:
+                        groups.append({'session': 'Office文档', 'windows': [w for w in ids if w not in moving]})
+                        groups.append({'session': 'Office文档·布局', 'windows': [w for w in ids if w in moving]})
+                    else:
+                        groups.append({'session': session['session_name'], 'windows': ids})
+                snapshot_file.write_text(json.dumps(before))
+                plan_file.write_text(json.dumps({'groups': groups}))
+                applied = subprocess.run([helper, 'apply', '--snapshot', str(snapshot_file),
+                                          '--plan', str(plan_file), '--scope-session', source],
+                                         env=env, text=True, capture_output=True)
+                if applied.returncode == 0:
+                    break
+                # The manager can finish its asynchronous restart after the
+                # snapshot. Follow the normal stale-snapshot recovery path.
+                if 'tmux topology or process identity changed since the snapshot' not in applied.stderr:
+                    applied.check_returncode()
+                assert time.monotonic() < deadline, applied.stderr
+                time.sleep(.1)
             assert tmux('show-option', '-wqv', '-t', existing[3], '@agent_focus') == '1'
             assert tmux('list-windows', '-t', 'unrelated', '-F', '#{window_name}') == 'shell'
             assert 'human-shell' in tmux('list-windows', '-t', source, '-F', '#{window_name}')
