@@ -1,6 +1,7 @@
 """Exercise real tmux automatic renaming and responsive argument validation."""
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,10 +55,55 @@ with tempfile.TemporaryDirectory(prefix='wb-naming-') as root:
         stale = subprocess.run([binary, 'sidebar-control', 'maintain', retired],
                                env=env, capture_output=True, text=True)
         assert stale.returncode == 0 and not stale.stderr, (stale.returncode, stale.stderr)
+        stale_auto = subprocess.run([binary, 'sidebar-control', 'toggle', retired, '--create-only'],
+                                    env=env, capture_output=True, text=True)
+        assert stale_auto.returncode == 0 and not stale_auto.stderr, (stale_auto.returncode, stale_auto.stderr)
+        stale_manual = subprocess.run([binary, 'sidebar-control', 'toggle', retired],
+                                      env=env, capture_output=True, text=True)
+        assert stale_manual.returncode != 0 and 'can\'t find window' in stale_manual.stderr
         assert tmux('list-panes', '-a', '-F', '#{window_id}:#{pane_id}:#{pane_width}x#{pane_height}') == before
         malformed = subprocess.run([binary, 'sidebar-control', 'maintain', 'invalid'],
                                    env=env, capture_output=True, text=True)
         assert malformed.returncode != 0
+        malformed_auto = subprocess.run([binary, 'sidebar-control', 'toggle', 'invalid', '--create-only'],
+                                        env=env, capture_output=True, text=True)
+        assert malformed_auto.returncode != 0
+
+        # Close the target after the automatic action has begun, just before
+        # its first window lookup. This exercises the asynchronous hook race.
+        racing = tmux('new-window', '-d', '-P', '-F', '#{window_id}', 'sleep', '120')
+        wrapper_dir = Path(root) / 'race-bin'
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / 'tmux'
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'for arg do\n'
+            '  if [ "$arg" = "#{@workbench_sidebar_disabled}" ]; then\n'
+            '    "$WB_REAL_TMUX" -S "$WB_RACE_SOCKET" kill-window -t "$WB_RACE_WINDOW" || exit 1\n'
+            '    : > "$WB_RACE_MARKER"\n'
+            '    break\n'
+            '  fi\n'
+            'done\n'
+            'exec "$WB_REAL_TMUX" "$@"\n')
+        wrapper.chmod(0o755)
+        subprocess.run(['sh', '-n', str(wrapper)], check=True)
+        marker = Path(root) / 'race-triggered'
+        race_env = dict(env, PATH=str(wrapper_dir) + os.pathsep + env['PATH'],
+                        WB_REAL_TMUX=shutil.which('tmux'), WB_RACE_SOCKET=socket,
+                        WB_RACE_WINDOW=racing, WB_RACE_MARKER=str(marker))
+        raced = subprocess.run([binary, 'sidebar-control', 'toggle', racing, '--create-only'],
+                               env=race_env, capture_output=True, text=True)
+        assert marker.exists(), 'the race was not triggered'
+        assert raced.returncode == 0 and not raced.stderr, (raced.returncode, raced.stderr)
+
+        # Failures unrelated to a retired window must remain visible.
+        tmux('set-option', '-g', '@agent_sidebar_bin', '/legacy/sidebar')
+        try:
+            conflict = subprocess.run([binary, 'sidebar-control', 'toggle', window, '--create-only'],
+                                      env=env, capture_output=True, text=True)
+            assert conflict.returncode != 0 and 'legacy tmux-agent-sidebar' in conflict.stderr
+        finally:
+            tmux('set-option', '-gu', '@agent_sidebar_bin')
         tmux('set-option', '-w', '-t', window, 'automatic-rename', 'on')
         core('sidebar-control', 'toggle', window)
         assert tmux('display-message', '-p', '-t', window, '#{pane_id}') == main

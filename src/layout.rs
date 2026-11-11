@@ -345,6 +345,19 @@ fn toggle(
     create_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(window, '@')?;
+    let result = toggle_window(server, window, create_only);
+    if create_only {
+        ignore_retired_window(server, window, result)
+    } else {
+        result
+    }
+}
+
+fn toggle_window(
+    server: &ServerIdentity,
+    window: &str,
+    create_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     refuse_old_sidebar(server)?;
     if create_only
         && !option(server, "@workbench_reorganise_sidebar_suppressed")?
@@ -633,11 +646,18 @@ fn restore_main_column_ratios(
 
 fn maintain(server: &ServerIdentity, window: &str) -> Result<(), Box<dyn std::error::Error>> {
     validate_target(window, '@')?;
-    let result = maintain_window(server, window);
+    ignore_retired_window(server, window, maintain_window(server, window))
+}
+
+fn ignore_retired_window(
+    server: &ServerIdentity,
+    window: &str,
+    result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if result.is_err() {
-        // Resize/exit hooks run asynchronously. Their exact target can close
-        // before maintenance starts or between tmux commands. A retired target
-        // needs no maintenance; preserve failures for live targets and servers.
+        // Automatic sidebar hooks run asynchronously. Their target can close
+        // before the action starts or between tmux commands. A retired target
+        // needs no work; preserve failures for live targets and servers.
         let windows = tmux(server, &["list-windows", "-a", "-F", "#{window_id}"])?;
         if !windows.lines().any(|id| id == window) {
             return Ok(());
