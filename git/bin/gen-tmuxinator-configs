@@ -70,14 +70,19 @@ seeds=$(cd "$WORKBENCH_CODE_ROOT" && for d in */ */*/ */*/*/; do
   git -C "$d" rev-parse --show-toplevel 2>/dev/null || true
 done | sort -u)
 
-roots=$(for s in $seeds; do
-  git -C "$s" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'
-done | sort -u)
-
-# Primary (main) worktree of each repo = the first entry git lists for it.
-primaries=$(for s in $seeds; do
-  git -C "$s" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1
-done | sort -u)
+# One inventory per seed supplies both the complete roots and each repository's
+# primary worktree (the first entry). The old two passes spawned Git twice for
+# every checkout, even though the first pass already contained both answers.
+worktrees=$(for s in $seeds; do
+  git -C "$s" worktree list --porcelain 2>/dev/null | awk '
+    /^worktree / {
+      sub(/^worktree /, "")
+      print "R" $0
+      if (!seen++) print "P" $0
+    }'
+done)
+roots=$(printf '%s\n' "$worktrees" | sed -n 's/^R//p' | sort -u)
+primaries=$(printf '%s\n' "$worktrees" | sed -n 's/^P//p' | sort -u)
 
 # 2. Keep only the persistent pool: must live under WORKBENCH_CODE_ROOT
 #    (drops stray worktrees registered in /tmp etc.), not under any

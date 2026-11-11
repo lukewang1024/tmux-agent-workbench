@@ -2,6 +2,8 @@
 """Exercise scoped switch lists through real small tmux clients and touch input."""
 from contextlib import ExitStack
 import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import pty
@@ -9,6 +11,7 @@ import re
 import select
 import shlex
 import signal
+import socket as socket_module
 import struct
 import subprocess
 import sys
@@ -68,13 +71,37 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         painted.extend(result)
         return result
 
-    def wait(predicate, label):
-        end = time.monotonic() + 8
+    def wait(predicate, label, timeout=8):
+        end = time.monotonic() + timeout
         while not predicate():
             if time.monotonic() >= end:
                 raise AssertionError((label, screen_rows(),
                                       tmux('list-windows', '-a', '-F', '#{session_name} #{window_id} #{window_name}')))
             drain(.05)
+
+    def shared_agents_ready(expected):
+        # The popup reads the core's paired sidebar snapshot, which can lag
+        # behind tmux session creation. Verify that exact frame contains all
+        # rows needed to overflow before exercising wheel scrolling.
+        runtime = Path(env['XDG_RUNTIME_DIR']) / 'tmux-agent-workbench'
+        if len(os.fsencode(runtime)) > 70:
+            runtime = Path('/tmp') / f'tmux-agent-workbench-{os.getuid()}'
+        server_key = hashlib.sha256(os.fsencode(os.path.realpath(socket))).hexdigest()[:16]
+        request = {'protocol_version': 1, 'id': 'switcher-agents', 'method': 'snapshot.get',
+                   'params': {'include_surface': True}}
+        try:
+            with socket_module.socket(socket_module.AF_UNIX) as conn:
+                conn.settimeout(2)
+                conn.connect(str(runtime / f'daemon-{server_key}.sock'))
+                conn.sendall(json.dumps(request).encode() + b'\n')
+                response = json.loads(conn.makefile('rb').readline())
+            result = response.get('result') or {}
+            if not (result.get('_workbench_surface') or {}).get('sidebar'):
+                return False
+            live = {agent['target']['session_name'] for agent in result.get('agents', []) if not agent['exited']}
+            return expected <= live
+        except (OSError, ValueError, KeyError):
+            return False
 
     def text(needle):
         expected = needle.encode()
@@ -530,6 +557,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         # Populate enough Agent groups to overflow the now-independent Agents view.
         for index in range(6):
             tmux('new-session', '-d', '-s', f'zz-agent-{index}', '-n', f'work-{index}', shlex.quote(fixture))
+        wait(lambda: shared_agents_ready({f'zz-agent-{index}' for index in range(6)}),
+             'new Agent groups were not published to the shared sidebar', timeout=12)
         drain(1.5)
         # A lower current Agent must not open the overview halfway through its
         # groups. The Agents/sort heading also stays usable after scrolling.

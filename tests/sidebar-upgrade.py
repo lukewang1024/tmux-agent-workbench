@@ -20,6 +20,7 @@ import uuid
 from daemon_fixture import running_daemon
 
 source = Path(sys.argv[1]).resolve()
+previous_source = Path(os.environ.get('WORKBENCH_TEST_UPGRADE_FROM', str(source))).resolve()
 repo = Path(__file__).resolve().parents[1]
 fixture = repo / 'target/debug/examples/codex'
 
@@ -34,9 +35,15 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
                       ('XDG_STATE_HOME', 'state'), ('XDG_CACHE_HOME', 'cache'),
                       ('XDG_RUNTIME_DIR', 'run'), ('HOME', 'home')):
         env[key] = str(root / name)
+    low_churn = os.environ.get('WORKBENCH_TEST_LOW_CHURN') == '1'
+    low_churn_before_only = os.environ.get('WORKBENCH_TEST_LOW_CHURN_BEFORE_ONLY') == '1'
+    if low_churn or low_churn_before_only:
+        config = Path(env['XDG_CONFIG_HOME']) / 'tmux-agent-workbench'
+        config.mkdir(parents=True)
+        (config / 'enable-low-process-churn').touch()
     core = root / 'data/tmux-agent-workbench/bin/tmux-agent-workbench-core'
     core.parent.mkdir(parents=True)
-    shutil.copy2(source, core)
+    shutil.copy2(previous_source, core)
     plugin = root / 'plugin with spaces'
     (plugin / 'target/release').mkdir(parents=True)
     shutil.copy2(repo / 'install', plugin / 'install')
@@ -146,13 +153,21 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
         # Also migrate pre-handoff versions that never wrote a runtime marker.
         tmux(primary, 'set-option', '-pu', '-t', primary['sidebar'], '@workbench_sidebar_runtime')
         before = [{"panes": panes(s), "layout": layout(s), "focus": focus(s),
-                   "agents": agent_identity(s)} for s in servers]
+                   "agents": agent_identity(s),
+                   "daemon": json.loads(run(str(core), 'daemon', 'status',
+                                            environment=s['env']))} for s in servers]
 
         # This is the actual installer, invoked outside tmux. It atomically
         # replaces the resident processes' executable, then discovers both
         # existing servers and runs the same handoff as plugin daemon ensure.
+        if low_churn_before_only:
+            (config / 'enable-low-process-churn').unlink()
         installer_env = dict(env, TMUX_AGENT_WORKBENCH_INSTALL_SOURCE='1')
         run(str(plugin / 'install'), str(root / 'bin'), '--no-git', environment=installer_env)
+        expected_revision = int(os.environ.get('WORKBENCH_TEST_EXPECT_RUNTIME_REVISION') or
+                                next(line.split('=')[1].strip().rstrip(';')
+                                     for line in (repo / 'src/lib.rs').read_text().splitlines()
+                                     if line.startswith('pub const DAEMON_RUNTIME_REVISION:')))
         for server, previous in zip(servers, before):
             current = panes(server)
             assert current.keys() == previous['panes'].keys(), 'pane IDs changed during handoff'
@@ -164,8 +179,17 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
                     assert current[pane] == attributes, 'agent or supporting process changed'
             assert layout(server) == previous['layout'], 'window layout or zoom changed'
             assert focus(server) == previous['focus'], 'client focus changed'
-            assert agent_identity(server) == previous['agents'], 'agent process identity changed'
+            current_agents = agent_identity(server)
+            assert current_agents == previous['agents'], (
+                'agent process identity changed', previous['agents'], current_agents)
             assert sidebar_ready(server), 'installer returned before the replacement sidebar rendered'
+            if previous_source != source:
+                daemon = json.loads(run(str(core), 'daemon', 'status', environment=server['env']))
+                assert daemon['pid'] != previous['daemon']['pid'], 'old daemon survived the upgrade'
+                assert daemon['runtime_revision'] == expected_revision, 'daemon revision was not updated'
+            if low_churn:
+                assert 'workbench-low-churn-focus-wake' in tmux(
+                    server, 'show-hooks', '-g', 'client-session-changed'), 'low-churn wake hook missing'
         print('PASS installer hands off legacy and current sidebars on every server, retaining panes, agents, support, layout, zoom and focus')
 
         # A plugin/tool caller can name one server explicitly. --all still

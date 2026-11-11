@@ -14,10 +14,24 @@ wb_assert 'explicit session resolves without TMUX' test \
   "$(WORKBENCH_SESSION=target workbench_resolve_session)" = "$expected"
 wb_assert 'explicit ID resolves' test \
   "$(WORKBENCH_SESSION=$expected workbench_resolve_session)" = "$expected"
+tmux new-session -d -s 'name with  spaces'
+spaced=$(tmux display-message -p -t 'name with  spaces' '#{session_id}')
+wb_assert 'explicit session names retain spaces' test \
+  "$(WORKBENCH_SESSION='name with  spaces' workbench_resolve_session)" = "$spaced"
+tmux kill-session -t 'name with  spaces'
 wb_assert 'TMUX session identity resolves without pane identity' test \
   "$(TMUX="$(tmux display-message -p -t target '#{socket_path},#{pid}'),${expected#\$}" workbench_resolve_session)" = "$expected"
 wb_assert 'pane identity resolves without TMUX' test \
   "$(TMUX_PANE=$(tmux display-message -p -t target '#{pane_id}') workbench_resolve_session)" = "$expected"
+linked_pane=$(tmux display-message -p -t target:main '#{pane_id}')
+tmux new-session -d -s linked
+tmux link-window -s target:main -t linked:
+wb_assert 'a pane linked into two sessions still has one pane identity' test \
+  "$(TMUX_PANE=$linked_pane workbench_resolve_pane)" = "$linked_pane"
+if ( TMUX_PANE=$linked_pane; export TMUX_PANE; workbench_resolve_session ) >"$WB_TEST_TMPDIR/error" 2>&1; then
+  wb_assert 'linked pane alone does not choose an ambiguous session' false
+fi
+tmux kill-session -t linked
 if WORKBENCH_SESSION=missing workbench_resolve_session >"$WB_TEST_TMPDIR/error" 2>&1; then
   wb_assert 'missing explicit session fails' false
 fi

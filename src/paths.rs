@@ -72,7 +72,6 @@ impl Paths {
 
     pub(crate) fn discover_daemon_sockets(&self) -> DaemonSockets {
         use std::collections::BTreeSet;
-        use std::process::Command;
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
         let uid = unsafe { libc::geteuid() };
@@ -132,7 +131,7 @@ impl Paths {
                 servers.into_iter().map(Some).collect()
             };
             for server in targets {
-                let mut command = Command::new("tmux");
+                let mut command = crate::command::new("tmux");
                 command.arg("-u");
                 if let Some(socket) = server {
                     command.arg("-S").arg(socket);
@@ -269,7 +268,7 @@ fn canonical_runtime_dir(uid: u32) -> PathBuf {
 
 fn tmux_runtime_dir(uid: u32) -> Option<PathBuf> {
     use crate::server::{ServerError, ServerIdentity};
-    let mut command = std::process::Command::new("tmux");
+    let mut command = crate::command::new("tmux");
     command.arg("-u");
     match ServerIdentity::discover() {
         Ok(server) => {

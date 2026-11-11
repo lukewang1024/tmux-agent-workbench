@@ -1,4 +1,3 @@
-use std::process::Command;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -83,7 +82,7 @@ pub fn run(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn check_tmux() -> usize {
-    let output = Command::new("tmux").arg("-V").output();
+    let output = crate::command::new("tmux").arg("-V").output();
     let Ok(output) = output else {
         println!("error: tmux not found (requires >= 3.2)");
         return 1;
@@ -177,7 +176,7 @@ fn command_exists(name: &str) -> bool {
 }
 
 fn tmux_output(server: &ServerIdentity, args: &[&str]) -> Result<String, std::io::Error> {
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(args)

@@ -3,7 +3,6 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -79,6 +78,9 @@ struct Window {
     automatic_rename: bool,
     task_name: Option<String>,
     team_role: String,
+    encoded_title_state: String,
+    agent_team: String,
+    pane_title: String,
 }
 
 impl Window {
@@ -93,7 +95,7 @@ impl Window {
 }
 
 pub(crate) fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .arg("-u")
         .args(server.tmux_args())
         .args(args)
@@ -122,18 +124,56 @@ fn window(server: &ServerIdentity, agent: &AgentSnapshot) -> Result<Window, Stri
 }
 
 fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), String> {
+    // show-option -w returns only a window-local value, whereas a format can
+    // inherit an identically named global option. Keep the original semantics
+    // while reading both pieces through one tmux client.
+    let marker = format!("__workbench_window_{}__", uuid::Uuid::new_v4().simple());
+    let separator = format!(
+        "__workbench_window_field_{}__",
+        uuid::Uuid::new_v4().simple()
+    );
+    let format = format!(
+        "{marker}{}",
+        [
+            "#{pane_id}",
+            "#{window_id}",
+            "#{window_name}",
+            "#{@workbench_task}",
+            "#{@workbench_project_root}",
+            "#{@pane_role}",
+            "#{@workbench-window-automatic-rename}",
+            "#{automatic-rename}",
+            "#{@workbench_task_root}",
+            "#{@workbench_task_name}",
+            "#{@agent_team_role}",
+            "#{@agent_team}",
+            "#{pane_title}",
+        ]
+        .join(&separator)
+    );
     let value = tmux(
         server,
         &[
+            "show-option",
+            "-wqv",
+            "-t",
+            target,
+            STATE_OPTION,
+            ";",
             "display-message",
             "-p",
             "-t",
             target,
-            "#{pane_id}\u{1f}#{window_id}\u{1f}#{window_name}\u{1f}#{@workbench_task}\u{1f}#{@workbench_project_root}\u{1f}#{@pane_role}\u{1f}#{@workbench-window-automatic-rename}\u{1f}#{automatic-rename}\u{1f}#{@workbench_task_root}\u{1f}#{@workbench_task_name}\u{1f}#{@agent_team_role}",
+            &format,
         ],
     )?;
-    let fields: Vec<_> = value.split('\u{1f}').collect();
-    if fields.len() != 11 || !fields[1].starts_with('@') {
+    let (encoded_title_state, pane_fields) = value
+        .split_once(&marker)
+        .ok_or("missing task title inventory marker")?;
+    // Pane titles can contain the separator. It is deliberately the last
+    // field, so the remaining title is retained without corrupting metadata.
+    let fields: Vec<_> = pane_fields.splitn(13, separator.as_str()).collect();
+    if fields.len() != 13 || !fields[1].starts_with('@') {
         return Err("agent pane moved or expired; retry with its current identity".into());
     }
     Ok((
@@ -148,6 +188,9 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
             automatic_rename: fields[7] == "1",
             task_name: (!fields[8].is_empty()).then(|| fields[9].to_owned()),
             team_role: fields[10].into(),
+            encoded_title_state: encoded_title_state.trim_end_matches('\n').into(),
+            agent_team: fields[11].into(),
+            pane_title: fields[12].into(),
         },
     ))
 }
@@ -265,6 +308,10 @@ fn state(server: &ServerIdentity, window: &Window) -> Result<Option<TitleState>,
         server,
         &["show-option", "-wqv", "-t", &window.id, STATE_OPTION],
     )?;
+    decode_state(&value)
+}
+
+fn decode_state(value: &str) -> Result<Option<TitleState>, String> {
     if value.is_empty() {
         return Ok(None);
     }
@@ -294,24 +341,15 @@ fn foreground_agent(
     let server = ServerIdentity::from_socket(snapshot.server.clone().into())
         .map_err(|error| error.to_string())?;
     let current = window(&server, agent)?;
-    let previous = state(&server, &current)?;
+    let previous = decode_state(&current.encoded_title_state)?;
     let bound = previous.as_ref().filter(|state| {
         state.owner.pane == agent.target.pane_id
             && Some(&state.owner.process) == agent.process.as_ref()
     });
     let title = if agent.kind == AgentKind::Codex {
-        tmux(
-            &server,
-            &[
-                "display-message",
-                "-p",
-                "-t",
-                &agent.target.pane_id,
-                "#{pane_title}",
-            ],
-        )?
+        current.pane_title.as_str()
     } else {
-        String::new()
+        ""
     };
     let visible = crate::state_machine::codex_title_identity(&title);
     let remembered = bound.and_then(|state| state.owner.session.as_deref());
@@ -414,7 +452,7 @@ fn with_window<T>(
     let initial = window(&server, agent)?;
     let _lock = window_lock_wait(paths, &server, &initial.id, wait)?;
     let current = window(&server, agent)?;
-    let previous = state(&server, &current)?;
+    let previous = decode_state(&current.encoded_title_state)?;
     let preserved = current.protected
         || !current.generic_name()
         || previous.as_ref().is_some_and(|state| {
@@ -798,12 +836,7 @@ pub fn hook_output(
                 }
                 let team = current.team_role == "lead";
                 if (!needs_name && (state.grouped || event == "SessionStart"))
-                    || (!team
-                        && !tmux(
-                            server,
-                            &["display-message", "-p", "-t", pane, "#{@agent_team}"],
-                        )?
-                        .is_empty())
+                    || (!team && !current.agent_team.is_empty())
                 {
                     return Ok(json!({}));
                 }
@@ -1080,7 +1113,10 @@ fn for_caller_action(
             })
             .map_err(|error| error.to_string())?,
         ),
-        Duration::from_secs(3),
+        // Placement verifies and updates several tmux objects. On a loaded
+        // host, do not report failure while the daemon is still committing an
+        // explicit user operation; successful requests return immediately.
+        Duration::from_secs(8),
     )
     .map_err(|error| error.to_string());
     drop(placement_guard);
@@ -1261,6 +1297,8 @@ pub(crate) fn apply(
 pub(crate) struct TitleReaper {
     system: System,
     next_scan: Instant,
+    quiet: bool,
+    last_surface: Option<(String, u64)>,
 }
 
 /// Project the detector's canonical session into tmux. Never infer a second
@@ -1305,31 +1343,71 @@ impl Default for TitleReaper {
         Self {
             system: System::new(),
             next_scan: Instant::now(),
+            quiet: false,
+            last_surface: None,
         }
     }
 }
 
 impl TitleReaper {
-    pub(crate) fn tick(&mut self, paths: &Paths, server: &ServerIdentity, snapshot: &Snapshot) {
-        if Instant::now() < self.next_scan {
+    pub(crate) fn tick(
+        &mut self,
+        paths: &Paths,
+        server: &ServerIdentity,
+        snapshot: &Snapshot,
+        quiet: bool,
+        surface: Option<&crate::tmux::SurfaceInventory>,
+    ) {
+        if self.quiet && !quiet {
+            self.next_scan = Instant::now();
+        }
+        self.quiet = quiet;
+        let cached = surface;
+        let changed = cached.is_some_and(|surface| {
+            self.last_surface
+                .as_ref()
+                .is_none_or(|(titles, generation)| {
+                    titles != &surface.titles || *generation != snapshot.generation
+                })
+        });
+        if !changed && Instant::now() < self.next_scan {
             return;
         }
-        self.next_scan = Instant::now() + Duration::from_millis(500);
-        let Ok(windows) = tmux(
-            server,
-            &[
-                "list-panes",
-                "-a",
-                "-F",
-                "#{window_id}\u{1f}#{@workbench_task_title}\u{1f}#{pane_id}\u{1f}#{pane_title}",
-            ],
-        ) else {
-            return;
+        self.next_scan = Instant::now()
+            + if quiet {
+                Duration::from_secs(30)
+            } else if cached.is_none() {
+                // Exceptional inventory failures are retried centrally;
+                // sidebars must not each start a separate fallback query.
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(500)
+            };
+        let (windows, separator) = if let Some(surface) = cached {
+            self.last_surface = Some((surface.titles.clone(), snapshot.generation));
+            (surface.titles.clone(), "\u{1f}".to_owned())
+        } else {
+            self.last_surface = None;
+            let separator = format!(
+                "__workbench_title_field_{}__",
+                uuid::Uuid::new_v4().simple()
+            );
+            let format = [
+                "#{window_id}",
+                "#{@workbench_task_title}",
+                "#{pane_id}",
+                "#{pane_title}",
+            ]
+            .join(&separator);
+            let Ok(windows) = tmux(server, &["list-panes", "-a", "-F", &format]) else {
+                return;
+            };
+            (windows, separator)
         };
         let panes: Vec<_> = windows
             .lines()
             .filter_map(|line| {
-                let fields: Vec<_> = line.splitn(4, '\u{1f}').collect();
+                let fields: Vec<_> = line.splitn(4, separator.as_str()).collect();
                 (fields.len() == 4).then_some(fields)
             })
             .collect();
@@ -1440,6 +1518,69 @@ impl TitleReaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_inventory_reads_only_window_local_title_state() {
+        if crate::command::new("tmux").arg("-V").output().is_err() {
+            return;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("wb-title-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = dir.path().join("tmux.sock");
+        struct ServerCleanup(std::path::PathBuf);
+        impl Drop for ServerCleanup {
+            fn drop(&mut self) {
+                let _ = crate::command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let _cleanup = ServerCleanup(socket.clone());
+        let run = |args: &[&str]| {
+            let output = crate::command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let pane = run(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            "test",
+        ]);
+        run(&["set-option", "-g", STATE_OPTION, "global-state"]);
+        let server = ServerIdentity::from_socket(socket.clone()).unwrap();
+        assert_eq!(window_at(&server, &pane).unwrap().1.encoded_title_state, "");
+        run(&[
+            "set-option",
+            "-w",
+            "-t",
+            &pane,
+            STATE_OPTION,
+            "window-state",
+        ]);
+        assert_eq!(
+            window_at(&server, &pane).unwrap().1.encoded_title_state,
+            "window-state"
+        );
+    }
 
     #[test]
     fn exit_detection_checks_process_identity_and_actual_termination() {

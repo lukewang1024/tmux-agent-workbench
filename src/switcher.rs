@@ -2,7 +2,6 @@
 //! and state use the same snapshot and presentation as the Sidebar.
 use std::collections::{BTreeMap, HashSet};
 use std::io::stdout;
-use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -92,7 +91,7 @@ impl Scope {
             return Err("invalid source pane".into());
         }
         let format = "#{session_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_index}";
-        let output = Command::new("tmux")
+        let output = crate::command::new("tmux")
             .args(server.tmux_args())
             .args(["display-message", "-p", "-t", pane, format])
             .output()?;

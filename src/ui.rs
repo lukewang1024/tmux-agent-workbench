@@ -2,7 +2,7 @@
 //! Sidebar and switchers always use their shared list renderer.
 use crate::{paths::Paths, server::ServerIdentity};
 use clap::ValueEnum;
-use std::{fs, process::Command};
+use std::fs;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -31,7 +31,7 @@ impl Mode {
 
     pub fn current() -> Result<Self> {
         if let Ok(server) = ServerIdentity::discover() {
-            let output = Command::new("tmux")
+            let output = crate::command::new("tmux")
                 .args(server.tmux_args())
                 .args(["show-option", "-gqv", "@workbench-ui"])
                 .output()?;
@@ -58,7 +58,7 @@ impl Mode {
         fs::write(&temporary, format!("{}\n", self.name()))?;
         fs::rename(&temporary, paths.config_dir.join("ui-mode"))?;
         if let Ok(server) = ServerIdentity::discover() {
-            let status = Command::new("tmux")
+            let status = crate::command::new("tmux")
                 .args(server.tmux_args())
                 .args(["set-option", "-g", "@workbench-ui", self.name()])
                 .status()?;

@@ -178,7 +178,7 @@ fn context() -> Result<(String, String), Box<dyn std::error::Error>> {
             .ok_or("picker client disappeared")?;
         return Ok((pane, client));
     }
-    let clients = Command::new("tmux")
+    let clients = crate::command::new("tmux")
         .args(server.tmux_args())
         .args(["list-clients", "-F", "#{client_name}\t#{pane_id}"])
         .output()?;
@@ -232,7 +232,7 @@ fn activate_agent(
             agent.label,
             agent.reason_category.as_deref().unwrap_or("done")
         );
-        let _ = Command::new("tmux")
+        let _ = crate::command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
             .args(["display-message", "-c", client, &summary])

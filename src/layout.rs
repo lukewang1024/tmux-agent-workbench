@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -1149,7 +1148,7 @@ fn display(
 }
 
 fn tmux(server: &ServerIdentity, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(args)

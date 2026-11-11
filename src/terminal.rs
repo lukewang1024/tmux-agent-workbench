@@ -74,7 +74,7 @@ fn valid_tty(tty: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn interactive_ssh_tty(host: &str) -> Option<String> {
-    let output = Command::new("ps")
+    let output = crate::command::new("ps")
         .args(["-axo", "tty=,command="])
         .output()
         .ok()?;

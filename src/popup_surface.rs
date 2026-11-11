@@ -1,7 +1,6 @@
 //! A bounded panel and its dismissible backdrop share one client-local surface.
 //! tmux's native popup does not forward outside mouse events. Keep drawing and
 //! list coordinates local to the card while capturing those events here.
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -69,7 +68,7 @@ impl Backdrop {
             return Self::default();
         };
         let output = |args: &[&str]| {
-            Command::new("tmux")
+            crate::command::new("tmux")
                 .args(server.tmux_args())
                 .args(args)
                 .output()

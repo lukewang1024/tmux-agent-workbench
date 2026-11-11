@@ -2,11 +2,14 @@
 """Exercise the pinned focus cards through a real tmux client."""
 from contextlib import ExitStack
 import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import pty
 import select
 import shlex
+import socket as socket_module
 import struct
 import subprocess
 import sys
@@ -59,6 +62,33 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
     def screen():
         return tmux('capture-pane', '-p', '-t', sidebar).splitlines()
 
+    def initial_current_agent_visible():
+        lines = screen()
+        return (len(lines) > 6 and 'Priority task' in lines[1]
+                and any('Task z-source' in line for line in lines[6:])
+                and not any(line.strip().endswith('Priority task') for line in lines[6:]))
+
+    def initial_shared_frame_ready():
+        runtime = Path(env['XDG_RUNTIME_DIR']) / 'tmux-agent-workbench'
+        if len(os.fsencode(runtime)) > 70:
+            runtime = Path('/tmp') / f'tmux-agent-workbench-{os.getuid()}'
+        server_key = hashlib.sha256(os.fsencode(os.path.realpath(socket))).hexdigest()[:16]
+        request = {'protocol_version': 1, 'id': 'sidebar-startup', 'method': 'snapshot.get',
+                   'params': {'include_surface': True}}
+        try:
+            with socket_module.socket(socket_module.AF_UNIX) as conn:
+                conn.settimeout(2)
+                conn.connect(str(runtime / f'daemon-{server_key}.sock'))
+                conn.sendall(json.dumps(request).encode() + b'\n')
+                response = json.loads(conn.makefile('rb').readline())
+            result = response.get('result') or {}
+            targets = ((result.get('_workbench_surface') or {}).get('sidebar') or {}).get('selection_targets') or {}
+            live = {agent['target']['session_name'] for agent in result.get('agents', []) if not agent['exited']}
+            expected = {'a-target', 'b-agent', 'c-agent', 'd-agent', 'e-agent', 'f-agent', 'g-agent', 'z-source'}
+            return targets.get(sidebar) == main and expected <= live
+        except (OSError, ValueError, KeyError):
+            return False
+
     def wait(predicate, label):
         deadline = time.monotonic() + 12
         while not predicate():
@@ -94,8 +124,14 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
             tmux('set-option', '-w', '-t', window, '@agent_focus', '1')
         processes.enter_context(running_daemon(core, env))
         sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
-                       '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
+                       '-P', '-F', '#{pane_id}', 'exec sleep 120')
         tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+        # Seed the exact shared frame that can be observed while the sidebar
+        # temporarily has focus, then start it in the same disposable pane.
+        # Returning to main must not leave that initial scroll in place.
+        wait(initial_shared_frame_ready, 'temporary sidebar focus was not shared by the core')
+        tmux('respawn-pane', '-k', '-t', sidebar, shlex.quote(core) + ' sidebar')
+        wait(initial_current_agent_visible, 'temporary sidebar focus did not select its current agent')
         tmux('select-pane', '-t', main)
         client = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'z-source'],
                                   env=env, stdin=slave, stdout=slave, stderr=slave,

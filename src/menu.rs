@@ -250,7 +250,7 @@ fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<
         .into(),
         String::new(),
     ]);
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .args(server.tmux_args())
         .args(&args)
         .env("WORKBENCH_SOURCE_PANE", pane)
@@ -274,7 +274,7 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
         .and_then(|selection| menu.items.get(selection.index))
         .filter(|item| item.enabled && !item.command.is_empty())
     {
-        let mut callback = Command::new("tmux")
+        let mut callback = crate::command::new("tmux")
             .args(ServerIdentity::discover()?.tmux_args())
             .args(["source-file", "-t", pane, "-"])
             .stdin(Stdio::piped())

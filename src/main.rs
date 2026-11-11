@@ -264,6 +264,8 @@ enum DaemonCommand {
     #[command(hide = true)]
     Wake,
     #[command(hide = true)]
+    WakeIfRunning,
+    #[command(hide = true)]
     Run,
 }
 
@@ -697,7 +699,7 @@ fn focus_attached_client(
         ],
         vec!["select-pane", "-Z", "-t", target.pane_id.as_str()],
     ] {
-        if !ProcessCommand::new("tmux")
+        if !tmux_agent_workbench::command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
             .args(args)
@@ -854,7 +856,7 @@ fn client_attach(
         // Local/plain-SSH attachment has no authenticated terminal identity.
         // Use server-local fallback history only when no target was requested.
         let server = ServerIdentity::discover().ok().or_else(|| {
-            let result = ProcessCommand::new("tmux")
+            let result = tmux_agent_workbench::command::new("tmux")
                 .args(["display-message", "-p", "#{socket_path}"])
                 .stderr(Stdio::null())
                 .output()
@@ -876,7 +878,7 @@ fn client_attach(
         } else {
             None
         };
-        let mut command = ProcessCommand::new("tmux");
+        let mut command = tmux_agent_workbench::command::new("tmux");
         if let Some(server) = &server {
             command.args(server.tmux_args());
         }
@@ -1129,7 +1131,7 @@ fn client_attach_pty(
             None
         }
     };
-    let mut command = ProcessCommand::new("tmux");
+    let mut command = tmux_agent_workbench::command::new("tmux");
     command.args(server.tmux_args());
     // `attach-pty` may be invoked from a helper launched inside another tmux
     // client. Clear the inherited client context so tmux creates an actual
@@ -1775,6 +1777,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ipc_call(&paths, "daemon.wake", serde_json::Value::Null)?;
             }
         }
+        Command::Daemon {
+            command: DaemonCommand::WakeIfRunning,
+        } => {
+            // Focus hooks are advisory and can race an intentional shutdown.
+            // They must never resurrect a stopped daemon.
+            let _ = ipc_call(&paths, "daemon.wake", serde_json::Value::Null);
+        }
         Command::Reload => {
             let value = ipc_call(&paths, "config.reload", serde_json::Value::Null)?;
             let _ = tmux_agent_workbench::layout::control(
@@ -1982,7 +1991,7 @@ fn attention_next(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
 
 fn tmux_message(message: &str) -> Result<(), Box<dyn std::error::Error>> {
     let server = ServerIdentity::discover()?;
-    let status = ProcessCommand::new("tmux")
+    let status = tmux_agent_workbench::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(["display-message", message])
@@ -2036,7 +2045,7 @@ fn focus_target(
     if let (Some(source_pane), Some(target_pane)) = (source_pane, pane) {
         restore_source_pane_before_jump(&server, source_pane, target_pane)?;
     }
-    let client_output = ProcessCommand::new("tmux")
+    let client_output = tmux_agent_workbench::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args([
@@ -2073,7 +2082,7 @@ fn focus_target(
         commands.push(select_pane_command(pane));
     }
     for args in commands {
-        let status = ProcessCommand::new("tmux")
+        let status = tmux_agent_workbench::command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
             .args(args)
@@ -2141,7 +2150,7 @@ fn select_pane_command(pane: &str) -> Vec<&str> {
 }
 
 fn client_for_pane(server: &ServerIdentity, pane: &str) -> Option<String> {
-    let output = ProcessCommand::new("tmux")
+    let output = tmux_agent_workbench::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args([
@@ -2178,7 +2187,7 @@ fn restore_source_pane_before_jump(
         // A sidebar click makes the sidebar tmux's remembered active pane.
         // Restore the previous pane before leaving this window so returning
         // later does not unexpectedly land back in the sidebar.
-        let _ = ProcessCommand::new("tmux")
+        let _ = tmux_agent_workbench::command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
             .args(["select-pane", "-Z", "-t", source_pane, "-l"])
@@ -2192,7 +2201,7 @@ fn tmux_format(
     target: &str,
     format: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = ProcessCommand::new("tmux")
+    let output = tmux_agent_workbench::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(["display-message", "-p", "-t", target, format])

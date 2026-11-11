@@ -94,6 +94,60 @@ fn foreground_ids(rows: &str) -> HashSet<u32> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
+fn foreground_ids_for_agents(agents: &HashMap<u32, AgentProcess>) -> HashSet<u32> {
+    let mut foreground = HashSet::new();
+    let mut retry = Vec::new();
+    for agent in agents.values() {
+        let pid = agent.fingerprint.pid;
+        let Ok(raw_pid) = libc::pid_t::try_from(pid) else {
+            continue;
+        };
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // The kernel initializes the complete buffer when it returns its size.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                raw_pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size as i32,
+            )
+        };
+        if read != size as i32 {
+            retry.push(pid);
+            continue;
+        }
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pgid > 0
+            && info.pbi_pgid == info.e_tpgid
+            && !matches!(info.pbi_status, libc::SSTOP | libc::SZOMB)
+        {
+            foreground.insert(pid);
+        }
+    }
+    // Preserve the existing ps behavior if the native query is unavailable.
+    if !retry.is_empty() {
+        foreground.extend(foreground_ids_via_ps(&retry));
+    }
+    foreground
+}
+
+fn foreground_ids_via_ps(pids: &[u32]) -> HashSet<u32> {
+    let pids = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::command::new("ps")
+        .args(["-o", "pid=,pgid=,tpgid=,stat=", "-p", &pids])
+        .output()
+        .ok()
+        .map(|output| foreground_ids(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
+}
+
 impl ProcessTree {
     /// Reuse the detector's existing process inventory. One batched foreground
     /// query replaces per-menu discovery; status formats read pane-local flags.
@@ -104,18 +158,15 @@ impl ProcessTree {
         if agents.is_empty() {
             return HashSet::new();
         }
-        let pids = agents
-            .values()
-            .map(|agent| agent.fingerprint.pid.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let rows = std::process::Command::new("ps")
-            .args(["-o", "pid=,pgid=,tpgid=,stat=", "-p", &pids])
-            .output();
-        let foreground = rows
-            .ok()
-            .map(|output| foreground_ids(&String::from_utf8_lossy(&output.stdout)))
-            .unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let foreground = foreground_ids_for_agents(agents);
+        #[cfg(not(target_os = "macos"))]
+        let foreground = foreground_ids_via_ps(
+            &agents
+                .values()
+                .map(|agent| agent.fingerprint.pid)
+                .collect::<Vec<_>>(),
+        );
         agents
             .iter()
             .filter_map(|(root, agent)| {

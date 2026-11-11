@@ -58,10 +58,28 @@ while [ $# -gt 0 ]; do
 done
 [ $# -eq 0 ] || { echo "tmux-agent-workbench add: unexpected arguments after --" >&2; usage >&2; exit 2; }
 [ -n "$repo_spec" ] || { usage >&2; exit 2; }
+wb_batch_projects=${_WORKBENCH_BATCH_PROJECTS:-0}
+# Keep the internal batch flag out of Git hooks and repository initializers.
+unset _WORKBENCH_BATCH_PROJECTS
 
 WORKBENCH_CODE_ROOT="${WORKBENCH_CODE_ROOT:-$HOME/Code}"
 WORKBENCH_CODE_ROOT=$(cd "$WORKBENCH_CODE_ROOT" 2>/dev/null && pwd -P) || { echo "tmux-agent-workbench add: WORKBENCH_CODE_ROOT not found: $WORKBENCH_CODE_ROOT" >&2; exit 1; }
 WORKBENCH_WORKSPACE_ROOT="${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}"
+
+# Reject a missing repository before resolving tmux task ownership. In a
+# batched add this keeps a later typo from repeating an expensive ancestry and
+# window search before the caller can refresh already-created worktrees.
+case $repo_spec in *:*) wb_probe_repo=${repo_spec%%:*} ;; *) wb_probe_repo=$repo_spec ;; esac
+case $wb_probe_repo in ''|.|..|*/*) echo "workbench: invalid repository name: $wb_probe_repo" >&2; exit 2 ;; esac
+wb_repo_candidate_found=0
+if [ -d "$WORKBENCH_CODE_ROOT/$wb_probe_repo" ]; then
+  wb_repo_candidate_found=1
+else
+  for wb_repo_candidate in "$WORKBENCH_CODE_ROOT"/*/"$wb_probe_repo" "$WORKBENCH_CODE_ROOT"/*/*/"$wb_probe_repo"; do
+    if [ -d "$wb_repo_candidate" ]; then wb_repo_candidate_found=1; break; fi
+  done
+fi
+[ "$wb_repo_candidate_found" -eq 1 ] || { echo "tmux-agent-workbench add: no repo named '$wb_probe_repo' found under $WORKBENCH_CODE_ROOT" >&2; exit 1; }
 
 . "$dir/../../lib/resolve-session.sh"
 . "$dir/../../lib/task-context.sh"
@@ -90,12 +108,19 @@ fi
 # Same exact-basename resolution tmux-agent-workbench new uses: never matches a numbered pool
 # slot like web-app-3, since those are never named exactly `web-app`.
 main=
-for c in "$WORKBENCH_CODE_ROOT/$rname" "$WORKBENCH_CODE_ROOT"/*/"$rname" "$WORKBENCH_CODE_ROOT"/*/*/"$rname"; do
-  [ -d "$c" ] || continue
-  top=$(git -C "$c" rev-parse --show-toplevel 2>/dev/null) || continue
-  [ "$top" = "$c" ] || continue
-  main=$top; break
-done
+c=$WORKBENCH_CODE_ROOT/$rname
+if [ -d "$c" ]; then
+  top=$(git -C "$c" rev-parse --show-toplevel 2>/dev/null) || top=
+  [ "$top" != "$c" ] || main=$top
+fi
+if [ -z "$main" ]; then
+  for c in "$WORKBENCH_CODE_ROOT"/*/"$rname" "$WORKBENCH_CODE_ROOT"/*/*/"$rname"; do
+    [ -d "$c" ] || continue
+    top=$(git -C "$c" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ "$top" = "$c" ] || continue
+    main=$top; break
+  done
+fi
 [ -n "$main" ] || { echo "tmux-agent-workbench add: no repo named '$rname' found under $WORKBENCH_CODE_ROOT" >&2; exit 1; }
 
 dest="$wb_task_root/$(basename "$main")"
@@ -192,5 +217,7 @@ fi
 
 if command -v zoxide > /dev/null 2>&1; then zoxide add "$dest" || true; fi
 
-"$dir/../../bin/tmux-agent-workbench-cli" projects rebuild "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"
+if [ "$wb_batch_projects" != 1 ]; then
+  "$dir/../../bin/tmux-agent-workbench-cli" projects rebuild "$WORKBENCH_CODE_ROOT" "$WORKBENCH_WORKSPACE_ROOT"
+fi
 printf '%s\n' "$dest"

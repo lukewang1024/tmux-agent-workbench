@@ -48,7 +48,7 @@ struct TeamSummary {
     done: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct TeamMember {
     key: String,
     window: String,
@@ -74,7 +74,7 @@ struct FocusCard {
     team: Option<TeamSummary>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SidebarView {
     Agents,
     Sessions,
@@ -104,7 +104,7 @@ impl PinnedCard {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct FocusWindow {
     id: String,
     session_id: String,
@@ -118,6 +118,19 @@ struct FocusWindow {
 
 type FocusWindows = HashMap<String, FocusWindow>;
 type FocusSessions = HashSet<String>;
+
+/// One daemon-computed view shared by every sidebar on the same server.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SharedSidebarData {
+    teams: TeamIndex,
+    focused: FocusWindows,
+    sessions: FocusSessions,
+    live_panes: HashSet<String>,
+    branches: HashMap<String, String>,
+    selection_targets: HashMap<String, String>,
+    view: Option<SidebarView>,
+    sort: Option<AgentSort>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SidebarPalette {
@@ -136,6 +149,25 @@ struct SidebarPalette {
 }
 
 impl SidebarPalette {
+    fn from_surface(surface: &crate::tmux::SurfaceInventory) -> Self {
+        let fallback = if surface.appearance == "light" {
+            Self::light()
+        } else {
+            Self::dark()
+        };
+        if let Some(palette) = Self::from_json(&surface.palette, fallback) {
+            return palette;
+        }
+        let mut palette = fallback;
+        if surface.mode == "full" {
+            palette.accent = tmux_color(&surface.accent).unwrap_or(Color::Indexed(2));
+            palette.warning = Color::Indexed(3);
+            palette.alert = Color::Indexed(1);
+            palette.info = Color::Indexed(4);
+        }
+        palette
+    }
+
     fn light() -> Self {
         Self {
             background: Color::Rgb(250, 250, 250),
@@ -168,55 +200,6 @@ impl SidebarPalette {
             alert: Color::Rgb(224, 108, 117),
             info: Color::Rgb(97, 175, 239),
         }
-    }
-
-    fn from_tmux(server: &ServerIdentity) -> Option<Self> {
-        let tmux = crate::tmux::Tmux::new(server.clone());
-        if let Ok(serialized) = tmux.output_with_timeout(
-            &["show-option", "-gqv", "@adaptive_palette"],
-            Duration::from_millis(250),
-        ) && let Some(palette) = Self::from_json(&serialized, Self::default())
-        {
-            return Some(palette);
-        }
-
-        let output = tmux
-            .output_with_timeout(&["show-options", "-g"], Duration::from_millis(250))
-            .ok()?;
-        let options: HashMap<_, _> = output
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .filter(|(name, _)| name.starts_with("@adaptive_"))
-            .map(|(name, value)| {
-                (
-                    name.to_owned(),
-                    value.trim().trim_matches('\'').trim_matches('"').to_owned(),
-                )
-            })
-            .collect();
-
-        let fallback = if options.get("@adaptive_appearance").map(String::as_str) == Some("light") {
-            Self::light()
-        } else {
-            Self::dark()
-        };
-        if let Some(serialized) = options.get("@adaptive_palette")
-            && let Some(palette) = Self::from_json(serialized, fallback)
-        {
-            return Some(palette);
-        }
-
-        let mut palette = fallback;
-        if options.get("@adaptive_mode").map(String::as_str) == Some("full") {
-            palette.accent = options
-                .get("@adaptive_accent")
-                .and_then(|color| tmux_color(color))
-                .unwrap_or(Color::Indexed(2));
-            palette.warning = Color::Indexed(3);
-            palette.alert = Color::Indexed(1);
-            palette.info = Color::Indexed(4);
-        }
-        Some(palette)
     }
 
     fn from_json(serialized: &str, fallback: Self) -> Option<Self> {
@@ -398,22 +381,54 @@ fn worker_display(agent: &AgentSnapshot, member: &TeamMember) -> WorkerDisplay {
 
 /// Live grouping requires a pane marker and matching state. Retained snapshots
 /// of missing worker panes can also be matched against validated team state.
+pub(crate) struct CachedSidebarInventory {
+    topology: Vec<(String, String, bool)>,
+    expires: Instant,
+    rows: String,
+    restore_token: String,
+}
+
 fn read_inventory(
     paths: &Paths,
     server: &ServerIdentity,
     snapshot: &Snapshot,
+    cache: &mut Option<CachedSidebarInventory>,
+    shared: Option<&crate::tmux::SurfaceInventory>,
 ) -> Option<(TeamIndex, FocusWindows, FocusSessions, HashSet<String>)> {
-    let inventory = crate::tmux::Tmux::new(server.clone())
-        .output_with_timeout(
-            &[
-                "list-panes",
-                "-a",
-                "-F",
-                "#{window_id}\t#{pane_id}\t#{@agent_team}\t#{pane_dead}\t#{@agent_focus}\t#{session_id}\t#{session_name}\t#{window_name}\t#{window_index}\t#{pane_active}\t#{@workbench_window_state}\t#{@pane_role}\t#{@workbench_assistant}\t#{@workbench_session_focus}",
-            ],
-            Duration::from_millis(250),
-        )
-        .ok()?;
+    let topology = snapshot
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.target.pane_id.clone(),
+                agent.target.window_id.clone(),
+                agent.exited,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expired = cache
+        .as_ref()
+        .is_none_or(|cached| cached.topology != topology || Instant::now() >= cached.expires);
+    if let Some(surface) = shared {
+        if !expired {
+            let cached = cache.as_mut()?;
+            cached.rows.clone_from(&surface.rows);
+            cached.restore_token.clone_from(&surface.restore_token);
+        } else {
+            *cache = Some(CachedSidebarInventory {
+                topology,
+                expires: Instant::now() + Duration::from_secs(45),
+                rows: surface.rows.clone(),
+                restore_token: surface.restore_token.clone(),
+            });
+        }
+    } else if expired {
+        // Keep the last rendered frame until the daemon can supply a fresh
+        // shared inventory. A sidebar must not amplify a core failure into
+        // one tmux query per resident UI.
+        return None;
+    }
+    let inventory = cache.as_ref()?.rows.clone();
     let mut marked: HashMap<(String, String), HashSet<String>> = HashMap::new();
     let mut all_panes = HashSet::new();
     let mut focused = FocusWindows::new();
@@ -496,13 +511,7 @@ fn read_inventory(
     let mut index = TeamIndex::new();
     // A random server-lifetime token lets a deliberately rebound team retain
     // provenance even after its last window disappears.
-    let restore_token = crate::tmux::Tmux::new(server.clone())
-        .output_with_timeout(
-            &["show-option", "-gqv", "@workbench_team_restore_token"],
-            Duration::from_millis(250),
-        )
-        .unwrap_or_default();
-    let restore_token = restore_token.trim();
+    let restore_token = cache.as_ref()?.restore_token.trim();
     for id in candidates {
         let file = root.join(&id).join("state.json");
         let state = std::fs::metadata(&file)
@@ -590,6 +599,57 @@ fn read_inventory(
     Some((index, focused, focused_sessions, all_panes))
 }
 
+pub(crate) fn shared_sidebar_data(
+    paths: &Paths,
+    server: &ServerIdentity,
+    snapshot: &Snapshot,
+    cache: &mut Option<CachedSidebarInventory>,
+    surface: &crate::tmux::SurfaceInventory,
+) -> Option<SharedSidebarData> {
+    let (teams, focused, sessions, live_panes) =
+        read_inventory(paths, server, snapshot, cache, Some(surface))?;
+    let session_paths: HashSet<_> = snapshot
+        .sessions
+        .iter()
+        .filter_map(|session| session.current_path.as_deref())
+        .filter(|path| !path.is_empty())
+        .collect();
+    let branches = session_paths
+        .into_iter()
+        .filter_map(|path| {
+            git_branch(std::path::Path::new(path)).map(|branch| (path.into(), branch))
+        })
+        .collect();
+    let selection_targets = surface
+        .rows
+        .lines()
+        .filter_map(|row| {
+            let fields: Vec<_> = row.split('\t').collect();
+            let window = *fields.first()?;
+            let pane = *fields.get(1)?;
+            // A sidebar only represents the previous pane while it is the
+            // active pane. In a window with multiple panes, pane_last can
+            // otherwise refer to an unrelated, inactive sidebar.
+            if fields.get(11) == Some(&"sidebar") && fields.get(9) != Some(&"1") {
+                return None;
+            }
+            Some((pane.to_owned(), surface.last_panes.get(window)?.clone()))
+        })
+        .collect();
+    Some(SharedSidebarData {
+        teams,
+        focused,
+        sessions,
+        live_panes,
+        branches,
+        selection_targets,
+        // An absent preference means the default view. Send it explicitly so
+        // a newly opened sidebar can discard a stale shared Sessions value.
+        view: Some(persisted_sidebar_view(paths).unwrap_or(SidebarView::Agents)),
+        sort: persisted_agent_sort(paths),
+    })
+}
+
 /// Shared geometry for rendering and hit testing. Status, overflow and popup
 /// footer lines and the pinned action bar never map to an agent row.
 #[derive(Debug, Clone, Copy)]
@@ -652,7 +712,8 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
     // Resolve the first frame before switching to the alternate screen. Some
     // remote clients do not paint an initially empty fullscreen popup until a
     // later input event; entering with real rows makes the UI visible at once.
-    let initial_snapshot = fetch_snapshot(&paths.socket_for_server(&server.key));
+    let initial_snapshot =
+        fetch_snapshot_with_surface(&paths.socket_for_server(&server.key), false);
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(crate::popup_surface::Surface::from_env(
         CrosstermBackend::new(stdout()),
@@ -749,59 +810,101 @@ fn switch_sidebar_view(
     Ok(())
 }
 
+fn apply_shared_preference<T: Copy + Eq>(
+    current: &mut T,
+    pending: &mut Option<(T, Instant)>,
+    shared: Option<T>,
+) -> bool {
+    if let Some((requested, at)) = *pending {
+        if shared == Some(requested) || at.elapsed() >= Duration::from_secs(3) {
+            *pending = None;
+        } else {
+            return false;
+        }
+    }
+    if let Some(value) = shared
+        && value != *current
+    {
+        *current = value;
+        return true;
+    }
+    false
+}
+
 fn event_loop(
     terminal: &mut Terminal<crate::popup_surface::Surface<CrosstermBackend<io::Stdout>>>,
     paths: &Paths,
     server: &ServerIdentity,
-    initial_snapshot: Result<Snapshot, Box<dyn std::error::Error>>,
+    initial_snapshot: Result<
+        (Snapshot, Option<crate::tmux::SurfaceInventory>),
+        Box<dyn std::error::Error>,
+    >,
     runtime_identity: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
     let fetch_socket = socket.clone();
     let (refresh_tx, refresh_rx) = mpsc::sync_channel::<bool>(1);
-    let visibility_tmux = crate::tmux::Tmux::new(server.clone());
     let visibility_pane = std::env::var("TMUX_PANE").ok();
     let is_popup = popup_mode();
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
-    let team_paths = paths.clone();
-    let team_server = server.clone();
+    let low_process_churn = Config::load(&paths.config_file())
+        .map(|config| config.detection.low_process_churn)
+        .unwrap_or(false);
     std::thread::spawn(move || {
         let mut visible = true;
-        let mut next_visibility_check = Instant::now();
         while let Ok(interactive) = refresh_rx.recv() {
-            if !is_popup && (interactive || Instant::now() >= next_visibility_check) {
-                visible = visibility_pane
-                    .as_deref()
-                    .and_then(|pane| visibility_tmux.sidebar_visible(pane).ok())
-                    .unwrap_or(true);
-                next_visibility_check = Instant::now() + Duration::from_secs(5);
+            let fetched = match fetch_snapshot_with_surface(&fetch_socket, interactive) {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    // Retain the last frame if the shared core is temporarily busy.
+                    let _ = snapshot_tx.try_send((Err(error.to_string()), visible, None));
+                    continue;
+                }
+            };
+            let surface = fetched.1.as_ref();
+            if let Some(now_visible) = surface.and_then(|surface| {
+                visibility_pane
+                    .as_ref()
+                    .and_then(|pane| surface.visibility.get(pane))
+            }) {
+                visible = *now_visible;
             }
-            let result = fetch_snapshot(&fetch_socket)
-                .map_err(|error| error.to_string())
-                .and_then(|snapshot| sidebar_state(&team_paths, &team_server, snapshot));
-            let _ = snapshot_tx.try_send((result, visible));
+            let shared_palette = surface.map(SidebarPalette::from_surface);
+            let (snapshot, surface) = fetched;
+            let result = sidebar_state(snapshot, surface.as_ref());
+            let _ = snapshot_tx.try_send((result, visible, shared_palette));
         }
     });
     let mut detailed = false;
     let mut agent_sort = Config::load(&paths.config_file())
         .map(|config| config.sidebar.agent_sort)
         .unwrap_or_default();
-    if let Some(saved) = persisted_agent_sort(paths) {
-        agent_sort = saved;
-    }
-    let mut view = persisted_sidebar_view(paths).unwrap_or(SidebarView::Agents);
+    let mut view = SidebarView::Agents;
+    let initial_palette = initial_snapshot
+        .as_ref()
+        .ok()
+        .and_then(|(_, surface)| surface.as_ref())
+        .map(SidebarPalette::from_surface);
     let initial_state = initial_snapshot
         .map_err(|error| error.to_string())
-        .and_then(|snapshot| sidebar_state(paths, server, snapshot));
-    let (mut snapshot, mut teams, mut focused, mut focused_sessions) = match initial_state {
-        Ok((snapshot, teams, focused, sessions)) => (Some(snapshot), teams, focused, sessions),
-        Err(_) => (
-            None,
-            TeamIndex::new(),
-            FocusWindows::new(),
-            FocusSessions::new(),
-        ),
+        .and_then(|(snapshot, surface)| sidebar_state(snapshot, surface.as_ref()));
+    let (mut snapshot, initial_data) = match initial_state {
+        Ok((snapshot, data)) => (Some(snapshot), data),
+        Err(_) => (None, SharedSidebarData::default()),
     };
+    if let Some(saved) = initial_data.sort {
+        agent_sort = saved;
+    }
+    if let Some(saved) = initial_data.view {
+        view = saved;
+    }
+    let mut teams = initial_data.teams;
+    let mut focused = initial_data.focused;
+    let mut focused_sessions = initial_data.sessions;
+    let mut branches = initial_data.branches;
+    let mut selection_targets = initial_data.selection_targets;
+    let mut pending_view = None;
+    let mut pending_sort = None;
     let mut expanded = HashSet::new();
     let mut rows = snapshot
         .as_ref()
@@ -812,9 +915,13 @@ fn event_loop(
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
+    let mut startup_selection = None;
     if let Some(snapshot) = &snapshot
-        && let Some(index) = initial_row(&rows, snapshot, server, is_popup)
+        && let Some(index) = initial_row(&rows, snapshot, &selection_targets, is_popup)
     {
+        if !is_popup {
+            startup_selection = selection_key(&rows[index]);
+        }
         navigation.select(index);
     }
     let mut disconnected = snapshot.is_none();
@@ -822,33 +929,59 @@ fn event_loop(
     let mut last_failure_log = Instant::now() - Duration::from_secs(10);
     let mut visible = true;
     let mut next_refresh = Instant::now();
-    let mut next_sort_sync = Instant::now() + Duration::from_millis(200);
-    let mut palette = SidebarPalette::from_tmux(server).unwrap_or_default();
-    let mut next_palette_sync = Instant::now() + Duration::from_secs(1);
+    let mut palette = initial_palette.unwrap_or_default();
     let mut dirty = true;
     let mut initial_selection = snapshot.is_none();
     let mut last_content_height = usize::MAX;
     let mut runtime_registered = is_popup;
     loop {
-        if let Ok((result, now_visible)) = snapshot_rx.try_recv() {
-            if now_visible && !visible {
-                next_palette_sync = Instant::now();
+        if let Ok((result, now_visible, shared_palette)) = snapshot_rx.try_recv() {
+            if let Some(updated) = shared_palette {
+                if updated != palette {
+                    palette = updated;
+                }
             }
             visible = now_visible;
-            next_refresh = Instant::now() + refresh_interval(visible);
+            // Low-churn mode avoids subprocesses using a cached inventory;
+            // keep IPC fresh even if a window becomes visible without a
+            // focus event, rather than waiting for the slow visibility probe.
+            next_refresh = Instant::now() + refresh_interval(visible || low_process_churn);
             match result {
-                Ok((fetched, fetched_teams, fetched_focused, fetched_sessions)) => {
-                    teams = fetched_teams;
-                    focused = fetched_focused;
-                    focused_sessions = fetched_sessions;
+                Ok((fetched, data)) => {
+                    let view_changed =
+                        apply_shared_preference(&mut view, &mut pending_view, data.view);
+                    apply_shared_preference(&mut agent_sort, &mut pending_sort, data.sort);
+                    teams = data.teams;
+                    focused = data.focused;
+                    focused_sessions = data.sessions;
+                    branches = data.branches;
+                    selection_targets = data.selection_targets;
                     rows = view_rows(&fetched, detailed, agent_sort, &teams, &expanded, view);
+                    if view_changed {
+                        navigation = NavigationList::default();
+                    }
                     navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
                     if initial_selection {
                         initial_selection = false;
-                        navigation
-                            .select(initial_row(&rows, &fetched, server, is_popup).unwrap_or(0));
+                        let index = initial_row(&rows, &fetched, &selection_targets, is_popup);
+                        if !is_popup {
+                            startup_selection = index.and_then(|index| selection_key(&rows[index]));
+                        }
+                        navigation.select(index.unwrap_or(0));
+                    } else if let Some(selected) = startup_selection.as_ref() {
+                        let current = current_agent_selection(&rows, &fetched, &selection_targets)
+                            .and_then(|index| selection_key(&rows[index]));
+                        if current.as_ref() != Some(selected) {
+                            // The sidebar can start while it is temporarily
+                            // focused, before tmux returns to the main pane.
+                            // Do not retain that stale automatic scroll after
+                            // a newer shared frame observes the focus change.
+                            navigation = NavigationList::default();
+                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            startup_selection = None;
+                        }
                     }
                     snapshot = Some(fetched);
                 }
@@ -871,48 +1004,8 @@ fn event_loop(
         }
         if Instant::now() >= next_refresh {
             let _ = refresh_tx.try_send(false);
-            next_refresh = Instant::now() + refresh_interval(visible);
+            next_refresh = Instant::now() + refresh_interval(visible || low_process_churn);
         }
-        if Instant::now() >= next_sort_sync {
-            next_sort_sync = Instant::now()
-                + if visible {
-                    Duration::from_millis(200)
-                } else {
-                    Duration::from_secs(5)
-                };
-            if let Some(saved) = persisted_agent_sort(paths)
-                && saved != agent_sort
-            {
-                agent_sort = saved;
-                if let Some(snapshot) = &snapshot {
-                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
-                    navigation.replace_rows(rows.iter().map(selection_key).collect());
-                }
-                dirty = true;
-            }
-            if let Some(saved) = persisted_sidebar_view(paths)
-                && saved != view
-            {
-                view = saved;
-                if let Some(snapshot) = &snapshot {
-                    rows = view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
-                    navigation = NavigationList::default();
-                    navigation.replace_rows(rows.iter().map(selection_key).collect());
-                }
-                dirty = true;
-            }
-        }
-        let now = Instant::now();
-        if now >= next_palette_sync {
-            next_palette_sync = now + refresh_interval(visible);
-            if let Some(updated) = SidebarPalette::from_tmux(server)
-                && updated != palette
-            {
-                palette = updated;
-                dirty = true;
-            }
-        }
-
         let size = terminal.size()?;
         let body_height = usize::from(size.height).max(1);
         let footer_height = 2 * usize::from(popup_mode());
@@ -967,6 +1060,7 @@ fn event_loop(
                         highlighted,
                         area.width,
                         palette,
+                        &branches,
                     ));
                 }
                 if let Some(notice) = notice {
@@ -999,6 +1093,7 @@ fn event_loop(
                             area.width - 3,
                             &focused,
                             palette,
+                            &branches,
                         );
                         let mut style = Style::default().fg(
                             if focused_sessions.contains(&session.session_id) {
@@ -1014,7 +1109,7 @@ fn event_loop(
                         line
                     } else {
                         render_sidebar_row_with_palette(
-                            row, selected, area.width, &focused, palette,
+                            row, selected, area.width, &focused, palette, &branches,
                         )
                     }
                 });
@@ -1058,7 +1153,7 @@ fn event_loop(
                     );
                 }
             })?;
-            if !runtime_registered {
+            if !runtime_registered && snapshot.is_some() {
                 crate::layout::register_sidebar_runtime(server, runtime_identity)?;
                 runtime_registered = true;
             }
@@ -1075,12 +1170,15 @@ fn event_loop(
         let Some(input) = terminal.backend_mut().input(event::read()?)? else {
             continue;
         };
+        if matches!(input, Event::FocusGained | Event::Key(_) | Event::Mouse(_)) {
+            // Never move the viewport underneath a pending click or undo the
+            // user's own selection when the next shared frame arrives.
+            startup_selection = None;
+        }
         if matches!(input, Event::FocusGained) || (!visible && !matches!(input, Event::FocusLost)) {
             let _ = refresh_tx.try_send(true);
             visible = true;
             next_refresh = Instant::now() + refresh_interval(true);
-            next_sort_sync = Instant::now();
-            next_palette_sync = Instant::now();
         }
         dirty = true;
         match input {
@@ -1158,17 +1256,21 @@ fn event_loop(
                             next_refresh = Instant::now();
                         }
                     }
-                    KeyCode::Tab => switch_sidebar_view(
-                        paths,
-                        &mut view,
-                        snapshot.as_ref(),
-                        detailed,
-                        agent_sort,
-                        &teams,
-                        &expanded,
-                        &mut rows,
-                        &mut navigation,
-                    )?,
+                    KeyCode::Tab => {
+                        switch_sidebar_view(
+                            paths,
+                            &mut view,
+                            snapshot.as_ref(),
+                            detailed,
+                            agent_sort,
+                            &teams,
+                            &expanded,
+                            &mut rows,
+                            &mut navigation,
+                        )?;
+                        pending_view = Some((view, Instant::now()));
+                        let _ = refresh_tx.try_send(true);
+                    }
                     _ if navigation.navigate(key.code) => {}
                     KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
                         if navigation.selection_visible
@@ -1337,17 +1439,21 @@ fn event_loop(
                 };
                 match hit {
                     Some(Hit::Action(Action::Close)) => return Ok(()),
-                    Some(Hit::Action(Action::View)) => switch_sidebar_view(
-                        paths,
-                        &mut view,
-                        snapshot.as_ref(),
-                        detailed,
-                        agent_sort,
-                        &teams,
-                        &expanded,
-                        &mut rows,
-                        &mut navigation,
-                    )?,
+                    Some(Hit::Action(Action::View)) => {
+                        switch_sidebar_view(
+                            paths,
+                            &mut view,
+                            snapshot.as_ref(),
+                            detailed,
+                            agent_sort,
+                            &teams,
+                            &expanded,
+                            &mut rows,
+                            &mut navigation,
+                        )?;
+                        pending_view = Some((view, Instant::now()));
+                        let _ = refresh_tx.try_send(true);
+                    }
                     Some(Hit::Action(Action::Pinned)) => {
                         if show_pinned_menu(&focus_cards, view, Some((mouse.column, mouse.row)))? {
                             return Ok(());
@@ -1371,6 +1477,8 @@ fn event_loop(
                             AgentSort::Prioritized => AgentSort::Grouped,
                         };
                         persist_agent_sort(paths, agent_sort)?;
+                        pending_sort = Some((agent_sort, Instant::now()));
+                        let _ = refresh_tx.try_send(true);
                         if let Some(snapshot) = &snapshot {
                             rows =
                                 view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
@@ -1461,26 +1569,45 @@ fn connection_notice(disconnected: bool, has_snapshot: bool) -> Option<&'static 
     }
 }
 
+#[cfg(test)]
 fn fetch_snapshot(socket: &std::path::Path) -> Result<Snapshot, Box<dyn std::error::Error>> {
+    Ok(fetch_snapshot_with_surface(socket, false)?.0)
+}
+
+fn fetch_snapshot_with_surface(
+    socket: &std::path::Path,
+    refresh_surface: bool,
+) -> Result<(Snapshot, Option<crate::tmux::SurfaceInventory>), Box<dyn std::error::Error>> {
     let value = call(
         socket,
-        &Request::new("snapshot.get", serde_json::Value::Null),
+        &Request::new(
+            "snapshot.get",
+            serde_json::json!({
+                "include_surface": true,
+                "refresh_surface": refresh_surface,
+            }),
+        ),
         Duration::from_millis(500),
     )?;
-    Ok(serde_json::from_value(value)?)
+    let surface = value
+        .get("_workbench_surface")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    Ok((serde_json::from_value(value)?, surface))
 }
 
 // A snapshot and its team identities form one display frame. A temporary
 // tmux inventory failure must not promote retained workers to ordinary agents.
 fn sidebar_state(
-    paths: &Paths,
-    server: &ServerIdentity,
     mut snapshot: Snapshot,
-) -> Result<(Snapshot, TeamIndex, FocusWindows, FocusSessions), String> {
-    let (teams, focused, sessions, live_panes) = read_inventory(paths, server, &snapshot)
-        .ok_or_else(|| "team pane inventory unavailable".to_owned())?;
-    prune_closed_pane_tombstones(&mut snapshot, &live_panes);
-    Ok((snapshot, teams, focused, sessions))
+    shared: Option<&crate::tmux::SurfaceInventory>,
+) -> Result<(Snapshot, SharedSidebarData), String> {
+    let data = shared
+        .and_then(|surface| surface.sidebar.as_ref())
+        .ok_or_else(|| "shared sidebar inventory unavailable".to_owned())?;
+    prune_closed_pane_tombstones(&mut snapshot, &data.live_panes);
+    Ok((snapshot, data.clone()))
 }
 
 fn prune_closed_pane_tombstones(snapshot: &mut Snapshot, live_panes: &HashSet<String>) {
@@ -1847,17 +1974,19 @@ fn render_pinned_card_with_palette(
     selected: bool,
     width: u16,
     palette: SidebarPalette,
+    branches: &HashMap<String, String>,
 ) -> [Line<'static>; 2] {
     match card {
         PinnedCard::Agent(card) => render_focus_card_with_palette(card, selected, width, palette),
         PinnedCard::Session(session) => {
             let title =
                 render_row_with_palette(&Row::Session(session.clone()), selected, width, palette);
-            let subtitle = render_row_with_palette(
+            let subtitle = render_row_with_branches(
                 &Row::SessionSub(session.clone()),
                 selected,
                 width,
                 palette,
+                Some(branches),
             );
             [title, subtitle]
         }
@@ -1971,9 +2100,9 @@ fn stable_session_key(session: &SessionSnapshot) -> (String, String) {
 fn current_agent_selection(
     rows: &[Row],
     snapshot: &Snapshot,
-    server: &ServerIdentity,
+    selection_targets: &HashMap<String, String>,
 ) -> Option<usize> {
-    let instance = current_agent_instance(snapshot, server)?;
+    let instance = current_agent_instance(snapshot, selection_targets)?;
     // Prefer the canonical Agent row when restoring focus after a refresh.
     rows.iter()
         .rposition(|row| matches!(row, Row::Agent(agent) | Row::Team(agent, _) | Row::TeamWorker(agent, _) if agent.instance_id == instance))
@@ -1982,7 +2111,7 @@ fn current_agent_selection(
 fn initial_row(
     rows: &[Row],
     snapshot: &Snapshot,
-    server: &ServerIdentity,
+    selection_targets: &HashMap<String, String>,
     popup: bool,
 ) -> Option<usize> {
     if popup {
@@ -1991,11 +2120,14 @@ fn initial_row(
         // in the middle of a group as soon as the popup opened.
         rows.iter().position(|row| selection_key(row).is_some())
     } else {
-        current_agent_selection(rows, snapshot, server)
+        current_agent_selection(rows, snapshot, selection_targets)
     }
 }
 
-fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Option<String> {
+fn current_agent_instance(
+    snapshot: &Snapshot,
+    selection_targets: &HashMap<String, String>,
+) -> Option<String> {
     let source = source_pane()?;
     if let Some(agent) = snapshot
         .agents
@@ -2005,35 +2137,11 @@ fn current_agent_instance(snapshot: &Snapshot, server: &ServerIdentity) -> Optio
         return Some(agent.instance_id.clone());
     }
 
-    let output = Command::new("tmux")
-        .arg("-S")
-        .arg(&server.socket_path)
-        .args([
-            "list-panes",
-            "-t",
-            &source,
-            "-F",
-            "#{pane_id}\u{1f}#{pane_last}\u{1f}#{@pane_role}",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let previous = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split('\u{1f}');
-            let pane = fields.next()?;
-            let was_last = fields.next()? == "1";
-            let role = fields.next().unwrap_or_default();
-            (was_last && role != "sidebar").then(|| pane.to_owned())
-        })?;
+    let previous = selection_targets.get(&source)?;
     snapshot
         .agents
         .iter()
-        .find(|agent| agent.target.pane_id == previous)
+        .find(|agent| agent.target.pane_id == *previous)
         .map(|agent| agent.instance_id.clone())
 }
 
@@ -2054,6 +2162,16 @@ fn render_row_with_palette(
     selected: bool,
     width: u16,
     palette: SidebarPalette,
+) -> Line<'static> {
+    render_row_with_branches(row, selected, width, palette, None)
+}
+
+fn render_row_with_branches(
+    row: &Row,
+    selected: bool,
+    width: u16,
+    palette: SidebarPalette,
+    branches: Option<&HashMap<String, String>>,
 ) -> Line<'static> {
     match row {
         Row::Section(label) => Line::from(Span::styled(
@@ -2084,7 +2202,12 @@ fn render_row_with_palette(
             palette,
         ),
         Row::SessionSub(session) => {
-            context_line_with_palette(&session_context(session), width, selected, palette)
+            let branch = session
+                .current_path
+                .as_ref()
+                .and_then(|path| branches.and_then(|branches| branches.get(path)))
+                .map(String::as_str);
+            context_line_with_palette(&session_context(session, branch), width, selected, palette)
         }
         Row::Team(agent, summary) => icon_title_line_with_palette(
             if summary.expanded { "▾" } else { "▸" },
@@ -2272,19 +2395,20 @@ fn render_sidebar_row_with_palette(
     width: u16,
     focused: &FocusWindows,
     palette: SidebarPalette,
+    branches: &HashMap<String, String>,
 ) -> Line<'static> {
     let assistant = row_agent(row)
         .and_then(|agent| focused.get(&agent.target.window_id))
         .is_some_and(|window| window.assistant);
     if !assistant {
-        return render_row_with_palette(row, selected, width, palette);
+        return render_row_with_branches(row, selected, width, palette, Some(branches));
     }
 
     let mut row = row.clone();
     if let Some(agent) = row_agent_mut(&mut row) {
         agent.thread_name = Some(crate::ui_language::text("Personal assistant", "个人助理").into());
     }
-    render_row_with_palette(&row, selected, width, palette)
+    render_row_with_branches(&row, selected, width, palette, Some(branches))
 }
 
 fn popup_mode() -> bool {
@@ -2703,7 +2827,77 @@ pub(crate) fn agent_status(agent: &AgentSnapshot) -> String {
     status
 }
 
-fn session_context(session: &SessionSnapshot) -> String {
+fn git_branch(path: &std::path::Path) -> Option<String> {
+    git_branch_from(path, std::env::var_os("GIT_DIR").as_deref())
+}
+
+fn git_branch_from(path: &std::path::Path, override_dir: Option<&OsStr>) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    if !path.is_dir() {
+        return None;
+    }
+    let path = path.as_path();
+    fn small_file(path: &std::path::Path) -> Option<String> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?.take(4097);
+        let mut text = String::new();
+        file.read_to_string(&mut text).ok()?;
+        (text.len() <= 4096).then_some(text)
+    }
+
+    let git_dir = if let Some(directory) = override_dir {
+        let directory = std::path::PathBuf::from(directory);
+        if directory.as_os_str().is_empty() {
+            return None;
+        }
+        if directory.is_absolute() {
+            directory
+        } else {
+            path.join(directory)
+        }
+    } else {
+        let mut found = None;
+        for ancestor in path.ancestors() {
+            let marker = ancestor.join(".git");
+            if marker.is_dir() {
+                found = Some(marker);
+                break;
+            }
+            if marker.is_file() {
+                let text = small_file(&marker)?;
+                let directory = text.trim().strip_prefix("gitdir:")?.trim();
+                if directory.is_empty() {
+                    return None;
+                }
+                let directory = std::path::Path::new(directory);
+                found = Some(if directory.is_absolute() {
+                    directory.to_owned()
+                } else {
+                    ancestor.join(directory)
+                });
+                break;
+            }
+            // Git also accepts a bare repository as the working path.
+            if ancestor.join("HEAD").is_file()
+                && ancestor.join("objects").is_dir()
+                && ancestor.join("refs").is_dir()
+            {
+                found = Some(ancestor.to_owned());
+                break;
+            }
+        }
+        found?
+    };
+    let head = small_file(&git_dir.join("HEAD"))?;
+    let branch = head
+        .trim()
+        .strip_prefix("ref:")?
+        .trim()
+        .strip_prefix("refs/heads/")?;
+    (!branch.is_empty() && !branch.chars().any(char::is_control)).then(|| branch.to_owned())
+}
+
+fn session_context(session: &SessionSnapshot, branch: Option<&str>) -> String {
     let mut parts = Vec::new();
     if let Some(path) = session
         .current_path
@@ -2718,18 +2912,12 @@ fn session_context(session: &SessionSnapshot) -> String {
         if !display.eq_ignore_ascii_case(&session.session_name) {
             parts.push(display.to_owned());
         }
-        if let Ok(output) = Command::new("git")
-            .args(["-C", path, "branch", "--show-current"])
-            .stderr(Stdio::null())
-            .output()
-            && output.status.success()
-        {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if let Some(branch) = branch {
             if !branch.is_empty()
                 && !branch.eq_ignore_ascii_case(&session.session_name)
                 && !parts.iter().any(|part| part.eq_ignore_ascii_case(&branch))
             {
-                parts.push(branch);
+                parts.push(branch.to_owned());
             }
         }
     }
@@ -3724,7 +3912,7 @@ where
         }
         // tmux owns this background job, so closing the current popup cannot
         // kill the deferred action with the popup's process group.
-        Command::new("tmux")
+        crate::command::new("tmux")
             .args(["run-shell", "-b", &deferred])
             .status()?
             .success()
@@ -3752,7 +3940,7 @@ fn current_client() -> Result<String, Box<dyn std::error::Error>> {
     {
         return Ok(client);
     }
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .args(["display-message", "-p", "#{client_name}"])
         .output()?;
     let client = String::from_utf8(output.stdout)?.trim().to_owned();
@@ -4756,10 +4944,57 @@ mod tests {
         session.session_name = "word-formula".into();
         session.current_path = Some("/tmp/word-formula".into());
         session.agent_count = 1;
-        assert_eq!(session_context(&session), "1 agent");
+        assert_eq!(session_context(&session, None), "1 agent");
 
         session.current_path = Some("/tmp/dotfiles".into());
-        assert_eq!(session_context(&session), "dotfiles · 1 agent");
+        assert_eq!(session_context(&session, None), "dotfiles · 1 agent");
+        assert_eq!(
+            session_context(&session, Some("topic")),
+            "dotfiles · topic · 1 agent"
+        );
+    }
+
+    #[test]
+    fn session_branch_reads_git_head_and_worktrees_without_a_process() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let git = repo.join(".git");
+        let nested = repo.join("src/deep");
+        let worktree = root.path().join("worktree");
+        let bare = root.path().join("bare");
+        let alias = root.path().join("alias");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(repo.join("src"), &alias).unwrap();
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir_all(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/bare-branch\n").unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/feature/one\n").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git\n").unwrap();
+        assert_eq!(
+            git_branch_from(&nested, None).as_deref(),
+            Some("feature/one")
+        );
+        assert_eq!(
+            git_branch_from(&alias.join("deep"), None).as_deref(),
+            Some("feature/one")
+        );
+        assert_eq!(
+            git_branch_from(&worktree, None).as_deref(),
+            Some("feature/one")
+        );
+        assert_eq!(git_branch_from(&bare, None).as_deref(), Some("bare-branch"));
+
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/other\n").unwrap();
+        assert_eq!(git_branch_from(&worktree, None).as_deref(), Some("other"));
+        std::fs::write(
+            git.join("HEAD"),
+            "0000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch_from(&nested, None), None);
+        assert_eq!(git_branch_from(&worktree, Some(git.as_os_str())), None);
     }
 
     #[test]

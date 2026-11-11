@@ -4,8 +4,8 @@ use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock, RwLockWriteGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -77,6 +77,74 @@ struct State {
     recovered_pending: Vec<crate::semantic::SemanticEvent>,
     recovered_runtimes: Vec<crate::checkpoint::RuntimeCheckpoint>,
     attached_focus: AttachedFocus,
+    status_projection: Option<Vec<(String, crate::model::DisplayState, bool)>>,
+    sidebar_sender: mpsc::SyncSender<SidebarRequest>,
+    shared_surface: Arc<SharedSurfaceCache>,
+    next_sidebar_surface: Instant,
+    last_sidebar_sample: Option<Instant>,
+}
+
+struct SidebarRequest {
+    snapshot: Snapshot,
+    surface: crate::tmux::SurfaceInventory,
+    sampled_at: Instant,
+}
+
+struct CachedSharedSurface {
+    snapshot: Snapshot,
+    surface: crate::tmux::SurfaceInventory,
+    sampled_at: Instant,
+}
+
+#[derive(Default)]
+struct SharedSurfaceCache {
+    value: RwLock<Option<CachedSharedSurface>>,
+    refresh_requested: AtomicBool,
+}
+
+fn start_sidebar_worker(
+    paths: &Paths,
+    server: &ServerIdentity,
+) -> (mpsc::SyncSender<SidebarRequest>, Arc<SharedSurfaceCache>) {
+    let (sender, receiver) = mpsc::sync_channel::<SidebarRequest>(1);
+    let shared = Arc::new(SharedSurfaceCache::default());
+    let output = Arc::clone(&shared);
+    let paths = paths.clone();
+    let server = server.clone();
+    thread::spawn(move || {
+        let mut inventory_cache = None;
+        while let Ok(request) = receiver.recv() {
+            let mut surface = request.surface;
+            surface.sidebar = crate::sidebar::shared_sidebar_data(
+                &paths,
+                &server,
+                &request.snapshot,
+                &mut inventory_cache,
+                &surface,
+            );
+            if surface.sidebar.is_some() && request.sampled_at.elapsed() < Duration::from_secs(3) {
+                *output.value.write().expect("sidebar cache poisoned") =
+                    Some(CachedSharedSurface {
+                        snapshot: request.snapshot,
+                        surface,
+                        sampled_at: request.sampled_at,
+                    });
+            }
+        }
+    });
+    (sender, shared)
+}
+
+fn cached_sidebar_surface(
+    cache: &SharedSurfaceCache,
+) -> Option<(Snapshot, crate::tmux::SurfaceInventory)> {
+    cache
+        .value
+        .read()
+        .expect("sidebar cache poisoned")
+        .as_ref()
+        .filter(|cached| cached.sampled_at.elapsed() < Duration::from_secs(3))
+        .map(|cached| (cached.snapshot.clone(), cached.surface.clone()))
 }
 
 #[derive(Default)]
@@ -86,10 +154,10 @@ struct AttachedFocus {
 }
 
 impl AttachedFocus {
-    fn due(&mut self, now: Instant) -> bool {
+    fn due(&mut self, now: Instant, interval: Duration) -> bool {
         if self
             .last_sync
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(250))
+            .is_some_and(|last| now.duration_since(last) < interval)
         {
             return false;
         }
@@ -253,11 +321,15 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         }
         semantic_router.restore_accepted(delivered);
     }
+    let (sidebar_sender, shared_surface) = start_sidebar_worker(paths, server);
+    let interactive_waiters = Arc::new(AtomicUsize::new(0));
+    let mut detector = Detector::new(server.clone());
+    detector.set_interactive_waiters(Arc::clone(&interactive_waiters));
     let state = Arc::new(RwLock::new(State {
         config,
         manifests,
         snapshot: Snapshot::empty(server.socket_path.display().to_string(), now_unix_ms()),
-        detector: Detector::new(server.clone()),
+        detector,
         notifications: NotificationPipeline::new(semantic_router),
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
@@ -267,7 +339,21 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         recovered_pending,
         recovered_runtimes,
         attached_focus: AttachedFocus::default(),
+        status_projection: None,
+        sidebar_sender,
+        shared_surface,
+        next_sidebar_surface: Instant::now(),
+        last_sidebar_sample: None,
     }));
+    if state
+        .read()
+        .expect("state poisoned")
+        .config
+        .detection
+        .low_process_churn
+    {
+        configure_focus_wake_hooks(server, true);
+    }
     if state
         .read()
         .expect("state poisoned")
@@ -275,7 +361,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         .clients
         .selected_implies_focused
     {
-        let _ = std::process::Command::new("tmux")
+        let _ = crate::command::new("tmux")
             .arg("-S")
             .arg(&server.socket_path)
             .args([
@@ -298,6 +384,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         snapshot,
         shutdown,
         ipc_metrics,
+        interactive_waiters,
         paths,
         server,
     );
@@ -312,12 +399,16 @@ fn serve_loop(
     snapshot: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
     ipc_metrics: Arc<IpcMetrics>,
+    interactive_waiters: Arc<AtomicUsize>,
     paths: &Paths,
     server: &ServerIdentity,
 ) -> Result<(), DaemonError> {
     let scan_state = Arc::clone(&state);
     let scan_snapshot = Arc::clone(&snapshot);
     let scan_shutdown = Arc::clone(&shutdown);
+    let scan_interactive_waiters = Arc::clone(&interactive_waiters);
+    let sidebar_cache = Arc::clone(&state.read().expect("state poisoned").shared_surface);
+    let scan_sidebar_cache = Arc::clone(&sidebar_cache);
     let scan_server = server.clone();
     let scan_paths = paths.clone();
     let _scanner = thread::spawn(move || {
@@ -330,11 +421,36 @@ fn serve_loop(
                     scan_shutdown.store(true, Ordering::Relaxed);
                     break;
                 }
-                next_liveness_check = Instant::now() + Duration::from_secs(1);
+                let state = scan_state.read().expect("state poisoned");
+                let quiet = state.config.detection.low_process_churn && state.detector.is_idle();
+                next_liveness_check = Instant::now()
+                    + if quiet {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_secs(1)
+                    };
             }
-            update_snapshot(&scan_state, &scan_snapshot, &scan_paths, &scan_server.key);
+            update_snapshot(
+                &scan_state,
+                &scan_snapshot,
+                &scan_paths,
+                &scan_server,
+                &scan_sidebar_cache,
+                &scan_interactive_waiters,
+            );
             let snapshot = scan_snapshot.read().expect("snapshot poisoned").clone();
-            title_reaper.tick(&scan_paths, &scan_server, &snapshot);
+            let (quiet, surface) = {
+                let state = scan_state.read().expect("state poisoned");
+                let quiet = state.config.detection.low_process_churn && state.detector.is_idle();
+                (quiet, state.detector.surface_inventory().cloned())
+            };
+            title_reaper.tick(
+                &scan_paths,
+                &scan_server,
+                &snapshot,
+                quiet,
+                surface.as_ref(),
+            );
             crate::compat::sleep(Duration::from_millis(50));
         }
     });
@@ -350,6 +466,8 @@ fn serve_loop(
                     let snapshot = Arc::clone(&snapshot);
                     let shutdown = Arc::clone(&shutdown);
                     let metrics = Arc::clone(&ipc_metrics);
+                    let interactive_waiters = Arc::clone(&interactive_waiters);
+                    let sidebar_cache = Arc::clone(&sidebar_cache);
                     let paths = paths.clone();
                     let server = server.clone();
                     let in_flight = metrics.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
@@ -365,8 +483,15 @@ fn serve_loop(
                         if let Ok(mut stream) = crate::ipc::prepare_connection(&mut stream) {
                             let response = match read_request(&mut stream) {
                                 Ok(request) => handle(
-                                    request, &state, &snapshot, &shutdown, &metrics, &paths,
+                                    request,
+                                    &state,
+                                    &snapshot,
+                                    &shutdown,
+                                    &metrics,
+                                    &interactive_waiters,
+                                    &paths,
                                     &server,
+                                    &sidebar_cache,
                                 ),
                                 Err(error) => Response::error(
                                     String::new(),
@@ -389,20 +514,99 @@ fn serve_loop(
         crate::compat::sleep(Duration::from_millis(50));
     }
     shutdown.store(true, Ordering::Relaxed);
+    configure_focus_wake_hooks(server, false);
     Ok(())
+}
+
+// Install only into unused array slots. The marker lets reload and shutdown
+// remove our own hooks without touching a user's or another plugin's hooks.
+fn configure_focus_wake_hooks(server: &ServerIdentity, enabled: bool) {
+    const TAG: &str = "workbench-low-churn-focus-wake";
+    const HOOKS: &[&str] = &[
+        "client-attached",
+        "client-detached",
+        "client-session-changed",
+        "session-window-changed",
+        "window-pane-changed",
+        "client-focus-in",
+        "client-focus-out",
+    ];
+    let Ok(existing) = crate::command::new("tmux")
+        .arg("-S")
+        .arg(&server.socket_path)
+        .args(["show-hooks", "-g"])
+        .output()
+    else {
+        return;
+    };
+    if !existing.status.success() {
+        return;
+    }
+    let existing = String::from_utf8_lossy(&existing.stdout);
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let shell = format!(
+        "{} daemon wake-if-running >/dev/null 2>&1 # {TAG}",
+        crate::status_menu::shell_quote(&executable.to_string_lossy())
+    );
+    let hook_command = format!("run-shell -b {}", crate::status_menu::shell_quote(&shell));
+    let mut args = Vec::<String>::new();
+    for hook in HOOKS {
+        let slot = format!("{hook}[921]");
+        let found = existing
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some(slot.as_str()));
+        if enabled && found.is_none_or(|line| line.contains(TAG)) {
+            if !args.is_empty() {
+                args.push(";".into());
+            }
+            args.extend(["set-hook".into(), "-g".into(), slot, hook_command.clone()]);
+        } else if !enabled && found.is_some_and(|line| line.contains(TAG)) {
+            if !args.is_empty() {
+                args.push(";".into());
+            }
+            args.extend(["set-hook".into(), "-gu".into(), slot]);
+        }
+    }
+    if !args.is_empty() {
+        let _ = crate::command::new("tmux")
+            .arg("-S")
+            .arg(&server.socket_path)
+            .args(&args)
+            .output();
+    }
 }
 
 fn update_snapshot(
     state: &RwLock<State>,
     published: &RwLock<Snapshot>,
     paths: &Paths,
-    server_key: &str,
+    server: &ServerIdentity,
+    sidebar_cache: &SharedSurfaceCache,
+    interactive_waiters: &AtomicUsize,
 ) {
+    let server_key = server.key.as_str();
     let mut state = state.write().expect("state poisoned");
+    if interactive_waiters.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    if sidebar_cache
+        .refresh_requested
+        .swap(false, Ordering::Relaxed)
+    {
+        state.detector.request_surface_refresh();
+    }
     let config = state.config.clone();
     let manifests = state.manifests.clone();
     let now = now_unix_ms();
-    if state.detector.tick(&config, &manifests, now).is_ok() {
+    state.detector.set_sampling_interruptible(true);
+    let sampled = state.detector.tick(&config, &manifests, now);
+    state.detector.set_sampling_interruptible(false);
+    if interactive_waiters.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    if sampled.is_ok() {
         if !state.recovered_runtimes.is_empty() {
             let checkpoints = std::mem::take(&mut state.recovered_runtimes);
             state.recovered_runtimes = state.detector.restore_checkpoints(&checkpoints, now);
@@ -470,7 +674,11 @@ fn update_snapshot(
         }
         if changed {
             state.snapshot.generation = state.snapshot.generation.saturating_add(1);
-            publish_status_fragments(&state.snapshot);
+            let projection = status_projection(&state.snapshot);
+            if state.status_projection.as_ref() != Some(&projection) {
+                publish_status_fragments(&state.snapshot);
+                state.status_projection = Some(projection);
+            }
         }
         state.snapshot.observed_at_unix_ms = now;
         let accepted_before = state.notifications.router.accepted_event_ids().len();
@@ -480,6 +688,31 @@ fn update_snapshot(
             persist_checkpoint(paths, server_key, &state);
         }
         *published.write().expect("snapshot poisoned") = state.snapshot.clone();
+        if Instant::now() >= state.next_sidebar_surface {
+            if let (Some(surface), Some(sampled_at)) = (
+                state.detector.surface_inventory().cloned(),
+                state.detector.surface_sampled_at(),
+            ) && state
+                .last_sidebar_sample
+                .is_none_or(|previous| sampled_at > previous)
+            {
+                // Filesystem reads run in one bounded worker, outside the
+                // detector lock. Keep this snapshot paired with the inventory
+                // it describes, even if a later tmux query fails.
+                if state
+                    .sidebar_sender
+                    .try_send(SidebarRequest {
+                        snapshot: state.snapshot.clone(),
+                        surface,
+                        sampled_at,
+                    })
+                    .is_ok()
+                {
+                    state.last_sidebar_sample = Some(sampled_at);
+                    state.next_sidebar_surface = Instant::now() + Duration::from_secs(1);
+                }
+            }
+        }
     }
     state.relay_sender.tick(now);
 }
@@ -529,28 +762,24 @@ fn dispatch_notifications(state: &mut State, now_ms: u64) {
 }
 
 fn sync_attached_client_focus(state: &mut State, now_ms: u64) {
-    if !state.attached_focus.due(Instant::now()) {
+    let quiet = state.config.detection.low_process_churn && state.detector.is_idle();
+    let interval = if quiet {
+        Duration::from_millis(state.config.detection.idle_capture_interval_ms.max(2_000))
+    } else {
+        Duration::from_millis(250)
+    };
+    if !state.attached_focus.due(Instant::now(), interval) {
         return;
     }
     let server = match ServerIdentity::discover() {
         Ok(server) => server,
         Err(_) => return,
     };
-    let output = match std::process::Command::new("tmux")
-        .arg("-S")
-        .arg(&server.socket_path)
-        .args([
-            "list-clients",
-            "-F",
-            "#{client_tty}\u{1f}#{client_flags}\u{1f}#{@workbench_overlay_visible}\u{1f}#{session_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_id}\u{1f}#{pane_index}",
-        ])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return,
+    let Some(output) = state.detector.client_inventory().map(str::to_owned) else {
+        return;
     };
     let mut seen = HashSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         let Some((attachment, focus, overlay_visible, observed)) = attached_client_row(line) else {
             continue;
         };
@@ -633,7 +862,7 @@ fn attached_client_row(line: &str) -> Option<(String, FocusState, bool, TmuxTarg
 }
 
 fn server_incarnation(server: &ServerIdentity) -> String {
-    let output = std::process::Command::new("tmux")
+    let output = crate::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(["display-message", "-p", "#{pid}"])
@@ -709,6 +938,20 @@ fn save_checkpoint(paths: &Paths, server_key: &str, state: &State) -> io::Result
     crate::checkpoint::store_server(&paths.checkpoint_for_server(server_key), &checkpoint)
 }
 
+fn status_projection(snapshot: &Snapshot) -> Vec<(String, crate::model::DisplayState, bool)> {
+    snapshot
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.target.window_id.clone(),
+                agent.display_state,
+                agent.attention.as_ref().is_some_and(|event| !event.seen),
+            )
+        })
+        .collect()
+}
+
 fn publish_status_fragments(snapshot: &Snapshot) {
     let blocked = snapshot
         .agents
@@ -756,13 +999,15 @@ fn publish_status_fragments(snapshot: &Snapshot) {
         Ok(server) => server,
         Err(_) => return,
     };
-    for (name, value) in fragments {
-        let _ = std::process::Command::new("tmux")
-            .arg("-S")
-            .arg(&server.socket_path)
-            .args(["set-option", "-gq", name, &value])
-            .status();
+    let mut command = crate::command::new("tmux");
+    command.arg("-S").arg(&server.socket_path);
+    for (index, (name, value)) in fragments.into_iter().enumerate() {
+        if index > 0 {
+            command.arg(";");
+        }
+        command.args(["set-option", "-gq", name, &value]);
     }
+    let _ = command.status();
     publish_window_statuses(snapshot, &server);
 }
 
@@ -777,7 +1022,7 @@ fn publish_window_statuses(snapshot: &Snapshot, server: &ServerIdentity) {
             .push(agent);
     }
 
-    let output = match std::process::Command::new("tmux")
+    let output = match crate::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args(["list-windows", "-a", "-F", "#{window_id}"])
@@ -787,7 +1032,7 @@ fn publish_window_statuses(snapshot: &Snapshot, server: &ServerIdentity) {
         _ => return,
     };
     let windows = String::from_utf8_lossy(&output.stdout);
-    let mut command = std::process::Command::new("tmux");
+    let mut command = crate::command::new("tmux");
     command.arg("-S").arg(&server.socket_path);
     let mut first = true;
     for window in windows.lines().filter(|window| window.starts_with('@')) {
@@ -865,14 +1110,33 @@ fn window_rollup(agents: &[&crate::model::AgentSnapshot]) -> (&'static str, usiz
     ("idle", agents.len())
 }
 
+fn interactive_state<'a>(
+    state: &'a RwLock<State>,
+    waiters: &AtomicUsize,
+) -> RwLockWriteGuard<'a, State> {
+    struct Waiting<'a>(&'a AtomicUsize);
+    impl Drop for Waiting<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    waiters.fetch_add(1, Ordering::SeqCst);
+    let waiting = Waiting(waiters);
+    let state = state.write().expect("state poisoned");
+    drop(waiting);
+    state
+}
+
 fn handle(
     request: Request,
     state: &RwLock<State>,
     snapshot: &RwLock<Snapshot>,
     shutdown: &AtomicBool,
     ipc_metrics: &IpcMetrics,
+    interactive_waiters: &AtomicUsize,
     paths: &Paths,
     server: &ServerIdentity,
+    sidebar_cache: &SharedSurfaceCache,
 ) -> Response {
     if request.protocol_version != crate::IPC_PROTOCOL_VERSION {
         return Response::error(
@@ -903,10 +1167,26 @@ fn handle(
             })
             .map_err(|error| error.to_string())
         }
-        "snapshot.get" => serde_json::to_value(&*snapshot.read().expect("snapshot poisoned"))
-            .map_err(|error| error.to_string()),
+        "snapshot.get" => (|| -> Result<Value, String> {
+            let cached = if request.params.get("include_surface").and_then(Value::as_bool) == Some(true) {
+                if request.params.get("refresh_surface").and_then(Value::as_bool) == Some(true) {
+                    // Coalesce requests without making any sidebar wait for
+                    // process discovery or another tmux query to finish.
+                    sidebar_cache.refresh_requested.store(true, Ordering::Relaxed);
+                }
+                cached_sidebar_surface(sidebar_cache)
+            } else { None };
+            if let Some((cached_snapshot, surface)) = cached {
+                let mut result = serde_json::to_value(cached_snapshot).map_err(|error| error.to_string())?;
+                result["_workbench_surface"] = serde_json::to_value(surface).map_err(|error| error.to_string())?;
+                Ok(result)
+            } else {
+                serde_json::to_value(&*snapshot.read().expect("snapshot poisoned"))
+                    .map_err(|error| error.to_string())
+            }
+        })(),
         "task.title" => parse_params::<crate::task_title::TitleRequest>(request.params).and_then(|params| {
-            let mut state = state.write().expect("state poisoned");
+            let mut state = interactive_state(state, interactive_waiters);
             state.detector.refresh_targets().map_err(|error| error.to_string())?;
             let mut current = state.snapshot.clone();
             current.agents = state.detector.machine_snapshots();
@@ -953,7 +1233,7 @@ fn handle(
                 (endpoint_id, attachment_token, replaced_attachments)
             };
             for attachment in replaced_attachments {
-                let _ = std::process::Command::new("tmux")
+                let _ = crate::command::new("tmux")
                     .arg("-S")
                     .arg(&server.socket_path)
                     .args(["detach-client", "-t", &attachment])
@@ -1064,9 +1344,17 @@ fn handle(
             .map(|(config, manifests)| {
                 let mut state = state.write().expect("state poisoned");
                 let compat_focus = config.clients.selected_implies_focused;
+                let low_churn = config.detection.low_process_churn;
+                let changed = low_churn != state.config.detection.low_process_churn;
                 state.config = config;
                 state.manifests = manifests;
-                let mut command = std::process::Command::new("tmux");
+                if changed {
+                    state.detector.wake();
+                    state.attached_focus.last_sync = None;
+                }
+                drop(state);
+                if changed { configure_focus_wake_hooks(server, low_churn); }
+                let mut command = crate::command::new("tmux");
                 command.arg("-S").arg(&server.socket_path);
                 if compat_focus { command.args(["set-option", "-gq", "@workbench_selected_implies_focused", "1"]); }
                 else { command.args(["set-option", "-gu", "@workbench_selected_implies_focused"]); }
@@ -1077,13 +1365,15 @@ fn handle(
         "daemon.stop" => {
             shutdown.store(true, Ordering::Relaxed);
             Ok(json!({"stopping": true}))
-        }
+        },
         "daemon.wake" => {
-            state.write().expect("state poisoned").detector.wake();
+            let mut state = interactive_state(state, interactive_waiters);
+            state.detector.wake();
+            state.attached_focus.last_sync = None;
             Ok(json!({"woken": true}))
         }
         "attention.ack" => parse_params::<AckParams>(request.params).and_then(|params| {
-            let mut state = state.write().expect("state poisoned");
+            let mut state = interactive_state(state, interactive_waiters);
             if state.detector.acknowledge(&params.event_id, now_unix_ms()) {
                 let agents = state.detector.machine_snapshots();
                 state.snapshot.agents = agents;
@@ -1125,7 +1415,7 @@ fn handle(
                 if report.occurred_at_unix_ms > now.saturating_add(5_000) {
                     return Err("agent event timestamp is in the future".into());
                 }
-                let mut state = state.write().expect("state poisoned");
+                let mut state = interactive_state(state, interactive_waiters);
                 let agent = state.detector.report_agent_event(&report)?;
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
@@ -1159,7 +1449,7 @@ fn handle(
                 if detached.occurred_at_unix_ms > now.saturating_add(5_000) {
                     return Err("agent event timestamp is in the future".into());
                 }
-                let mut state = state.write().expect("state poisoned");
+                let mut state = interactive_state(state, interactive_waiters);
                 let resolved = state.detector.resolve_agent_event(&detached);
                 let (report, agent) = match resolved {
                     Ok(resolved) => resolved,
@@ -1265,11 +1555,19 @@ mod focus_tests {
         let start = Instant::now();
         let mut focus = AttachedFocus::default();
         let polls = (0..20)
-            .filter(|tick| focus.due(start + Duration::from_millis(tick * 50)))
+            .filter(|tick| {
+                focus.due(
+                    start + Duration::from_millis(tick * 50),
+                    Duration::from_millis(250),
+                )
+            })
             .count();
         assert_eq!(polls, 4);
         focus.invalidate("/dev/tty1");
-        assert!(focus.due(start + Duration::from_millis(960)));
+        assert!(focus.due(
+            start + Duration::from_millis(960),
+            Duration::from_millis(250)
+        ));
     }
 
     #[test]
