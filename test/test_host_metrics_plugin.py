@@ -4,6 +4,7 @@ from pathlib import Path
 import pty
 import select
 import shlex
+import signal
 import shutil
 import struct
 import subprocess
@@ -152,6 +153,18 @@ class MetricsPluginTest(unittest.TestCase):
             self.assertEqual(badge(), 'claude badge')
             self.set_option('@workbench-usage-source', 'opencode')
             self.assertEqual(badge(), '')
+            self.set_option('@workbench-usage-source', 'codex')
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 50, 0, 0))
+            os.kill(client.pid, signal.SIGWINCH)
+            deadline = time.monotonic() + 10
+            while subprocess.check_output(self.cmd + ['display-message', '-p', '-c', clients,
+                                                       '#{client_width}'], text=True).strip() != '50':
+                self.assertLess(time.monotonic(), deadline, 'tmux client width did not update')
+                time.sleep(.1)
+            self.set_option('@adaptive_compact_min_width', '0')
+            self.assertEqual(badge(), 'codex badge')
+            self.set_option('@adaptive_compact_min_width', 'invalid')
+            self.assertEqual(badge(), '')
         finally:
             client.terminate()
             client.wait(timeout=5)
@@ -159,19 +172,24 @@ class MetricsPluginTest(unittest.TestCase):
             os.close(slave)
 
     def test_stale_shared_status_falls_back_then_returns_to_cache(self):
-        plugin = Path(self.tmp.name) / 'plugin'
+        plugin = Path(self.tmp.name) / "plugin with space's"
         (plugin / 'bin').mkdir(parents=True)
         trace = Path(self.tmp.name) / 'fallback-jobs'
         script = plugin / 'bin/workbench-host-metrics-status'
         script.write_text('#!/bin/sh\nprintf "fallback\\n" >> ' + shlex.quote(str(trace)) + '\nprintf "fallback"\n')
         script.chmod(0o700)
+        usage = plugin / 'bin/workbench-agent-usage'
+        usage.write_text('#!/bin/sh\nprintf "usage\\n" >> ' + shlex.quote(str(trace)) + '\nprintf "badge"\n')
+        usage.chmod(0o700)
         subprocess.run(['sh', str(ROOT / 'lib/host-metrics.sh')],
+                       env=dict(self.env, CURRENT_DIR=str(plugin)), check=True)
+        subprocess.run(['sh', str(ROOT / 'lib/status-usage.sh')],
                        env=dict(self.env, CURRENT_DIR=str(plugin)), check=True)
         self.set_option('@workbench_status_ready', '1')
         self.set_option('@workbench_status_updated_at', str(int(time.time()) - 30))
         self.set_option('@workbench_cached_metrics_compact', 'fresh')
         self.set_option('status-interval', '1')
-        self.set_option('status-right', '#{E:@adaptive_cpu}')
+        self.set_option('status-right', '#{E:@adaptive_cpu} #{E:@adaptive_context_suffix}')
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
         env = dict(self.env, TERM='xterm-256color')
@@ -180,7 +198,7 @@ class MetricsPluginTest(unittest.TestCase):
                                   stdin=slave, stdout=slave, stderr=slave, env=env)
         try:
             deadline = time.monotonic() + 15
-            while not trace.exists():
+            while not trace.exists() or not {'fallback', 'usage'} <= set(trace.read_text().splitlines()):
                 self.assertLess(time.monotonic(), deadline, 'stale status did not run fallback')
                 if select.select([master], [], [], .1)[0]:
                     os.read(master, 65536)

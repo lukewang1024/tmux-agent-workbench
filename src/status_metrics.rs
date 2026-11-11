@@ -317,22 +317,9 @@ impl Sampler {
                 if let Some(data) = self.networks.get(&interface) {
                     let rx = data.total_received();
                     let tx = data.total_transmitted();
-                    if let (Some(elapsed), Some((previous, previous_rx, previous_tx))) =
-                        (elapsed, &self.network_baseline)
-                        && previous == &interface
-                        && rx >= *previous_rx
-                        && tx >= *previous_tx
-                        && elapsed.as_secs_f64() > 0.0
-                        && elapsed.as_secs_f64() <= 120.0
-                    {
-                        let seconds = elapsed.as_secs_f64();
-                        self.network_values = (
-                            rate((tx - *previous_tx) as f64 / seconds),
-                            rate((rx - *previous_rx) as f64 / seconds),
-                        );
-                    } else {
-                        self.network_values = ("--".into(), "--".into());
-                    }
+                    self.network_values =
+                        network_delta(self.network_baseline.as_ref(), &interface, rx, tx, elapsed)
+                            .unwrap_or_else(|| ("--".into(), "--".into()));
                     self.network_baseline = Some((interface, rx, tx));
                 } else {
                     self.network_values = ("--".into(), "--".into());
@@ -391,6 +378,30 @@ fn rate(bytes_per_second: f64) -> String {
     } else {
         format!("{value:.2}MB/s")
     }
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn network_delta(
+    previous: Option<&(String, u64, u64)>,
+    interface: &str,
+    rx: u64,
+    tx: u64,
+    elapsed: Option<Duration>,
+) -> Option<(String, String)> {
+    let (previous_interface, previous_rx, previous_tx) = previous?;
+    let seconds = elapsed?.as_secs_f64();
+    if previous_interface != interface
+        || rx < *previous_rx
+        || tx < *previous_tx
+        || seconds <= 0.0
+        || seconds > 120.0
+    {
+        return None;
+    }
+    Some((
+        rate((tx - *previous_tx) as f64 / seconds),
+        rate((rx - *previous_rx) as f64 / seconds),
+    ))
 }
 
 #[cfg(unix)]
@@ -514,7 +525,8 @@ fn parse_nettop_rates(data: &str) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nettop_rates, rate, usage_badge};
+    use super::{network_delta, parse_nettop_rates, rate, usage_badge};
+    use std::time::Duration;
 
     #[test]
     fn badge_matches_the_existing_usage_widget() {
@@ -546,5 +558,46 @@ mod tests {
             Some((40, 60))
         );
         assert_eq!(parse_nettop_rates(",first\na,1,2\n"), None);
+        let baseline = ("en0".to_owned(), 1_000_000, 2_000_000);
+        assert_eq!(
+            network_delta(
+                Some(&baseline),
+                "en0",
+                3_000_000,
+                6_000_000,
+                Some(Duration::from_secs(2))
+            ),
+            Some(("2.00MB/s".into(), "1.00MB/s".into()))
+        );
+        assert_eq!(
+            network_delta(
+                Some(&baseline),
+                "en1",
+                3_000_000,
+                6_000_000,
+                Some(Duration::from_secs(2))
+            ),
+            None
+        );
+        assert_eq!(
+            network_delta(
+                Some(&baseline),
+                "en0",
+                0,
+                6_000_000,
+                Some(Duration::from_secs(2))
+            ),
+            None
+        );
+        assert_eq!(
+            network_delta(
+                Some(&baseline),
+                "en0",
+                3_000_000,
+                6_000_000,
+                Some(Duration::from_secs(121))
+            ),
+            None
+        );
     }
 }

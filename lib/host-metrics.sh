@@ -22,8 +22,9 @@ else
   tmux set-option -gq @workbench_status_clock '%s'
   status_age='#{e|-:#{T:@workbench_status_clock},#{@workbench_status_updated_at}}'
   status_fresh="#{&&:#{==:#{@workbench_status_ready},1},#{&&:#{e|>=:$status_age,0},#{e|<:$status_age,15}}}"
-  metrics_cpu_fallback="#(sh '$CURRENT_DIR/bin/workbench-host-metrics' cpu)"
-  metrics_fallback="#(sh '$CURRENT_DIR/bin/workbench-host-metrics-status')"
+  metrics_shell_dir=$(printf '%s' "$CURRENT_DIR" | sed "s/'/'\\\\''/g")
+  metrics_cpu_fallback="#(sh '$metrics_shell_dir/bin/workbench-host-metrics' cpu)"
+  metrics_fallback="#(sh '$metrics_shell_dir/bin/workbench-host-metrics-status')"
   metrics_cached='#{?#{==:#{@workbench-host-metrics-mode},full},#{@workbench_cached_metrics_full},#{?#{==:#{@workbench-host-metrics-mode},standard},#{@workbench_cached_metrics_standard},#{@workbench_cached_metrics_compact}}}'
   tmux set-option -g @adaptive_cpu_compact \
     "#{?$status_fresh,#{@workbench_cached_cpu},$metrics_cpu_fallback}"
