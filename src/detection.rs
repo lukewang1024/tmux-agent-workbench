@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,14 @@ impl Detector {
             last_actions: None,
             metadata: HashMap::new(),
         }
+    }
+
+    pub(crate) fn set_interactive_waiters(&mut self, waiters: Arc<AtomicUsize>) {
+        self.tmux.set_interactive_waiters(waiters);
+    }
+
+    pub(crate) fn set_sampling_interruptible(&mut self, enabled: bool) {
+        self.tmux.set_sampling_interruptible(enabled);
     }
 
     pub fn tick(

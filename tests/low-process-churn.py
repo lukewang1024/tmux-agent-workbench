@@ -423,6 +423,22 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
             elapsed = time.monotonic() - started
             assert elapsed < 1.5, f'four cached IPC reads waited {elapsed:.2f}s for a stalled query'
             print(f'PASS four cached IPC reads returned in {elapsed:.2f}s during a stalled query')
+
+            # A real foreground event must preempt the stalled background
+            # sample rather than missing the hook's 750 ms delivery budget.
+            event = {
+                'version': 1, 'event_id': str(uuid.uuid4()), 'agent': 'codex',
+                'pane_id': agent['target']['pane_id'],
+                'tmux_session_id': agent['target']['session_id'],
+                'session_id': session, 'agent_pid': agent['process']['pid'],
+                'event': 'working', 'occurred_at_unix_ms': int(time.time() * 1000),
+            }
+            started = time.monotonic()
+            result = ipc_call('agent.event.report', event)
+            elapsed = time.monotonic() - started
+            assert result.get('accepted') and elapsed < 1, (
+                f'interactive event waited {elapsed:.2f}s for a stalled sample: {result}')
+            print(f'PASS interactive event preempted stalled sampling in {elapsed:.2f}s')
         finally:
             stall_probe.unlink()
         # The same timeout recovery also applies while an agent is active.

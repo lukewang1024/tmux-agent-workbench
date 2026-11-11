@@ -4,8 +4,8 @@ use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock, RwLockWriteGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -322,11 +322,14 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         semantic_router.restore_accepted(delivered);
     }
     let (sidebar_sender, shared_surface) = start_sidebar_worker(paths, server);
+    let interactive_waiters = Arc::new(AtomicUsize::new(0));
+    let mut detector = Detector::new(server.clone());
+    detector.set_interactive_waiters(Arc::clone(&interactive_waiters));
     let state = Arc::new(RwLock::new(State {
         config,
         manifests,
         snapshot: Snapshot::empty(server.socket_path.display().to_string(), now_unix_ms()),
-        detector: Detector::new(server.clone()),
+        detector,
         notifications: NotificationPipeline::new(semantic_router),
         notification_backend: SystemBackend::new(paths),
         relay_sender: RelaySender::new(paths, server),
@@ -381,6 +384,7 @@ pub fn serve(paths: &Paths, server: &ServerIdentity) -> Result<(), DaemonError> 
         snapshot,
         shutdown,
         ipc_metrics,
+        interactive_waiters,
         paths,
         server,
     );
@@ -395,12 +399,14 @@ fn serve_loop(
     snapshot: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
     ipc_metrics: Arc<IpcMetrics>,
+    interactive_waiters: Arc<AtomicUsize>,
     paths: &Paths,
     server: &ServerIdentity,
 ) -> Result<(), DaemonError> {
     let scan_state = Arc::clone(&state);
     let scan_snapshot = Arc::clone(&snapshot);
     let scan_shutdown = Arc::clone(&shutdown);
+    let scan_interactive_waiters = Arc::clone(&interactive_waiters);
     let sidebar_cache = Arc::clone(&state.read().expect("state poisoned").shared_surface);
     let scan_sidebar_cache = Arc::clone(&sidebar_cache);
     let scan_server = server.clone();
@@ -430,6 +436,7 @@ fn serve_loop(
                 &scan_paths,
                 &scan_server,
                 &scan_sidebar_cache,
+                &scan_interactive_waiters,
             );
             let snapshot = scan_snapshot.read().expect("snapshot poisoned").clone();
             let (quiet, surface) = {
@@ -459,6 +466,7 @@ fn serve_loop(
                     let snapshot = Arc::clone(&snapshot);
                     let shutdown = Arc::clone(&shutdown);
                     let metrics = Arc::clone(&ipc_metrics);
+                    let interactive_waiters = Arc::clone(&interactive_waiters);
                     let sidebar_cache = Arc::clone(&sidebar_cache);
                     let paths = paths.clone();
                     let server = server.clone();
@@ -480,6 +488,7 @@ fn serve_loop(
                                     &snapshot,
                                     &shutdown,
                                     &metrics,
+                                    &interactive_waiters,
                                     &paths,
                                     &server,
                                     &sidebar_cache,
@@ -575,9 +584,13 @@ fn update_snapshot(
     paths: &Paths,
     server: &ServerIdentity,
     sidebar_cache: &SharedSurfaceCache,
+    interactive_waiters: &AtomicUsize,
 ) {
     let server_key = server.key.as_str();
     let mut state = state.write().expect("state poisoned");
+    if interactive_waiters.load(Ordering::SeqCst) != 0 {
+        return;
+    }
     if sidebar_cache
         .refresh_requested
         .swap(false, Ordering::Relaxed)
@@ -587,7 +600,13 @@ fn update_snapshot(
     let config = state.config.clone();
     let manifests = state.manifests.clone();
     let now = now_unix_ms();
-    if state.detector.tick(&config, &manifests, now).is_ok() {
+    state.detector.set_sampling_interruptible(true);
+    let sampled = state.detector.tick(&config, &manifests, now);
+    state.detector.set_sampling_interruptible(false);
+    if interactive_waiters.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    if sampled.is_ok() {
         if !state.recovered_runtimes.is_empty() {
             let checkpoints = std::mem::take(&mut state.recovered_runtimes);
             state.recovered_runtimes = state.detector.restore_checkpoints(&checkpoints, now);
@@ -1091,12 +1110,30 @@ fn window_rollup(agents: &[&crate::model::AgentSnapshot]) -> (&'static str, usiz
     ("idle", agents.len())
 }
 
+fn interactive_state<'a>(
+    state: &'a RwLock<State>,
+    waiters: &AtomicUsize,
+) -> RwLockWriteGuard<'a, State> {
+    struct Waiting<'a>(&'a AtomicUsize);
+    impl Drop for Waiting<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    waiters.fetch_add(1, Ordering::SeqCst);
+    let waiting = Waiting(waiters);
+    let state = state.write().expect("state poisoned");
+    drop(waiting);
+    state
+}
+
 fn handle(
     request: Request,
     state: &RwLock<State>,
     snapshot: &RwLock<Snapshot>,
     shutdown: &AtomicBool,
     ipc_metrics: &IpcMetrics,
+    interactive_waiters: &AtomicUsize,
     paths: &Paths,
     server: &ServerIdentity,
     sidebar_cache: &SharedSurfaceCache,
@@ -1149,7 +1186,7 @@ fn handle(
             }
         })(),
         "task.title" => parse_params::<crate::task_title::TitleRequest>(request.params).and_then(|params| {
-            let mut state = state.write().expect("state poisoned");
+            let mut state = interactive_state(state, interactive_waiters);
             state.detector.refresh_targets().map_err(|error| error.to_string())?;
             let mut current = state.snapshot.clone();
             current.agents = state.detector.machine_snapshots();
@@ -1330,13 +1367,13 @@ fn handle(
             Ok(json!({"stopping": true}))
         },
         "daemon.wake" => {
-            let mut state = state.write().expect("state poisoned");
+            let mut state = interactive_state(state, interactive_waiters);
             state.detector.wake();
             state.attached_focus.last_sync = None;
             Ok(json!({"woken": true}))
         }
         "attention.ack" => parse_params::<AckParams>(request.params).and_then(|params| {
-            let mut state = state.write().expect("state poisoned");
+            let mut state = interactive_state(state, interactive_waiters);
             if state.detector.acknowledge(&params.event_id, now_unix_ms()) {
                 let agents = state.detector.machine_snapshots();
                 state.snapshot.agents = agents;
@@ -1378,7 +1415,7 @@ fn handle(
                 if report.occurred_at_unix_ms > now.saturating_add(5_000) {
                     return Err("agent event timestamp is in the future".into());
                 }
-                let mut state = state.write().expect("state poisoned");
+                let mut state = interactive_state(state, interactive_waiters);
                 let agent = state.detector.report_agent_event(&report)?;
                 if report.event == crate::model::AgentEventType::SessionStart
                     && report.reason_category.as_deref() != Some("compact")
@@ -1412,7 +1449,7 @@ fn handle(
                 if detached.occurred_at_unix_ms > now.saturating_add(5_000) {
                     return Err("agent event timestamp is in the future".into());
                 }
-                let mut state = state.write().expect("state poisoned");
+                let mut state = interactive_state(state, interactive_waiters);
                 let resolved = state.detector.resolve_agent_event(&detached);
                 let (report, agent) = match resolved {
                     Ok(resolved) => resolved,

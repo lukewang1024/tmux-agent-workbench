@@ -1113,7 +1113,10 @@ fn for_caller_action(
             })
             .map_err(|error| error.to_string())?,
         ),
-        Duration::from_secs(3),
+        // Placement verifies and updates several tmux objects. On a loaded
+        // host, do not report failure while the daemon is still committing an
+        // explicit user operation; successful requests return immediately.
+        Duration::from_secs(8),
     )
     .map_err(|error| error.to_string());
     drop(placement_guard);

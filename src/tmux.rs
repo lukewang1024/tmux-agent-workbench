@@ -1,6 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::process::Stdio;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -18,6 +23,8 @@ pub enum TmuxError {
     Command(String),
     #[error("tmux command timed out after {0} ms")]
     Timeout(u64),
+    #[error("background tmux sampling interrupted by an interactive request")]
+    Interrupted,
     #[error("invalid tmux inventory row: {0:?}")]
     InvalidRow(String),
 }
@@ -52,6 +59,8 @@ pub trait TmuxSource {
 #[derive(Debug, Clone)]
 pub struct Tmux {
     server: ServerIdentity,
+    interactive_waiters: Option<Arc<AtomicUsize>>,
+    sampling_interruptible: bool,
 }
 
 pub(crate) struct PaneProbe {
@@ -84,7 +93,27 @@ impl Tmux {
     }
 
     pub fn new(server: ServerIdentity) -> Self {
-        Self { server }
+        Self {
+            server,
+            interactive_waiters: None,
+            sampling_interruptible: false,
+        }
+    }
+
+    pub(crate) fn set_interactive_waiters(&mut self, waiters: Arc<AtomicUsize>) {
+        self.interactive_waiters = Some(waiters);
+    }
+
+    pub(crate) fn set_sampling_interruptible(&mut self, enabled: bool) {
+        self.sampling_interruptible = enabled;
+    }
+
+    fn interactive_waiting(&self) -> bool {
+        self.sampling_interruptible
+            && self
+                .interactive_waiters
+                .as_ref()
+                .is_some_and(|waiters| waiters.load(Ordering::SeqCst) != 0)
     }
 
     /// `display-message -c` selects a message destination, not a pane context.
@@ -179,12 +208,16 @@ impl Tmux {
         args: &[&str],
         timeout: Duration,
     ) -> Result<String, TmuxError> {
+        if self.interactive_waiting() {
+            return Err(TmuxError::Interrupted);
+        }
         let mut child = crate::command::new("tmux")
             .arg("-S")
             .arg(&self.server.socket_path)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()?;
         // Drain both pipes while waiting. A batched screen capture may exceed
         // the OS pipe capacity, and waiting before reading would deadlock.
@@ -210,12 +243,22 @@ impl Tmux {
                 }
                 return Ok(String::from_utf8_lossy(&stdout).into_owned());
             }
-            if Instant::now() >= deadline {
+            let interrupted = self.interactive_waiting();
+            if interrupted || Instant::now() >= deadline {
+                // The child owns a process group so wrappers cannot leave a
+                // descendant holding the output pipes open after cancellation.
+                unsafe {
+                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err(TmuxError::Timeout(timeout.as_millis() as u64));
+                return Err(if interrupted {
+                    TmuxError::Interrupted
+                } else {
+                    TmuxError::Timeout(timeout.as_millis() as u64)
+                });
             }
             crate::compat::sleep(Duration::from_millis(5));
         }
