@@ -171,6 +171,10 @@ impl Detector {
                 }
             }
             self.last_surface_attempt = Some(Instant::now());
+            if matches!(&probe, Err(TmuxError::Interrupted)) {
+                self.next_foreground_probe = Instant::now();
+                return Ok(self.decorated_snapshots());
+            }
             if let Ok(probe) = probe {
                 self.retry_surface_without_capture = false;
                 if inventory_only && !stale_panes.is_empty() {
@@ -232,6 +236,9 @@ impl Detector {
         // fresh at one query per second, independently of sidebar count.
         if !quiet && self.surface_query_due() {
             let probe = self.poll_surface();
+            if matches!(&probe, Err(TmuxError::Interrupted)) {
+                return Ok(self.decorated_snapshots());
+            }
             if let Ok(probe) = probe {
                 self.remember_surface(&probe);
                 scanned_panes = Some(probe.panes);
@@ -244,6 +251,9 @@ impl Detector {
                 scanned_panes = self.recent_surface_panes(Duration::from_secs(1));
                 if scanned_panes.is_none() && self.surface_query_due() {
                     let probe = self.poll_surface();
+                    if matches!(&probe, Err(TmuxError::Interrupted)) {
+                        return Ok(self.decorated_snapshots());
+                    }
                     if let Ok(probe) = probe {
                         self.remember_surface(&probe);
                         scanned_panes = Some(probe.panes);
@@ -942,6 +952,11 @@ impl Detector {
                 self.next_capture
                     .insert(pane_id, scheduled_from + Duration::from_millis(interval));
             }
+            Err(TmuxError::Interrupted) => {
+                // Yielding to an interactive request is not evidence that the
+                // agent is stale. Retry the capture after that request finishes.
+                self.next_capture.insert(pane_id, now);
+            }
             Err(_) => {
                 if let Some(instance) = self.pane_instances.get(&pane_id) {
                     self.machine.mark_capture_failure(
@@ -1537,6 +1552,39 @@ mod tests {
             );
         }
         detector
+    }
+
+    #[test]
+    fn interrupted_capture_preserves_agent_health_and_is_retried() {
+        let mut detector = routing_detector();
+        detector.set_interactive_waiters(Arc::new(AtomicUsize::new(1)));
+        detector.set_sampling_interruptible(true);
+        let pane = detector.panes["%42"].clone();
+        let process = detector.agents[&42].clone();
+        let directory = tempfile::tempdir().unwrap();
+        let manifests = ManifestSet::load(directory.path()).unwrap();
+        let now = Instant::now();
+
+        detector.capture(
+            &pane,
+            process,
+            &Config::default(),
+            &manifests,
+            now,
+            100,
+            None,
+        );
+
+        let agent = detector
+            .machine_snapshots()
+            .into_iter()
+            .find(|agent| agent.target.pane_id == pane.target.pane_id)
+            .unwrap();
+        assert!(
+            !agent.stale,
+            "preempted sampling must not invalidate an agent"
+        );
+        assert_eq!(detector.next_capture.get(&pane.target.pane_id), Some(&now));
     }
 
     #[test]

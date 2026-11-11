@@ -438,6 +438,9 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
             elapsed = time.monotonic() - started
             assert result.get('accepted') and elapsed < 1, (
                 f'interactive event waited {elapsed:.2f}s for a stalled sample: {result}')
+            live = [a for a in ipc_snapshot()['agents'] if not a['exited']]
+            assert len(live) == 3 and not any(a['stale'] for a in live), (
+                f'preempting the sample marked agents stale: {live}')
             print(f'PASS interactive event preempted stalled sampling in {elapsed:.2f}s')
         finally:
             stall_probe.unlink()
