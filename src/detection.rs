@@ -222,8 +222,7 @@ impl Detector {
         // While agents are active, keep the shared foreground information
         // fresh at one query per second, independently of sidebar count.
         if !quiet && self.surface_query_due() {
-            let probe = self.tmux.surface_probe();
-            self.last_surface_attempt = Some(Instant::now());
+            let probe = self.poll_surface();
             if let Ok(probe) = probe {
                 self.remember_surface(&probe);
                 scanned_panes = Some(probe.panes);
@@ -235,8 +234,7 @@ impl Detector {
             if scanned_panes.is_none() {
                 scanned_panes = self.recent_surface_panes(Duration::from_secs(1));
                 if scanned_panes.is_none() && self.surface_query_due() {
-                    let probe = self.tmux.surface_probe();
-                    self.last_surface_attempt = Some(Instant::now());
+                    let probe = self.poll_surface();
                     if let Ok(probe) = probe {
                         self.remember_surface(&probe);
                         scanned_panes = Some(probe.panes);
@@ -423,6 +421,17 @@ impl Detector {
     fn surface_query_due(&self) -> bool {
         self.last_surface_attempt
             .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+    }
+
+    fn poll_surface(&mut self) -> Result<crate::tmux::PaneProbe, TmuxError> {
+        let probe = if self.surface_probe_timed_out {
+            self.tmux.recovery_surface_probe()
+        } else {
+            self.tmux.surface_probe()
+        };
+        self.last_surface_attempt = Some(Instant::now());
+        self.surface_probe_timed_out |= matches!(&probe, Err(TmuxError::Timeout(_)));
+        probe
     }
 
     fn recent_surface_panes(&self, age: Duration) -> Option<Vec<Pane>> {

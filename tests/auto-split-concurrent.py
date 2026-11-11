@@ -1,4 +1,5 @@
 """Concurrent clients cannot both occupy a direction's last free slot."""
+from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -68,7 +69,12 @@ with tempfile.TemporaryDirectory(prefix='wb-split-race-', dir='/tmp') as root:
                          '-P', '-F', '#{pane_id}', command) for i in range(2)]
         env['TMUX'] = socket + ',' + tmux('display-message', '-p', '#{pid}') + ',0'
         daemon_env['TMUX'] = env['TMUX']
-        with running_daemon(daemon_binary, daemon_env):
+        with running_daemon(daemon_binary, daemon_env), ExitStack() as resources:
+            # Stop the fixture's tmux server before reaping the daemon. This
+            # prevents late tmux jobs from writing into its temporary runtime
+            # directory while TemporaryDirectory is removing it.
+            resources.callback(subprocess.run, ['tmux', '-S', socket, 'kill-server'],
+                               env=env, capture_output=True, timeout=5)
             wait(lambda: all(live(p) for p in existing + incoming))
             sessions = {p: str(uuid.uuid4()) for p in existing + incoming}
             for p in existing + incoming:

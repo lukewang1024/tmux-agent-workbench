@@ -73,7 +73,9 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
                          + '[ ! -f "$WORKBENCH_TEST_TMUX_STALL" ] || /bin/sleep 2; '
                          + '[ ! -f "$WORKBENCH_TEST_TMUX_FAIL" ] || exit 1; '
                          + 'if [ -f "$WORKBENCH_TEST_TMUX_SLOW_INVENTORY" ]; then '
-                         + 'case "$*" in *"capture-pane"*) : ;; *) /bin/sleep 1.3 ;; esac; '
+                         + 'case "$*" in *"capture-pane"*) : ;; *) '
+                         + 'printf "SLOW_INVENTORY\\n" >> "$WORKBENCH_TEST_TMUX_TRACE"; '
+                         + '/bin/sleep 1.3 ;; esac; '
                          + 'fi ;; esac\n'
                          + 'exec ' + shlex.quote(tmux_binary) + ' "$@"\n')
     tmux_shim.chmod(0o700)
@@ -251,7 +253,13 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         finally:
             fail_probe.unlink()
         started = time.monotonic()
-        agents = wait_for(idle_agents, 'detached stale capture did not recover promptly', timeout=8)
+        try:
+            agents = wait_for(idle_agents, 'detached stale capture did not recover promptly', timeout=8)
+        except AssertionError as error:
+            live = [(a['target']['pane_id'], a['target']['session_name'], a['base_state'], a['stale'])
+                    for a in snapshot()['agents'] if not a['exited']]
+            errors = probe_errors.read_text() if probe_errors.exists() else 'none'
+            raise AssertionError(f'{error}; agents={live}; probe_errors={errors}') from error
         print(f'PASS detached stale capture recovered in {time.monotonic() - started:.2f}s', flush=True)
 
         # A loaded host can start even a capture-free tmux client more slowly
@@ -417,7 +425,20 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
             print(f'PASS four cached IPC reads returned in {elapsed:.2f}s during a stalled query')
         finally:
             stall_probe.unlink()
-        wait_for(surface, 'shared cache did not recover after the stalled query', timeout=8)
+        # The same timeout recovery also applies while an agent is active.
+        # Wait for a deliberately slow query before changing the theme so a
+        # previously cached frame cannot satisfy the recovery assertion.
+        offset = tmux_trace.stat().st_size
+        slow_inventory.touch()
+        try:
+            wait_for(lambda: 'SLOW_INVENTORY' in tmux_trace.read_text()[offset:],
+                     'the slow active inventory did not start', timeout=8)
+            tmux('set-option', '-g', '@adaptive_appearance', 'dark')
+            wait_for(lambda: (surface() or {}).get('appearance') == 'dark',
+                     'shared cache did not recover after the stalled query', timeout=12)
+        finally:
+            slow_inventory.unlink()
+        print('PASS active shared cache recovered from a slow inventory')
 
         # A failing inventory is also rate limited: the four sidebars must
         # not turn one failed query into independent retries or fallbacks.
