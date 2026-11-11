@@ -60,8 +60,21 @@ jobs:
       - name: Install test dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fzf libevent-dev libncurses-dev bison pkg-config
+          if timeout 8 getent ahostsv4 azure.archive.ubuntu.com >/dev/null 2>&1 &&
+             timeout 8 getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 &&
+             timeout 8 getent ahostsv4 security.ubuntu.com >/dev/null 2>&1 &&
+             sudo apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=15 update &&
+             sudo apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=15 install -y fzf libevent-dev libncurses-dev bison pkg-config; then
+            :
+          else
+            echo 'Ubuntu default archives unavailable; trying a signed mirror'
+            workbench_sources="$RUNNER_TEMP/workbench-ubuntu.sources.list"
+            for workbench_suite in noble noble-updates noble-backports noble-security; do
+              printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://mirrors.edge.kernel.org/ubuntu %s main universe\n' "$workbench_suite"
+            done > "$workbench_sources"
+            sudo apt-get -o Dir::Etc::sourcelist="$workbench_sources" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o Acquire::Retries=1 -o Acquire::https::Timeout=20 update
+            sudo apt-get -o Dir::Etc::sourcelist="$workbench_sources" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o Acquire::Retries=1 -o Acquire::https::Timeout=20 install -y fzf libevent-dev libncurses-dev bison pkg-config
+          fi
           sh .github/scripts/install-ci-tmux.sh
       - name: Install test dependencies (macOS)
         if: runner.os == 'macOS'

@@ -58,8 +58,8 @@ repair of the missing host-metrics fixture without changing shipped code.
 Existing release notes are preserved; artifacts are uploaded after all targets
 succeed. No release tag is moved or overwritten.
 
-If Ubuntu's default archives cannot be reached, the P0 gate and Linux release
-jobs retry their test dependencies using signed Ubuntu mirrors. Package
+If Ubuntu's default archives cannot be reached, the P0 gate, Linux P1 and
+release jobs retry their test dependencies using signed Ubuntu mirrors. Package
 signature verification remains enabled; the binaries are still built from the
 original release tag.
 
