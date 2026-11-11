@@ -381,6 +381,10 @@ impl Detector {
         for pane in &panes {
             self.machine.retarget(&pane.target);
         }
+        // Explicit placement may have moved a pane since the last shared
+        // sample. Keep any immediately reused pane inventory in sync, or the
+        // next process scan can restore the pre-move target after publication.
+        self.surface_panes = Some(panes.clone());
         self.panes = panes
             .into_iter()
             .map(|pane| (pane.target.pane_id.clone(), pane))
@@ -1331,6 +1335,86 @@ fn _display_interval(state: DisplayState, config: &Config) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_target_refresh_updates_the_reusable_pane_inventory() {
+        if crate::command::new("tmux").arg("-V").output().is_err() {
+            return;
+        }
+        let directory = tempfile::Builder::new()
+            .prefix("wb-target-cache-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = directory.path().join("tmux.sock");
+        struct ServerCleanup(std::path::PathBuf);
+        impl Drop for ServerCleanup {
+            fn drop(&mut self) {
+                let _ = crate::command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let _cleanup = ServerCleanup(socket.clone());
+        let run = |args: &[&str]| {
+            let output = crate::command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let pane = run(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            "old",
+            "sleep 30",
+        ]);
+        run(&["new-session", "-d", "-s", "new", "sleep 30"]);
+        let mut detector = Detector::new(ServerIdentity::from_socket(socket.clone()).unwrap());
+        detector.surface_panes = Some(detector.tmux.panes().unwrap());
+        assert_eq!(
+            detector
+                .surface_panes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|p| p.target.pane_id == pane)
+                .unwrap()
+                .target
+                .session_name,
+            "old"
+        );
+
+        run(&["move-window", "-s", &pane, "-t", "new:"]);
+        detector.refresh_targets().unwrap();
+        detector.surface_inventory_at = Some(Instant::now());
+        let reusable = detector
+            .recent_surface_panes(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            reusable
+                .iter()
+                .find(|p| p.target.pane_id == pane)
+                .unwrap()
+                .target
+                .session_name,
+            "new"
+        );
+    }
 
     #[test]
     fn task_progress_uses_an_explicit_title_item_and_never_a_thread_name() {
