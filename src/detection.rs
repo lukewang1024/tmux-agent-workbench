@@ -326,7 +326,15 @@ impl Detector {
         }
 
         let was_idle = config.detection.low_process_churn && self.is_idle();
-        let panes: Vec<_> = self.panes.values().cloned().collect();
+        let mut panes: Vec<_> = self.panes.values().cloned().collect();
+        // Screen-only foreground changes should not wait behind slower
+        // captures from detached sessions on a heavily monitored host.
+        panes.sort_by_key(|pane| {
+            (
+                !self.attached_sessions.contains(&pane.target.session_id),
+                pane.target.pane_id.clone(),
+            )
+        });
         for pane in panes {
             let Some(process) = self.agents.get(&pane.root_pid).cloned() else {
                 continue;

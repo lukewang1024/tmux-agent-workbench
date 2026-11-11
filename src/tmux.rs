@@ -591,9 +591,14 @@ impl TmuxSource for Tmux {
             return Err(TmuxError::InvalidRow(pane_id.to_owned()));
         }
         let lines = lines.clamp(1, 200);
-        // capture-pane can monopolize the entire tmux server when a busy TUI
-        // continuously redraws. Never let Agent observation stall interactive
-        // tmux commands; the detector's stale grace handles a missed sample.
+        // A background sample can take longer on a heavily monitored host.
+        // It remains interruptible by foreground requests; standalone callers
+        // keep the shorter existing bound.
+        let timeout = if self.sampling_interruptible {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(250)
+        };
         let output = self.output_with_timeout(
             &[
                 "capture-pane",
@@ -603,7 +608,7 @@ impl TmuxSource for Tmux {
                 "-S",
                 &format!("-{lines}"),
             ],
-            Duration::from_millis(250),
+            timeout,
         )?;
         Ok(tail_utf8(tail_lines(&output, lines), bytes.min(65_536)))
     }
@@ -801,6 +806,44 @@ mod tests {
             .args([
                 "--exact",
                 "tmux::tests::interactive_inventory_does_not_use_idle_probe_timeout",
+            ])
+            .env("PATH", directory.path())
+            .env(CHILD, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn background_capture_tolerates_a_slow_tmux_client() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "WORKBENCH_SLOW_CAPTURE_TEST_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let socket = std::path::PathBuf::from(directory).join("tmux.sock");
+            let mut tmux = Tmux::new(ServerIdentity::from_socket(socket).unwrap());
+            tmux.set_sampling_interruptible(true);
+            assert_eq!(tmux.capture_bottom("%1", 10, 1024).unwrap(), "ready\n");
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tmux");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n/bin/sleep 0.4\nprintf 'ready\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tmux::tests::background_capture_tolerates_a_slow_tmux_client",
             ])
             .env("PATH", directory.path())
             .env(CHILD, directory.path())
