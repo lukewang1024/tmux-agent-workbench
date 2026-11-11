@@ -1,8 +1,15 @@
 import os
+import fcntl
 from pathlib import Path
+import pty
+import select
+import shlex
 import shutil
+import struct
 import subprocess
 import tempfile
+import termios
+import time
 import unittest
 
 
@@ -32,6 +39,11 @@ class MetricsPluginTest(unittest.TestCase):
     def load(self):
         subprocess.run(['sh', str(ROOT / 'lib/host-metrics.sh')],
                        env=self.env, check=True)
+
+    def expand(self, option):
+        return subprocess.check_output(self.cmd + ['display-message', '-p',
+                                                  '#{E:' + option + '}'],
+                                       text=True).rstrip('\n')
 
     def test_default_registration_and_reload(self):
         self.set_option('@adaptive_cpu', '#(sh /old/dotfiles/tmux-host-metrics cpu)')
@@ -83,6 +95,102 @@ class MetricsPluginTest(unittest.TestCase):
         env = dict(self.env, XDG_CACHE_HOME=str(cache), PATH=str(shim) + ':' + os.environ['PATH'])
         output = subprocess.check_output(['sh', str(ROOT / 'bin/workbench-host-metrics-status')], env=env, text=True)
         self.assertEqual(output, '󰻠 25% 󰍛 35% 󰋊 40%')
+
+    def test_shared_metrics_update_without_changing_the_menu_mode(self):
+        self.load()
+        self.set_option('@workbench_status_ready', '1')
+        self.set_option('@workbench_status_updated_at', str(int(time.time())))
+        self.set_option('@workbench_cached_cpu', 'cpu')
+        self.set_option('@workbench_cached_metrics_compact', 'compact')
+        self.set_option('@workbench_cached_metrics_standard', 'standard')
+        self.set_option('@workbench_cached_metrics_full', 'full')
+        self.assertEqual(self.expand('@adaptive_cpu_compact'), 'cpu')
+        for mode in ('compact', 'standard', 'full'):
+            self.set_option('@workbench-host-metrics-mode', mode)
+            self.assertEqual(self.expand('@adaptive_cpu'), mode)
+        # The old job remains the fallback until a compatible core publishes.
+        self.assertIn('workbench-host-metrics-status', self.option('@adaptive_cpu'))
+        self.set_option('@workbench_status_updated_at', str(int(time.time()) - 30))
+        self.assertEqual(self.expand('@adaptive_cpu'), '')
+        self.set_option('@workbench_status_updated_at', str(int(time.time())))
+        self.assertEqual(self.expand('@adaptive_cpu'), 'full')
+
+    def test_cached_usage_changes_with_the_selected_source(self):
+        subprocess.run(['sh', str(ROOT / 'lib/status-usage.sh')],
+                       env=self.env, check=True)
+        self.set_option('@workbench_status_ready', '1')
+        self.set_option('@workbench_status_updated_at', str(int(time.time())))
+        self.set_option('@adaptive_compact_min_width', '70')
+        self.set_option('@workbench_cached_usage_codex', 'codex badge')
+        self.set_option('@workbench_cached_usage_claude', 'claude badge')
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
+        env = dict(self.env, TERM='xterm-256color')
+        env.pop('TMUX', None)
+        client = subprocess.Popen(self.cmd + ['attach-session', '-t', 'metrics-test'],
+                                  stdin=slave, stdout=slave, stderr=slave, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                clients = subprocess.check_output(self.cmd + ['list-clients', '-F', '#{client_name}'],
+                                                  text=True).strip()
+                if clients:
+                    break
+                self.assertLess(time.monotonic(), deadline, 'tmux client did not attach')
+                time.sleep(.1)
+            def badge():
+                return subprocess.check_output(self.cmd + ['display-message', '-p', '-c', clients,
+                                                             '#{E:@adaptive_context_suffix}'],
+                                               text=True).rstrip('\n')
+            self.set_option('@workbench-usage-source', 'codex')
+            self.assertEqual(badge(), 'codex badge')
+            self.set_option('@adaptive_compact_min_width', '200')
+            self.assertEqual(badge(), '')
+            subprocess.run(self.cmd + ['set-option', '-gu', '@adaptive_compact_min_width'], check=True)
+            self.assertEqual(badge(), 'codex badge')
+            self.set_option('@workbench-usage-source', 'claude')
+            self.assertEqual(badge(), 'claude badge')
+            self.set_option('@workbench-usage-source', 'opencode')
+            self.assertEqual(badge(), '')
+        finally:
+            client.terminate()
+            client.wait(timeout=5)
+            os.close(master)
+            os.close(slave)
+
+    def test_stale_shared_status_falls_back_then_returns_to_cache(self):
+        plugin = Path(self.tmp.name) / 'plugin'
+        (plugin / 'bin').mkdir(parents=True)
+        trace = Path(self.tmp.name) / 'fallback-jobs'
+        script = plugin / 'bin/workbench-host-metrics-status'
+        script.write_text('#!/bin/sh\nprintf "fallback\\n" >> ' + shlex.quote(str(trace)) + '\nprintf "fallback"\n')
+        script.chmod(0o700)
+        subprocess.run(['sh', str(ROOT / 'lib/host-metrics.sh')],
+                       env=dict(self.env, CURRENT_DIR=str(plugin)), check=True)
+        self.set_option('@workbench_status_ready', '1')
+        self.set_option('@workbench_status_updated_at', str(int(time.time()) - 30))
+        self.set_option('@workbench_cached_metrics_compact', 'fresh')
+        self.set_option('status-interval', '1')
+        self.set_option('status-right', '#{E:@adaptive_cpu}')
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
+        env = dict(self.env, TERM='xterm-256color')
+        env.pop('TMUX', None)
+        client = subprocess.Popen(self.cmd + ['attach-session', '-t', 'metrics-test'],
+                                  stdin=slave, stdout=slave, stderr=slave, env=env)
+        try:
+            deadline = time.monotonic() + 15
+            while not trace.exists():
+                self.assertLess(time.monotonic(), deadline, 'stale status did not run fallback')
+                if select.select([master], [], [], .1)[0]:
+                    os.read(master, 65536)
+            self.set_option('@workbench_status_updated_at', str(int(time.time())))
+            self.assertEqual(self.expand('@adaptive_cpu'), 'fresh')
+        finally:
+            client.terminate()
+            client.wait(timeout=5)
+            os.close(master)
+            os.close(slave)
 
 
 if __name__ == '__main__':

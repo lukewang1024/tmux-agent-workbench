@@ -82,6 +82,20 @@ pub(crate) struct SurfaceInventory {
     #[serde(default)]
     pub restore_token: String,
     #[serde(default)]
+    pub shared_status: String,
+    #[serde(default)]
+    pub status_ready: String,
+    #[serde(default)]
+    pub usage_source: String,
+    #[serde(default)]
+    pub plugin_dir: String,
+    #[serde(default)]
+    pub metrics_mode: String,
+    #[serde(default)]
+    pub metrics_enabled: String,
+    #[serde(default)]
+    pub usage_enabled: String,
+    #[serde(default)]
     pub last_panes: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<crate::sidebar::SharedSidebarData>,
@@ -406,6 +420,13 @@ impl Tmux {
                     "#{@adaptive_mode}",
                     "#{@adaptive_accent}",
                     "#{@workbench_team_restore_token}",
+                    "#{@workbench_shared_status}",
+                    "#{@workbench_status_ready}",
+                    "#{@workbench-usage-source}",
+                    "#{@workbench_plugin_dir}",
+                    "#{@workbench-host-metrics-mode}",
+                    "#{@workbench-host-metrics}",
+                    "#{@workbench-usage}",
                 ]
                 .join(&separator)
             );
@@ -452,6 +473,13 @@ impl Tmux {
             mode: String::new(),
             accent: String::new(),
             restore_token: String::new(),
+            shared_status: String::new(),
+            status_ready: String::new(),
+            usage_source: String::new(),
+            plugin_dir: String::new(),
+            metrics_mode: String::new(),
+            metrics_enabled: String::new(),
+            usage_enabled: String::new(),
             last_panes: HashMap::new(),
             sidebar: None,
         });
@@ -525,7 +553,7 @@ impl Tmux {
                 }
             } else if let Some(row) = value.strip_prefix(&format!("T{separator}")) {
                 let fields: Vec<_> = row.split(&separator).collect();
-                if fields.len() != 5 {
+                if fields.len() != 12 {
                     return Err(TmuxError::InvalidRow(row.to_owned()));
                 }
                 let surface = surface.as_mut().expect("surface requested");
@@ -534,6 +562,13 @@ impl Tmux {
                 surface.mode = fields[2].to_owned();
                 surface.accent = fields[3].to_owned();
                 surface.restore_token = fields[4].to_owned();
+                surface.shared_status = fields[5].to_owned();
+                surface.status_ready = fields[6].to_owned();
+                surface.usage_source = fields[7].to_owned();
+                surface.plugin_dir = fields[8].to_owned();
+                surface.metrics_mode = fields[9].to_owned();
+                surface.metrics_enabled = fields[10].to_owned();
+                surface.usage_enabled = fields[11].to_owned();
             } else if !value.is_empty() {
                 return Err(TmuxError::InvalidRow(value.to_owned()));
             }

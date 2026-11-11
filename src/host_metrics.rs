@@ -37,6 +37,34 @@ pub fn cpu_counters() -> io::Result<(u64, u64)> {
     ))
 }
 
+/// Match the standalone macOS widget: active, wired and compressed pages.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // Mach is exposed by the existing libc dependency.
+pub(crate) fn used_memory_bytes() -> io::Result<u64> {
+    // SAFETY: the Mach API fills a correctly sized VM statistics structure.
+    let mut stats = unsafe { std::mem::zeroed::<libc::vm_statistics64>() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let result = unsafe {
+        let host = libc::mach_host_self();
+        let result = libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut stats as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        );
+        mach_port_deallocate(libc::mach_task_self(), host);
+        result
+    };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if result != libc::KERN_SUCCESS || count != libc::HOST_VM_INFO64_COUNT || page_size <= 0 {
+        return Err(io::Error::other("memory statistics unavailable"));
+    }
+    Ok((u64::from(stats.active_count)
+        + u64::from(stats.wire_count)
+        + u64::from(stats.compressor_page_count))
+    .saturating_mul(page_size as u64))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn cpu_counters() -> io::Result<(u64, u64)> {
     Err(io::Error::new(
@@ -52,5 +80,10 @@ mod tests {
         let (total, idle) = super::cpu_counters().unwrap();
         assert!(total > 0);
         assert!(idle <= total);
+    }
+
+    #[test]
+    fn native_memory_pages_are_readable_without_privileges() {
+        assert!(super::used_memory_bytes().unwrap() > 0);
     }
 }

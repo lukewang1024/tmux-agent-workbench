@@ -52,6 +52,21 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         raise SystemExit('git is required for the session-view regression')
     shim_dir = root / 'bin'
     shim_dir.mkdir()
+    status_trace = root / 'status-jobs.log'
+    status_trace.touch(mode=0o600)
+    env['WORKBENCH_TEST_STATUS_TRACE'] = str(status_trace)
+    repo = Path(__file__).resolve().parent.parent
+    status_plugin = root / 'status-plugin'
+    (status_plugin / 'bin').mkdir(parents=True)
+    for name in ('workbench-host-metrics', 'workbench-host-metrics-status', 'workbench-agent-usage'):
+        wrapper = status_plugin / 'bin' / name
+        wrapper.write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote(name)
+                           + ' >> "$WORKBENCH_TEST_STATUS_TRACE"\nexec '
+                           + shlex.quote(str(repo / 'bin' / name)) + ' "$@"\n')
+        wrapper.chmod(0o700)
+    usage = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench/usage/codex'
+    usage.parent.mkdir(parents=True)
+    usage.write_text('Cdx D1 W2 M3 | L 50%L\n')
     shim = shim_dir / 'git'
     shim.write_text('#!/bin/sh\nprintf "%s\\tgit\\n" "$PPID" >> "$WORKBENCH_TEST_SPAWN_TRACE"\n'
                     + 'exec ' + shlex.quote(real_git) + ' "$@"\n')
@@ -87,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
     config.write_text('[ui]\nlanguage = "en-US"\n')
     (config.parent / 'enable-low-process-churn').touch()
     view = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench/sidebar-view'
-    view.parent.mkdir(parents=True)
+    view.parent.mkdir(parents=True, exist_ok=True)
     view.write_text('sessions\n')
     workspace = root / 'repo'
     (workspace / '.git').mkdir(parents=True)
@@ -140,6 +155,18 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         panes.append(tmux('new-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'test:', '-c', str(workspace), idle))
         panes.append(tmux('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', 'background', '-c', str(workspace), idle))
         panes.append(tmux('new-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'test:', '-c', str(workspace), 'sleep 180'))
+        tmux('set-option', '-g', '@workbench_shared_status', '1')
+        tmux('set-option', '-g', '@workbench_status_ready', '0')
+        tmux('set-option', '-g', '@workbench_plugin_dir', str(status_plugin))
+        tmux('set-option', '-g', '@workbench-usage-source', 'codex')
+        status_env = dict(env, CURRENT_DIR=str(status_plugin), TMUX=f'{socket},0,0')
+        subprocess.run(['sh', str(repo / 'lib/host-metrics.sh')], env=status_env, check=True)
+        subprocess.run(['sh', str(repo / 'lib/status-usage.sh')], env=status_env, check=True)
+        tmux('set-option', '-g', 'status-interval', '5')
+        tmux('set-option', '-g', 'status-right-length', '160')
+        tmux('set-option', '-g', '@workbench_test_theme',
+             '#{E:@adaptive_cpu} #{E:@adaptive_cpu_compact} #{E:@adaptive_context_suffix}')
+        tmux('set-option', '-g', 'status-right', '#{T:@workbench_test_theme}')
         tmux('set-option', '-g', 'focus-events', 'on')
         tmux('set-hook', '-g', 'client-attached[921]', 'display-message preexisting-hook')
         daemon = subprocess.Popen([core, 'daemon', 'run'], env=env,
@@ -158,6 +185,10 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         wait_for(lambda: tmux('list-clients', '-F', '#{client_name}'),
                  'tmux client did not attach')
         client_name = tmux('list-clients', '-F', '#{client_name}')
+        wait_for(lambda: tmux('show-option', '-gqv', '@workbench_status_ready') == '1',
+                 'shared status cache did not become ready', timeout=15)
+        wait_for(lambda: '󰻠' in tmux('display-message', '-p', '#{E:@adaptive_cpu}'),
+                 'shared host metrics did not render', timeout=15)
         os.write(master, b'\x1b[O')
         wait_for(lambda: 'focused' not in tmux('list-clients', '-F', '#{client_flags}'),
                  'fixture client did not enter the unfocused state')
@@ -293,6 +324,7 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         # as children of the daemon or a sidebar.
         pids = [daemon.pid] + sidebar_pids + [server_pid]
         time.sleep(5)  # Ignore startup and the transition into idle scheduling.
+        status_trace.write_text('')
         queue = select.kqueue()
         for pid in pids:
             queue.control([select.kevent(pid, filter=select.KQ_FILTER_PROC,
@@ -351,6 +383,8 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         if previously_stale:
             wait_for(idle_agents, 'capture health did not recover after measurement', timeout=5)
         assert invocations > 0, 'debug spawn accounting did not record the resident processes'
+        assert not status_trace.read_text(), (
+            f'status redraw launched a fallback job while the shared cache was ready: {status_trace.read_text()}')
         assert invocations <= elapsed, f'idle command budget exceeded: {invocations} in {elapsed:.1f}s'
         assert events <= elapsed, f'idle fork budget exceeded: {events} in {elapsed:.1f}s, {counts}'
         print(f'PASS idle budget: {invocations} command constructions, {events} fork notifications '

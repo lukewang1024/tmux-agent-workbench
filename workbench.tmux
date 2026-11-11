@@ -7,6 +7,8 @@
 set -eu
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmux set-option -gq @workbench_plugin_dir "$CURRENT_DIR"
+tmux set-option -gq @workbench_shared_status 1
+tmux set-option -gq @workbench_status_ready 0
 
 # Bridge a tmux option to a global env var, only if the user actually set it —
 # leave it alone otherwise so the scripts' own `${VAR:-default}` applies.
@@ -81,19 +83,7 @@ tmux set-option -g @adaptive_action_3_visible 0
 tmux set-option -g @adaptive_usage ''
 tmux set-option -g @adaptive_usage_range_open '#[range=user|wb_usage]'
 tmux set-option -g @adaptive_usage_range_close '#[range=]'
-usage_enabled="$(tmux show-option -gqv @workbench-usage 2>/dev/null || true)"
-if [ "$usage_enabled" != off ]; then
-  old_usage_source="$(tmux show-option -gqv @agent_usage_source 2>/dev/null || true)"
-  usage_source="$(tmux show-option -gqv @workbench-usage-source 2>/dev/null || true)"
-  if [ -z "$usage_source" ]; then
-    case "$old_usage_source" in codex|claude|trae|opencode) usage_source=$old_usage_source ;; *) usage_source=codex ;; esac
-    tmux set-option -g @workbench-usage-source "$usage_source"
-  fi
-  tmux set-option -g @adaptive_context_suffix \
-    "#($CURRENT_DIR/bin/workbench-agent-usage badge #{client_width})"
-else
-  tmux set-option -g @adaptive_context_suffix ''
-fi
+. "$CURRENT_DIR/lib/status-usage.sh"
 tmux set-option -s command-alias[920] \
   "wb-tmux-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[921] \
