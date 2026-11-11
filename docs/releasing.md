@@ -58,9 +58,10 @@ repair of the missing host-metrics fixture without changing shipped code.
 Existing release notes are preserved; artifacts are uploaded after all targets
 succeed. No release tag is moved or overwritten.
 
-If Ubuntu's default archives cannot be reached, Linux release jobs retry their
-test dependencies using signed Ubuntu mirrors. Package signature verification
-remains enabled; the binaries are still built from the original release tag.
+If Ubuntu's default archives cannot be reached, the P0 gate and Linux release
+jobs retry their test dependencies using signed Ubuntu mirrors. Package
+signature verification remains enabled; the binaries are still built from the
+original release tag.
 
 The main protection and repository auto-merge setting live in GitHub. The
 required status check is `CI gate`, strict/up-to-date is enabled, administrators
