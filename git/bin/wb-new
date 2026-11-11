@@ -48,14 +48,16 @@ workspace=${WORKBENCH_WORKSPACE_ROOT:-$HOME/Workspace}/$direction
 }
 mkdir -p "$workspace"
 workspace=$(CDPATH='' cd "$workspace" && pwd -P)
+wb_initial_pane=
 if ! tmux has-session -t "=$direction" 2>/dev/null; then
   task_root=$workspace/tasks/$task
   mkdir -p "$task_root"
   pane=$(tmux new-session -d -s "$direction" -c "$workspace" -n "$task" -P -F '#{pane_id}')
-  tmux set-option -t "$direction" @workbench_workspace_root "$workspace"
-  tmux set-option -t "$direction" @workbench_task 1
-  tmux set-option -w -t "$pane" @workbench_task_root "$task_root"
-  tmux set-option -w -t "$pane" @workbench_task_name "$task"
+  wb_initial_pane=$pane
+  tmux set-option -t "$direction" @workbench_workspace_root "$workspace" \; \
+    set-option -t "$direction" @workbench_task 1 \; \
+    set-option -w -t "$pane" @workbench_task_root "$task_root" \; \
+    set-option -w -t "$pane" @workbench_task_name "$task"
 else
   actual=$(tmux show-option -qv -t "$direction" @workbench_workspace_root)
   if [ -z "$actual" ]; then
@@ -68,9 +70,15 @@ else
     exit 1
   }
 fi
-WORKBENCH_SESSION=$direction "$cli" task new --detach "$task" "$@"
+if [ -n "$wb_initial_pane" ]; then
+  WORKBENCH_SESSION=$direction TMUX_PANE=$wb_initial_pane "$cli" task new --detach "$task" "$@"
+else
+  WORKBENCH_SESSION=$direction "$cli" task new --detach "$task" "$@"
+fi
 if command -v zoxide >/dev/null 2>&1; then zoxide add "$workspace" || true; fi
-"$cli" projects rebuild
+# `task new` already refreshes project launchers, including when no repository
+# was supplied. Repeating it here makes the initial task creation needlessly
+# rescan every checkout.
 [ "$detach" = 0 ] || exit 0
 if [ -n "${WORKBENCH_TARGET_CLIENT:-}" ]; then exec tmux switch-client -c "$WORKBENCH_TARGET_CLIENT" -t "$direction"
 elif [ -n "${TMUX:-}" ]; then exec tmux switch-client -t "$direction"

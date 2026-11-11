@@ -6,6 +6,11 @@ cd "$repo"
 python_runner="$repo/tests/python.sh"
 # Snapshot and team tests invoke the core before the later cargo test step.
 cargo build --locked --bin tmux-agent-workbench
+"$python_runner" "$repo/tests/macos-spawn-events.py" "$repo/target/debug/tmux-agent-workbench"
+if [ "$(uname -s)" = Darwin ]; then
+  cargo build --locked --example codex
+  "$python_runner" "$repo/tests/low-process-churn.py" "$repo/target/debug/tmux-agent-workbench"
+fi
 "$python_runner" -B -m unittest discover -s tests -p test_codex_usage.py
 "$python_runner" -B -m unittest discover -s tests -p test_release_prepare.py
 "$python_runner" -B -m unittest discover -s tests -p test_botmux.py

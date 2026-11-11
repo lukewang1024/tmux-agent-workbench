@@ -1,6 +1,5 @@
 //! Containers for Sidebar views and compact action menus.
 use crate::server::ServerIdentity;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
@@ -125,7 +124,7 @@ pub(crate) fn open(
             .collect::<Vec<_>>()
             .join(" "),
     );
-    let mut popup = Command::new("tmux");
+    let mut popup = crate::command::new("tmux");
     let popup_height = popup_height.to_string();
     let popup_y = if status_visible { "0" } else { "C" };
     popup.args(server.tmux_args()).args([
@@ -183,7 +182,7 @@ pub(crate) fn open(
                     // keeps its search and position when the viewport shrinks.
                     // tmux cannot grow a popup beyond its initial size, so a
                     // stale input surface must not leave uncaptured margins.
-                    let _ = Command::new("tmux")
+                    let _ = crate::command::new("tmux")
                         .args(server.tmux_args())
                         .args(["display-popup", "-C", "-c", client])
                         .output();

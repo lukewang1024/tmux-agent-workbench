@@ -1,9 +1,11 @@
 """Task isolation and temporary tools against a private, config-free tmux server."""
+from collections import Counter
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -12,6 +14,9 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / 'bin/tmux-agent-workbench-cli'
+# Keep the normal P0 timeout, while allowing an explicit diagnostic rerun on a
+# loaded host to distinguish a slow operation from a functional failure.
+COMMAND_TIMEOUT = float(os.environ.get('WORKBENCH_TEST_COMMAND_TIMEOUT', '25'))
 
 
 class TaskWindows(unittest.TestCase):
@@ -53,8 +58,28 @@ class TaskWindows(unittest.TestCase):
         path.chmod(0o755)
 
     def call(self, argv, env=None, check=True):
-        result = subprocess.run([str(a) for a in argv], env=env or self.env,
-                                cwd=self.root, text=True, capture_output=True, timeout=25)
+        args = [str(a) for a in argv]
+        process = subprocess.Popen(args, env=env or self.env, cwd=self.root, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # A timed-out CLI may still have shell/Git descendants holding its
+            # pipes. Reap only this fixture's isolated process group.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate(timeout=5)
+            raise
+        result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if check and result.returncode:
             self.fail(f'{argv}: {result.returncode}\n{result.stdout}\n{result.stderr}')
         return result
@@ -92,8 +117,9 @@ class TaskWindows(unittest.TestCase):
         self.git(path, 'remote', 'set-head', 'origin', '-a')
 
     def new(self, task='first', *repos):
-        self.cli('new', '--detach', '--task', task, 'direction', *repos, session=None)
+        result = self.cli('new', '--detach', '--task', task, 'direction', *repos, session=None)
         self.wait(lambda: self.root.joinpath('agents.log').exists())
+        return result
 
     def task_root(self, task):
         return self.workspaces / 'direction' / 'tasks' / task
@@ -111,6 +137,73 @@ class TaskWindows(unittest.TestCase):
 
     def windows(self):
         return self.tmux('list-windows', '-t', 'direction', '-F', '#{window_name}').splitlines()
+
+    def test_task_creation_refreshes_projects_without_duplicate_rebuilds(self):
+        initial = self.new('first', 'app', 'api:custom-api')
+        self.assertEqual(initial.stdout.count('gen-tmuxinator-configs: wrote'), 1)
+        empty = self.cli('task', 'new', 'empty')
+        self.assertEqual(empty.stdout.count('gen-tmuxinator-configs: wrote'), 1)
+        another = self.cli('task', 'new', 'another', 'app')
+        self.assertEqual(another.stdout.count('gen-tmuxinator-configs: wrote'), 1)
+
+        # A later failed add still leaves previously created worktrees and
+        # their project launcher discoverable.
+        partial = self.cli('task', 'new', 'partial', 'app', 'missing', check=False)
+        self.assertNotEqual(partial.returncode, 0)
+        self.assertTrue((self.task_root('partial') / 'app/.git').exists())
+        text = (self.root / 'config/tmuxinator/direction.yml').read_text()
+        self.assertEqual(re.findall(r"^  - '([^']+)':$", text, re.M),
+                         ['another', 'empty', 'first', 'partial'])
+
+    def test_project_generation_inventories_each_seed_once(self):
+        self.git(self.code / 'app', 'worktree', 'add', '-b', 'pool-slot',
+                 str(self.code / 'app-2'), 'HEAD')
+        real_git = shutil.which('git', path=self.env['PATH'])
+        git_log = self.root / 'worktree-inventory.log'
+        self.write_script('git',
+                          'case " $* " in *" worktree list --porcelain "*) '
+                          'printf "%s\\n" "$2" >> "$WORKBENCH_TEST_GIT_LOG" ;; esac\n'
+                          + 'exec ' + shlex.quote(real_git) + ' "$@"\n')
+        self.env['WORKBENCH_TEST_GIT_LOG'] = str(git_log)
+        self.cli('projects', 'rebuild', session=None)
+        calls = Counter(git_log.read_text().splitlines())
+        self.assertEqual(set(calls), {str(self.code / name) for name in ('app', 'app-2', 'api')})
+        self.assertTrue(all(count == 1 for count in calls.values()), calls)
+        for name in ('app', 'app-2', 'api'):
+            self.assertTrue((self.root / 'config/tmuxinator' / (name + '.yml')).is_file(), name)
+
+    def test_interrupted_batch_refreshes_previous_worktrees(self):
+        self.new('first', 'app')
+        initializer = self.code / 'api/.workbench/worktree-init'
+        initializer.parent.mkdir()
+        initializer.write_text('#!/bin/sh\nset -eu\n'
+                               'printf ready > "$WORKBENCH_TEST_INIT_MARKER"\n'
+                               'while [ ! -e "$WORKBENCH_TEST_INIT_RELEASE" ]; do sleep 0.1; done\n')
+        initializer.chmod(0o755)
+        marker = self.root / 'initializer-ready'
+        release = self.root / 'initializer-release'
+        env = dict(self.env, WORKBENCH_SESSION='direction',
+                   WORKBENCH_TEST_INIT_MARKER=str(marker), WORKBENCH_TEST_INIT_RELEASE=str(release))
+        process = subprocess.Popen([str(REPO / 'git/bin/wb-task'), 'new', '--detach', 'interrupted', 'app', 'api'],
+                                   env=env, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            deadline = time.monotonic() + max(35, COMMAND_TIMEOUT)
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertTrue(marker.exists(), 'second repository initializer did not start')
+            process.terminate()
+            release.touch()
+            stdout, stderr = process.communicate(timeout=max(35, COMMAND_TIMEOUT))
+            self.assertNotEqual(process.returncode, 0, (stdout, stderr))
+            self.assertTrue((self.task_root('interrupted') / 'app/.git').exists())
+            text = (self.root / 'config/tmuxinator/direction.yml').read_text()
+            self.assertIn("  - 'interrupted':", text)
+        finally:
+            release.touch()
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
 
     def test_parallel_tasks_have_separate_checkouts_and_agents(self):
         self.new('first', 'app', 'api:custom-api')

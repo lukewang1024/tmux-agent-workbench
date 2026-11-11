@@ -112,7 +112,10 @@ case $action in
     }
     lock=workbench-tasks-$wb_session
     tmux wait-for -L "$lock"
-    trap 'tmux wait-for -U "$lock" 2>/dev/null || true' 0
+    # If a later add fails or this task is interrupted, preserve discoverability
+    # of earlier successful worktrees before releasing the task lock.
+    projects_dirty=0
+    trap 'wb_task_exit=$?; trap - 0; if [ "${projects_dirty:-0}" -eq 1 ]; then "$cli" projects rebuild >&2 || true; fi; tmux wait-for -U "$lock" 2>/dev/null || true; exit "$wb_task_exit"' 0
     trap 'exit 1' HUP INT TERM
     wb_task_root=$task_root
     workbench_task_window
@@ -125,12 +128,30 @@ case $action in
       mkdir -p "$task_root"
       window=$(tmux new-window -d -t "$wb_session:" -n "$task" -c "$task_root" -P -F '#{window_id}')
     fi
-    tmux set-option -w -t "$window" automatic-rename off
-    tmux set-option -w -t "$window" @workbench_task_root "$task_root"
-    tmux set-option -w -t "$window" @workbench_task_name "$task"
+    tmux set-option -w -t "$window" automatic-rename off \; \
+      set-option -w -t "$window" @workbench_task_root "$task_root" \; \
+      set-option -w -t "$window" @workbench_task_name "$task"
+    # Pass a pane belonging to the already-validated task window to each add.
+    # Otherwise an invocation from outside tmux repeatedly walks its process
+    # ancestry even though this window's identity is already known.
+    context_pane=$(tmux display-message -p -t "$window" '#{pane_id}')
+    # A batch needs only one launcher rebuild. If a later add fails, rebuild
+    # first so successfully created earlier worktrees remain discoverable.
+    projects_refreshed=0
     for repo do
-      WORKBENCH_SESSION=$wb_session WORKBENCH_TASK=$task "$cli" add "$repo"
+      if WORKBENCH_SESSION=$wb_session WORKBENCH_TASK=$task TMUX_PANE=$context_pane \
+        _WORKBENCH_BATCH_PROJECTS=1 "$cli" add "$repo"; then
+        projects_refreshed=1
+        projects_dirty=1
+      else
+        add_status=$?
+        exit "$add_status"
+      fi
     done
+    if [ "$projects_refreshed" -eq 1 ]; then
+      "$cli" projects rebuild
+      projects_dirty=0
+    fi
     if [ "$(tmux show-option -wqv -t "$window" @workbench_task_started)" != 1 ]; then
       workbench_inherit_proxies
       pane=$(tmux list-panes -t "$window" -f '#{!=:#{@pane_role},sidebar}' -F '#{pane_id}' | head -1)
@@ -145,7 +166,7 @@ case $action in
       tmux set-option -w -t "$window" @workbench_task_started 1
     fi
     [ "$detach" = 1 ] || tmux select-window -t "$window"
-    "$cli" projects rebuild
+    [ "$projects_refreshed" -eq 1 ] || "$cli" projects rebuild
     printf '%s\n' "$task_root"
     ;;
   list)

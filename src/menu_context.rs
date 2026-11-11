@@ -10,7 +10,6 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -35,7 +34,7 @@ pub(crate) struct Member {
 }
 
 pub(crate) fn tmux(args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("tmux");
+    let mut cmd = crate::command::new("tmux");
     if let Ok(server) = ServerIdentity::discover() {
         cmd.args(server.tmux_args());
     }
@@ -160,7 +159,7 @@ impl Context {
 // ps is available on both Linux and macOS. A suspended/background CLI must not
 // turn an ordinary foreground shell into an agent command target. Fail closed.
 fn foreground(pid: u32) -> bool {
-    Command::new("ps")
+    crate::command::new("ps")
         .args(["-o", "pgid=,tpgid=,stat=", "-p", &pid.to_string()])
         .output()
         .ok()

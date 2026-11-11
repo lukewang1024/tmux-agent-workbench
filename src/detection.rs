@@ -25,6 +25,15 @@ pub struct Detector {
     last_classification: HashMap<String, CachedClassification>,
     next_capture: HashMap<String, Instant>,
     next_process_scan: Instant,
+    next_foreground_probe: Instant,
+    client_inventory: Option<String>,
+    attached_sessions: HashSet<String>,
+    surface_inventory: Option<crate::tmux::SurfaceInventory>,
+    surface_inventory_at: Option<Instant>,
+    surface_panes: Option<Vec<Pane>>,
+    last_surface_attempt: Option<Instant>,
+    retry_surface_without_capture: bool,
+    last_actions: Option<(Vec<(String, String, bool, bool)>, Instant)>,
     metadata: HashMap<String, MetadataRecord>,
 }
 
@@ -72,6 +81,15 @@ impl Detector {
             last_classification: HashMap::new(),
             next_capture: HashMap::new(),
             next_process_scan: Instant::now(),
+            next_foreground_probe: Instant::now(),
+            client_inventory: None,
+            attached_sessions: HashSet::new(),
+            surface_inventory: None,
+            surface_inventory_at: None,
+            surface_panes: None,
+            last_surface_attempt: None,
+            retry_surface_without_capture: false,
+            last_actions: None,
             metadata: HashMap::new(),
         }
     }
@@ -83,8 +101,144 @@ impl Detector {
         now_ms: u64,
     ) -> Result<Vec<AgentSnapshot>, TmuxError> {
         let now = Instant::now();
+        let quiet = config.detection.low_process_churn && self.is_idle();
+        let mut batch = None;
+        let mut scanned_panes = None;
+        if quiet && now >= self.next_foreground_probe && self.surface_query_due() {
+            self.next_foreground_probe =
+                now + Duration::from_millis(config.detection.idle_capture_interval_ms.max(2_000));
+            // Detached idle panes normally use the slower background cadence.
+            // A stale capture is an exception: retry it in the next shared
+            // probe so a transient failure does not persist for that interval.
+            let stale_panes: HashSet<_> = self
+                .machine
+                .snapshots()
+                .into_iter()
+                .filter(|agent| !agent.exited && agent.stale)
+                .map(|agent| agent.target.pane_id)
+                .collect();
+            let inventory_only = self.retry_surface_without_capture;
+            let due: Vec<_> = if inventory_only {
+                Vec::new()
+            } else {
+                self.panes
+                    .values()
+                    .filter(|pane| self.agents.contains_key(&pane.root_pid))
+                    .filter(|pane| {
+                        self.attached_sessions.contains(&pane.target.session_id)
+                            || stale_panes.contains(&pane.target.pane_id)
+                            || self
+                                .next_capture
+                                .get(&pane.target.pane_id)
+                                .is_none_or(|due| now >= *due)
+                    })
+                    .map(|pane| pane.target.pane_id.clone())
+                    .collect()
+            };
+            let probe = self.tmux.probe(
+                &due,
+                config.detection.capture_lines.min(40),
+                config.detection.capture_bytes,
+                true,
+            );
+            #[cfg(debug_assertions)]
+            if let (Err(error), Some(path)) =
+                (&probe, std::env::var_os("WORKBENCH_TEST_PROBE_ERRORS"))
+            {
+                use std::io::Write;
+                if let Ok(mut log) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(log, "{now_ms}\tcaptures={}\t{error}", due.len());
+                }
+            }
+            self.last_surface_attempt = Some(Instant::now());
+            if let Ok(probe) = probe {
+                self.retry_surface_without_capture = false;
+                if inventory_only && !stale_panes.is_empty() {
+                    // Re-capture stale panes at the next permitted query;
+                    // do not add another full idle interval after recovery.
+                    self.next_foreground_probe = Instant::now();
+                }
+                // Attached clients may not report a terminal focus flag. Keep
+                // their sessions responsive without changing the stricter
+                // visibility rules used for attention acknowledgement.
+                let attached_sessions = attached_sessions(&probe.clients);
+                let topology_changed = probe.panes.len() != self.panes.len()
+                    || probe.panes.iter().any(|pane| {
+                        self.panes.get(&pane.target.pane_id).is_none_or(|old| {
+                            old.root_pid != pane.root_pid
+                                || (attached_sessions.contains(&pane.target.session_id)
+                                    && old.current_command != pane.current_command)
+                        })
+                    });
+                if topology_changed {
+                    self.next_process_scan = now;
+                }
+                let mut newly_attached = false;
+                for pane in &probe.panes {
+                    if attached_sessions.contains(&pane.target.session_id)
+                        && !self.attached_sessions.contains(&pane.target.session_id)
+                    {
+                        newly_attached = true;
+                        self.next_capture.insert(pane.target.pane_id.clone(), now);
+                    }
+                }
+                if newly_attached {
+                    // A newly visible session may not have been in this
+                    // probe's capture list. Refresh it at the next permitted
+                    // query instead of waiting a full background interval.
+                    self.next_foreground_probe = Instant::now();
+                }
+                self.remember_surface(&probe);
+                for pane in &probe.panes {
+                    self.machine.retarget(&pane.target);
+                }
+                self.panes = probe
+                    .panes
+                    .iter()
+                    .cloned()
+                    .map(|pane| (pane.target.pane_id.clone(), pane))
+                    .collect();
+                scanned_panes = Some(probe.panes);
+                batch = Some(probe.captures);
+            } else {
+                // A pane can disappear during capture. Retry inventory without
+                // captures on the next permitted query, never immediately.
+                self.retry_surface_without_capture = true;
+                self.next_foreground_probe = Instant::now();
+            }
+        }
+        // While agents are active, keep the shared foreground information
+        // fresh at one query per second, independently of sidebar count.
+        if !quiet && self.surface_query_due() {
+            let probe = self.tmux.surface_probe();
+            self.last_surface_attempt = Some(Instant::now());
+            if let Ok(probe) = probe {
+                self.remember_surface(&probe);
+                scanned_panes = Some(probe.panes);
+            }
+        }
         if now >= self.next_process_scan {
-            if self.scan_processes(config, manifests, now_ms).is_err() {
+            // The daemon owns the shared tmux inventory. An interactive
+            // refresh and a scheduled scan reuse the same recent query.
+            if scanned_panes.is_none() {
+                scanned_panes = self.recent_surface_panes(Duration::from_secs(1));
+                if scanned_panes.is_none() && self.surface_query_due() {
+                    let probe = self.tmux.surface_probe();
+                    self.last_surface_attempt = Some(Instant::now());
+                    if let Ok(probe) = probe {
+                        self.remember_surface(&probe);
+                        scanned_panes = Some(probe.panes);
+                    }
+                }
+            }
+            let scan = scanned_panes.map(|panes| {
+                self.scan_processes(manifests, now_ms, config.detection.low_process_churn, panes)
+            });
+            if scan.as_ref().is_some_and(Result::is_err) {
                 let instances: Vec<_> = self.pane_instances.values().cloned().collect();
                 for instance in instances {
                     self.machine.mark_capture_failure(
@@ -93,32 +247,109 @@ impl Detector {
                         config.detection.stale_grace_ms,
                     );
                 }
+                // A failed inventory marks every known capture stale. Do not
+                // leave background panes waiting for their slow idle deadline
+                // before attempting to clear that failure.
+                for due in self.next_capture.values_mut() {
+                    *due = now;
+                }
+                self.next_foreground_probe = now;
+                let scheduled_from = if config.detection.low_process_churn {
+                    Instant::now()
+                } else {
+                    now
+                };
                 self.next_process_scan =
-                    now + Duration::from_millis(config.detection.process_interval_ms);
+                    scheduled_from + Duration::from_millis(config.detection.process_interval_ms);
                 self.machine.prune_tombstones(now_ms);
                 return Ok(self.machine.snapshots());
             }
-            self.next_process_scan =
-                now + Duration::from_millis(config.detection.process_interval_ms);
+            let interval = if scan.is_none() {
+                // A shared-inventory failure does not mean each existing
+                // agent's screen capture has failed. Retain the last verified
+                // topology, retry the inventory at its global cadence, and
+                // let actual capture failures set individual stale flags.
+                // In quiet mode captures share this probe, so prolonged loss
+                // of the shared sample must still surface as stale health.
+                if quiet
+                    && self.surface_inventory_at.is_none_or(|at| {
+                        at.elapsed() >= Duration::from_millis(config.detection.stale_grace_ms)
+                    })
+                {
+                    for instance in self.pane_instances.values() {
+                        self.machine.mark_capture_failure(
+                            instance,
+                            now_ms,
+                            config.detection.stale_grace_ms,
+                        );
+                    }
+                }
+                config.detection.process_interval_ms.max(1_000)
+            } else if config.detection.low_process_churn && self.is_idle() {
+                config.detection.process_interval_ms.max(20_000)
+            } else {
+                config.detection.process_interval_ms
+            };
+            // A slow inventory must not immediately trigger another full
+            // inventory while other IPC requests are waiting for the lock.
+            let scheduled_from = if config.detection.low_process_churn {
+                Instant::now()
+            } else {
+                now
+            };
+            self.next_process_scan = scheduled_from + Duration::from_millis(interval);
         }
 
+        let was_idle = config.detection.low_process_churn && self.is_idle();
         let panes: Vec<_> = self.panes.values().cloned().collect();
         for pane in panes {
             let Some(process) = self.agents.get(&pane.root_pid).cloned() else {
                 continue;
             };
-            let due = self
-                .next_capture
-                .get(&pane.target.pane_id)
-                .is_none_or(|due| now >= *due);
+            let due = (quiet
+                && batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.contains_key(&pane.target.pane_id)))
+                || self
+                    .next_capture
+                    .get(&pane.target.pane_id)
+                    .is_none_or(|due| now >= *due);
             // Codex can redraw its progress line without changing the pane
             // title, cursor, or history size. Keep sampling settled idle panes
             // at the configured idle interval so a new turn is noticed.
             if due {
-                self.capture(&pane, process, config, manifests, now, now_ms);
+                if quiet {
+                    if let Some(content) = batch
+                        .as_mut()
+                        .and_then(|captured| captured.remove(&pane.target.pane_id))
+                    {
+                        self.capture(
+                            &pane,
+                            process,
+                            config,
+                            manifests,
+                            now,
+                            now_ms,
+                            Some(content),
+                        );
+                    } else if batch.is_some() {
+                        // The inventory is fresh even when this pane was not
+                        // selected for capture. A decisive title can update
+                        // its state without starting another tmux process.
+                        self.observe_decisive_title(
+                            &pane, &process, config, manifests, now, now_ms,
+                        );
+                    }
+                } else {
+                    self.capture(&pane, process, config, manifests, now, now_ms, None);
+                }
             } else if let Some(instance) = self.pane_instances.get(&pane.target.pane_id) {
                 self.machine.set_visibility(instance, pane.visible, now_ms);
             }
+        }
+        if was_idle && !self.is_idle() {
+            // An observed turn should immediately restore active polling.
+            self.wake();
         }
         self.machine.prune_tombstones(now_ms);
         self.metadata.retain(|_, item| item.expires_at_ms > now_ms);
@@ -153,9 +384,75 @@ impl Detector {
 
     pub fn wake(&mut self) {
         self.next_process_scan = Instant::now();
+        self.next_foreground_probe = Instant::now();
+        self.last_actions = None;
         for due in self.next_capture.values_mut() {
             *due = Instant::now();
         }
+    }
+
+    pub(crate) fn client_inventory(&self) -> Option<&str> {
+        self.client_inventory
+            .as_deref()
+            .filter(|_| self.surface_is_fresh())
+    }
+
+    pub(crate) fn surface_inventory(&self) -> Option<&crate::tmux::SurfaceInventory> {
+        self.surface_inventory
+            .as_ref()
+            .filter(|_| self.surface_is_fresh())
+    }
+
+    pub(crate) fn surface_sampled_at(&self) -> Option<Instant> {
+        self.surface_inventory().and(self.surface_inventory_at)
+    }
+
+    fn surface_is_fresh(&self) -> bool {
+        self.surface_inventory_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+    }
+
+    fn surface_query_due(&self) -> bool {
+        self.last_surface_attempt
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+    }
+
+    fn recent_surface_panes(&self, age: Duration) -> Option<Vec<Pane>> {
+        self.surface_inventory_at
+            .filter(|at| at.elapsed() < age)
+            .and(self.surface_panes.clone())
+    }
+
+    fn remember_surface(&mut self, probe: &crate::tmux::PaneProbe) {
+        self.retry_surface_without_capture = false;
+        self.client_inventory = Some(probe.clients.clone());
+        self.attached_sessions = attached_sessions(&probe.clients);
+        self.surface_inventory = probe.surface.clone();
+        self.surface_panes = Some(probe.panes.clone());
+        self.surface_inventory_at = Some(Instant::now());
+    }
+
+    /// Schedule, rather than execute, a shared refresh for interactive input.
+    /// Concurrent sidebars are coalesced behind the daemon's query cadence.
+    pub(crate) fn request_surface_refresh(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .last_surface_attempt
+            .map(|at| at + Duration::from_secs(1))
+            .filter(|due| *due > now)
+            .unwrap_or(now);
+        self.next_process_scan = self.next_process_scan.min(due);
+        self.next_foreground_probe = self.next_foreground_probe.min(due);
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        let snapshots = self.machine.snapshots();
+        crate::model::agents_are_idle(&snapshots)
+            && self.agents.values().all(|process| {
+                snapshots.iter().any(|agent| {
+                    !agent.exited && agent.process.as_ref() == Some(&process.fingerprint)
+                })
+            })
     }
 
     pub fn machine_snapshots(&self) -> Vec<AgentSnapshot> {
@@ -341,7 +638,16 @@ impl Detector {
             .get(&report.pane_id)
             .ok_or("event pane has no tracked instance")?
             .clone();
-        self.machine.report_event(&instance, report, pane.visible)
+        let was_idle = self.is_idle();
+        let result = self.machine.report_event(&instance, report, pane.visible);
+        if was_idle
+            && result
+                .as_ref()
+                .is_ok_and(|agent| agent.base_state != BaseState::Idle)
+        {
+            self.wake();
+        }
+        result
     }
 
     pub fn resolve_agent_event(
@@ -433,11 +739,12 @@ impl Detector {
 
     fn scan_processes(
         &mut self,
-        config: &Config,
         manifests: &ManifestSet,
         now_ms: u64,
+        low_process_churn: bool,
+        inventory: Vec<Pane>,
     ) -> Result<(), TmuxError> {
-        let mut panes = self.tmux.panes()?;
+        let mut panes = inventory;
         let roots: Vec<_> = panes.iter().map(|pane| pane.root_pid).collect();
         let agents = self
             .processes
@@ -446,8 +753,34 @@ impl Detector {
         if crate::task_placement::isolate(self.tmux.server(), &panes, &agents, &interactive) {
             panes = self.tmux.panes()?;
         }
-        // Presentation must not block detection if a pane disappears mid-update.
-        let _ = self.tmux.publish_agent_actions(&panes, &interactive);
+        // Avoid rewriting identical pane options on every scan. Changed panes
+        // and wake events publish immediately; periodic repair catches an
+        // option changed externally without holding the state lock each tick.
+        let mut actions: Vec<_> = panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.target.pane_id.clone(),
+                    pane.target.window_id.clone(),
+                    pane.pane_active,
+                    interactive.contains(&pane.root_pid),
+                )
+            })
+            .collect();
+        actions.sort();
+        let repair_after = if self.is_idle() { 60 } else { 5 };
+        let unchanged = low_process_churn
+            && self.last_actions.as_ref().is_some_and(|(previous, at)| {
+                previous == &actions && at.elapsed() < Duration::from_secs(repair_after)
+            });
+        if !unchanged
+            && self
+                .tmux
+                .publish_agent_actions(&panes, &interactive)
+                .is_ok()
+        {
+            self.last_actions = Some((actions, Instant::now()));
+        }
         for pane in &panes {
             let Some(agent) = agents.get(&pane.root_pid) else {
                 continue;
@@ -490,8 +823,6 @@ impl Detector {
             .map(|pane| (pane.target.pane_id.clone(), pane))
             .collect();
         self.agents = agents;
-        self.next_process_scan =
-            Instant::now() + Duration::from_millis(config.detection.process_interval_ms);
         Ok(())
     }
 
@@ -503,39 +834,28 @@ impl Detector {
         manifests: &ManifestSet,
         now: Instant,
         now_ms: u64,
+        captured: Option<String>,
     ) {
-        let pane_id = pane.target.pane_id.clone();
-        let title_result = manifests.get(process.kind).classify("", &pane.title);
-        // A busy TUI can make capture-pane hit its short timeout. Pane titles are
-        // already present in list-panes, so publish positive title signals before
-        // attempting a capture. In particular, Codex keeps its spinner in the
-        // title while a turn is active; ignoring it here made working detection
-        // depend on the slowest and least reliable observation path.
-        if matches!(title_result.state, BaseState::Working | BaseState::Blocked)
-            && !title_needs_capture(process.kind, title_result.state)
-            && !self.machine.has_pending_codex_permission(&pane_id)
-            && !title_result.skip_state_update
+        if captured.is_some()
+            && let Some(instance) = self.pane_instances.get(&pane.target.pane_id)
         {
-            let cached = CachedClassification {
-                state: title_result.state,
-                reason_category: title_result.reason_category,
-                rule_id: title_result.rule_id,
-                evidence: title_result.evidence,
-                strong_visible_signal: title_result.strong_visible_signal,
-            };
-            self.publish_observation(pane, process, cached.clone(), now_ms);
-            self.last_classification.insert(pane_id.clone(), cached);
-            self.next_capture.insert(
-                pane_id,
-                now + Duration::from_millis(config.detection.active_capture_interval_ms),
-            );
+            // A batched capture has already succeeded even when the title is
+            // decisive; preserve that evidence when updating capture health.
+            self.machine.mark_capture_success(instance);
+        }
+        if self.observe_decisive_title(pane, &process, config, manifests, now, now_ms) {
             return;
         }
-        match self.tmux.capture_bottom(
-            &pane_id,
-            config.detection.capture_lines.min(40),
-            config.detection.capture_bytes,
-        ) {
+        let pane_id = pane.target.pane_id.clone();
+        let content = match captured {
+            Some(content) => Ok(content),
+            None => self.tmux.capture_bottom(
+                &pane_id,
+                config.detection.capture_lines.min(40),
+                config.detection.capture_bytes,
+            ),
+        };
+        match content {
             Ok(content) => {
                 if let Some(instance) = self.pane_instances.get(&pane_id) {
                     self.machine.mark_capture_success(instance);
@@ -567,12 +887,29 @@ impl Detector {
                 {
                     100
                 } else if snapshot.base_state == BaseState::Idle {
-                    config.detection.idle_capture_interval_ms
+                    if config.detection.low_process_churn
+                        && self.is_idle()
+                        && !self.attached_sessions.contains(&pane.target.session_id)
+                    {
+                        // Background sessions may settle more slowly; all panes
+                        // in a focused session retain the configured cadence.
+                        config
+                            .detection
+                            .idle_capture_interval_ms
+                            .max(5_000u64.saturating_mul(self.agents.len().max(1) as u64))
+                    } else {
+                        config.detection.idle_capture_interval_ms
+                    }
                 } else {
                     config.detection.active_capture_interval_ms
                 };
+                let scheduled_from = if config.detection.low_process_churn {
+                    Instant::now()
+                } else {
+                    now
+                };
                 self.next_capture
-                    .insert(pane_id, now + Duration::from_millis(interval));
+                    .insert(pane_id, scheduled_from + Duration::from_millis(interval));
             }
             Err(_) => {
                 if let Some(instance) = self.pane_instances.get(&pane_id) {
@@ -582,12 +919,55 @@ impl Detector {
                         config.detection.stale_grace_ms,
                     );
                 }
+                let scheduled_from = if config.detection.low_process_churn {
+                    Instant::now()
+                } else {
+                    now
+                };
                 self.next_capture.insert(
                     pane_id,
-                    now + Duration::from_millis(config.detection.active_capture_interval_ms),
+                    scheduled_from
+                        + Duration::from_millis(config.detection.active_capture_interval_ms),
                 );
             }
         }
+    }
+
+    fn observe_decisive_title(
+        &mut self,
+        pane: &Pane,
+        process: &AgentProcess,
+        config: &Config,
+        manifests: &ManifestSet,
+        now: Instant,
+        now_ms: u64,
+    ) -> bool {
+        let pane_id = pane.target.pane_id.clone();
+        let title_result = manifests.get(process.kind).classify("", &pane.title);
+        // A busy TUI can make capture-pane hit its short timeout. Pane titles
+        // are already present in list-panes, so publish decisive signals
+        // without relying on an additional capture.
+        if !matches!(title_result.state, BaseState::Working | BaseState::Blocked)
+            || title_needs_capture(process.kind, title_result.state)
+            || self.machine.has_pending_codex_permission(&pane_id)
+            || title_result.skip_state_update
+        {
+            return false;
+        }
+        let cached = CachedClassification {
+            state: title_result.state,
+            reason_category: title_result.reason_category,
+            rule_id: title_result.rule_id,
+            evidence: title_result.evidence,
+            strong_visible_signal: title_result.strong_visible_signal,
+        };
+        self.publish_observation(pane, process.clone(), cached.clone(), now_ms);
+        self.last_classification.insert(pane_id.clone(), cached);
+        self.next_capture.insert(
+            pane_id,
+            now + Duration::from_millis(config.detection.active_capture_interval_ms),
+        );
+        true
     }
 
     #[allow(dead_code)]
@@ -888,6 +1268,15 @@ fn same_directory(left: &str, right: &str) -> bool {
             .ok()
             .zip(std::fs::canonicalize(right).ok())
             .is_some_and(|(left, right)| left == right)
+}
+
+fn attached_sessions(clients: &str) -> HashSet<String> {
+    clients
+        .lines()
+        .filter_map(|line| line.split('\u{1f}').nth(3))
+        .filter(|id| crate::attachment::valid_id(id, '$'))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn title_needs_capture(kind: AgentKind, state: BaseState) -> bool {

@@ -9,6 +9,14 @@ pub enum BaseState {
     Unknown,
 }
 
+/// A stale idle observation is retried separately; unknown/active is not idle.
+pub(crate) fn agents_are_idle(agents: &[AgentSnapshot]) -> bool {
+    agents
+        .iter()
+        .filter(|agent| !agent.exited)
+        .all(|agent| agent.base_state == BaseState::Idle)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayState {

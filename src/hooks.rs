@@ -2,7 +2,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -352,7 +351,7 @@ fn number_field(value: &Value, names: &[&str]) -> Option<u64> {
 }
 
 fn pane_identity(server: &ServerIdentity, pane: &str) -> Result<(String, u32), String> {
-    let output = Command::new("tmux")
+    let output = crate::command::new("tmux")
         .arg("-S")
         .arg(&server.socket_path)
         .args([

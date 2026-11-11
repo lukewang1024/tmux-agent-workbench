@@ -1,7 +1,7 @@
 //! Attachment history belongs to the tmux server, independent of daemon endpoints.
 //! Server options survive daemon restarts and disappear with the server, so pane
 //! IDs can never be replayed into a new server incarnation.
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use sha2::{Digest, Sha256};
 
@@ -54,7 +54,7 @@ pub fn terminal_key(device: &str, terminal: Option<&str>) -> Option<String> {
 }
 
 fn output(server: &ServerIdentity, args: &[&str]) -> Option<String> {
-    let result = Command::new("tmux")
+    let result = crate::command::new("tmux")
         .args(server.tmux_args())
         .args(args)
         .stderr(Stdio::null())
@@ -234,7 +234,7 @@ pub fn refresh(server: &ServerIdentity, client: &str) {
     else {
         return;
     };
-    let Ok(group) = Command::new("ps")
+    let Ok(group) = crate::command::new("ps")
         .args(["-o", "tpgid=", "-p", &pid.to_string()])
         .output()
     else {

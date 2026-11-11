@@ -90,6 +90,8 @@ pub struct DetectionConfig {
     pub process_interval_ms: u64,
     pub active_capture_interval_ms: u64,
     pub idle_capture_interval_ms: u64,
+    /// Trade slower hookless idle discovery for substantially fewer processes.
+    pub low_process_churn: bool,
     pub capture_lines: usize,
     pub capture_bytes: usize,
     pub stale_grace_ms: u64,
@@ -101,6 +103,7 @@ impl Default for DetectionConfig {
             process_interval_ms: 1_000,
             active_capture_interval_ms: 500,
             idle_capture_interval_ms: 2_000,
+            low_process_churn: false,
             capture_lines: 40,
             capture_bytes: 65_536,
             stale_grace_ms: 3_000,
@@ -224,14 +227,23 @@ fn valid_language_tag(value: &str) -> bool {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        if !path.exists() {
-            return Ok(Self::default());
+        let mut value: Self = if path.exists() {
+            let input = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+                path: path.display().to_string(),
+                source,
+            })?;
+            toml::from_str(&input)?
+        } else {
+            Self::default()
+        };
+        // A standalone opt-in is ignored by older binaries, so a local
+        // rollback does not break strict parsing of the shared config file.
+        if path
+            .parent()
+            .is_some_and(|dir| dir.join("enable-low-process-churn").is_file())
+        {
+            value.detection.low_process_churn = true;
         }
-        let input = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.display().to_string(),
-            source,
-        })?;
-        let value: Self = toml::from_str(&input)?;
         value.validate()?;
         Ok(value)
     }
@@ -322,6 +334,22 @@ mod tests {
         assert_eq!(c.sidebar.width, 26);
         assert_eq!(c.sidebar.main_min_width, 80);
         assert_eq!(c.relay.port, 19_999);
+    }
+
+    #[test]
+    fn local_low_churn_marker_is_optional_and_independent_of_toml() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let marker = directory.path().join("enable-low-process-churn");
+        assert!(!Config::load(&path).unwrap().detection.low_process_churn);
+        std::fs::write(&marker, "").unwrap();
+        assert!(Config::load(&path).unwrap().detection.low_process_churn);
+        std::fs::write(&path, "[ui]\nlanguage = 'en-US'\n").unwrap();
+        assert!(Config::load(&path).unwrap().detection.low_process_churn);
+        std::fs::remove_file(&marker).unwrap();
+        assert!(!Config::load(&path).unwrap().detection.low_process_churn);
+        std::fs::write(&path, "[detection]\nlow_process_churn = true\n").unwrap();
+        assert!(Config::load(&path).unwrap().detection.low_process_churn);
     }
 
     #[test]

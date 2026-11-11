@@ -246,6 +246,8 @@ language = "auto" # auto follows the OS; e.g. zh-CN, en-US, ja-JP
 process_interval_ms = 1000
 active_capture_interval_ms = 500
 idle_capture_interval_ms = 2000
+# Opt in to fewer background processes when every live agent is idle.
+# low_process_churn = true
 capture_lines = 40
 capture_bytes = 65536
 stale_grace_ms = 3000
@@ -282,6 +284,28 @@ mute_request = false
 bind = "127.0.0.1"
 port = 19999
 ```
+
+Sidebars share one core-maintained inventory, including team information,
+session branches, visibility and appearance. Routine inventory queries are
+limited to one per second by the core, regardless of sidebar count; concurrent
+interactive refresh requests are coalesced. If that inventory is temporarily
+unavailable, sidebars retain the last frame while the core retries. Agent screen
+sampling and explicit user actions have their own cadence.
+
+With `low_process_churn = true`, lifecycle hooks and user-driven focus changes
+wake detection promptly. While all agents are idle, panes in attached sessions
+share one foreground probe at the configured idle interval (two seconds by
+default). The same probe supplies focus, sidebar inventory and palette changes;
+sidebars normally render these within one more refresh. Hookless background
+screen changes are sampled less frequently, with an interval of at least five
+seconds per idle agent. Background process discovery falls back to at least 20
+seconds; foreground command and topology changes trigger discovery sooner.
+Intervals are scheduling targets and can be longer on a busy machine. Unknown
+or active agents retain the regular detection cadence. Alternatively, create the empty file
+`$XDG_CONFIG_HOME/tmux-agent-workbench/enable-low-process-churn` to opt in
+without modifying TOML. Older binaries ignore the file, so rollback remains
+safe. To restore normal intervals, set the option to `false` and remove the
+marker file if present; restart sidebars after changing the setting.
 
 Automatic direction splitting is disabled by default. When enabled, a task's
 own agent chooses its direction by meaning, using existing direction names and

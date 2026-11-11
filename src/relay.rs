@@ -775,14 +775,14 @@ pub fn focus_target(
     validate_target(session_id, '$')?;
     validate_target(pane_id, '%')?;
     let tmux = |args: &[&str]| {
-        Command::new("tmux")
+        crate::command::new("tmux")
             .args(["-S", tmux_socket])
             .args(args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
     };
-    let clients = Command::new("tmux")
+    let clients = crate::command::new("tmux")
         .args([
             "-S",
             tmux_socket,
@@ -796,7 +796,7 @@ pub fn focus_target(
     }
     let client = focus_client(&String::from_utf8_lossy(&clients.stdout), session_id)
         .ok_or("remote tmux server has no attached client")?;
-    let panes = Command::new("tmux")
+    let panes = crate::command::new("tmux")
         .args([
             "-S",
             tmux_socket,
