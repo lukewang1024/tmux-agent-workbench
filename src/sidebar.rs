@@ -624,9 +624,15 @@ pub(crate) fn shared_sidebar_data(
         .rows
         .lines()
         .filter_map(|row| {
-            let mut fields = row.split('\t');
-            let window = fields.next()?;
-            let pane = fields.next()?;
+            let fields: Vec<_> = row.split('\t').collect();
+            let window = *fields.first()?;
+            let pane = *fields.get(1)?;
+            // A sidebar only represents the previous pane while it is the
+            // active pane. In a window with multiple panes, pane_last can
+            // otherwise refer to an unrelated, inactive sidebar.
+            if fields.get(11) == Some(&"sidebar") && fields.get(9) != Some(&"1") {
+                return None;
+            }
             Some((pane.to_owned(), surface.last_panes.get(window)?.clone()))
         })
         .collect();
@@ -909,9 +915,13 @@ fn event_loop(
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
+    let mut startup_selection = None;
     if let Some(snapshot) = &snapshot
         && let Some(index) = initial_row(&rows, snapshot, &selection_targets, is_popup)
     {
+        if !is_popup {
+            startup_selection = selection_key(&rows[index]);
+        }
         navigation.select(index);
     }
     let mut disconnected = snapshot.is_none();
@@ -955,9 +965,23 @@ fn event_loop(
                     last_success = Some(Instant::now());
                     if initial_selection {
                         initial_selection = false;
-                        navigation.select(
-                            initial_row(&rows, &fetched, &selection_targets, is_popup).unwrap_or(0),
-                        );
+                        let index = initial_row(&rows, &fetched, &selection_targets, is_popup);
+                        if !is_popup {
+                            startup_selection = index.and_then(|index| selection_key(&rows[index]));
+                        }
+                        navigation.select(index.unwrap_or(0));
+                    } else if let Some(selected) = startup_selection.as_ref() {
+                        let current = current_agent_selection(&rows, &fetched, &selection_targets)
+                            .and_then(|index| selection_key(&rows[index]));
+                        if current.as_ref() != Some(selected) {
+                            // The sidebar can start while it is temporarily
+                            // focused, before tmux returns to the main pane.
+                            // Do not retain that stale automatic scroll after
+                            // a newer shared frame observes the focus change.
+                            navigation = NavigationList::default();
+                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            startup_selection = None;
+                        }
                     }
                     snapshot = Some(fetched);
                 }
@@ -1146,6 +1170,11 @@ fn event_loop(
         let Some(input) = terminal.backend_mut().input(event::read()?)? else {
             continue;
         };
+        if matches!(input, Event::FocusGained | Event::Key(_) | Event::Mouse(_)) {
+            // Never move the viewport underneath a pending click or undo the
+            // user's own selection when the next shared frame arrives.
+            startup_selection = None;
+        }
         if matches!(input, Event::FocusGained) || (!visible && !matches!(input, Event::FocusLost)) {
             let _ = refresh_tx.try_send(true);
             visible = true;

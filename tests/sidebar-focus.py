@@ -59,6 +59,12 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
     def screen():
         return tmux('capture-pane', '-p', '-t', sidebar).splitlines()
 
+    def initial_current_agent_visible():
+        lines = screen()
+        return (len(lines) > 6 and 'Priority task' in lines[1]
+                and any('Task z-source' in line for line in lines[6:])
+                and not any(line.strip().endswith('Priority task') for line in lines[6:]))
+
     def wait(predicate, label):
         deadline = time.monotonic() + 12
         while not predicate():
@@ -96,6 +102,10 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
                        '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
         tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
+        # Let the sidebar observe its temporary focus before the caller
+        # returns to the main pane. The resulting cached initial selection
+        # must not leave the ordinary list scrolled to z-source indefinitely.
+        wait(initial_current_agent_visible, 'temporary sidebar focus did not select its current agent')
         tmux('select-pane', '-t', main)
         client = subprocess.Popen(['tmux', '-S', socket, 'attach-session', '-t', 'z-source'],
                                   env=env, stdin=slave, stdout=slave, stderr=slave,
