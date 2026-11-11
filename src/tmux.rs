@@ -261,6 +261,12 @@ impl Tmux {
         self.probe_with_timeout(&[], 1, 1, true, Some(Duration::from_secs(1)))
     }
 
+    /// After a timed-out inventory, allow bounded recovery queries more time.
+    /// They carry no screen captures and still share the global cadence.
+    pub(crate) fn recovery_surface_probe(&self) -> Result<PaneProbe, TmuxError> {
+        self.probe_with_timeout(&[], 1, 1, true, Some(Duration::from_secs(2)))
+    }
+
     fn probe_with_timeout(
         &self,
         capture_panes: &[String],
@@ -462,17 +468,10 @@ impl Tmux {
                         pane[5].to_owned(),
                         sidebar_is_visible(&[pane[11], extra[7], extra[8], pane[12]].join(":")),
                     );
-                    if pane[10] != "sidebar" {
-                        if pane[16] == "1" {
-                            surface
-                                .last_panes
-                                .insert(pane[2].to_owned(), pane[5].to_owned());
-                        } else if pane[12] == "1" {
-                            surface
-                                .last_panes
-                                .entry(pane[2].to_owned())
-                                .or_insert_with(|| pane[5].to_owned());
-                        }
+                    if pane[10] != "sidebar" && pane[16] == "1" {
+                        surface
+                            .last_panes
+                            .insert(pane[2].to_owned(), pane[5].to_owned());
                     }
                 } else {
                     pane_rows.push(
@@ -837,7 +836,7 @@ mod tests {
             "@workbench_team_restore_token",
             "restore-test",
         ]);
-        let tmux = Tmux::new(ServerIdentity::from_socket(socket).unwrap());
+        let tmux = Tmux::new(ServerIdentity::from_socket(socket.clone()).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let probe = tmux
@@ -870,6 +869,30 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(25));
         }
+
+        // Only the actual previous non-sidebar pane is a selection target.
+        // The active pane must not become an implicit fallback when the last
+        // pane is the sidebar, otherwise a newly opened sidebar jumps down.
+        let window = run(&["display-message", "-p", "-t", &first, "#{window_id}"]);
+        let sidebar = run(&[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &first,
+            "sleep 30",
+        ]);
+        run(&["set-option", "-p", "-t", &sidebar, "@pane_role", "sidebar"]);
+        run(&["select-pane", "-t", &sidebar]);
+        run(&["select-pane", "-t", &first]);
+        let surface = tmux.surface_probe().unwrap().surface.unwrap();
+        assert!(!surface.last_panes.contains_key(&window));
+        run(&["select-pane", "-t", &sidebar]);
+        let surface = tmux.surface_probe().unwrap().surface.unwrap();
+        assert_eq!(surface.last_panes.get(&window), Some(&first));
+
         assert!(
             tmux.probe(&["%1;kill-server".into()], 40, 4096, true)
                 .is_err()

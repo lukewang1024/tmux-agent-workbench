@@ -33,6 +33,7 @@ pub struct Detector {
     surface_panes: Option<Vec<Pane>>,
     last_surface_attempt: Option<Instant>,
     retry_surface_without_capture: bool,
+    surface_probe_timed_out: bool,
     last_actions: Option<(Vec<(String, String, bool, bool)>, Instant)>,
     metadata: HashMap<String, MetadataRecord>,
 }
@@ -89,6 +90,7 @@ impl Detector {
             surface_panes: None,
             last_surface_attempt: None,
             retry_surface_without_capture: false,
+            surface_probe_timed_out: false,
             last_actions: None,
             metadata: HashMap::new(),
         }
@@ -135,12 +137,17 @@ impl Detector {
                     .map(|pane| pane.target.pane_id.clone())
                     .collect()
             };
-            let probe = self.tmux.probe(
-                &due,
-                config.detection.capture_lines.min(40),
-                config.detection.capture_bytes,
-                true,
-            );
+            let probe = if inventory_only && self.surface_probe_timed_out {
+                self.tmux.recovery_surface_probe()
+            } else {
+                self.tmux.probe(
+                    &due,
+                    config.detection.capture_lines.min(40),
+                    config.detection.capture_bytes,
+                    true,
+                )
+            };
+            let timed_out = matches!(&probe, Err(TmuxError::Timeout(_)));
             #[cfg(debug_assertions)]
             if let (Err(error), Some(path)) =
                 (&probe, std::env::var_os("WORKBENCH_TEST_PROBE_ERRORS"))
@@ -208,6 +215,7 @@ impl Detector {
                 // A pane can disappear during capture. Retry inventory without
                 // captures on the next permitted query, never immediately.
                 self.retry_surface_without_capture = true;
+                self.surface_probe_timed_out |= timed_out;
                 self.next_foreground_probe = Instant::now();
             }
         }
@@ -425,6 +433,7 @@ impl Detector {
 
     fn remember_surface(&mut self, probe: &crate::tmux::PaneProbe) {
         self.retry_surface_without_capture = false;
+        self.surface_probe_timed_out = false;
         self.client_inventory = Some(probe.clients.clone());
         self.attached_sessions = attached_sessions(&probe.clients);
         self.surface_inventory = probe.surface.clone();

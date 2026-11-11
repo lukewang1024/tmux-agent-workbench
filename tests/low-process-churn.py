@@ -65,11 +65,16 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
     env['WORKBENCH_TEST_TMUX_STALL'] = str(stall_probe)
     fail_probe = root / 'fail-surface-probe'
     env['WORKBENCH_TEST_TMUX_FAIL'] = str(fail_probe)
+    slow_inventory = root / 'slow-surface-inventory'
+    env['WORKBENCH_TEST_TMUX_SLOW_INVENTORY'] = str(slow_inventory)
     tmux_shim = shim_dir / 'tmux'
     tmux_shim.write_text('#!/bin/sh\nprintf "%s\\t%s\\n" "$PPID" "$*" >> "$WORKBENCH_TEST_TMUX_TRACE"\n'
                          + 'case "$*" in *"@workbench_team_restore_token"*) '
                          + '[ ! -f "$WORKBENCH_TEST_TMUX_STALL" ] || /bin/sleep 2; '
-                         + '[ ! -f "$WORKBENCH_TEST_TMUX_FAIL" ] || exit 1 ;; esac\n'
+                         + '[ ! -f "$WORKBENCH_TEST_TMUX_FAIL" ] || exit 1; '
+                         + 'if [ -f "$WORKBENCH_TEST_TMUX_SLOW_INVENTORY" ]; then '
+                         + 'case "$*" in *"capture-pane"*) : ;; *) /bin/sleep 1.3 ;; esac; '
+                         + 'fi ;; esac\n'
                          + 'exec ' + shlex.quote(tmux_binary) + ' "$@"\n')
     tmux_shim.chmod(0o700)
     env['PATH'] = str(shim_dir) + os.pathsep + env.get('PATH', os.defpath)
@@ -235,25 +240,44 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
         # A failed shared probe can make detached idle agents stale. Once tmux
         # recovers, they must be included in the next shared capture instead
         # of waiting for their much slower normal background deadline.
+        def all_captures_stale():
+            sample = ipc_snapshot(True, True)
+            live = [a for a in sample['agents'] if not a['exited']]
+            return len(live) == 3 and all(a['stale'] for a in live)
+
         fail_probe.touch()
         try:
-            def all_captures_stale():
-                sample = ipc_snapshot(True, True)
-                live = [a for a in sample['agents'] if not a['exited']]
-                return len(live) == 3 and all(a['stale'] for a in live)
-
             wait_for(all_captures_stale, 'failed idle probe did not mark captures stale', timeout=12)
         finally:
             fail_probe.unlink()
         started = time.monotonic()
+        agents = wait_for(idle_agents, 'detached stale capture did not recover promptly', timeout=8)
+        print(f'PASS detached stale capture recovered in {time.monotonic() - started:.2f}s', flush=True)
+
+        # A loaded host can start even a capture-free tmux client more slowly
+        # than the normal one-second deadline. Recovery gets a longer,
+        # globally rate-limited inventory before capturing again.
+        fail_probe.touch()
         try:
-            agents = wait_for(idle_agents, 'detached stale capture did not recover promptly', timeout=8)
+            wait_for(all_captures_stale, 'slow-recovery fixture did not mark captures stale', timeout=12)
+            error_offset = probe_errors.stat().st_size if probe_errors.exists() else 0
+        finally:
+            slow_inventory.touch()
+            fail_probe.unlink()
+        started = time.monotonic()
+        try:
+            agents = wait_for(idle_agents, 'slow inventory did not recover promptly', timeout=12)
         except AssertionError as error:
             live = [(a['target']['pane_id'], a['target']['session_name'], a['base_state'], a['stale'])
                     for a in snapshot()['agents'] if not a['exited']]
             errors = probe_errors.read_text() if probe_errors.exists() else 'none'
             raise AssertionError(f'{error}; agents={live}; probe_errors={errors}') from error
-        print(f'PASS detached stale capture recovered in {time.monotonic() - started:.2f}s', flush=True)
+        finally:
+            slow_inventory.unlink()
+        recovery_errors = probe_errors.read_text()[error_offset:] if probe_errors.exists() else ''
+        assert 'captures=0\ttmux command timed out after 1000 ms' in recovery_errors, (
+            f'slow inventory did not exercise the timeout recovery: {recovery_errors}')
+        print(f'PASS slow inventory recovered in {time.monotonic() - started:.2f}s', flush=True)
 
         sidebar_pids = [int(tmux('display-message', '-p', '-t', pane, '#{pane_pid}')) for pane in sidebars]
         server_pid = int(tmux('display-message', '-p', '#{pid}'))
