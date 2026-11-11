@@ -637,7 +637,9 @@ pub(crate) fn shared_sidebar_data(
         live_panes,
         branches,
         selection_targets,
-        view: persisted_sidebar_view(paths),
+        // An absent preference means the default view. Send it explicitly so
+        // a newly opened sidebar can discard a stale shared Sessions value.
+        view: Some(persisted_sidebar_view(paths).unwrap_or(SidebarView::Agents)),
         sort: persisted_agent_sort(paths),
     })
 }
