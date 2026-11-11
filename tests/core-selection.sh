@@ -17,6 +17,11 @@ cp "$repo/bin/workbench-status-popup" "$repo/bin/workbench-menu" \
 cp "$repo/workbench.tmux" "$repo/Cargo.toml" "$plugin/"
 cp "$repo/lib/bind-tracked.sh" "$repo/lib/host-metrics.sh" \
   "$repo/lib/resolve-core.sh" "$plugin/lib/"
+# Release recovery can run this validated fixture against an older immutable
+# tag, whose plugin predates the extracted status-usage helper.
+if [ -f "$repo/lib/status-usage.sh" ]; then
+  cp "$repo/lib/status-usage.sh" "$plugin/lib/"
+fi
 
 make_core() {
   # Arguments are expanded by the generated executable.

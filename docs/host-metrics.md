@@ -39,9 +39,10 @@ No Python, background service or additional monitoring package is required.
   Unavailable metrics show `--`, while available memory/disk metrics still work.
   Real-device Termux acceptance remains pending.
 
-Only displayed metrics are sampled: CPU mode reads CPU ticks, Compact adds
-memory, Standard adds disk, and Full adds network. Changing modes reuses fresh
-CPU samples and preserves the network counter baseline across other modes.
+The standalone command samples only the requested metrics: CPU mode reads CPU
+ticks, Compact adds memory, Standard adds disk, and Full adds network.
+Changing modes reuses fresh CPU samples and preserves the network counter
+baseline across other modes.
 
 Samples share a two-second, atomic `snapshot` file in
 `$XDG_CACHE_HOME/tmux-agent-workbench/host-metrics` (default
@@ -51,6 +52,17 @@ instead of separate counter and per-mode output files. The first counter sample 
 120 seconds apart show `--` until a new baseline is established. The tmux
 status interval controls subsequent refreshes. Cached tmux status jobs also honor
 the widget's off setting, so hiding it via the plugin stops sampling. No traffic payload is collected.
+
+With `low_process_churn` enabled, the status bar instead shares one native
+core sample across attached clients. CPU and memory update about every three
+seconds; disk is sampled in Standard or Full mode. Full mode uses the same
+external-traffic source on macOS, at three-second intervals during activity and
+at least fifteen seconds apart when every agent is idle. Linux Full mode reads
+the default-route interface without launching a command. The usage badge also
+shares cached values while retaining its existing refresh schedule. If the core
+is older, stops, or its cache is more than fifteen seconds old, status formats
+fall back to the standalone jobs. Agent state and foreground interaction use
+their own detection cadence.
 
 Icons use Nerd Fonts: `md-cpu-64-bit`, `md-memory`, `md-harddisk`, `md-upload`,
 `md-download`, verified against the official glyph map:

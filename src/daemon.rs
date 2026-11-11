@@ -411,9 +411,11 @@ fn serve_loop(
     let scan_sidebar_cache = Arc::clone(&sidebar_cache);
     let scan_server = server.clone();
     let scan_paths = paths.clone();
+    let status_sender = crate::status_metrics::start(paths, server);
     let _scanner = thread::spawn(move || {
         let tmux = Tmux::new(scan_server.clone());
         let mut title_reaper = crate::task_title::TitleReaper::default();
+        let mut last_status_settings = None;
         let mut next_liveness_check = Instant::now();
         while !scan_shutdown.load(Ordering::Relaxed) && scan_server.socket_path.exists() {
             if Instant::now() >= next_liveness_check {
@@ -439,11 +441,29 @@ fn serve_loop(
                 &scan_interactive_waiters,
             );
             let snapshot = scan_snapshot.read().expect("snapshot poisoned").clone();
-            let (quiet, surface) = {
+            let (quiet, low_churn, attached, surface) = {
                 let state = scan_state.read().expect("state poisoned");
                 let quiet = state.config.detection.low_process_churn && state.detector.is_idle();
-                (quiet, state.detector.surface_inventory().cloned())
+                (
+                    quiet,
+                    state.config.detection.low_process_churn,
+                    state
+                        .detector
+                        .client_inventory()
+                        .is_some_and(|clients| !clients.trim().is_empty()),
+                    state.detector.surface_inventory().cloned(),
+                )
             };
+            if let Some(surface) = &surface {
+                let settings = crate::status_metrics::Settings::from_surface(
+                    surface, low_churn, quiet, attached,
+                );
+                if last_status_settings.as_ref() != Some(&settings)
+                    && status_sender.try_send(settings.clone()).is_ok()
+                {
+                    last_status_settings = Some(settings);
+                }
+            }
             title_reaper.tick(
                 &scan_paths,
                 &scan_server,

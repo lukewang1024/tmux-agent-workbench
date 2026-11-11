@@ -37,6 +37,7 @@ pub mod server;
 pub mod sidebar;
 pub mod state_machine;
 pub mod status_menu;
+mod status_metrics;
 pub mod switcher;
 mod task_placement;
 pub mod task_title;
@@ -48,7 +49,7 @@ pub mod workspace;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Changes when a same-version daemon requires a runtime handoff.
-pub const DAEMON_RUNTIME_REVISION: u32 = 7;
+pub const DAEMON_RUNTIME_REVISION: u32 = 8;
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const CLIENT_PROTOCOL_VERSION: u32 = 2;
