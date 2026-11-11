@@ -1,6 +1,7 @@
 """Concurrent clients cannot both occupy a direction's last free slot."""
 from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -52,11 +53,28 @@ with tempfile.TemporaryDirectory(prefix='wb-split-race-', dir='/tmp') as root:
         return next((a for a in core('snapshot', '--json')['agents']
                      if not a['exited'] and a['target']['pane_id'] == pane), None)
 
-    def wait(predicate):
+    def wait(predicate, label='mock agent not discovered'):
         deadline = time.monotonic() + 20
         while not predicate():
-            assert time.monotonic() < deadline, 'mock agent not discovered'
+            assert time.monotonic() < deadline, label
             time.sleep(.05)
+
+    def dispatcher_finished():
+        # The detached dispatcher saves its submitted ticket while holding
+        # this lock. Wait for both the save and lock release before deleting
+        # the isolated state directory; otherwise it can recreate files while
+        # TemporaryDirectory is removing them.
+        status = core('auto-split', 'status')
+        if status['manager']['submitted_ticket_count'] != 1:
+            return False
+        lock = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench/manager/lock'
+        try:
+            with lock.open('rb') as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(stream, fcntl.LOCK_UN)
+        except (FileNotFoundError, BlockingIOError):
+            return False
+        return True
 
     try:
         command = shlex.quote(fixture)
@@ -96,6 +114,7 @@ with tempfile.TemporaryDirectory(prefix='wb-split-race-', dir='/tmp') as root:
             assert len(tmux('list-windows', '-t', '方向', '-F', '#{window_id}').splitlines()) == 5
             assert len(core('auto-split', 'status')['pending']) == 1
             assert core('daemon', 'status')['pid'] == before
+            wait(dispatcher_finished, 'manager dispatcher did not finish queueing')
             print('PASS concurrent placements keep the fifth slot unique without restarting the daemon')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, capture_output=True, timeout=5)
