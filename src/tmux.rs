@@ -90,11 +90,12 @@ impl Tmux {
     /// `display-message -c` selects a message destination, not a pane context.
     /// Evaluate client-relative formats inside list-clients, then match exactly.
     pub fn client_format(&self, name: &str, format: &str) -> Result<Option<String>, TmuxError> {
-        let format = format!("#{{client_name}}{FIELD_SEPARATOR}{format}");
+        let separator = format!("__workbench_client_{}__", uuid::Uuid::new_v4().simple());
+        let format = format!("#{{client_name}}{separator}{format}");
         let rows = self.output(&["list-clients", "-F", &format])?;
         Ok(rows
             .lines()
-            .filter_map(|row| row.split_once(FIELD_SEPARATOR))
+            .filter_map(|row| row.split_once(&separator))
             .find(|(client, _)| *client == name)
             .map(|(_, value)| value.to_owned()))
     }
@@ -274,8 +275,25 @@ impl Tmux {
             }
         }
         let lines = lines.clamp(1, 200);
+        // tmux 3.4 may escape control bytes in batched command output. Use a
+        // per-query printable separator on the wire and normalize internally.
+        let separator = format!("__workbench_field_{}__", uuid::Uuid::new_v4().simple());
         let client_format = format!(
-            "C{FIELD_SEPARATOR}#{{client_tty}}{FIELD_SEPARATOR}#{{client_flags}}{FIELD_SEPARATOR}#{{@workbench_overlay_visible}}{FIELD_SEPARATOR}#{{session_id}}{FIELD_SEPARATOR}#{{session_name}}{FIELD_SEPARATOR}#{{window_id}}{FIELD_SEPARATOR}#{{window_index}}{FIELD_SEPARATOR}#{{window_name}}{FIELD_SEPARATOR}#{{pane_id}}{FIELD_SEPARATOR}#{{pane_index}}{FIELD_SEPARATOR}#{{@workbench_selected_implies_focused}}"
+            "C{separator}{}",
+            [
+                "#{client_tty}",
+                "#{client_flags}",
+                "#{@workbench_overlay_visible}",
+                "#{session_id}",
+                "#{session_name}",
+                "#{window_id}",
+                "#{window_index}",
+                "#{window_name}",
+                "#{pane_id}",
+                "#{pane_index}",
+                "#{@workbench_selected_implies_focused}",
+            ]
+            .join(&separator)
         );
         let pane_format = [
             "#{session_id}",
@@ -297,7 +315,7 @@ impl Tmux {
             "#{pane_last}",
             "#{pane_current_path}",
         ]
-        .join(&FIELD_SEPARATOR.to_string());
+        .join(&separator);
         // The same pane inventory feeds detection and all sidebars. A unique
         // separator keeps sidebar-only fields distinct from the original pane
         // row without a second list-panes query.
@@ -314,10 +332,10 @@ impl Tmux {
                 "#{session_attached}",
                 "#{window_zoomed_flag}",
             ]
-            .join(&FIELD_SEPARATOR.to_string());
-            format!("P{FIELD_SEPARATOR}{pane_format}{surface_marker}{extra}")
+            .join(&separator);
+            format!("P{separator}{pane_format}{surface_marker}{extra}")
         } else {
-            format!("P{FIELD_SEPARATOR}{pane_format}")
+            format!("P{separator}{pane_format}")
         };
         let marker = format!("__workbench_capture_{}__", uuid::Uuid::new_v4().simple());
         let mut args = vec![
@@ -331,9 +349,22 @@ impl Tmux {
             format,
         ];
         if with_surface {
+            let theme_format = format!(
+                "T{separator}{}",
+                [
+                    "#{@adaptive_palette}",
+                    "#{@adaptive_appearance}",
+                    "#{@adaptive_mode}",
+                    "#{@adaptive_accent}",
+                    "#{@workbench_team_restore_token}",
+                ]
+                .join(&separator)
+            );
             args.extend([
-                ";".into(), "display-message".into(), "-p".into(),
-                "T\u{1f}#{@adaptive_palette}\u{1f}#{@adaptive_appearance}\u{1f}#{@adaptive_mode}\u{1f}#{@adaptive_accent}\u{1f}#{@workbench_team_restore_token}".into(),
+                ";".into(),
+                "display-message".into(),
+                "-p".into(),
+                theme_format,
             ]);
         }
         for pane in capture_panes {
@@ -390,8 +421,8 @@ impl Tmux {
                     .get_mut(pane)
                     .expect("capture present")
                     .push_str(line);
-            } else if let Some(row) = value.strip_prefix(&format!("C{FIELD_SEPARATOR}")) {
-                let fields: Vec<_> = row.split(FIELD_SEPARATOR).collect();
+            } else if let Some(row) = value.strip_prefix(&format!("C{separator}")) {
+                let fields: Vec<_> = row.split(&separator).collect();
                 if fields.len() != 11 {
                     return Err(TmuxError::InvalidRow(row.to_owned()));
                 }
@@ -401,14 +432,14 @@ impl Tmux {
                 ));
                 client_rows.push_str(&fields[..10].join(&FIELD_SEPARATOR.to_string()));
                 client_rows.push('\n');
-            } else if let Some(row) = value.strip_prefix(&format!("P{FIELD_SEPARATOR}")) {
+            } else if let Some(row) = value.strip_prefix(&format!("P{separator}")) {
                 if let Some(surface) = surface.as_mut() {
                     let Some((pane_row, extra_row)) = row.split_once(&surface_marker) else {
                         return Err(TmuxError::InvalidRow(row.to_owned()));
                     };
-                    pane_rows.push(pane_row);
-                    let pane: Vec<_> = pane_row.split(FIELD_SEPARATOR).collect();
-                    let extra: Vec<_> = extra_row.split(FIELD_SEPARATOR).collect();
+                    let pane: Vec<_> = pane_row.split(&separator).collect();
+                    let extra: Vec<_> = extra_row.split(&separator).collect();
+                    pane_rows.push(pane.join(&FIELD_SEPARATOR.to_string()));
                     if pane.len() != 18 || extra.len() != 9 {
                         // Preserve detection when a sidebar-only option
                         // cannot be represented by the inventory format.
@@ -444,10 +475,14 @@ impl Tmux {
                         }
                     }
                 } else {
-                    pane_rows.push(row);
+                    pane_rows.push(
+                        row.split(&separator)
+                            .collect::<Vec<_>>()
+                            .join(&FIELD_SEPARATOR.to_string()),
+                    );
                 }
-            } else if let Some(row) = value.strip_prefix(&format!("T{FIELD_SEPARATOR}")) {
-                let fields: Vec<_> = row.split(FIELD_SEPARATOR).collect();
+            } else if let Some(row) = value.strip_prefix(&format!("T{separator}")) {
+                let fields: Vec<_> = row.split(&separator).collect();
                 if fields.len() != 5 {
                     return Err(TmuxError::InvalidRow(row.to_owned()));
                 }
@@ -465,7 +500,7 @@ impl Tmux {
         let visible = clients.unobscured();
         let mut panes: Vec<_> = pane_rows
             .into_iter()
-            .map(|row| parse_pane(row, &visible))
+            .map(|row| parse_pane(&row, &visible))
             .collect::<Result<_, _>>()?;
         apply_client_visibility(&mut panes, &clients);
         panes.retain(|pane| pane.role.as_deref() != Some("sidebar"));

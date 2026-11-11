@@ -128,8 +128,28 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
     // inherit an identically named global option. Keep the original semantics
     // while reading both pieces through one tmux client.
     let marker = format!("__workbench_window_{}__", uuid::Uuid::new_v4().simple());
+    let separator = format!(
+        "__workbench_window_field_{}__",
+        uuid::Uuid::new_v4().simple()
+    );
     let format = format!(
-        "{marker}#{{pane_id}}\u{1f}#{{window_id}}\u{1f}#{{window_name}}\u{1f}#{{@workbench_task}}\u{1f}#{{@workbench_project_root}}\u{1f}#{{@pane_role}}\u{1f}#{{@workbench-window-automatic-rename}}\u{1f}#{{automatic-rename}}\u{1f}#{{@workbench_task_root}}\u{1f}#{{@workbench_task_name}}\u{1f}#{{@agent_team_role}}\u{1f}#{{@agent_team}}\u{1f}#{{pane_title}}"
+        "{marker}{}",
+        [
+            "#{pane_id}",
+            "#{window_id}",
+            "#{window_name}",
+            "#{@workbench_task}",
+            "#{@workbench_project_root}",
+            "#{@pane_role}",
+            "#{@workbench-window-automatic-rename}",
+            "#{automatic-rename}",
+            "#{@workbench_task_root}",
+            "#{@workbench_task_name}",
+            "#{@agent_team_role}",
+            "#{@agent_team}",
+            "#{pane_title}",
+        ]
+        .join(&separator)
     );
     let value = tmux(
         server,
@@ -152,7 +172,7 @@ fn window_at(server: &ServerIdentity, target: &str) -> Result<(String, Window), 
         .ok_or("missing task title inventory marker")?;
     // Pane titles can contain the separator. It is deliberately the last
     // field, so the remaining title is retained without corrupting metadata.
-    let fields: Vec<_> = pane_fields.splitn(13, '\u{1f}').collect();
+    let fields: Vec<_> = pane_fields.splitn(13, separator.as_str()).collect();
     if fields.len() != 13 || !fields[1].starts_with('@') {
         return Err("agent pane moved or expired; retry with its current identity".into());
     }
@@ -1360,28 +1380,31 @@ impl TitleReaper {
             } else {
                 Duration::from_millis(500)
             };
-        let windows = if let Some(surface) = cached {
+        let (windows, separator) = if let Some(surface) = cached {
             self.last_surface = Some((surface.titles.clone(), snapshot.generation));
-            surface.titles.clone()
+            (surface.titles.clone(), "\u{1f}".to_owned())
         } else {
             self.last_surface = None;
-            let Ok(windows) = tmux(
-                server,
-                &[
-                    "list-panes",
-                    "-a",
-                    "-F",
-                    "#{window_id}\u{1f}#{@workbench_task_title}\u{1f}#{pane_id}\u{1f}#{pane_title}",
-                ],
-            ) else {
+            let separator = format!(
+                "__workbench_title_field_{}__",
+                uuid::Uuid::new_v4().simple()
+            );
+            let format = [
+                "#{window_id}",
+                "#{@workbench_task_title}",
+                "#{pane_id}",
+                "#{pane_title}",
+            ]
+            .join(&separator);
+            let Ok(windows) = tmux(server, &["list-panes", "-a", "-F", &format]) else {
                 return;
             };
-            windows
+            (windows, separator)
         };
         let panes: Vec<_> = windows
             .lines()
             .filter_map(|line| {
-                let fields: Vec<_> = line.splitn(4, '\u{1f}').collect();
+                let fields: Vec<_> = line.splitn(4, separator.as_str()).collect();
                 (fields.len() == 4).then_some(fields)
             })
             .collect();
