@@ -56,8 +56,16 @@ pub(crate) fn used_memory_bytes() -> io::Result<u64> {
         result
     };
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if result != libc::KERN_SUCCESS || count != libc::HOST_VM_INFO64_COUNT || page_size <= 0 {
-        return Err(io::Error::other("memory statistics unavailable"));
+    // Older supported macOS releases return fewer trailing fields than the
+    // SDK's current structure. The compressor counter is the last field we
+    // read, so accepting the older prefix preserves the standalone metric.
+    let required_bytes = std::mem::offset_of!(libc::vm_statistics64, compressor_page_count)
+        + std::mem::size_of::<libc::natural_t>();
+    let required_count = required_bytes.div_ceil(std::mem::size_of::<libc::integer_t>()) as u32;
+    if result != libc::KERN_SUCCESS || count < required_count || page_size <= 0 {
+        return Err(io::Error::other(format!(
+            "memory statistics unavailable: result={result} count={count} required={required_count} page_size={page_size}"
+        )));
     }
     Ok((u64::from(stats.active_count)
         + u64::from(stats.wire_count)
