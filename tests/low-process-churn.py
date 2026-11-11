@@ -172,6 +172,22 @@ with tempfile.TemporaryDirectory(prefix='wb-idle-', dir='/tmp') as directory:
                  'attached session was not recognized')
         wait_for(lambda: 'branch-one' in tmux('capture-pane', '-p', '-t', sidebars[0]),
                  'session view did not display the current branch')
+
+        # A removed preference must invalidate the shared Sessions view, so a
+        # new or existing sidebar returns to the default rather than retaining
+        # a stale cached value indefinitely.
+        view.unlink()
+        wait_for(lambda: ((surface() or {}).get('sidebar') or {}).get('view') == 'Agents',
+                 'shared sidebar view did not reset after preference removal', timeout=8)
+        wait_for(lambda: 'Agents' in tmux('capture-pane', '-p', '-t', sidebars[0]),
+                 'visible sidebar did not reset to the default Agent view', timeout=8)
+        view.write_text('sessions\n')
+        wait_for(lambda: ((surface() or {}).get('sidebar') or {}).get('view') == 'Sessions',
+                 'shared sidebar view did not restore Sessions', timeout=8)
+        wait_for(lambda: 'branch-one' in tmux('capture-pane', '-p', '-t', sidebars[0]),
+                 'visible sidebar did not restore the Session view', timeout=8)
+        print('PASS shared view resets and restores across sidebars', flush=True)
+
         started = time.monotonic()
         head.write_text('ref: refs/heads/branch-two\n')
         wait_for(lambda: 'branch-two' in tmux('capture-pane', '-p', '-t', sidebars[0]),
