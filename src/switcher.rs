@@ -752,10 +752,15 @@ fn event_loop(
             terminal.draw(|frame| draw(frame, kind, scope, &list, geometry))?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+        let input = if let Some(input) = terminal.backend_mut().take_pending_input() {
+            input
+        } else {
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
+            }
+            event::read()?
+        };
+        let Some(input) = terminal.backend_mut().input(input)? else {
             continue;
         };
         let mut action = None;

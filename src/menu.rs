@@ -860,11 +860,16 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
                 .draw(|frame| render(frame, menu, layout, &navigation, &rows, &actions, &query))?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
+        let input = if let Some(input) = terminal.backend_mut().take_pending_input() {
+            input
+        } else {
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
+            }
+            event::read()?
+        };
         let mut chosen = None;
-        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+        let Some(input) = terminal.backend_mut().input(input)? else {
             continue;
         };
         match input {

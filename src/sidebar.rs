@@ -1160,14 +1160,19 @@ fn event_loop(
             dirty = false;
         }
 
-        if !event::poll(if visible {
-            Duration::from_millis(50)
+        let input = if let Some(input) = terminal.backend_mut().take_pending_input() {
+            input
         } else {
-            Duration::from_millis(250)
-        })? {
-            continue;
-        }
-        let Some(input) = terminal.backend_mut().input(event::read()?)? else {
+            if !event::poll(if visible {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(250)
+            })? {
+                continue;
+            }
+            event::read()?
+        };
+        let Some(input) = terminal.backend_mut().input(input)? else {
             continue;
         };
         if matches!(input, Event::FocusGained | Event::Key(_) | Event::Mouse(_)) {
