@@ -1,5 +1,6 @@
 mod attached_process;
 mod optional_notifications;
+mod remote_terminal;
 mod terminal_lease;
 
 use std::collections::HashMap;
@@ -235,6 +236,14 @@ enum ClientCommand {
         #[arg(long)]
         target: Option<String>,
     },
+    Stream {
+        #[command(subcommand)]
+        command: StreamCommand,
+    },
+    Route {
+        #[command(subcommand)]
+        command: RouteCommand,
+    },
     #[command(hide = true)]
     AttachPty {
         #[arg(long)]
@@ -242,6 +251,85 @@ enum ClientCommand {
         #[arg(long)]
         session: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum StreamCommand {
+    /// Run the TLS broker on the Devbox.
+    Serve,
+    /// Configure the local TLS listener used by `client stream serve`.
+    ServerConfigure {
+        #[arg(long)]
+        bind: String,
+        #[arg(long)]
+        certificate: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+    },
+    /// Add or update a local reverse-stream target.
+    TargetAdd {
+        target: String,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        server_name: String,
+        #[arg(long)]
+        ca_certificate: PathBuf,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Machine Fabric executor on this host, for an SSH local-forward tunnel.
+        #[arg(long)]
+        machine_fabric_executor: Option<String>,
+        /// SSH host alias from this host to the Devbox.
+        #[arg(long)]
+        ssh_host: Option<String>,
+        /// Devbox loopback broker endpoint reached through the SSH tunnel.
+        #[arg(long)]
+        forward_to: Option<String>,
+    },
+    /// Generate the target's private pairing token.
+    Pair { target: String },
+    /// Keep a Mac-side reverse connection open and serve its tmux PTY.
+    Agent {
+        target: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    #[command(hide = true)]
+    AgentSession {
+        target: String,
+        #[arg(long)]
+        attachment: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Stop the configured Machine Fabric SSH tunnel for a target.
+    TunnelStop { target: String },
+    /// Attach this host's terminal to a configured reverse target.
+    Attach {
+        target: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RouteCommand {
+    /// Map an SSH inventory alias to a reverse-stream target via an SSH host.
+    Add {
+        alias: String,
+        #[arg(long)]
+        via: String,
+        #[arg(long)]
+        target: String,
+        /// Absolute Workbench core path on the SSH host for this route only.
+        #[arg(long)]
+        remote_core: Option<String>,
+    },
+    Remove {
+        alias: String,
+    },
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -852,6 +940,11 @@ fn client_attach(
     if let Some(value) = target {
         validate_safe_name(value, "event target")?;
     }
+    if let Some(host) = ssh_host
+        && let Some(route) = remote_terminal::route_for(paths, host)?
+    {
+        return client_attach_route(paths, &route, session);
+    }
     let Some(host) = ssh_host else {
         // Local/plain-SSH attachment has no authenticated terminal identity.
         // Use server-local fallback history only when no target was requested.
@@ -1083,6 +1176,60 @@ fn client_attach(
     } else {
         Err("remote tmux attach failed".into())
     }
+}
+
+fn client_attach_route(
+    paths: &Paths,
+    route: &remote_terminal::Route,
+    session: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _terminal = terminal_lease::TerminalLease::acquire(paths)?;
+    let remote = route_attach_command(route, session)?;
+    let mut pty = attached_process::AttachedProcess::new(
+        ProcessCommand::new("ssh")
+            .args(["-o", "ClearAllForwardings=yes", "-t", &route.via, &remote])
+            .spawn()?,
+    );
+    let status = pty.child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("reverse terminal attach failed".into())
+    }
+}
+
+fn route_attach_command(
+    route: &remote_terminal::Route,
+    session: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    validate_ssh_host(&route.via)?;
+    validate_safe_name(&route.target, "remote target")?;
+    if let Some(session) = session {
+        validate_safe_name(session, "session")?;
+    }
+    let mut remote = String::new();
+    if let Some(remote_core) = &route.remote_core {
+        if !std::path::Path::new(remote_core).is_absolute() || remote_core.contains('\0') {
+            return Err("remote core path must be an absolute path on the route host".into());
+        }
+        remote.push_str("exec ");
+        remote.push_str(&posix_shell_quote(remote_core));
+    } else {
+        remote.push_str("exec tmux-agent-workbench");
+    }
+    remote.push_str(&format!(
+        " client stream attach {}",
+        posix_shell_quote(&route.target)
+    ));
+    if let Some(session) = session {
+        remote.push_str(" --session ");
+        remote.push_str(&posix_shell_quote(session));
+    }
+    Ok(remote)
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn client_attach_pty(
@@ -1498,6 +1645,70 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 session.as_deref(),
                 target.as_deref(),
             )?,
+            ClientCommand::Stream { command } => match command {
+                StreamCommand::Serve => remote_terminal::serve(&paths)?,
+                StreamCommand::ServerConfigure {
+                    bind,
+                    certificate,
+                    private_key,
+                } => remote_terminal::configure_server(&paths, &bind, &certificate, &private_key)?,
+                StreamCommand::TargetAdd {
+                    target,
+                    endpoint,
+                    server_name,
+                    ca_certificate,
+                    token_file,
+                    machine_fabric_executor,
+                    ssh_host,
+                    forward_to,
+                } => remote_terminal::add_target(
+                    &paths,
+                    &target,
+                    &endpoint,
+                    &server_name,
+                    &ca_certificate,
+                    token_file.as_deref(),
+                    machine_fabric_executor.as_deref(),
+                    ssh_host.as_deref(),
+                    forward_to.as_deref(),
+                )?,
+                StreamCommand::Pair { target } => remote_terminal::pair_target(&paths, &target)?,
+                StreamCommand::Agent { target, session } => {
+                    remote_terminal::agent(&paths, &target, session.as_deref())?
+                }
+                StreamCommand::AgentSession {
+                    target,
+                    attachment,
+                    session,
+                } => remote_terminal::agent_session(
+                    &paths,
+                    &target,
+                    &attachment,
+                    session.as_deref(),
+                )?,
+                StreamCommand::TunnelStop { target } => {
+                    remote_terminal::stop_tunnel(&paths, &target)?
+                }
+                StreamCommand::Attach { target, session } => {
+                    remote_terminal::attach(&paths, &target, session.as_deref())?
+                }
+            },
+            ClientCommand::Route { command } => match command {
+                RouteCommand::Add {
+                    alias,
+                    via,
+                    target,
+                    remote_core,
+                } => remote_terminal::add_route(
+                    &paths,
+                    &alias,
+                    &via,
+                    &target,
+                    remote_core.as_deref(),
+                )?,
+                RouteCommand::Remove { alias } => remote_terminal::remove_route(&paths, &alias)?,
+                RouteCommand::List => remote_terminal::list_routes(&paths)?,
+            },
             ClientCommand::AttachPty { bind, session } => {
                 client_attach_pty(&paths, &bind, session.as_deref())?
             }
@@ -2637,6 +2848,38 @@ fn running_executable_matches(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_core_override_is_scoped_to_the_selected_route() {
+        let mac_route = remote_terminal::Route {
+            via: "devbox-alias".into(),
+            target: "MacBook-Pro".into(),
+            remote_core: Some(
+                "/home/wangyuanlv/.local/bin/tmux-agent-workbench-core-mac-route-local".into(),
+            ),
+        };
+        assert_eq!(
+            route_attach_command(&mac_route, Some("work")).unwrap(),
+            "exec '/home/wangyuanlv/.local/bin/tmux-agent-workbench-core-mac-route-local' client stream attach 'MacBook-Pro' --session 'work'"
+        );
+
+        let regular_route = remote_terminal::Route {
+            via: "devbox-alias".into(),
+            target: "BuildHost".into(),
+            remote_core: None,
+        };
+        assert_eq!(
+            route_attach_command(&regular_route, None).unwrap(),
+            "exec tmux-agent-workbench client stream attach 'BuildHost'"
+        );
+
+        let invalid_route = remote_terminal::Route {
+            via: "devbox-alias".into(),
+            target: "MacBook-Pro".into(),
+            remote_core: Some("relative/core".into()),
+        };
+        assert!(route_attach_command(&invalid_route, None).is_err());
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
