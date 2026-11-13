@@ -204,6 +204,7 @@ pub(crate) struct Surface<B: Backend> {
     sizing: Option<Sizing>,
     geometry: Option<Geometry>,
     event_geometry: Option<Geometry>,
+    pending_input: Option<Event>,
     content: Buffer,
     backdrop: Backdrop,
     outside_press: Option<bool>,
@@ -249,6 +250,7 @@ impl<B: Backend> Surface<B> {
             sizing,
             geometry: None,
             event_geometry: None,
+            pending_input: None,
             content: Buffer::empty(Rect::default()),
             backdrop,
             outside_press: None,
@@ -261,6 +263,11 @@ impl<B: Backend> Surface<B> {
         self.sizing
             .map(|sizing| self.backend.size().map(|size| Geometry::new(size, sizing)))
             .transpose()
+    }
+
+    /// Deliver input held while the caller cleared state after a resize.
+    pub fn take_pending_input(&mut self) -> Option<Event> {
+        self.pending_input.take()
     }
 
     /// A complete click on the backdrop dismisses. Hover, wheel, and a drag
@@ -276,6 +283,11 @@ impl<B: Backend> Surface<B> {
         {
             self.event_geometry = Some(geometry);
             self.outside_press = None;
+            // Cancel a stale pointer gesture first, without losing a key or
+            // paste that arrived before the terminal's resize notification.
+            if matches!(&event, Event::Key(_) | Event::Paste(_)) {
+                self.pending_input = Some(event);
+            }
             return Ok(Some(Event::FocusLost));
         }
         self.event_geometry = Some(geometry);
@@ -535,6 +547,29 @@ mod tests {
     }
 
     #[test]
+    fn resize_preserves_pending_keyboard_and_paste_input() {
+        let mut surface = surface();
+        let first = Event::Key(KeyEvent::new(KeyCode::Char('任'), KeyModifiers::NONE));
+        assert_eq!(surface.input(first.clone()).unwrap(), Some(first));
+
+        surface.backend.resize(100, 35);
+        let next = Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(surface.input(next.clone()).unwrap(), Some(Event::FocusLost));
+        assert_eq!(surface.take_pending_input(), Some(next.clone()));
+        assert_eq!(surface.input(next.clone()).unwrap(), Some(next));
+
+        surface.backend.resize(80, 30);
+        let paste = Event::Paste("任务 O'Reilly $(literal)".into());
+        assert_eq!(
+            surface.input(paste.clone()).unwrap(),
+            Some(Event::FocusLost)
+        );
+        assert_eq!(surface.take_pending_input(), Some(paste.clone()));
+        assert_eq!(surface.input(paste.clone()).unwrap(), Some(paste));
+        assert_eq!(surface.take_pending_input(), None);
+    }
+
+    #[test]
     fn only_termux_left_releases_arm_the_delayed_tap_guard() {
         let mut surface = surface();
         surface
@@ -700,6 +735,7 @@ mod tests {
                 .unwrap(),
             Some(Event::FocusLost)
         );
+        assert_eq!(surface.take_pending_input(), None);
     }
 
     #[test]
