@@ -106,6 +106,11 @@ impl RelaySender {
     }
 
     pub fn tick(&mut self, now_ms: u64) {
+        // There is nothing to send or revoke; enqueue reloads the current
+        // configuration before accepting the next event.
+        if self.pending.is_empty() {
+            return;
+        }
         let Ok(store) = load_store(&self.store_path) else {
             return;
         };
@@ -1276,6 +1281,121 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn empty_queue_does_not_wait_for_relay_config() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::process::Stdio;
+
+        const CHILD: &str = "WORKBENCH_TEST_EMPTY_RELAY_FIFO";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let mut sender = RelaySender {
+                store_path: path.into(),
+                tmux_socket: "/tmp/relay-test.sock".into(),
+                pending: HashMap::new(),
+            };
+            sender.tick(0);
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.toml");
+        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "relay::tests::empty_queue_does_not_wait_for_relay_config",
+            ])
+            .env(CHILD, &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "relay config check failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("an empty queue waited for the relay configuration");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pending_events_use_current_relay_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.toml");
+        let mut sender = RelaySender {
+            store_path: path.clone(),
+            tmux_socket: "/tmp/relay-test.sock".into(),
+            pending: HashMap::new(),
+        };
+        let pending = || PendingOutbound {
+            event: event(),
+            next_attempt_ms: 0,
+            deadline_ms: 60_000,
+            delay_ms: 250,
+        };
+
+        sender.tick(0);
+        save_store(&path, &RelayStore::default()).unwrap();
+        sender.pending.insert("evt-1".into(), pending());
+        sender.tick(0);
+        assert!(sender.pending.is_empty(), "disabled relay kept an event");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "relay did not connect");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("relay accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http(&mut stream)
+                .unwrap_or_else(|error| panic!("invalid relay request: {}", error.message));
+            stream
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            request
+        });
+        save_store(
+            &path,
+            &RelayStore {
+                pairings: vec![],
+                outbound: Some(Outbound {
+                    remote_id: "remote-1".into(),
+                    token: "a".repeat(64),
+                    endpoint: format!("http://127.0.0.1:{port}/v1/events"),
+                }),
+            },
+        )
+        .unwrap();
+        sender.pending.insert("evt-1".into(), pending());
+        sender.tick(0);
+        let request = receiver.join().unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/events");
+        assert!(sender.pending.is_empty(), "sent event remained queued");
     }
 
     #[test]
