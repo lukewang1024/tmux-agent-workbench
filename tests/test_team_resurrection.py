@@ -509,7 +509,7 @@ class TeamResurrection(unittest.TestCase):
         # Prevent the upstream hook's attach wait without opening a real client.
         real_tmux = subprocess.check_output(['which', 'tmux'], text=True).strip()
         tmux_shim = shim / 'tmux'
-        tmux_shim.write_text('#!/bin/sh\nif [ "$1" = list-clients ]; then printf "client\\n"; exit 0; fi\nexec ' + real_tmux + ' "$@"\n')
+        tmux_shim.write_text('#!/bin/sh\ncase "$1:${3:-}" in list-clients:*|-S:list-clients) printf "client\\n"; exit 0 ;; esac\nexec ' + real_tmux + ' "$@"\n')
         tmux_shim.chmod(0o755)
         env = dict(self.env, PATH=path, TMUX=self.socket + ',1,0', TEAM_TEST_OUTPUT=str(output))
         result = subprocess.run([str(REPO / 'bin/workbench-resurrect-restore-all')], env=env,
@@ -536,7 +536,7 @@ class TeamResurrection(unittest.TestCase):
         team_cli.chmod(0o755)
         real_tmux = subprocess.check_output(['which', 'tmux'], text=True).strip()
         tmux_shim = shim / 'tmux'
-        tmux_shim.write_text('#!/bin/sh\nif [ "$1" = list-clients ]; then printf "client\\n"; exit 0; fi\nexec ' + real_tmux + ' "$@"\n')
+        tmux_shim.write_text('#!/bin/sh\ncase "$1:${3:-}" in list-clients:*|-S:list-clients) printf "client\\n"; exit 0 ;; esac\nexec ' + real_tmux + ' "$@"\n')
         tmux_shim.chmod(0o755)
         path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
         self.env.update(PATH=path, TEAM_TEST_OUTPUT=str(output))
@@ -611,7 +611,7 @@ class TeamResurrection(unittest.TestCase):
         team_cli.chmod(0o755)
         real_tmux = subprocess.check_output(['which', 'tmux'], text=True).strip()
         tmux_shim = shim / 'tmux'
-        tmux_shim.write_text('#!/bin/sh\nif [ "$1" = list-clients ]; then printf "client\\n"; exit 0; fi\nexec ' + real_tmux + ' "$@"\n')
+        tmux_shim.write_text('#!/bin/sh\ncase "$1:${3:-}" in list-clients:*|-S:list-clients) printf "client\\n"; exit 0 ;; esac\nexec ' + real_tmux + ' "$@"\n')
         tmux_shim.chmod(0o755)
         path = str(shim) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin')
         self.env.update(PATH=path, TEAM_TEST_OUTPUT=str(output))
