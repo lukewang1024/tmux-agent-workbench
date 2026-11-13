@@ -137,7 +137,16 @@ pub fn write_response(mut stream: impl Write, response: &Response) -> Result<(),
 pub(crate) fn prepare_connection(
     stream: &mut UnixStream,
 ) -> io::Result<crate::compat::TimedIo<&mut UnixStream>> {
+    // A client that never sends a request should not pin a daemon thread.
     crate::compat::unix_io(stream, Duration::from_secs(2))
+}
+
+pub(crate) fn prepare_response_connection(
+    stream: &mut UnixStream,
+) -> io::Result<crate::compat::TimedIo<&mut UnixStream>> {
+    // Large snapshot replies can take longer to drain. Preparing a separate
+    // response phase also resets iSH's shared polling deadline after reading.
+    crate::compat::unix_io(stream, Duration::from_secs(5))
 }
 
 // Serialize once: serde's small writes must not each become a socket syscall.
@@ -167,19 +176,22 @@ mod tests {
             )
             .unwrap()
         });
-        let (mut stream, _) = listener.accept().unwrap();
+        let (mut socket_stream, _) = listener.accept().unwrap();
         // Exercise the inherited macOS mode on every CI platform.
-        stream.set_nonblocking(true).unwrap();
-        let mut stream = prepare_connection(&mut stream).unwrap();
-        assert_eq!(
-            unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
-            if crate::compat::is_ish() {
-                libc::O_NONBLOCK
-            } else {
-                0
-            }
-        );
-        let request = read_request(&mut stream).unwrap();
+        socket_stream.set_nonblocking(true).unwrap();
+        let request = {
+            let mut stream = prepare_connection(&mut socket_stream).unwrap();
+            assert_eq!(
+                unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
+                if crate::compat::is_ish() {
+                    libc::O_NONBLOCK
+                } else {
+                    0
+                }
+            );
+            read_request(&mut stream).unwrap()
+        };
+        let mut stream = prepare_response_connection(&mut socket_stream).unwrap();
         let response = serde_json::json!({"snapshot": "x".repeat(128 * 1024)});
         write_response(
             &mut stream,
@@ -187,6 +199,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.join().unwrap(), response);
+    }
+
+    #[test]
+    fn slow_reader_receives_a_complete_large_response() {
+        use std::os::fd::AsRawFd;
+        let (mut server, client) = UnixStream::pair().unwrap();
+        let buffer_size: libc::c_int = 4096;
+        let result = unsafe {
+            libc::setsockopt(
+                server.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer_size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0, "could not limit the test socket buffer");
+        let read_delay = if crate::compat::is_ish() {
+            // Leave more time for the slower iSH emulator to drain the frame.
+            Duration::from_millis(2_200)
+        } else {
+            Duration::from_millis(4_200)
+        };
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            ready_rx.recv().unwrap();
+            std::thread::sleep(read_delay);
+            let mut line = String::new();
+            BufReader::new(client).read_line(&mut line).unwrap();
+            serde_json::from_str::<Response>(&line).unwrap()
+        });
+        let mut stream = prepare_response_connection(&mut server).unwrap();
+        ready_tx.send(()).unwrap();
+        let started = std::time::Instant::now();
+        write_response(
+            &mut stream,
+            &Response::success(
+                "slow-reader".into(),
+                serde_json::json!({"data": "x".repeat(512 * 1024)}),
+            ),
+        )
+        .unwrap();
+        assert!(started.elapsed() >= read_delay.saturating_sub(Duration::from_millis(200)));
+        let response = reader.join().unwrap();
+        assert_eq!(response.id, "slow-reader");
+        assert_eq!(
+            response.result.unwrap()["data"].as_str().unwrap().len(),
+            512 * 1024
+        );
+    }
+
+    #[test]
+    fn inactive_requester_keeps_the_short_read_deadline() {
+        let (mut server, client) = UnixStream::pair().unwrap();
+        let mut stream = prepare_connection(&mut server).unwrap();
+        let started = std::time::Instant::now();
+        assert!(read_request(&mut stream).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "a silent requester held the connection for the response timeout"
+        );
+        drop(client);
     }
 
     #[test]

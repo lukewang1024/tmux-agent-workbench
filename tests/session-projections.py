@@ -152,7 +152,18 @@ with tempfile.TemporaryDirectory(prefix='wb-session-projections-', dir='/tmp') a
             checkpoint, = Path(env['XDG_STATE_HOME']).glob('tmux-agent-workbench/servers/*.json')
             backup = checkpoint.with_suffix('.before-name')
             checkpoint.rename(backup)
-            checkpoint.mkdir()
+            # The live daemon may recreate the file between the rename and
+            # mkdir. Remove that new test checkpoint and retry until the
+            # directory blocks subsequent writes, preserving the backup.
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    checkpoint.mkdir()
+                    break
+                except FileExistsError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    checkpoint.unlink(missing_ok=True)
             try:
                 failed = core('title', 'rename', 'Recovery write failed', '--pane', main,
                               '--session-id', manual, check=False)
