@@ -75,7 +75,26 @@ class TeamResurrection(unittest.TestCase):
         self.tmux('set-option', '-g', '@resurrect-dir', str(self.root / 'save'))
 
     def restart(self):
+        server_pid = int(self.tmux('display-message', '-p', '#{pid}'))
         self.tmux('kill-server')
+        # kill-server can return while the old server still accepts its last
+        # connection. Wait for it to exit before reusing the socket path.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(server_pid, 0)
+            except ProcessLookupError:
+                break
+            if sys.platform.startswith('linux'):
+                try:
+                    state = Path(f'/proc/{server_pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+                    if state == 'Z':
+                        break
+                except (OSError, IndexError):
+                    pass
+            if time.monotonic() >= deadline:
+                self.fail('old tmux server did not exit after kill-server')
+            time.sleep(.02)
         self.tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'bootstrap')
         self.tmux('set-option', '-g', 'default-shell', '/bin/sh')
         self.tmux('set-option', '-g', '@resurrect-dir', str(self.root / 'save'))
