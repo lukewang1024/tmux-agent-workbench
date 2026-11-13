@@ -752,6 +752,129 @@ closed panes fall back to their window, then session. Plain SSH can invoke
 it uses the server's last detached target as a shared fallback. With no sessions,
 the local entrypoint creates one.
 
+### Attach to a Mac without running its SSH server
+
+For a tmux host that cannot accept SSH, Workbench can keep a TLS connection from
+the host back to a broker on the Devbox. The broker joins that stream to a phone
+terminal that entered the Devbox through `ssh-connect --workbench`. The Mac
+agent attaches a PTY to its existing tmux server; sessions remain on the Mac.
+Install a Workbench build containing the `client stream` and `client route`
+commands on the Devbox and Mac before configuring the route. The phone continues
+to use its existing `ssh-connect --workbench` entry into the Devbox.
+The phone-to-Devbox hop uses SSH as before. On the Mac, Workbench asks the
+existing Machine Fabric Executor to maintain an SSH local forward to the
+Devbox's loopback broker, then carries the terminal stream over TLS inside
+that forward. This needs an outbound SSH client on the Mac; the Mac's SSHD
+stays closed. It does not require a Machine Fabric binary change. Python 3.8 or
+newer is required on the Devbox and Mac for the embedded standard-library TLS
+and PTY helper.
+
+Create a CA and server certificate on the Devbox, then copy the public CA
+certificate and the target's mode-0600 pairing token to the Mac through a
+trusted setup channel:
+
+```sh
+mkdir -p ~/.config/tmux-agent-workbench/remote-terminal
+cd ~/.config/tmux-agent-workbench/remote-terminal
+openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
+  -subj '/CN=workbench-relay-ca' -keyout ca.key -out ca.pem \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -addext 'subjectKeyIdentifier=hash' \
+  -addext 'authorityKeyIdentifier=keyid:always,issuer'
+openssl req -new -newkey rsa:3072 -nodes -sha256 \
+  -subj '/CN=workbench-relay' -keyout server.key -out server.csr
+printf '%s\n' 'basicConstraints=critical,CA:FALSE' \
+  'keyUsage=critical,digitalSignature,keyEncipherment' \
+  'extendedKeyUsage=serverAuth' \
+  'subjectKeyIdentifier=hash' \
+  'authorityKeyIdentifier=keyid,issuer' \
+  'subjectAltName=DNS:workbench-relay' > server.ext
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -days 3650 -sha256 -extfile server.ext -out server.pem
+chmod 600 ca.key server.key
+```
+
+On the Devbox, configure the broker on a loopback high port and generate a
+random token. Keep the broker running under a user service or supervisor:
+
+```sh
+tmux-agent-workbench client stream server-configure \
+  --bind 127.0.0.1:48765 \
+  --certificate ~/.config/tmux-agent-workbench/remote-terminal/server.pem \
+  --private-key ~/.config/tmux-agent-workbench/remote-terminal/server.key
+tmux-agent-workbench client stream target-add MacBook-Pro \
+  --endpoint 127.0.0.1:48765 --server-name workbench-relay \
+  --ca-certificate ~/.config/tmux-agent-workbench/remote-terminal/ca.pem
+tmux-agent-workbench client stream pair MacBook-Pro
+tmux-agent-workbench client stream serve
+```
+
+On the Mac, install the matching token and CA file with mode `0600` for the
+token, then configure the local forward. `client stream agent` uses the local
+Machine Fabric CLI to call `tunnel.ensure` on the selected Mac Executor. Replace
+`MF_EXECUTOR_ID` and `DEVBOX_SSH_ALIAS` with the values in the Mac's existing
+Machine Fabric configuration. Include `~/.local/bin` and the Homebrew binary
+directory in launchd's `PATH` so Workbench can find Machine Fabric and `tmux`
+(`/opt/homebrew/bin` on Apple Silicon):
+
+```sh
+tmux-agent-workbench client stream target-add MacBook-Pro \
+  --endpoint 127.0.0.1:48766 --server-name workbench-relay \
+  --ca-certificate ~/.config/tmux-agent-workbench/remote-terminal/ca.pem \
+  --token-file ~/.config/tmux-agent-workbench/remote-terminal/MacBook-Pro.token \
+  --machine-fabric-executor MF_EXECUTOR_ID \
+  --ssh-host DEVBOX_SSH_ALIAS \
+  --forward-to 127.0.0.1:48765
+tmux-agent-workbench client stream agent MacBook-Pro
+```
+
+Stop the managed SSH forward when the Mac agent should no longer reach the
+broker:
+
+```sh
+tmux-agent-workbench client stream tunnel-stop MacBook-Pro
+```
+
+On the phone, add `Mac` to the existing `ssh-connect` host inventory and map
+that alias to the Devbox route. Use the Devbox SSH alias already present in the
+phone's `ssh-connect` inventory in place of `DEVBOX_SSH_ALIAS`:
+
+```sh
+tmux-agent-workbench client route add Mac --via DEVBOX_SSH_ALIAS --target MacBook-Pro
+ssh-connect --workbench
+```
+
+The route record is stored under `$XDG_CONFIG_HOME/tmux-agent-workbench` with
+mode `0600`. The broker authenticates each target with a random per-target
+token, verifies TLS against the configured CA, and relays separate input and
+output streams. The existing Devbox SSH login remains the phone's entrypoint;
+the Mac has no SSH listener, and the broker stays bound to Devbox loopback
+behind the Machine Fabric SSH local forward.
+
+When the Devbox's release-managed core does not yet include `client stream`, a
+route can select a local core only for that alias. Stage an executable on the
+Devbox and pass its absolute Devbox path when adding the Mac route:
+
+```sh
+tmux-agent-workbench client route add Mac \
+  --via DEVBOX_SSH_ALIAS --target MacBook-Pro \
+  --remote-core /home/USER/.local/bin/tmux-agent-workbench-core-mac-route-local
+```
+
+The Mac route executes that absolute binary path directly on the Devbox. Other
+routes continue to use the normal `tmux-agent-workbench` launcher and the
+release-managed core.
+
+Each terminal attachment has its own identifier and its own Mac PTY. Multiple
+phones or terminal windows can attach at the same time; each attachment forwards
+its own size changes to a separate tmux client, so tmux applies its normal
+multi-client sizing behavior. The phone only routes its terminal through the
+Devbox and does not speak this stream protocol directly, so protocol-only changes
+do not require reinstalling the phone CLI. The `--remote-core` route option is
+implemented by that CLI, so enabling this override requires a Termux build that
+supports the option.
+
 After responsive sidebar/zoom maintenance settles, Workbench refreshes the
 client and sends one `SIGWINCH` to the active pane's foreground process group.
 The same maintenance runs when the client switches sessions or windows.
