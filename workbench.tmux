@@ -70,27 +70,31 @@ tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_cpu_range_open '#[range=user|wb_cpu]'
 tmux set-option -g @adaptive_cpu_range_close '#[range=]'
 . "$CURRENT_DIR/lib/host-metrics.sh"
-# Stable controls precede host metrics; agent commands live in the status pill.
+# Frequent controls bracket the window list: Workbench and Quick Agent on the
+# left, URL extraction on the inner edge of status-right.
 tmux set-option -g @adaptive_action_1_icon ''
-tmux set-option -g @adaptive_action_1_range wb_tmux
+tmux set-option -g @adaptive_action_1_range wb_workbench
 tmux set-option -g @adaptive_action_1_visible 1
-tmux set-option -g @adaptive_action_2_icon ''
-tmux set-option -g @adaptive_action_2_range wb_sidebar
-tmux set-option -g @adaptive_action_2_visible 0
+tmux set-option -g @adaptive_action_2_icon '+'
+tmux set-option -g @adaptive_action_2_range wb_quick_agent
+tmux set-option -g @adaptive_action_2_visible 1
 tmux set-option -g @adaptive_action_3_icon ''
 tmux set-option -g @adaptive_action_3_range ''
-tmux set-option -g @adaptive_action_3_visible 0
+tmux set-option -g @adaptive_right_action_1_icon ''
+tmux set-option -g @adaptive_right_action_1_range wb_extract_url
+tmux set-option -g @adaptive_right_action_1_visible 1
 tmux set-option -g @adaptive_usage ''
 tmux set-option -g @adaptive_usage_range_open '#[range=user|wb_usage]'
 tmux set-option -g @adaptive_usage_range_close '#[range=]'
 . "$CURRENT_DIR/lib/status-usage.sh"
 tmux set-option -s command-alias[920] \
-  "wb-tmux-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' tmux '#{client_name}' '#{pane_id}'\""
+  "wb-workbench-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' workbench '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[921] \
   "wb-agent-status-menu=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' agent '#{client_name}' '#{pane_id}' --focus-agent\""
 tmux set-option -s command-alias[922] "wb-sidebar-status=run-shell -b \"$CURRENT_DIR/bin/wb-responsive '#{window_id}' '#{client_name}'\""
-tmux set-option -s command-alias[923] "wb-other-status=if-shell -F '#{==:#{mouse_status_range},window}' 'select-window -t =' ''"
-status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'wb-sidebar-status' \"if-shell -F '#{==:#{mouse_status_range},wb_tmux}' 'wb-tmux-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
+tmux set-option -s command-alias[923] \
+  "wb-other-status=run-shell -b \"$CURRENT_DIR/bin/workbench-status-click '#{mouse_status_range}' '#{pane_id}' root '#{client_name}' '#{window_id}'\""
+status_click_action="if-shell -F '#{==:#{mouse_status_range},wb_prefix}' 'wb-sidebar-status' \"if-shell -F '#{==:#{mouse_status_range},wb_workbench}' 'wb-workbench-status-menu' \\\"if-shell -F '#{==:#{mouse_status_range},wb_agent}' 'wb-agent-status-menu' \\\\\\\"if-shell -F '#{==:#{mouse_status_range},wb_sidebar}' 'wb-sidebar-status' 'wb-other-status'\\\\\\\"\\\"\""
 tmux set-option -s command-alias[924] \
   "wb-host-status=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' host '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[925] \
@@ -98,11 +102,12 @@ tmux set-option -s command-alias[925] \
 tmux set-option -su command-alias[928] 2>/dev/null || true
 tmux set-option -s command-alias[929] \
   "wb-metrics-status=run-shell \"'$CURRENT_DIR/bin/workbench-host-metrics-menu' '#{client_name}' '#{pane_id}'\""
+tmux set-option -s command-alias[930] \
+  "wb-quick-agent-status=run-shell \"'$CURRENT_DIR/bin/workbench-status-popup' quick-agent '#{client_name}' '#{pane_id}'\""
 tmux set-option -s command-alias[926] "wb-static-status=$status_click_action"
 tmux set-option -s command-alias[927] \
   'wb-status-route=if-shell -F "#{==:#{mouse_status_range},wb_cpu}" wb-metrics-status "if-shell -F '\''#{==:#{mouse_status_range},wb_host}'\'' wb-host-status \"if-shell -F '\''#{==:#{mouse_status_range},wb_usage}'\'' wb-usage-status wb-static-status\""'
-# Open after release. Native menus then receive a complete subsequent click,
-# including its coordinates, without depending on hover events (touch screens).
+# Open after release so each status action receives a complete click event.
 # Empty branches must emit nothing: display-message -p enters the output pager.
 # Unbound mouse motion (including pane borders) must not consume prefix.
 # Bound prefix commands retain their normal behaviour; Escape cancels.
@@ -175,10 +180,12 @@ bind_pane @workbench-key-pane-right-arrow @workbench-_bound-pane-right-arrow Rig
 
 bind_tracked @workbench-key-agent-menu @workbench-_bound-agent-menu M-a "open agent command menu" \
   run-shell "$CURRENT_DIR/bin/workbench-menu agent '#{client_name}' '#{pane_id}'"
-bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open compact tmux menu" \
-  run-shell -b "$CURRENT_DIR/bin/workbench-status-popup tmux '#{client_name}' '#{pane_id}'"
-bind_tracked @workbench-key-main-menu @workbench-_bound-main-menu M-m "open combined Workbench menu" \
+bind_tracked @workbench-key-mobile-menu @workbench-_bound-mobile-menu M-t "open Workbench menu" \
   run-shell -b "$CURRENT_DIR/bin/tmux-agent-workbench-cli menu --client '#{client_name}' --pane '#{pane_id}'"
+bind_tracked @workbench-key-main-menu @workbench-_bound-main-menu m "open Workbench menu" \
+  run-shell -b "$CURRENT_DIR/bin/tmux-agent-workbench-cli menu --client '#{client_name}' --pane '#{pane_id}'"
+bind_tracked @workbench-key-pane-mark @workbench-_bound-pane-mark M-m "mark pane" \
+  select-pane -m
 
 # Attention v2 is an additive Rust subsystem; the existing task/worktree tools
 # above remain independent. The public tmux-agent-workbench command is a shell

@@ -77,7 +77,8 @@ with tempfile.TemporaryDirectory(prefix='wb-assistant-pin-', dir='/tmp') as root
                         '-P', '-F', '#{pane_id}', shlex.quote(fixture))
         with running_daemon(core, env):
             bind(original)
-            sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', observer,
+            # Keep the pin count visible beside the Agent-state filters.
+            sidebar = tmux('split-window', '-b', '-h', '-l', '54', '-t', observer,
                            '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
             tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
             # Generic window titles such as "shell" use the tmux session name.

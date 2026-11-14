@@ -23,9 +23,10 @@ from daemon_fixture import running_daemon
 core = str(Path(sys.argv[1]).resolve())
 fixture = str(Path(__file__).resolve().parents[1] / 'target/debug/examples/codex')
 language = sys.argv[2] if len(sys.argv) > 2 else 'zh'
-agent_label, sort_label, pinned_menu, unpin_label = (
-    ('智能体', '分组', '置顶的智能体', '取消置顶') if language == 'zh' else
-    ('Agents', 'grouped', 'Pinned agents', 'Unpin task'))
+agent_label, pinned_menu, unpin_label = (
+    ('智能体', '置顶的智能体', '取消置顶') if language == 'zh' else
+    ('Agents', 'Pinned agents', 'Unpin task'))
+sort_icon = ''
 
 with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack() as processes:
     socket = root + '/tmux.sock'
@@ -123,7 +124,9 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         for window in (target_window, shell_window):
             tmux('set-option', '-w', '-t', window, '@agent_focus', '1')
         processes.enter_context(running_daemon(core, env))
-        sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
+        # Leave enough room for the view, pinned count, state filters, and
+        # controls together; narrower widths are exercised by sidebar-mouse.
+        sidebar = tmux('split-window', '-b', '-h', '-l', '54', '-t', 'z-source',
                        '-P', '-F', '#{pane_id}', 'exec sleep 120')
         tmux('set-option', '-p', '-t', sidebar, '@pane_role', 'sidebar')
         # Seed the exact shared frame that can be observed while the sidebar
@@ -137,8 +140,8 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
                                   env=env, stdin=slave, stdout=slave, stderr=slave,
                                   start_new_session=True)
         wait(lambda: len(screen()) > 6 and agent_label in screen()[0] and ' 2' in screen()[0]
-             and sort_label in screen()[0] and '' in screen()[0]
-             and '' in screen()[0] and '' in screen()[0]
+             and sort_icon in screen()[0] and '' in screen()[0]
+             and '' in screen()[0] and '' in screen()[0] and '' in screen()[0]
              and 'Priority task' in screen()[1] and 'plain-shell' in screen()[3], 'powerline header')
         assert 'a-target' in screen()[2] and 'm-shell' in screen()[4], screen()
         assert ('Agents' not in screen()[0] if language == 'zh' else '智能体' not in screen()[0]), screen()

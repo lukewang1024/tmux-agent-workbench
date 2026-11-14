@@ -20,7 +20,9 @@ from daemon_fixture import running_daemon
 core = str(Path(sys.argv[1]).resolve())
 fixture = str(Path(__file__).resolve().parents[1] / 'target/debug/examples/codex')
 language = sys.argv[2] if len(sys.argv) > 2 else 'en'
-sidebar_columns = os.environ.get('WORKBENCH_TEST_SIDEBAR_WIDTH', '36')
+# Keep the pinned count visible alongside the four Agent-state filters.
+# Narrow header fallbacks and touch geometry are covered by sidebar-mouse.py.
+sidebar_columns = os.environ.get('WORKBENCH_TEST_SIDEBAR_WIDTH', '54')
 agents, sessions, pinned_sessions, unpin = (
     ('智能体', '会话', '置顶的会话', '取消置顶会话') if language == 'zh' else
     ('Agents', 'Sessions', 'Pinned sessions', 'Unpin session'))
@@ -56,6 +58,10 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
     def showing_view(label, icon):
         header = screen()[0]
         return label in header or icon in header
+
+    def showing_pin_count(count):
+        header = screen()[0]
+        return f' {count}' in header or f'{count}' in header
 
     def wait(predicate, label):
         deadline = time.monotonic() + 12
@@ -99,13 +105,13 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
                                   stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         wait(lambda: tmux('display-message', '-p', '-t', sidebar, '#{pane_width}') == sidebar_columns,
              'configured sidebar width')
-        wait(lambda: showing_view(agents, '󰚩') and ' 1' in screen()[0]
+        wait(lambda: showing_view(agents, '󰚩') and showing_pin_count(1)
              and 'Priority task' in screen()[1], 'initial Agent view and its pinned task')
         assert not any('b-shell' in line for line in screen()), screen()
         client_name = tmux('list-clients', '-F', '#{client_name}').splitlines()[0]
         # The first Powerline label is a real touch/click target.
         os.write(master, b'\x1b[<0;2;1M\x1b[<0;2;1m')
-        wait(lambda: showing_view(sessions, '') and ' 0' in screen()[0]
+        wait(lambda: showing_view(sessions, '') and showing_pin_count(0)
              and any('b-shell' in line for line in screen()), 'switch to Session view')
         assert not any('Priority task' in line for line in screen()), screen()
         assert ('Sessions' not in screen()[0] if language == 'zh' else '会话' not in screen()[0]), screen()
@@ -117,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         tmux('select-pane', '-t', sidebar)
         wait(lambda: tmux('show-option', '-qv', '-t', b_id, '@workbench_session_focus') == '1',
              'pin selected session')
-        wait(lambda: ' 1' in screen()[0] and 'b-shell' in screen()[1], 'pinned session card')
+        wait(lambda: showing_pin_count(1) and 'b-shell' in screen()[1], 'pinned session card')
         assert tmux('show-option', '-wqv', '-t', a_window, '@agent_focus') == '1'
         # Cross from the pinned card into the list and back, then open it.
         tmux('send-keys', '-t', sidebar, 'Home', 'Down', 'Up', 'Enter')
@@ -156,7 +162,7 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-views-') as root, ExitStack(
         assert unpin.encode() in output, output[-1500:]
         os.write(master, b'p')
         wait(lambda: tmux('show-option', '-qv', '-t', b_id, '@workbench_session_focus') == '', 'unpin session')
-        wait(lambda: ' 0' in screen()[0], 'unpin reflected in Session view')
+        wait(lambda: showing_pin_count(0), 'unpin reflected in Session view')
         # Re-pin, then switch views and verify each retains only its own pins.
         tmux('send-keys', '-t', sidebar, 'Home', 'Down', 'p')
         wait(lambda: tmux('show-option', '-qv', '-t', b_id, '@workbench_session_focus') == '1', 'repin')

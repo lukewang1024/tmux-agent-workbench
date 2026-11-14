@@ -6,7 +6,7 @@ client=${2:-}
 pane=${3:-}
 focus=${4:-}
 case $focus in ''|--focus-agent) ;; *) exit 2 ;; esac
-case $kind in host|tmux|agent) ;; *) exit 2 ;; esac
+case $kind in host|tmux|workbench|agent|quick-agent|extract-url) ;; *) exit 2 ;; esac
 case $client in ''|*[!A-Za-z0-9_./-]*) exit 2 ;; esac
 case $pane in '%'|''|%*[!0-9]*) exit 2 ;; %*) ;; *) exit 2 ;; esac
 
@@ -20,8 +20,17 @@ plugin_dir=$(CDPATH='' cd -- "$(dirname "$self")/.." && pwd -P)
 core=$(workbench_core_path "$plugin_dir") || core=
 [ -x "$core" ] || { tmux display-message -c "$client" 'Workbench binary unavailable'; exit 127; }
 
-# Status bindings run after release, then the native menu handles the next click.
+# Status bindings open the shared Workbench menu component.
+if [ "$kind" = workbench ] || [ "$kind" = tmux ]; then
+  exec "$core" menu --pane "$pane" --client "$client"
+fi
+if [ "$kind" = extract-url ]; then
+  exec "$core" extract-urls --pane "$pane" --client "$client"
+fi
 if [ "$focus" = --focus-agent ]; then
   exec "$core" status-menu "$kind" --pane "$pane" --client "$client" --focus-agent
+fi
+if [ "$kind" = quick-agent ]; then
+  exec "$core" status-menu menu --pane "$pane" --client "$client" --quick-agent
 fi
 exec "$core" status-menu "$kind" --pane "$pane" --client "$client"

@@ -139,9 +139,10 @@ fn choose_at(
                 role: crate::menu::Role::Body,
             })
             .collect(),
-        pager: None,
         searchable: true,
         prompt: None,
+        copy_key: None,
+        wrap_items: false,
     };
     Ok(crate::menu::select(&menu, pane, client, 0)?.map(|selected| selected.index))
 }
@@ -159,9 +160,10 @@ pub fn prompt(title: &str, label: &str) -> Result<Option<String>, Box<dyn std::e
             enabled: true,
             role: crate::menu::Role::Primary,
         }],
-        pager: None,
         searchable: false,
         prompt: Some(label.into()),
+        copy_key: None,
+        wrap_items: false,
     };
     Ok(crate::menu::select(&menu, &pane, &client, 0)?.map(|selected| selected.input))
 }

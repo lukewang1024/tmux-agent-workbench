@@ -48,6 +48,8 @@ enum Command {
         #[arg(long, requires_all = ["pane", "client"])]
         popup: bool,
         #[arg(long)]
+        details: bool,
+        #[arg(long)]
         pane: Option<String>,
         #[arg(long)]
         client: Option<String>,
@@ -59,10 +61,12 @@ enum Command {
         #[arg(long)]
         client: Option<String>,
     },
-    /// Select the classic tmux UI or the shared Sidebar UI without reloading.
-    Ui {
-        #[arg(value_enum, default_value = "status")]
-        mode: tmux_agent_workbench::ui::Choice,
+    #[command(hide = true)]
+    ExtractUrls {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        client: String,
     },
     /// Open a scoped Sidebar navigation view.
     Switch {
@@ -87,11 +91,6 @@ enum Command {
     #[command(hide = true)]
     NormalizeResurrectLayout {
         path: std::path::PathBuf,
-    },
-    #[command(hide = true)]
-    MenuMouseMode {
-        #[arg(long)]
-        client: String,
     },
     #[command(hide = true)]
     DisplayMenu {
@@ -127,6 +126,8 @@ enum Command {
         action: Option<String>,
         #[arg(long, default_value_t = 0)]
         page: usize,
+        #[arg(long, hide = true)]
+        quick_agent: bool,
         #[command(flatten)]
         options: tmux_agent_workbench::status_menu::MenuOptions,
     },
@@ -1833,18 +1834,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Sidebar {
             popup,
+            details,
             pane,
             client,
         } => {
             let server = ServerIdentity::discover()?;
             if popup {
-                tmux_agent_workbench::sidebar::open_popup(
+                tmux_agent_workbench::sidebar::open_popup_with_details(
                     &server,
                     pane.as_deref().unwrap(),
                     client.as_deref().unwrap(),
+                    details,
                 )?;
             } else {
-                tmux_agent_workbench::sidebar::run(&paths, &server)?;
+                tmux_agent_workbench::sidebar::run_with_details(&paths, &server, details)?;
             }
         }
         Command::Switch {
@@ -1892,9 +1895,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::DisplayMenu { args, page } => {
             tmux_agent_workbench::menu_footer::display(&args, page)?
         }
-        Command::Ui { mode } => tmux_agent_workbench::ui::run(mode)?,
         Command::Menu { pane, client } => {
             tmux_agent_workbench::status_menu::open_root(pane.as_deref(), client.as_deref())?
+        }
+        Command::ExtractUrls { pane, client } => {
+            tmux_agent_workbench::status_menu::extract_urls(&pane, &client)?
         }
         Command::MenuPanel { request } => tmux_agent_workbench::menu::run_request(&request)?,
         Command::SelectList { title } => {
@@ -1915,31 +1920,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!("{value}");
             }
         }
-        Command::MenuMouseMode { client } => {
-            println!("{}", menu_input_mode(&paths, &client, None));
-        }
         Command::StatusMenu {
             kind,
             pane,
             client,
             action,
             page,
-            mut options,
+            quick_agent,
+            options,
         } => {
-            // Input mode stays fixed for one menu interaction; callbacks need
-            // no daemon snapshot request just to rediscover the same client.
-            let input_mode = menu_input_mode(&paths, &client, options.input_mode.as_deref());
-            let stay_open = input_mode == "mouse";
-            options.input_mode = Some(input_mode.into());
-            tmux_agent_workbench::status_menu::run(
-                kind,
-                &pane,
-                &client,
-                action.as_deref(),
-                page,
-                stay_open,
-                &options,
-            )?;
+            if quick_agent {
+                tmux_agent_workbench::status_menu::quick_agent_or_create(&pane, &client, &options)?;
+            } else {
+                tmux_agent_workbench::status_menu::run(
+                    kind,
+                    &pane,
+                    &client,
+                    action.as_deref(),
+                    page,
+                    &options,
+                )?;
+            }
         }
         Command::Pick { target } => {
             let server = ServerIdentity::discover()?;
@@ -2585,56 +2586,6 @@ fn ipc_call(
     Ok(call(&socket, &Request::new(method, params), timeout)?)
 }
 
-fn menu_input_mode(paths: &Paths, client: &str, requested: Option<&str>) -> &'static str {
-    match requested {
-        Some("touch") => return "touch",
-        Some("release") => return "release",
-        _ => {}
-    }
-    // tmux 3.8 distinguishes hover from a real release. Select on release so
-    // a held click cannot open a child menu and then dismiss it on mouse-up.
-    let version = ServerIdentity::discover().ok().and_then(|server| {
-        tmux_agent_workbench::tmux::Tmux::new(server)
-            .client_format(client, "#{version}")
-            .ok()
-            .flatten()
-    });
-    if version.as_deref().is_some_and(tmux_has_release_menus) {
-        return "release";
-    }
-    // Older native menus treat unpressed motion as a release. Preserve their
-    // pointer workaround; Termux taps have no hover and can still use release.
-    if requested != Some("mouse") && client_uses_termux_input(paths, client) {
-        "touch"
-    } else {
-        "mouse"
-    }
-}
-
-fn tmux_has_release_menus(version: &str) -> bool {
-    let version = version
-        .trim()
-        .strip_prefix("next-")
-        .unwrap_or(version.trim());
-    let Some((major, minor)) = version.split_once('.') else {
-        return false;
-    };
-    let minor = minor
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .unwrap_or("");
-    matches!((major.parse::<u32>(), minor.parse::<u32>()),
-        (Ok(major), Ok(minor)) if (major, minor) >= (3, 8))
-}
-
-fn client_uses_termux_input(paths: &Paths, client: &str) -> bool {
-    let Ok(server) = ServerIdentity::discover() else {
-        return false;
-    };
-    tmux_agent_workbench::attachment::client_kind(paths, &server, client).as_deref()
-        == Some("termux")
-}
-
 fn ensure_daemon(paths: &Paths) -> Result<(), Box<dyn std::error::Error>> {
     ensure_daemon_with_announcement(paths, true)
 }
@@ -2890,16 +2841,6 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-    }
-
-    #[test]
-    fn release_menus_require_hover_safe_tmux() {
-        for version in ["3.6", "3.7c", "unknown", ""] {
-            assert!(!tmux_has_release_menus(version), "{version}");
-        }
-        for version in ["3.8", "3.8a", "3.10", "4.0", "next-3.9"] {
-            assert!(tmux_has_release_menus(version), "{version}");
-        }
     }
 
     #[test]

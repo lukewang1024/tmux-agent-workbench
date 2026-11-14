@@ -21,8 +21,21 @@ case $range in
   wb_prefix)
     exec "$script_dir/wb-responsive" "$window" "$client"
     ;;
-  wb_tmux)
-    exec "$script_dir/workbench-status-popup" tmux "$client" "$pane"
+  wb_workbench|wb_tmux)
+    exec "$script_dir/workbench-status-popup" workbench "$client" "$pane"
+    ;;
+  wb_quick_agent)
+    exec "$script_dir/workbench-status-popup" quick-agent "$client" "$pane"
+    ;;
+  wb_extract_url)
+    exec "$script_dir/workbench-status-popup" extract-url "$client" "$pane"
+    ;;
+  wb_extract)
+    if ! command -v tmux-extrakto >/dev/null 2>&1; then
+      tmux display-message -c "$client" 'Extract helper tmux-extrakto is unavailable'
+      exit 127
+    fi
+    exec tmux-extrakto --client "$client" "$pane"
     ;;
   wb_agent)
     exec "$script_dir/workbench-status-popup" agent "$client" "$pane" --focus-agent

@@ -13,7 +13,7 @@ mkdir -p "$plugin/bin" "$plugin/lib" "$plugin/target/release" \
   "$XDG_DATA_HOME/tmux-agent-workbench/bin" "$fixture/bin"
 cp "$repo/bin/tmux-agent-workbench-cli" "$plugin/bin/"
 cp "$repo/bin/workbench-status-popup" "$repo/bin/workbench-menu" \
-  "$repo/bin/workbench-menu-mouse-mode" "$repo/bin/wb-responsive" "$plugin/bin/"
+  "$repo/bin/wb-responsive" "$plugin/bin/"
 cp "$repo/workbench.tmux" "$repo/Cargo.toml" "$plugin/"
 cp "$repo/lib/bind-tracked.sh" "$repo/lib/host-metrics.sh" \
   "$repo/lib/resolve-core.sh" "$plugin/lib/"
@@ -70,14 +70,22 @@ check() {
   for kind in host tmux agent; do
     actual=$("$plugin/bin/workbench-menu" "$kind" /dev/pts/8 %1)
     [ "$actual" = "$1" ] || { printf 'wrong %s menu core: %s\n' "$kind" "$actual" >&2; exit 1; }
-    [ "$(cat "$CORE_SELECTION_LOG.args")" = "status-menu $kind --pane %1 --client /dev/pts/8" ]
+    if [ "$kind" = tmux ]; then
+      expected_args='menu --pane %1 --client /dev/pts/8'
+    else
+      expected_args="status-menu $kind --pane %1 --client /dev/pts/8"
+    fi
+    [ "$(cat "$CORE_SELECTION_LOG.args")" = "$expected_args" ]
   done
   actual=$("$plugin/bin/workbench-status-popup" agent /dev/pts/8 %1 --focus-agent)
   [ "$actual" = "$1" ] || { echo 'wrong focused agent menu core' >&2; exit 1; }
   [ "$(cat "$CORE_SELECTION_LOG.args")" = 'status-menu agent --pane %1 --client /dev/pts/8 --focus-agent' ]
-  actual=$("$plugin/bin/workbench-menu-mouse-mode" /dev/pts/8)
-  [ "$actual" = "$1" ] || { echo 'wrong mouse mode core' >&2; exit 1; }
-  [ "$(cat "$CORE_SELECTION_LOG.args")" = 'menu-mouse-mode --client /dev/pts/8' ]
+  actual=$("$plugin/bin/workbench-status-popup" workbench /dev/pts/8 %1)
+  [ "$actual" = "$1" ] || { echo 'wrong Workbench menu core' >&2; exit 1; }
+  [ "$(cat "$CORE_SELECTION_LOG.args")" = 'menu --pane %1 --client /dev/pts/8' ]
+  actual=$("$plugin/bin/workbench-status-popup" quick-agent /dev/pts/8 %1)
+  [ "$actual" = "$1" ] || { echo 'wrong Quick Agent core' >&2; exit 1; }
+  [ "$(cat "$CORE_SELECTION_LOG.args")" = 'status-menu menu --pane %1 --client /dev/pts/8 --quick-agent' ]
   actual=$("$plugin/bin/wb-responsive" @1 /dev/pts/8)
   [ "$actual" = "$1" ] || { echo 'wrong sidebar toggle core' >&2; exit 1; }
   [ "$(cat "$CORE_SELECTION_LOG.args")" = 'sidebar-control toggle @1' ]
@@ -145,6 +153,5 @@ if "$plugin/bin/workbench-status-popup" tmux /dev/pts/8 %1 >/dev/null 2>&1; then
 fi
 unset TMUX_AGENT_WORKBENCH_BIN
 rm "$checkout"
-[ "$("$plugin/bin/workbench-menu-mouse-mode" /dev/pts/8)" = mouse ]
 "$plugin/bin/tmux-agent-workbench-cli" --help >/dev/null
-printf '%s\n' 'core selection: CLI, plugin, menus, mouse mode and sidebars agree on release, override and fallback'
+printf '%s\n' 'core selection: CLI, plugin, menus and sidebars agree on release, override and fallback'

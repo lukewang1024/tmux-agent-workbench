@@ -22,7 +22,7 @@ use std::{
     fs,
     io::{self, Write, stdout},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -54,35 +54,22 @@ pub(crate) struct Item {
 pub(crate) struct Menu {
     pub title: String,
     pub items: Vec<Item>,
-    pub pager: Option<Pager>,
     #[serde(default)]
     pub searchable: bool,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub copy_key: Option<String>,
+    #[serde(default)]
+    pub wrap_items: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Selection {
     pub index: usize,
     pub input: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Pager {
-    pub before_page: String,
-    pub after_page: String,
-}
-
-impl Pager {
-    fn command(&self, page: usize) -> String {
-        format!(
-            "run-shell -b {}",
-            crate::status_menu::shell_quote(&format!(
-                "{} --page {page} {}",
-                self.before_page, self.after_page
-            ))
-        )
-    }
+    #[serde(default)]
+    pub copy: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,172 +90,7 @@ impl Drop for Exchange {
     }
 }
 
-/// The classic renderer consumes the same model and callbacks. Pagination
-/// rebuilds the provider, so no request files survive a native menu callback.
-fn display_native(menu: &Menu, pane: &str, client: &str, page: usize) -> Result<()> {
-    let server = ServerIdentity::discover()?;
-    let tmux = crate::tmux::Tmux::new(server.clone());
-    let drawing_pane = tmux
-        .client_format(client, "#{pane_id}")?
-        .ok_or("menu client disappeared")?;
-    let height: usize = tmux
-        .client_format(client, "#{client_height}")?
-        .ok_or("menu client disappeared")?
-        .parse()?;
-    let body: Vec<_> = menu
-        .items
-        .iter()
-        .filter(|item| item.role == Role::Body)
-        .collect();
-    let pinned: Vec<_> = [Role::Summary, Role::Error, Role::Primary, Role::Back]
-        .into_iter()
-        .flat_map(|role| menu.items.iter().filter(move |item| item.role == role))
-        .collect();
-    // Leave seven rows of slack: tmux versions differ in native menu height
-    // accounting and silently omit menus that do not fit.
-    let capacity = height
-        .saturating_sub(
-            pinned.len()
-                + body.iter().filter(|item| item.subtitle.is_some()).count()
-                + 12
-                + usize::from(!pinned.is_empty()),
-        )
-        .max(1);
-    let paging = body.len() > capacity && menu.pager.is_some();
-    let capacity = capacity.saturating_sub(if paging { 2 } else { 0 }).max(1);
-    let page = page.min(body.len().saturating_sub(1) / capacity);
-    let escape = |text: &str| clean(text).replace('#', "##");
-    let mut args = vec![
-        "display-menu".into(),
-        "-M".into(),
-        "-c".into(),
-        client.into(),
-        "-t".into(),
-        drawing_pane,
-        "-T".into(),
-        format!("#[align=centre]{}", escape(&menu.title)),
-        "-x".into(),
-        "C".into(),
-        "-y".into(),
-        "C".into(),
-    ];
-    let mode = Command::new(std::env::current_exe()?)
-        .args(["menu-mouse-mode", "--client", client])
-        .output()?;
-    let input_mode = String::from_utf8_lossy(&mode.stdout);
-    // Older tmux needs -O to prevent ordinary hover from dismissing the menu.
-    // In 3.8, hover is safe without it and -O selects on press rather than
-    // release (a first tap with no prior selection can dismiss the menu).
-    if mode.status.success() && input_mode.trim() == "mouse" {
-        args.push("-O".into());
-    }
-    // Disabled rows start with '-'. Stop option parsing before the first row,
-    // including Agent's leading prefill notice and empty-state information.
-    args.push("--".into());
-    let append = |args: &mut Vec<String>, item: &Item| {
-        let label = escape(&item.label);
-        args.extend([
-            if item.enabled {
-                crate::menu_footer::item_label(&label, &item.key)
-            } else {
-                format!("-{label}")
-            },
-            if item.enabled {
-                item.key.clone()
-            } else {
-                String::new()
-            },
-            if item.enabled {
-                item.command.clone()
-            } else {
-                String::new()
-            },
-        ]);
-        if let Some(subtitle) = &item.subtitle {
-            args.extend([
-                format!(
-                    "{}#[fg=colour8]  {}#[default]",
-                    if item.enabled { "" } else { "-" },
-                    escape(subtitle)
-                ),
-                String::new(),
-                if item.enabled {
-                    item.command.clone()
-                } else {
-                    String::new()
-                },
-            ]);
-        }
-    };
-    for item in body.iter().skip(page * capacity).take(capacity) {
-        append(&mut args, item);
-    }
-    if !pinned.is_empty() {
-        args.push(String::new());
-    }
-    for item in pinned {
-        append(&mut args, item);
-    }
-    if paging && let Some(pager) = &menu.pager {
-        for (label, key, next, enabled) in [
-            (
-                tr("↑ Previous", "↑ 上页"),
-                "[",
-                page.saturating_sub(1),
-                page > 0,
-            ),
-            (
-                tr("↓ Next", "↓ 下页"),
-                "]",
-                page + 1,
-                (page + 1) * capacity < body.len(),
-            ),
-        ] {
-            args.extend([
-                if enabled {
-                    label.into()
-                } else {
-                    format!("-{label}")
-                },
-                key.into(),
-                if enabled {
-                    pager.command(next)
-                } else {
-                    String::new()
-                },
-            ]);
-        }
-    }
-    args.push(String::new());
-    args.extend([
-        crate::menu_footer::item_label(tr("× close", "× 关闭"), "Escape"),
-        if menu.items.iter().any(|item| item.role == Role::Back) {
-            "Escape"
-        } else {
-            "BSpace"
-        }
-        .into(),
-        String::new(),
-    ]);
-    let output = crate::command::new("tmux")
-        .args(server.tmux_args())
-        .args(&args)
-        .env("WORKBENCH_SOURCE_PANE", pane)
-        .output()?;
-    match output.status.code() {
-        Some(0 | 2) => Ok(()),
-        _ => Err(format!(
-            "could not display classic menu: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into()),
-    }
-}
-
 pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Result<()> {
-    if crate::ui::Mode::current()? == crate::ui::Mode::Old {
-        return display_native(&menu, pane, client, page);
-    }
     let selected = select(&menu, pane, client, page)?;
     if let Some(item) = selected
         .and_then(|selection| menu.items.get(selection.index))
@@ -289,8 +111,8 @@ pub(crate) fn display(menu: Menu, pane: &str, client: &str, page: usize) -> Resu
     Ok(())
 }
 
-/// Selection lists always use the shared touch UI, independently of the
-/// action-menu renderer preference. The result is data, never shell code.
+/// Selection lists use the same custom touch UI as action menus. The result
+/// is data, never shell code.
 pub(crate) fn select(
     menu: &Menu,
     pane: &str,
@@ -342,7 +164,7 @@ pub(crate) fn select(
         .items
         .iter()
         .map(|item| match item.role {
-            Role::Body | Role::Summary => row_count(item, width),
+            Role::Body | Role::Summary => row_count(item, width, menu.wrap_items),
             Role::Primary | Role::Error | Role::Back => 2,
             Role::Close => 0,
         })
@@ -454,7 +276,7 @@ impl Layout {
             menu.items
                 .iter()
                 .filter(|item| item.role == Role::Summary)
-                .map(|item| row_count(item, width))
+                .map(|item| row_count(item, width, menu.wrap_items))
                 .sum::<usize>()
                 .min(u16::MAX as usize) as u16,
         );
@@ -539,14 +361,21 @@ fn split_text(text: &str, width: usize) -> (String, String) {
     (result, remainder)
 }
 
-fn row_count(item: &Item, width: u16) -> usize {
-    if item.enabled || item.subtitle.is_some() {
+fn row_count(item: &Item, width: u16, wrap_items: bool) -> usize {
+    if item.subtitle.is_some() || (item.enabled && !wrap_items) {
         return 2;
     }
     let mut rest = clean(&item.label);
     let mut count = 0;
     loop {
-        rest = split_text(&rest, usize::from(width.saturating_sub(2)).max(1)).1;
+        let reserved = usize::from(count == 0 && item.enabled);
+        rest = split_text(
+            &rest,
+            usize::from(width.saturating_sub(2))
+                .saturating_sub(reserved)
+                .max(1),
+        )
+        .1;
         count += 1;
         if rest.is_empty() || count == 4 {
             return count;
@@ -718,7 +547,7 @@ fn render(
     let mut y = layout.body.bottom();
     let summary_end = y + layout.summary;
     for item in menu.items.iter().filter(|item| item.role == Role::Summary) {
-        for part in 0..row_count(item, layout.width) {
+        for part in 0..row_count(item, layout.width, menu.wrap_items) {
             if y == summary_end {
                 break;
             }
@@ -826,7 +655,7 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
                             .all(|term| item.label.to_lowercase().contains(term))
                 })
                 .flat_map(|(index, item)| {
-                    (0..row_count(item, size.width)).map(move |part| (index, part))
+                    (0..row_count(item, size.width, menu.wrap_items)).map(move |part| (index, part))
                 })
                 .collect();
             navigation.replace_rows(
@@ -880,6 +709,19 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
                         && matches!(key.code, KeyCode::Char('c' | 'd'))
                 {
                     return Ok(None);
+                }
+                if menu.copy_key.as_deref() == Some("Ctrl-Y")
+                    && key.code == KeyCode::Char('y')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    if let Some((index, _)) = rows.get(navigation.selected) {
+                        return Ok(Some(Selection {
+                            index: *index,
+                            input: query,
+                            copy: true,
+                        }));
+                    }
+                    continue;
                 }
                 if (menu.searchable || menu.prompt.is_some()) && key.code != KeyCode::Enter {
                     match key.code {
@@ -991,6 +833,7 @@ fn interact(menu: &Menu, page: usize) -> Result<Option<Selection>> {
             return Ok(Some(Selection {
                 index,
                 input: query,
+                copy: false,
             }));
         }
         dirty = true;
@@ -1037,7 +880,6 @@ pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
                 cursor += 1;
                 break;
             }
-            "-M" | "-O" => cursor += 1,
             "-c" | "-t" | "-T" | "-C" | "-x" | "-y" | "-b" | "-s" | "-S" | "-H" => {
                 let value = args.get(cursor + 1).ok_or("menu flag requires a value")?;
                 match flag.as_str() {
@@ -1122,36 +964,14 @@ pub(crate) fn display_legacy(args: &[String], page: usize) -> Result<()> {
         });
     }
     title = plain_label(&tmux.client_format(&client, &title)?.unwrap_or(title));
-    let mut pager_args = vec!["-c".into(), client.clone(), "-t".into(), pane.clone()];
-    pager_args.extend_from_slice(args);
-    if let Some(parent) = items.iter().find(|item| item.id == "parent") {
-        pager_args.extend([
-            parent.label.clone(),
-            parent.key.clone(),
-            parent.command.clone(),
-        ]);
-    }
-    let pager = Some(Pager {
-        before_page: format!(
-            "{} display-menu",
-            crate::status_menu::shell_quote(&std::env::current_exe()?.to_string_lossy())
-        ),
-        after_page: format!(
-            "-- {}",
-            pager_args
-                .iter()
-                .map(|arg| crate::status_menu::shell_quote(arg))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-    });
     display(
         Menu {
             title,
             items,
-            pager,
             searchable: false,
             prompt: None,
+            copy_key: None,
+            wrap_items: false,
         },
         &pane,
         &client,
@@ -1180,9 +1000,10 @@ mod tests {
     fn menu_body_and_pinned_controls_keep_their_entire_touch_area() {
         let menu = Menu {
             title: "test".into(),
-            pager: None,
             searchable: false,
             prompt: None,
+            copy_key: None,
+            wrap_items: false,
             items: vec![
                 item("body", Role::Body),
                 item("launch", Role::Primary),
@@ -1233,9 +1054,10 @@ mod tests {
     fn footer_uses_list_row_style_right_shortcuts_and_visible_hover() {
         let menu = Menu {
             title: "test".into(),
-            pager: None,
             searchable: false,
             prompt: None,
+            copy_key: None,
+            wrap_items: false,
             items: vec![
                 item("Alpha", Role::Body),
                 Item {
@@ -1314,7 +1136,8 @@ mod tests {
                 title: "test".into(),
                 searchable: false,
                 prompt: None,
-                pager: None,
+                copy_key: None,
+                wrap_items: false,
                 items,
             };
             let layout = Layout::new(30, 10, &menu);
@@ -1364,7 +1187,7 @@ mod tests {
             enabled: false,
             ..button
         };
-        assert!(row_count(&note, 10) > 1);
+        assert!(row_count(&note, 10, false) > 1);
         assert!(!row_line(&note, 0, 10, false).to_string().contains("(a)"));
     }
 
@@ -1375,7 +1198,7 @@ mod tests {
             key: "q".into(),
             ..item("Quick Agent", Role::Body)
         };
-        assert_eq!(row_count(&button, 50), 2);
+        assert_eq!(row_count(&button, 50, false), 2);
         let title = row_line(&button, 0, 50, false);
         let subtitle = row_line(&button, 1, 50, false);
         assert!(title.to_string().contains("Quick Agent"));
@@ -1392,7 +1215,8 @@ mod tests {
                     enabled: false,
                     ..button
                 },
-                50
+                50,
+                false,
             ),
             2
         );

@@ -1,50 +1,40 @@
-# Contextual menus
+# Workbench menu
+
+The left status-bar control and `prefix+m` / `prefix+M-t` open the same
+Workbench menu. The next status-bar control opens Extract directly, and the `+`
+control remains a one-click Quick Agent shortcut. Their order is Workbench →
+Extract → `+`. The Agent status control and
+`prefix+M-a` open the original Agent command menu. The Sidebar control opens
+Sidebar actions directly.
 
 ```text
-prefix M-m / tmux-agent-workbench menu
-  Agent → current-window Agent commands, or an empty state and Usage
-  Sidebar → overview, Switch session / agent / window / pane
-  Tmux → window/session controls and agent launch
-  Host / SSH → SSH destinations
-  Extract → general text / paragraphs / URL / file paths / lines / words / quoted text
-  CPU / resources → status density and btop
-  Interface → classic tmux menus / new list menus
-
-statusbar tmux / prefix M-t
-  Create → Quick Agent / Agent / Window / Pane / Session
-    Quick Agent → repeat last successful combination in the source directory
-    Agent → installed tool → remote recommendation or Trae scene / mode → Launch
-    Window → new shell in source directory
-    Pane → split below / right in source directory
-    Session → name, create in source directory, enter
-    Open project in VS Code (when installed)
+Workbench
+  Create → Agent / Pane / Window / Session
+    Agent → Quick create / each installed Agent → configure → launch
+    Window → new window / VS Code (when installed)
   Switch → Agent / Window / Pane / Session
-    Agent → running Agents only
-    Window → current Session's windows
-    Pane → current Window's panes
-    Session → Sessions only
-  Extract → the same text extraction submenu as the combined Menu
+  Close → Agent / Window / Pane / Session, with target confirmation
   Layout → zoom, even horizontal / vertical, main-vertical, tiled
-  Kill → Agent / Window / Pane / Session
-    Each shows its current target and requires confirmation
-    Agent terminates the verified foreground Agent process only
-  Detach → this client only
+  Detach
+  Extract → general text / paragraphs / URL / file paths / lines / words / quoted text
+  Host / SSH → SSH destinations
+  CPU / resources → status density and btop
 
-statusbar Agent / prefix M-a
-  actual foreground CLI + state + source pane + team role
-  frequent task commands: goal / side question / Codex fast (where supported)
-  installed grill-me / handoff skills (prefill, no Enter)
-  Usage summary (current CLI)
-    Codex with codex-reset-card installed: Usage & reset cards
-    Schedule earliest available card · 5 min before expiry (skill request)
-    View / adjust scheduled tasks (skill request)
-  More
-    plan / compact / branching / status / configuration (where supported)
-    Botmux (when installed)
-  Team members & progress (pane teams only)
-    lead / workers + reported status → focus member
-    restore main-vertical layout
+Sidebar status control / Sidebar menu
+  show/hide, details (d), next attention (n), reload (r)
+
+Agent status control / prefix M-a
+  foreground CLI + state + source pane + team role
+  frequent commands and installed grill-me / handoff skills
+  Usage summary; Codex reset cards when the skill is installed
+  More → plan / compact / branching / status / configuration (where supported)
+  Team members & progress → focus a member and restore the team layout
 ```
+
+The `+` status-bar shortcut repeats the last successful Agent setup in the
+source directory. If no setup is saved, it opens the Create page. Quick create
+in the Agent page reuses the saved setup or opens the installed-Agent chooser.
+Switch and Close each group Agent, Window, Pane and Session.
 
 Extract uses the optional `tmux-extrakto` helper on the host, installed by the
 [dotfiles profile](https://github.com/lukewang1024/dotfiles/blob/main/util/shell/tmux-extrakto).
@@ -53,36 +43,18 @@ General text, paragraphs, file paths, lines, words/identifiers and single- or
 double-quoted text default to Enter to copy and Tab to insert. URL uses Enter
 to open on the invoking device and Ctrl-Y to copy. All choices retain the pane
 and client that opened the menu; changing the active pane does not retarget them.
-The same submenu is available in the classic and new menu renderers.
 
-All action menus use `menu::Menu`, including legacy shell providers through the
-`display-menu` adapter. Content providers supply labels, keys and callbacks;
-two renderers consume the same model. The new list renderer is the default;
-the classic native tmux renderer retains one-line menus with pagination and
-requires explicit selection. Choose Interface in the
-combined Menu, or run `tmux-agent-workbench ui old|new|toggle|status`, to switch
-without reloading. The saved XDG configuration preference is overridden by
-the current server's `@workbench-ui` option when it is set.
-This setting changes action-menu rendering only. Sidebar and the Agent,
-Window, Pane and Session switchers always use the shared list UI. Both menu
-renderers expose the same ordered actions, targets and return destinations.
-
-For classic menus, tmux 3.7 uses `-O` to prevent pointer motion from dismissing
-the menu. tmux 3.8 distinguishes hover from release and no longer needs `-O`;
-without it, a press selects only on release and a release outside cancels. In
-3.8 `display-menu` returns while the native menu is still visible, so tests and
-callers must observe the rendered menu or its callback rather than equate the
-command process exiting with menu dismissal.
-
-The new renderer owns layout, two-row buttons and pinned navigation. Its popup
-fits the content, with a maximum width of 60 cells, rather than using Sidebar's
-larger dimensions. Every cell of both button rows is clickable. Descriptions
-wrap within the content area. Tapping outside the menu closes it on release
-without sending that click to the underlying terminal. Outside hover, wheel
-and drags leave it open, as do information, title and blank taps inside the
-card. Escape and Close dismiss it; Backspace returns to its parent
-or closes a root menu. Back, Close and Launch use full-width list rows, with
-their shortcut on the right of the label, and stay pinned while the body scrolls.
+All menus use the shared custom `menu::Menu` component, including legacy shell
+providers translated through the `display-menu` compatibility adapter. The
+adapter translates menu definitions into component items and callbacks. The
+custom component owns layout, two-row buttons and pinned navigation. Its popup fits the content, with a maximum width of 60 cells.
+Every cell of both button rows is clickable. Descriptions wrap within the
+content area. Tapping outside the menu closes it on release without sending
+that click to the underlying terminal. Outside hover, wheel and drags leave it
+open, as do information, title and blank taps inside the card. Escape and Close
+dismiss it; Backspace returns to its parent or closes a root menu. Back, Close
+and Launch use full-width list rows, with their shortcut on the right of the
+label, and stay pinned while the body scrolls.
 Launch configuration summaries also stay visible near Launch when space allows.
 After keyboard, hover or wheel navigation focuses a body choice, Enter confirms
 that choice before the pinned Launch shortcut. On a freshly opened panel, Enter
@@ -98,20 +70,17 @@ when the touched word may contain a URL, or when the rendered geometry is
 unavailable. Ordinary labels stay visible. This prevents the delayed lookup
 from opening a URL in the restored pane or opening a URL choice twice.
 Keyboard-only dismissal and registered desktop clients do not wait.
-Unregistered clients on Android use the same conservative protection. This
-applies to shared popups and pickers; classic native tmux menus retain tmux's
-own lifecycle.
+Unregistered clients on Android use the same conservative protection.
 Action menus dismiss when the terminal viewport changes. Navigation, searchable
 lists and name dialogs retain search/input and scrolling when the phone keyboard
 shrinks the viewport. If the client grows beyond the original input surface,
 the panel dismisses so it cannot leave an uncaptured outside margin.
 Horizontal rules separate the pinned header, scrolling body and footer in
-Sidebar popups, switchers and new menus. Divider rows do not activate actions;
+Sidebar popups, switchers and action menus. Divider rows do not activate actions;
 very short screens prioritize content and controls over divider rows.
 Wheel and drag scrolling use the same `NavigationList` as Sidebar, and `[` / `]`
-and Page Up/Down also browse a long menu. Host and member lists
-are not limited by the number of available shortcut keys. The source pane
-stays fixed across
+and Page Up/Down also browse a long menu. Host and member lists are not limited
+by the number of available shortcut keys. The source pane stays fixed across
 navigation, independent of the client's later active pane. Action callbacks
 carry a hash of the target identity and rebuild their available actions before
 executing. Window and launch menus check the pane, session and directory using
@@ -132,13 +101,12 @@ missing optional tier data never disables Create Agent. An empty or failed
 first fetch is retried after five minutes on a later menu visit. Launch-time
 validation stays in agent-team.
 
-New pointer and touch menus execute only on release. A hold, drag, wheel movement
-or resize cannot launch a held item. The component handles these events itself
-instead of depending on native `display-menu` mouse behavior. A selected
-callback runs only after its popup closes, allowing it to open a submenu or
-prompt. Private request/reply files carry the model and result and are removed
-when the menu finishes. Usage source changes retain their invoking client and
-parent menu.
+New pointer and touch menus execute only on release. A hold, drag, wheel
+movement or resize cannot launch a held item. The component handles these
+events itself. A selected callback runs only after its popup closes, allowing
+it to open a submenu or prompt. Private request/reply files carry the model and
+result and are removed when the menu finishes. Usage source changes retain
+their invoking client and parent menu.
 
 ## Capability boundaries
 
@@ -191,8 +159,8 @@ terminal pagination. Fixture CLI executables and an `agent-team` boundary stub
 avoid paid model requests; this validates menu orchestration, not model quality
 or coding-agent authentication. Rust tests cover provider catalogs, busy-state
 filtering, launch argument combinations, quoting, and unique shortcuts.
-The PTY tests also cover classic/new round trips, the saved preference, native
-pagination, SGR and legacy wheel reports on a fitting menu, and body/Close hover.
+The PTY tests also cover Workbench entry points, unified menu ordering, SGR and
+legacy wheel reports on a fitting menu, and body/Close hover.
 
 `tests/switcher.py` exercises real 40×20, 32×12, and 24×8 PTY clients, including
 touching both card rows, held presses, swipes, search, paging, keyboard-size
@@ -203,7 +171,7 @@ it does not claim a physical handset or Android keyboard acceptance run.
 
 ## Mobile navigation and interaction review
 
-In both menu modes the four switch actions use filtered Sidebar views. They share
+The four switch actions use filtered Sidebar views. They share
 Sidebar's popup container, title renderer, colors and secondary
 context row; every cell in both entry rows is clickable. The bordered popup
 uses about 90% of the client dimensions, capped at 96 columns by 40 rows, to
@@ -229,7 +197,7 @@ The same component also restores terminal mouse/focus/paste modes on exit.
 
 | Mobile issue | Result |
 | --- | --- |
-| Native tree rows and dense fzf lists require precise taps | Sidebar's two-line entries provide a single touch target across both rows |
+| Dense one-line rows and fzf lists require precise taps | Sidebar's two-line entries provide a single touch target across both rows |
 | Window/Pane scopes are ambiguous | Window stays in the opening Session; Pane stays in the opening Window |
 | Navigation takes over the whole terminal | Sidebar and filtered views share a bounded popup; tiny clients use the full screen |
 | Shortened labels spend cells on ellipses | Shared Sidebar labels use those cells for text; search still matches full titles |
@@ -239,7 +207,7 @@ The same component also restores terminal mouse/focus/paste modes on exit.
 | Keyboard reduces the terminal viewport | Entries, paging and footer resize together without clearing search |
 | Action menu rows are hard to tap | All menu providers use two-row, full-width targets and the shared list controller |
 | Information taps dismiss a menu | Disabled rows and blank areas ignore taps |
-| Status controls are too small to be the only entry | Prefix Alt+m opens the combined Agent/Sidebar/Tmux/Host/CPU menu |
+| Status controls are too small to be the only entry | Prefix+m opens the unified Workbench menu |
 | Long inventories are silently truncated | Host and member lists scroll beyond their shortcut-key count |
 
 Host, Agent, launch configuration, Usage, Resources and Sidebar action menus
@@ -258,11 +226,10 @@ browsing position, including scroll, remains a useful follow-up for long lists.
 | Temporary tool / `pick repo` | Searchable Menu with two-row repository paths | Outside tap or pinned Close |
 | `pick session` / `pick agent` / `agent goto` | Searchable Menu, retaining snapshot/tombstone behavior | Outside tap or pinned Close |
 | New workspace / New task | Menu text input with Create | Outside tap or pinned Close; empty input cannot submit |
-| Sidebar shortcuts and contextual/global actions | Menu model and the selected renderer | Outside tap, Back or Close |
+| Sidebar shortcuts and contextual/global actions | Shared custom Menu component | Outside tap, Back or Close |
 
-Selection lists and name dialogs use the same touch UI in both action-menu
-modes. Search accepts typed/pasted text; arrows, Tab/Shift-Tab and Page Up/Down
-browse entries. Data is returned only after the popup closes, so a project
+Selection lists and name dialogs use the same custom touch UI. Search accepts
+typed/pasted text; arrows, Tab/Shift-Tab and Page Up/Down browse entries. Data is returned only after the popup closes, so a project
 launch or tool never overlaps its picker. The old fzf wrappers remain available
 for compatibility but no built-in selection entrypoint depends on them.
 Repository selection shows the full searchable path across two rows; selecting
@@ -316,35 +283,36 @@ The session label is the persistent Sidebar toggle. Wide clients toggle its
 pane; narrow clients open the Agents panel. Session colours follow keyboard
 mode: normal accent, prefix blue, OFF red.
 
-The tmux root menu exposes Create (`c`), Switch (`s`), Layout (`l`), Kill (`k`)
-and Detach (`d`), in that order. Create's first item is Quick Agent (`q`),
-whose gray subtitle shows the last successful menu launch's tool, scene,
-Single/Team, Native/tmux, Codex permission and Fast choices. Either row starts a fresh conversation
-in the source pane's current directory. The choices are saved atomically in
-`$XDG_STATE_HOME/tmux-agent-workbench/last-agent-launch.json`; they are updated
-only after a successful launch, and missing or invalid state disables Quick
-Agent. Ordinary Agent creation remains available. Codex defaults to Auto
-approval and uses `--no-yolo --approve-for-me`; its Permission control can select
-YOLO, which uses `--yolo` without automatic-approval flags. Claude, Trae and
-OpenCode keep their existing automatic approval options.
+The Workbench root menu groups actions under Create, Switch, Close and Layout,
+then keeps Extract, Detach, Host / SSH and CPU / resources available. Create
+first offers Agent, Pane, Window and Session. Agent opens Quick create and each
+installed Coding Agent; Window offers a new window and VS Code when installed.
+Switch and Close each offer Agent, Window, Pane and Session; Close uses a
+separate confirmation and identity check. Layout offers
+zoom and common layouts. The `+` status-bar shortcut remains the one-click
+repeat of the last setup. The Sidebar icon opens visibility, details (`d`), next
+attention (`n`) and reload (`r`) directly. Back returns
+to the parent menu.
 
-Create then offers Agent (`a`), Window (`w`), Pane (`p`) and Session (`s`);
-Switch and Kill start with those four objects. Back returns to the immediate
-group, including after a scoped switch list or Agent launch configuration.
-Kill shows the source target and a separate confirmation; its callback rechecks
-the pane identity, and Agent termination additionally checks the process
-fingerprint. It never uses a process-name match or kills the entire tmux server.
-Create Session asks for a name and switches the invoking client to a new session
-in the source pane's directory; cancelling the prompt creates nothing.
+The `+` control immediately after the Workbench status button starts the saved
+Agent combination in the source pane's current session and directory. If no
+usable combination has been saved, it opens the Agent creation menu. Saved
+settings update only after a successful launch; cancelled and failed launches
+leave them alone.
 
 The overview Sidebar pins its Agents/sort heading above the scrolling body.
+In Agents view, the heading shows colored counts in blocked, done, working,
+idle order. Click a number to hide or show that state; hidden states keep their
+palette color in a dim style. The right side uses icon-only grouping and menu
+controls, separated from the counts by a full-height Powerline divider.
 Its popup starts at the first group instead of following a lower current Agent
 and hiding the first Session name. Persistent Sidebar panes retain their current
 Agent selection. Changing sort explicitly starts the newly sorted list at its top.
 
 The left group runs Session/Sidebar → tmux → window labels.
-CPU, Host and Agent status with usage stay on the right, whose outer
-edge is flat. The theme's time/date/battery modules have independent opt-in
+CPU, URL extraction and Host run left-to-right on the right side, followed by
+Agent status with usage; Host stays visible at every width. The outer edge is
+flat. The theme's time/date/battery modules have independent opt-in
 switches and stay visible in both densities when enabled. Clicking Session
 toggles Sidebar. Prefix remains available through the keyboard. The
 Agent status body opens commands for the current interactive foreground agent.

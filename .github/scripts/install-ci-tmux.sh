@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pin a shared native menu baseline on every CI runner.
+# Pin the minimum supported tmux version on every CI runner.
 set -eu
 ci_tmux_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/workbench-tmux.XXXXXX")
 trap 'rm -rf "$ci_tmux_root"' 0
@@ -11,8 +11,8 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   printf '%s  %s\n' "$ci_tmux_sha" "$ci_tmux_root/tmux.tar.gz" | shasum -a 256 -c -
 fi
-# Use the same menu baseline on Linux and macOS. Homebrew may already ship a
-# newer release with different native menu input semantics.
+# Use the same tmux compatibility baseline on Linux and macOS. Homebrew may
+# already ship a newer release with different server behavior.
 if [ "$(uname -s)" = Darwin ]; then
   PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig:$(brew --prefix jemalloc)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
   PATH="$(brew --prefix bison)/bin:$PATH"
