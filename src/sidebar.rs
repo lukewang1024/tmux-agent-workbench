@@ -2771,7 +2771,7 @@ impl HeaderLayout {
             String::new(),
         ];
         let wants_states = view == SidebarView::Agents;
-        let try_layout = |show_states| {
+        let try_layout = |show_states, prioritize_pin_count| {
             let right = header_right_parts(
                 show_states,
                 sort_icon,
@@ -2781,27 +2781,38 @@ impl HeaderLayout {
                 palette,
             );
             let right_width = header_parts_width(&right);
-            for view_text in &view_candidates {
-                for pinned_text in &pinned_candidates {
-                    let left = header_left_parts(view_text, pinned_text, hovered, palette);
-                    if header_parts_width(&left) + right_width < usize::from(width) {
-                        return Some((left, right));
-                    }
-                }
+            let fits = |view_text: &String, pinned_text: &String| {
+                let left = header_left_parts(view_text, pinned_text, hovered, palette);
+                (header_parts_width(&left) + right_width < usize::from(width))
+                    .then(|| (left, right.clone()))
+            };
+            if prioritize_pin_count {
+                pinned_candidates.iter().find_map(|pinned_text| {
+                    view_candidates
+                        .iter()
+                        .find_map(|view_text| fits(view_text, pinned_text))
+                })
+            } else {
+                view_candidates.iter().find_map(|view_text| {
+                    pinned_candidates
+                        .iter()
+                        .find_map(|pinned_text| fits(view_text, pinned_text))
+                })
             }
-            None
         };
 
-        let (left, right) = if wants_states && let Some((left, right)) = try_layout(true) {
-            (left, right)
-        } else if let Some((left, right)) = try_layout(false) {
-            (left, right)
-        } else {
-            let left = header_left_parts(view_icon, "", hovered, palette);
-            let right =
-                header_right_parts(false, sort_icon, counts, state_filter, hovered, palette);
-            (left, right)
-        };
+        let prioritize_pin_count = view == SidebarView::Sessions;
+        let (left, right) =
+            if wants_states && let Some((left, right)) = try_layout(true, prioritize_pin_count) {
+                (left, right)
+            } else if let Some((left, right)) = try_layout(false, prioritize_pin_count) {
+                (left, right)
+            } else {
+                let left = header_left_parts(view_icon, "", hovered, palette);
+                let right =
+                    header_right_parts(false, sort_icon, counts, state_filter, hovered, palette);
+                (left, right)
+            };
         let used_width = header_parts_width(&left) + header_parts_width(&right);
         let gap = usize::from(width).saturating_sub(used_width);
         let mut parts = left;
@@ -3022,7 +3033,7 @@ fn header_right_parts(
     let menu = if hovered == Some(&Action::Menu) {
         palette.hover
     } else {
-        palette.selection
+        palette.raised
     };
     let sort_foreground = if hovered == Some(&Action::Sort) {
         palette.header_hover_foreground
@@ -3093,6 +3104,16 @@ fn header_right_parts(
     )];
     parts.push(header_spacer(1, first_background));
     parts.extend(content);
+    let trailing_background = parts
+        .last()
+        .map(|part| part.background(palette.background))
+        .unwrap_or(palette.background);
+    parts.push(header_button(
+        " ",
+        Action::Menu,
+        menu_foreground,
+        trailing_background,
+    ));
     parts
 }
 
@@ -5041,6 +5062,9 @@ mod tests {
         assert_eq!(separator.content, "");
         assert_eq!(separator.style.fg, Some(palette.muted));
         assert_eq!(separator.style.bg, Some(palette.raised));
+        assert_eq!(header.spans[menu].style.bg, Some(palette.raised));
+        assert_eq!(header.spans.last().unwrap().content, " ");
+        assert_eq!(header.spans.last().unwrap().style.bg, Some(palette.raised));
         assert!(header.to_string().contains("1  0  0  0"));
         assert!(header.to_string().contains("0  "));
         assert!(header.to_string().contains("  "));
