@@ -500,26 +500,34 @@ fn serve_loop(
                         // A stalled or malformed client is connection-local and
                         // must not hold up snapshots for every other sidebar.
                         let mut stream = stream;
-                        if let Ok(mut stream) = crate::ipc::prepare_connection(&mut stream) {
-                            let response = match read_request(&mut stream) {
-                                Ok(request) => handle(
-                                    request,
-                                    &state,
-                                    &snapshot,
-                                    &shutdown,
-                                    &metrics,
-                                    &interactive_waiters,
-                                    &paths,
-                                    &server,
-                                    &sidebar_cache,
-                                ),
-                                Err(error) => Response::error(
-                                    String::new(),
-                                    "invalid_request",
-                                    error.to_string(),
-                                ),
-                            };
-                            let _ = write_response(&mut stream, &response);
+                        let response = match crate::ipc::prepare_connection(&mut stream) {
+                            Ok(mut request_stream) => {
+                                Some(match read_request(&mut request_stream) {
+                                    Ok(request) => handle(
+                                        request,
+                                        &state,
+                                        &snapshot,
+                                        &shutdown,
+                                        &metrics,
+                                        &interactive_waiters,
+                                        &paths,
+                                        &server,
+                                        &sidebar_cache,
+                                    ),
+                                    Err(error) => Response::error(
+                                        String::new(),
+                                        "invalid_request",
+                                        error.to_string(),
+                                    ),
+                                })
+                            }
+                            Err(_) => None,
+                        };
+                        if let Some(response) = response
+                            && let Ok(mut response_stream) =
+                                crate::ipc::prepare_response_connection(&mut stream)
+                        {
+                            let _ = write_response(&mut response_stream, &response);
                         }
                         metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                         if started.elapsed() >= Duration::from_millis(250) {
@@ -598,6 +606,16 @@ fn configure_focus_wake_hooks(server: &ServerIdentity, enabled: bool) {
     }
 }
 
+fn expected_detached_hook_rejection(error: &str) -> bool {
+    matches!(
+        error,
+        "event is not for the active foreground session"
+            | "out-of-order event"
+            | "no matching live agent pane"
+            | "ambiguous live agent panes; refusing to guess"
+    )
+}
+
 fn update_snapshot(
     state: &RwLock<State>,
     published: &RwLock<Snapshot>,
@@ -671,9 +689,13 @@ fn update_snapshot(
                         );
                     }
                 }
-                Err(error) => {
+                Err(error) if !expected_detached_hook_rejection(&error) => {
                     eprintln!("tmux-agent-workbench: queued detached hook rejected: {error}")
                 }
+                // Detached hooks are best-effort. Late events and hooks that
+                // no longer identify one live foreground pane are normal
+                // drops, not daemon errors; logging every one floods stderr.
+                Err(_) => {}
             }
         }
         let agents = state.detector.machine_snapshots();
@@ -896,8 +918,28 @@ fn server_incarnation(server: &ServerIdentity) -> String {
 }
 
 fn persist_checkpoint(paths: &Paths, server_key: &str, state: &State) {
-    if let Err(error) = save_checkpoint(paths, server_key, state) {
-        eprintln!("tmux-agent-workbench: checkpoint write failed: {error}");
+    static LAST_CHECKPOINT_FAILURE_LOG: std::sync::Mutex<Option<Instant>> =
+        std::sync::Mutex::new(None);
+    match save_checkpoint(paths, server_key, state) {
+        Ok(()) => {
+            *LAST_CHECKPOINT_FAILURE_LOG
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+        Err(error) => {
+            let mut last = LAST_CHECKPOINT_FAILURE_LOG
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last
+                .as_ref()
+                .is_none_or(|reported| reported.elapsed() >= Duration::from_secs(60))
+            {
+                *last = Some(Instant::now());
+                eprintln!(
+                    "tmux-agent-workbench: checkpoint write failed (repeated failures are logged once per minute): {error}"
+                );
+            }
+        }
     }
 }
 
@@ -1569,6 +1611,22 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod focus_tests {
     use super::*;
+
+    #[test]
+    fn detached_hook_filter_keeps_unexpected_failures_visible() {
+        for error in [
+            "event is not for the active foreground session",
+            "out-of-order event",
+            "no matching live agent pane",
+            "ambiguous live agent panes; refusing to guess",
+        ] {
+            assert!(expected_detached_hook_rejection(error));
+        }
+        assert!(!expected_detached_hook_rejection("permission denied"));
+        assert!(!expected_detached_hook_rejection(
+            "unexpected detector failure"
+        ));
+    }
 
     #[test]
     fn fast_detector_ticks_only_poll_clients_four_times_per_second() {

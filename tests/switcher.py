@@ -79,10 +79,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                                       tmux('list-windows', '-a', '-F', '#{session_name} #{window_id} #{window_name}')))
             drain(.05)
 
-    def shared_agents_ready(expected):
+    def shared_sidebar_snapshot():
         # The popup reads the core's paired sidebar snapshot, which can lag
-        # behind tmux session creation. Verify that exact frame contains all
-        # rows needed to overflow before exercising wheel scrolling.
+        # behind tmux session creation.
         runtime = Path(env['XDG_RUNTIME_DIR']) / 'tmux-agent-workbench'
         if len(os.fsencode(runtime)) > 70:
             runtime = Path('/tmp') / f'tmux-agent-workbench-{os.getuid()}'
@@ -97,10 +96,26 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 response = json.loads(conn.makefile('rb').readline())
             result = response.get('result') or {}
             if not (result.get('_workbench_surface') or {}).get('sidebar'):
-                return False
+                return {}
+            return result
+        except (OSError, ValueError, KeyError):
+            return {}
+
+    def shared_agents_ready(expected):
+        # Verify the paired frame contains all rows needed to overflow before
+        # exercising wheel scrolling.
+        result = shared_sidebar_snapshot()
+        try:
             live = {agent['target']['session_name'] for agent in result.get('agents', []) if not agent['exited']}
             return expected <= live
-        except (OSError, ValueError, KeyError):
+        except KeyError:
+            return False
+
+    def shared_sessions_ready(expected):
+        result = shared_sidebar_snapshot()
+        try:
+            return expected <= {session['session_name'] for session in result.get('sessions', [])}
+        except KeyError:
             return False
 
     def text(needle):
@@ -177,19 +192,26 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
     def content_rect():
         if size[0] < 36 or size[1] < 12:
             return 0, 0, size[0], size[1]
-        rows = screen_rows()
-        for top, row in enumerate(rows):
-            if '┌' not in row or '┐' not in row:
-                continue
-            left, right = row.index('┌'), row.index('┐')
-            for bottom in range(top + 1, len(rows)):
-                if rows[bottom][left] == '└' and rows[bottom][right] == '┘':
-                    assert right - left + 1 == min(96, max(32, size[0] * 9 // 10)), rows
-                    status = tmux('show-option', '-gqv', 'status')
-                    status_lines = 0 if status == 'off' else 1 if status == 'on' else int(status)
-                    available_height = size[1] - status_lines
-                    assert bottom - top + 1 == min(40, max(12, available_height * 9 // 10)), rows
-                    return left + 1, top + 1, right - left - 1, bottom - top - 1
+        # A PTY read may stop in the middle of a UTF-8 border redraw. Wait
+        # briefly for the complete frame instead of rejecting a partial paint.
+        deadline = time.monotonic() + .5
+        while True:
+            rows = screen_rows()
+            for top, row in enumerate(rows):
+                if '┌' not in row or '┐' not in row:
+                    continue
+                left, right = row.index('┌'), row.index('┐')
+                for bottom in range(top + 1, len(rows)):
+                    if rows[bottom][left] == '└' and rows[bottom][right] == '┘':
+                        assert right - left + 1 == min(96, max(32, size[0] * 9 // 10)), rows
+                        status = tmux('show-option', '-gqv', 'status')
+                        status_lines = 0 if status == 'off' else 1 if status == 'on' else int(status)
+                        available_height = size[1] - status_lines
+                        assert bottom - top + 1 == min(40, max(12, available_height * 9 // 10)), rows
+                        return left + 1, top + 1, right - left - 1, bottom - top - 1
+            if time.monotonic() >= deadline:
+                break
+            drain(.05)
         raise AssertionError(('missing Sidebar popup border', rows))
 
     def position(x, y):
@@ -592,7 +614,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         # views, including when the pointer is over the pinned action bar.
         for index in range(8):
             tmux('new-session', '-d', '-s', f'wheel-{index}', '/bin/sh')
-        drain(1.3)
+        wait(lambda: shared_sessions_ready({f'wheel-{index}' for index in range(8)}),
+             'new sessions were not published to the shared sidebar', timeout=12)
         prepare_popup()
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

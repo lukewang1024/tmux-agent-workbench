@@ -942,17 +942,28 @@ fn event_loop(
     let low_process_churn = Config::load(&paths.config_file())
         .map(|config| config.detection.low_process_churn)
         .unwrap_or(false);
+    let initial_refresh_needed = initial_snapshot
+        .as_ref()
+        .ok()
+        .and_then(|(_, surface)| surface.as_ref())
+        .and_then(|surface| surface.sidebar.as_ref())
+        .is_none();
     std::thread::spawn(move || {
         let mut visible = true;
+        // A newly started daemon may not have built its shared pane inventory
+        // yet. Ask it to refresh while we retry so startup does not wait for a
+        // later user interaction to hydrate the sidebar cache.
+        let mut refresh_surface = initial_refresh_needed;
         while let Ok(interactive) = refresh_rx.recv() {
-            let fetched = match fetch_snapshot_with_surface(&fetch_socket, interactive) {
-                Ok(fetched) => fetched,
-                Err(error) => {
-                    // Retain the last frame if the shared core is temporarily busy.
-                    let _ = snapshot_tx.try_send((Err(error.to_string()), visible, None));
-                    continue;
-                }
-            };
+            let fetched =
+                match fetch_sidebar_frame(&fetch_socket, interactive, &mut refresh_surface) {
+                    Ok(fetched) => fetched,
+                    Err(error) => {
+                        // Retain the last frame if the shared core is temporarily busy.
+                        let _ = snapshot_tx.try_send((Err(error.to_string()), visible, None));
+                        continue;
+                    }
+                };
             let surface = fetched.1.as_ref();
             if let Some(now_visible) = surface.and_then(|surface| {
                 visibility_pane
@@ -1037,7 +1048,7 @@ fn event_loop(
     }
     let mut disconnected = snapshot.is_none();
     let mut last_success = snapshot.as_ref().map(|_| Instant::now());
-    let mut last_failure_log = Instant::now() - Duration::from_secs(10);
+    let mut last_failure_log: Option<Instant> = None;
     let mut visible = true;
     let mut next_refresh = Instant::now();
     let mut palette = initial_palette.unwrap_or_default();
@@ -1110,12 +1121,13 @@ fn event_loop(
                     // a new snapshot with an empty or obsolete team index.
                     disconnected = last_success
                         .is_none_or(|success| success.elapsed() >= Duration::from_secs(3));
-                    if last_failure_log.elapsed() >= Duration::from_secs(10) {
+                    if last_failure_log.is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
+                    {
                         append_sidebar_log(
                             paths,
                             &format!("snapshot-error socket={} error={error}", socket.display()),
                         );
-                        last_failure_log = Instant::now();
+                        last_failure_log = Some(Instant::now());
                     }
                 }
             }
@@ -1783,6 +1795,24 @@ fn fetch_snapshot_with_surface(
         .map(serde_json::from_value)
         .transpose()?;
     Ok((serde_json::from_value(value)?, surface))
+}
+
+fn fetch_sidebar_frame(
+    socket: &std::path::Path,
+    interactive: bool,
+    refresh_surface: &mut bool,
+) -> Result<(Snapshot, Option<crate::tmux::SurfaceInventory>), Box<dyn std::error::Error>> {
+    let result = fetch_snapshot_with_surface(socket, interactive || *refresh_surface);
+    *refresh_surface = result
+        .as_ref()
+        .map(|(_, surface)| {
+            surface
+                .as_ref()
+                .and_then(|surface| surface.sidebar.as_ref())
+                .is_none()
+        })
+        .unwrap_or(true);
+    result
 }
 
 // A snapshot and its team identities form one display frame. A temporary
@@ -5859,6 +5889,121 @@ mod tests {
         let snapshot = fetch_snapshot(&socket).unwrap();
         assert_eq!(snapshot.server, "fixture");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn initial_sidebar_frame_does_not_wait_for_a_slow_daemon() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let request = read_request(&stream).unwrap();
+            std::thread::sleep(Duration::from_millis(900));
+            let snapshot = Snapshot::empty("fixture", 1);
+            let _ = write_response(
+                &stream,
+                &Response::success(request.id, serde_json::to_value(snapshot).unwrap()),
+            );
+        });
+        let started = Instant::now();
+        let initial = fetch_snapshot_with_surface(&socket, false);
+        assert!(
+            initial.is_err(),
+            "the initial frame waited for a slow daemon"
+        );
+        assert!(started.elapsed() < Duration::from_millis(1_200));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sidebar_retries_missing_shared_data_and_stops_after_recovery() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            for (refresh, with_sidebar) in
+                [(true, false), (true, true), (false, true), (true, true)]
+            {
+                let (stream, _) = listener.accept().unwrap();
+                let request = read_request(&stream).unwrap();
+                assert_eq!(request.params["refresh_surface"], refresh);
+                let mut snapshot = serde_json::to_value(Snapshot::empty("fixture", 1)).unwrap();
+                if with_sidebar {
+                    snapshot["_workbench_surface"] = serde_json::json!({
+                        "rows": "", "titles": "", "visibility": {}, "palette": "",
+                        "appearance": "", "mode": "", "accent": "",
+                        "sidebar": SharedSidebarData::default(),
+                    });
+                }
+                write_response(&stream, &Response::success(request.id, snapshot)).unwrap();
+            }
+        });
+        let mut refresh_surface = false;
+        assert!(
+            fetch_sidebar_frame(
+                &temp.path().join("missing.sock"),
+                false,
+                &mut refresh_surface
+            )
+            .is_err()
+        );
+        assert!(refresh_surface);
+        for interactive in [false, false, false, true] {
+            fetch_sidebar_frame(&socket, interactive, &mut refresh_surface).unwrap();
+        }
+        assert!(!refresh_surface);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn interactive_refresh_does_not_wait_for_a_slow_background_reply() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            let first_request = read_request(&first).unwrap();
+            first_tx.send(()).unwrap();
+            let slow = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1_200));
+                let snapshot = Snapshot::empty("fixture", 1);
+                let _ = write_response(
+                    &first,
+                    &Response::success(first_request.id, serde_json::to_value(snapshot).unwrap()),
+                );
+            });
+            let (second, _) = listener.accept().unwrap();
+            let second_request = read_request(&second).unwrap();
+            second_tx.send(()).unwrap();
+            let snapshot = Snapshot::empty("fixture", 2);
+            write_response(
+                &second,
+                &Response::success(second_request.id, serde_json::to_value(snapshot).unwrap()),
+            )
+            .unwrap();
+            slow.join().unwrap();
+        });
+        let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let mut refresh_surface = true;
+            for interactive in refresh_rx {
+                let _ = fetch_sidebar_frame(&socket, interactive, &mut refresh_surface);
+            }
+        });
+        refresh_tx.send(false).unwrap();
+        first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        refresh_tx.send(true).unwrap();
+        let delivered = second_rx.recv_timeout(Duration::from_millis(900)).is_ok();
+        drop(refresh_tx);
+        worker.join().unwrap();
+        server.join().unwrap();
+        assert!(
+            delivered,
+            "interactive refresh waited for a slow background reply"
+        );
     }
 
     #[test]
