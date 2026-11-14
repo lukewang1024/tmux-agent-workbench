@@ -125,7 +125,7 @@ def check(height, target, section='agent'):
                 print('PASS: scrolled sidebar opens its pinned top menu')
                 # All six fixture Agents are idle. Clicking the green count
                 # hides them; clicking it again restores the visible rows.
-                state_counts = '0<0<0<6'
+                state_counts = '0  0  0  6'
                 header = screen()[0]
                 assert state_counts in header, header
                 idle_x = header.index(state_counts) + len(state_counts)

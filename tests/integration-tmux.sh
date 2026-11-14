@@ -272,9 +272,11 @@ tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep 'M
 tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep -E '(^| )m( |$)' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'mark pane$' | grep 'M-m' >/dev/null
 [ "$(tmux -S "$socket" show-option -gqv @adaptive_action_1_range)" = wb_workbench ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_range)" = wb_extract ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_range)" = wb_quick_agent ]
 [ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_visible)" = 1 ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_3_range)" = wb_quick_agent ]
+[ -z "$(tmux -S "$socket" show-option -gqv @adaptive_action_3_range)" ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_right_action_1_range)" = wb_extract_url ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_right_action_1_visible)" = 1 ]
 [ "$(tmux -S "$socket" show-option -gqv @workbench_plugin_dir)" = "$repo" ]
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \

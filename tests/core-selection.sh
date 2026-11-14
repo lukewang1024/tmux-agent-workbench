@@ -70,7 +70,12 @@ check() {
   for kind in host tmux agent; do
     actual=$("$plugin/bin/workbench-menu" "$kind" /dev/pts/8 %1)
     [ "$actual" = "$1" ] || { printf 'wrong %s menu core: %s\n' "$kind" "$actual" >&2; exit 1; }
-    [ "$(cat "$CORE_SELECTION_LOG.args")" = "status-menu $kind --pane %1 --client /dev/pts/8" ]
+    if [ "$kind" = tmux ]; then
+      expected_args='menu --pane %1 --client /dev/pts/8'
+    else
+      expected_args="status-menu $kind --pane %1 --client /dev/pts/8"
+    fi
+    [ "$(cat "$CORE_SELECTION_LOG.args")" = "$expected_args" ]
   done
   actual=$("$plugin/bin/workbench-status-popup" agent /dev/pts/8 %1 --focus-agent)
   [ "$actual" = "$1" ] || { echo 'wrong focused agent menu core' >&2; exit 1; }

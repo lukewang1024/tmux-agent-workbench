@@ -785,8 +785,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                                  b'Extract', b'Host / SSH', b'CPU / resources')
         borders = [row for row in screen_rows(rendered) if '┌' in row and '┐' in row]
         assert len(borders) == 1 and borders[0].index('┐') - borders[0].index('┌') < 60, borders
-        for key, expected in [(b'c', b'Quick create'), (b'h', b'dev-host'),
-                              (b'r', b'Resources'), (b's', b'Agent')]:
+        for key, expected in [(b'c', b'Agent'), (b'h', b'dev-host'),
+                              (b'r', b'Resources'), (b's', b'Switch')]:
             os.write(master, key)
             wait_for_text(client_process, expected, b'(back)')
             os.write(master, b'\x7f')
@@ -835,7 +835,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             menu = open_menu([core, 'status-menu', 'menu', '--pane', pane, '--client', client],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             rendered = wait_for_text(menu) + drain()
-            for label, expected in (('Create', b'Quick create'),):
+            for label, expected in (('Create', b'Agent'), ('Agent', b'Quick create')):
                 x, y = item_position(rendered, label)
                 if input_mode == 'mouse':
                     os.write(master, b'\x1b[<35;1;1M')
@@ -1518,8 +1518,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu, b'Create', b'Switch', b'Close')
             os.write(master, b'c')
-            wait_for_text(client_process, b'Quick create', b'Codex', b'Claude Code',
-                          b'Window', b'Pane', b'Session')
+            wait_for_text(client_process, b'Agent', b'Pane', b'Window', b'Session')
+            os.write(master, b'a')
+            wait_for_text(client_process, b'Quick create', b'Codex', b'Claude Code')
             drain(0.15)
             os.write(master, b'x')
             rendered = wait_for_text(client_process, b'CodexRadar recommendations', b'gpt-6.1-sol')

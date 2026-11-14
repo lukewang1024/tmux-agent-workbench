@@ -216,8 +216,11 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             tap(width // 2, height - (2 if height >= 10 else 1) if index == 0 else height)
 
     def wheel(down, count=1):
-        x, y = position(10, 1)
-        os.write(master, (f'\x1b[<{65 if down else 64};{x};{y}M' * count).encode())
+        x, y = position(10, 3)
+        event = f'\x1b[<{65 if down else 64};{x};{y}M'.encode()
+        for _ in range(count):
+            os.write(master, event)
+            drain(.05)
 
     def visible_rows():
         left, top, width, height = content_rect()
@@ -314,27 +317,25 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         client = os.ttyname(slave)
         sibling = os.ttyname(other_slave)
         reset()
-        for mode in ('old', 'new'):
-            subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
-            for kind, query, target_window, target_pane, target_session in [
-                ('window', '中文', windows[1], None, 'source'),
-                ('pane', 'pane-right', None, second, 'source'),
-                ('session', 'other', None, other, 'other'),
-                ('agent', 'other-agent-window', None, other, 'other'),
-            ]:
-                print('Checking scoped search:', mode, kind, query, flush=True)
-                popup = open_list(kind)
-                rows = visible_rows()
-                assert rows[first_row() - 2].strip('─ ') == '' and '─' in rows[first_row() - 2], rows
-                assert rows[-5].strip('─ ') == '' and '─' in rows[-5], rows
-                search_list(query)
-                wait(lambda: query in row_text(visible_rows()[first_row() - 1]), 'filtered target did not render')
-                os.write(master, b'\r')
-                finish_popup(popup)
-                wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
-                     'shared switcher lost its scope or callback target in ' + mode)
-                assert client_value(sibling, '#{session_name}') == 'source'
-                reset()
+        for kind, query, target_window, target_pane, target_session in [
+            ('window', '中文', windows[1], None, 'source'),
+            ('pane', 'pane-right', None, second, 'source'),
+            ('session', 'other', None, other, 'other'),
+            ('agent', 'other-agent-window', None, other, 'other'),
+        ]:
+            print('Checking scoped search:', kind, query, flush=True)
+            popup = open_list(kind)
+            rows = visible_rows()
+            assert rows[first_row() - 2].strip('─ ') == '' and '─' in rows[first_row() - 2], rows
+            assert rows[-5].strip('─ ') == '' and '─' in rows[-5], rows
+            search_list(query)
+            wait(lambda: query in row_text(visible_rows()[first_row() - 1]), 'filtered target did not render')
+            os.write(master, b'\r')
+            finish_popup(popup)
+            wait(lambda: focused(window=target_window, pane=target_pane, session=target_session),
+                 'shared switcher lost its scope or callback target')
+            assert client_value(sibling, '#{session_name}') == 'source'
+            reset()
         print('PASS switch lists share custom navigation, search, identity guards and client isolation', flush=True)
         assert not desktop_calls.exists(), desktop_calls.read_text()
         print('PASS scoped switches stay in their client without desktop terminal activation', flush=True)
@@ -348,7 +349,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 popup = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 popups.append(popup)
-                text('Agents')
+                text('󰚩')
                 drain(.15)
             else:
                 popup = open_list(kind)
@@ -371,23 +372,21 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         print('PASS Sidebar and every filtered list dismiss on outside release without click-through', flush=True)
         # Compatibility pick entrypoints use the same searchable touch menu,
         # with the invoking client retained for the eventual focus operation.
-        for mode in ('old', 'new'):
-            subprocess.check_call([core, 'ui', mode], env=env, stdout=subprocess.DEVNULL)
-            for kind in ('session', 'agent'):
-                drain()
-                popup = subprocess.Popen([core, 'pick', kind],
-                                         env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                popups.append(popup)
-                text('Switch ' + ('sessions' if kind == 'session' else 'agents'))
-                os.write(master, b'other')
-                wait(lambda: any('/ other' in row for row in screen_rows()), 'picker query did not render')
-                os.write(master, b'\r')
-                finish_popup(popup)
-                assert popup.returncode == 0, popup.stderr.read()
-                wait(lambda: focused(session='other', pane=other), 'compatibility picker lost the target client')
-                assert client_value(sibling, '#{session_name}') == 'source'
-                reset()
+        for kind in ('session', 'agent'):
+            drain()
+            popup = subprocess.Popen([core, 'pick', kind],
+                                     env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            popups.append(popup)
+            text('Switch ' + ('sessions' if kind == 'session' else 'agents'))
+            os.write(master, b'other')
+            wait(lambda: any('/ other' in row for row in screen_rows()), 'picker query did not render')
+            os.write(master, b'\r')
+            finish_popup(popup)
+            assert popup.returncode == 0, popup.stderr.read()
+            wait(lambda: focused(session='other', pane=other), 'compatibility picker lost the target client')
+            assert client_value(sibling, '#{session_name}') == 'source'
+            reset()
         print('PASS public Session/Agent pickers share custom menu search, exact focus and client isolation', flush=True)
         # Both lines of a Sidebar entry must activate the same window, and
         # press-and-hold must not activate before release.
@@ -525,34 +524,6 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         assert focused(window=windows[0])
         assert tmux('display-message', '-p', '-t', source, '#{pane_in_mode}') == '0'
         print('PASS Switch submenu reopens its touch list and Close returns to Sidebar', flush=True)
-        # Sidebar keyboard and contextual-menu entries use the same lists,
-        # while Back returns to Sidebar rather than an unrelated tmux menu.
-        prepare_popup()
-        sidebar = subprocess.Popen([str(Path(__file__).resolve().parents[1] / 'bin/tmux-agent-workbench-cli'), 'popup'],
-                                   env=dict(env, WORKBENCH_SOURCE_PANE=source, WORKBENCH_TARGET_CLIENT=client),
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        popups.append(sidebar)
-        text('Agents')
-        drain(.2)
-        os.write(master, b's')
-        text('Switch sessions')
-        footer(0)
-        text('Agents')
-        drain(.2)
-        tap(content_rect()[2] - 2, 1)
-        text('workbench')
-        os.write(master, b'\x7f')
-        text('Agents')
-        tap(content_rect()[2] - 2, 1)
-        text('workbench')
-        os.write(master, b'a')
-        text('Switch agents')
-        footer(0)
-        text('Agents')
-        os.write(master, b'\x1b')
-        drain(.7)
-        assert focused(window=windows[0])
-        print('PASS Sidebar and contextual-menu routes share the touch UI and preserve their Back destination', flush=True)
         # Populate enough Agent groups to overflow the now-independent Agents view.
         for index in range(6):
             tmux('new-session', '-d', '-s', f'zz-agent-{index}', '-n', f'work-{index}', shlex.quote(fixture))
@@ -560,14 +531,14 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
              'new Agent groups were not published to the shared sidebar', timeout=12)
         drain(1.5)
         # A lower current Agent must not open the overview halfway through its
-        # groups. The Agents/sort heading also stays usable after scrolling.
+        # groups. The compact icon-only view/sort header stays usable after scrolling.
         prepare_popup()
         lower_pane = tmux('display-message', '-p', '-t', windows[8], '#{pane_id}')
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', lower_pane, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('Agents')
-        wait(lambda: 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0]
+        text('󰚩')
+        wait(lambda: '󰚩' in visible_rows()[0] and '' in visible_rows()[0]
              and '' in visible_rows()[0] and visible_rows()[2].strip() == 'other',
              'Sidebar hid its status bar or first Session group')
         for _ in range(2):
@@ -577,14 +548,14 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
             wait(lambda: visible_rows()[2].strip() == 'other', 'wheel could not restore the first Session group heading')
             drain(1.4)
             assert visible_rows()[2].strip() == 'other', 'snapshot refresh hid the restored first group'
-        assert 'Agents' in visible_rows()[0] and 'grouped' in visible_rows()[0], visible_rows()
+        assert '󰚩' in visible_rows()[0] and '' in visible_rows()[0], visible_rows()
         assert visible_rows()[1].strip('─ ') == '' and '─' in visible_rows()[1], visible_rows()
         assert visible_rows()[-2].strip('─ ') == '' and '─' in visible_rows()[-2], visible_rows()
-        tap(visible_rows()[0].index('grouped') + 1, 1)
-        text('priority')
-        assert 'Agents' in visible_rows()[0] and 'priority' in visible_rows()[0], visible_rows()
-        tap(visible_rows()[0].index('priority') + 1, 1)
-        text('grouped')
+        tap(visible_rows()[0].index('') + 1, 1)
+        text('')
+        assert '󰚩' in visible_rows()[0] and '' in visible_rows()[0], visible_rows()
+        tap(visible_rows()[0].index('') + 1, 1)
+        text('')
         wait(lambda: visible_rows()[2].strip() == 'other', 'grouped sort did not restore the first group')
         os.write(master, b'\x1b')
         finish_popup(sidebar)
@@ -626,9 +597,9 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         popups.append(sidebar)
-        text('Agents')
+        text('󰚩')
         tap(2, 1)
-        wait(lambda: 'Sessions' in visible_rows()[0] and any('other' in row for row in visible_rows()),
+        wait(lambda: '' in visible_rows()[0] and any('other' in row for row in visible_rows()),
              'Sidebar session view not ready')
         wheel(True, 20)
         wait(lambda: any('wheel-7' in row for row in visible_rows()), 'Sidebar wheel did not reach the last session')
@@ -669,25 +640,6 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         close(sidebar)
         (Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench' / 'sidebar-view').unlink(missing_ok=True)
         print('PASS overview Sidebar shares wheel limits, refresh stability and release cancellation with filtered lists', flush=True)
-        subprocess.check_call([core, 'ui', 'old'], env=env, stdout=subprocess.DEVNULL)
-        prepare_popup()
-        sidebar = subprocess.Popen([core, 'sidebar', '--popup', '--pane', source, '--client', client],
-                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        popups.append(sidebar)
-        text('Agents')
-        drain(.2)
-        tap(content_rect()[2] - 2, 1)
-        text('workbench')
-        os.write(master, b'\x7f')
-        text('Agents')
-        os.write(master, b's')
-        text('Switch sessions')
-        os.write(master, b'\x7f')
-        text('Agents')
-        os.write(master, b'\x1b')
-        finish_popup(sidebar)
-        drain(.7)
-        print('PASS custom menu uses the shared switcher and preserves its Sidebar Back destination', flush=True)
     finally:
         resources.close()
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

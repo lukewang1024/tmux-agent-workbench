@@ -2684,7 +2684,6 @@ impl HeaderPart {
 enum HeaderSeparator {
     PowerlineForward,
     PowerlineReverse,
-    PowerlinePill,
     ThinMuted,
 }
 
@@ -2837,7 +2836,6 @@ fn header_separator_part(
     let (text, foreground, background) = match separator {
         HeaderSeparator::PowerlineForward => ("", left, right),
         HeaderSeparator::PowerlineReverse => ("", right, left),
-        HeaderSeparator::PowerlinePill => ("", left, right),
         HeaderSeparator::ThinMuted => ("", palette.muted, left),
     };
     HeaderPart {
@@ -3011,7 +3009,7 @@ fn header_right_parts(
             header_button(sort_icon, Action::Sort, sort_foreground, sorting),
             header_button("", Action::Menu, menu_foreground, menu),
         ],
-        separator: HeaderSeparator::PowerlinePill,
+        separator: HeaderSeparator::ThinMuted,
         spaced: true,
     };
     let mut sections = Vec::new();
@@ -5010,12 +5008,12 @@ mod tests {
         let separator = &header.spans[menu - 2];
         assert_eq!(header.spans[menu - 1].content, " ");
         assert_eq!(header.spans[menu - 3].content, " ");
-        assert_eq!(separator.content, "");
-        assert_eq!(separator.style.fg, Some(palette.raised));
-        assert_eq!(separator.style.bg, Some(palette.selection));
+        assert_eq!(separator.content, "");
+        assert_eq!(separator.style.fg, Some(palette.muted));
+        assert_eq!(separator.style.bg, Some(palette.raised));
         assert!(header.to_string().contains("1  0  0  0"));
         assert!(header.to_string().contains("0  "));
-        assert!(header.to_string().contains("  "));
+        assert!(header.to_string().contains("  "));
     }
 
     #[test]
