@@ -34,7 +34,7 @@ pub(crate) fn item_label(label: &str, key: &str) -> String {
     format!("{label} #[align=right]({hint})#[list=on]#[list=left-marker]")
 }
 
-/// Shell providers supply display-menu arguments and reuse the same footer.
+/// Legacy shell menu definitions are translated into the shared custom menu.
 pub fn display(args: &[String], page: usize) -> Result<(), Box<dyn std::error::Error>> {
     crate::menu::display_legacy(args, page)
 }

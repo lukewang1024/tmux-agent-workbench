@@ -124,7 +124,6 @@ with tempfile.TemporaryDirectory(prefix='wb-tap-') as directory, \
                        for client in clients)
 
         wait_for(termux_attachment_ready)
-        subprocess.run([core, 'ui', 'new'], env=env, check=True, stdout=subprocess.DEVNULL)
         for case in ('action', 'url-choice', 'outside'):
             tmux('set-option', '-gu', '@tap-selected')
             label = 'https://menu.invalid/choice' if case == 'url-choice' else 'Safe action'

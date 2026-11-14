@@ -131,34 +131,29 @@ set -g @workbench-disable-git 1
 
 ## Keybindings
 
-Workbench uses the sidebar and compact Menu as its control surfaces. Press
-`prefix+Tab` for Sidebar, or `prefix Alt+m` for the combined menu; once Sidebar
-is focused, press `?` for a centered list of plain single-key actions.
-Optional global bindings are (re)installed each time the
-plugin loads when their option is explicitly set.
+Workbench uses Sidebar and one unified Workbench menu as its control surfaces.
+Press `prefix+Tab` for Sidebar, or `prefix+m` / `prefix+M-t` for the
+Workbench menu; the left status-bar control opens the same menu. The Sidebar
+menu contains Sidebar actions only. Once Sidebar is focused, press `?` for a
+centered list of plain single-key actions. Optional global bindings are
+(re)installed each time the plugin loads when their option is explicitly set.
 
-The new list menu is the default. Choose **Interface · classic / new** in
-the combined Menu to compare its two renderers. Buttons, order, scope checks
-and callbacks are shared. The setting changes action menus only; Sidebar and
-all four switchers always use the same list interaction. The CLI offers the
-same switch:
+The Workbench menu groups Create, Switch, Close and Layout. Create first offers
+Agent, Pane, Window and Session; Agent opens Quick create and each installed
+Coding Agent. Window contains new-window and VS Code choices when available.
+Switch and Close each list Agent, Window, Pane and Session; Close confirms its
+target. Extract is in the menu and has its own status-bar button beside
+Workbench. Detach, Host / SSH and CPU / resources remain available. The `+`
+status-bar shortcut launches the last-used Agent setup directly, or opens
+Create when no setup has been saved.
+The Sidebar status-bar control opens Sidebar actions directly: visibility,
+details (`d`), next attention (`n`) and reload (`r`). All action menus use the
+custom menu component, including shell-defined menu providers through a
+compatibility adapter.
 
-```sh
-tmux-agent-workbench ui old
-tmux-agent-workbench ui new
-tmux-agent-workbench ui toggle
-tmux-agent-workbench ui status
-```
-
-The preference is saved under `$XDG_CONFIG_HOME/tmux-agent-workbench/ui-mode`.
-The tmux option `@workbench-ui` (`old` / `new`) overrides it for one server.
-An explicitly selected classic renderer stays selected until changed again.
-The classic renderer uses native one-line tmux menus with pagination; the new
-renderer uses larger list rows. Both modes use Sidebar-sized navigation popups
-for Switch Agent, Window, Pane and Session.
-Sidebar popups and all built-in selection lists close on an outside tap without
+Sidebar popups and built-in selection lists close on an outside tap without
 passing it to the terminal. Project/repository pickers and workspace/task name
-dialogs use the same container and pinned Close control in either menu mode.
+dialogs use the same container and pinned Close control.
 
 | Action | Option | Default | Runs |
 |---|---|---|---|
@@ -168,8 +163,9 @@ dialogs use the same container and pinned Close control in either menu mode.
 | Prompt for a new workspace | `@workbench-key-new` | unbound | Workspace name prompt |
 | New isolated task in this workspace | `@workbench-key-task` | unbound | Task name popup |
 | Toggle current-window Agent sidebar | `@workbench-key-sidebar` | `Tab` | Rust sidebar |
-| Open combined Menu | `@workbench-key-main-menu` | `M-m` | Agent / Sidebar / Tmux / Host / CPU |
-| Open tmux controls | `@workbench-key-mobile-menu` | `M-t` | Tmux menu |
+| Open Workbench menu | `@workbench-key-main-menu` | `m` | Create / Switch / Close / Layout / Extract / Host / resources |
+| Open Workbench menu | `@workbench-key-mobile-menu` | `M-t` | Same Workbench menu |
+| Mark current pane | `@workbench-key-pane-mark` | `M-m` | tmux pane mark |
 | Open Agent commands | `@workbench-key-agent-menu` | `M-a` | Agent menu |
 | Toggle all Agent sidebars | `@workbench-key-sidebar-all` | unbound | Rust sidebar |
 | Pick any session by attention | `@workbench-key-session` | unbound | session picker |
@@ -190,7 +186,7 @@ grabs it at load time). Verify with the *live*, post-plugin-load table, not
 just the file:
 
 ```sh
-tmux list-keys -T prefix | grep -E '(^| )(M-a|M-m|M-t|Tab)( |$)'
+tmux list-keys -T prefix | grep -E '(^| )(m|M-a|M-m|M-t|Tab)( |$)'
 ```
 
 To rebind, set the option **before** the plugin loads (add it above
@@ -414,8 +410,8 @@ The everyday keys are plain letters: `i` opens a temporary Git tool, `d` toggles
 `n` jumps to attention, and `s`/`a` open pickers. Heavier mutating actions use
 uppercase: `N` picks/starts a tmuxinator project, `W` creates a workspace, `T`
 creates a task in the selected session, and `R` rebuilds generated projects. `m` opens the
-row menu. The global menu exposes the
-same management actions for mouse use.
+row menu. The Sidebar icon opens Sidebar actions; the Workbench menu groups
+Create, Switch, Close and Layout around Agent and tmux objects.
 
 The daemon publishes `@workbench_window_state` and
 `@workbench_window_label` as window-scoped tmux options for status themes.
@@ -442,9 +438,11 @@ owns sampling, caching, width defaults and the menu action. Set
 for mode selection, platform support and the standalone CLI.
 
 Session/Sidebar and tmux controls form the left group, followed by window
-labels. CPU, Host and Agent status remain on the right, with a flat
-outer edge. tmux and Agent status open the same menus as `M-t` and `M-a`, while
-the session label performs the same responsive Sidebar toggle as `Tab`.
+labels. CPU, URL extraction, Host and Agent status remain on the right, with a
+flat outer edge. The action buttons appear in order: Workbench → Extract → `+`.
+Workbench opens the same menu as `m` and `M-t`; Extract has its own button and
+remains in the menu. Agent status opens Agent commands as `M-a`. The session label performs the
+same responsive Sidebar toggle as `Tab`.
 Prefix remains available through the keyboard. Workbench owns their ranges and behavior;
 the adaptive theme owns their placement, separators, and colors.
 The Host segment is a separate clickable range: it launches the existing
@@ -452,28 +450,26 @@ The Host segment is a separate clickable range: it launches the existing
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
 
-The tmux menu starts with **Create**, **Switch**, **Layout**, **Kill**, and
-**Detach**. Create starts with **Quick Agent** (`q`), followed by **Agent**,
-**Window**, **Pane**, and **Session**. Quick Agent repeats the last successful
-menu launch's tool, scene, Single/Team and Native/tmux choices in the current
-directory, creating a fresh conversation. Its gray second line shows that
-combination. It becomes available after the first successful menu launch;
-cancelled and failed launches leave the saved combination unchanged. Switch
-and Kill start with **Agent**, **Window**, **Pane**, and **Session**, in that
-order. Kill shows its target for confirmation and
-rechecks its identity before acting. Switch Window lists only
-the source Session's windows; Switch pane lists only its Window's panes. Sessions
-and running Agents have separate server-wide views. In both menu modes these views share Sidebar's
-bordered popup and two-line title/context rows, with search, paging, and a
-full-width Back and Close rows. The popup leaves terminal context visible, caps its size
-at 96 columns by 40 rows, and uses all available space on very small screens.
-Labels use the available cells without ellipses. Selection happens on release;
-dragging scrolls without activating. Sidebar's Session/Agent shortcuts and menu
-use these same lists, and Back restores the originating Sidebar or tmux menu.
-Wheel scrolling, touch, keyboard navigation and refresh positioning share one
-list component across Sidebar and the four filtered views. New session prompts for
-a name, starts in the source pane's directory, and switches only the invoking
-client to the new session.
+The Workbench menu opens from the left status-bar control or `m` / `M-t`.
+Create first offers Agent, Pane, Window and Session; Agent opens Quick create
+and each installed Coding Agent. Window contains new-window and VS Code choices
+when available. Switch and Close each list Agent, Window, Pane and Session;
+Close confirms its target. Layout contains pane arrangements. Extract is in the menu and has its
+own status-bar button. Detach, Host / SSH and CPU / resources remain available.
+The `+` shortcut repeats the last successful Agent setup, or opens Create when
+no setup has been saved. Sidebar's icon opens its own actions only.
+
+Switch Window lists only the source Session's windows; Switch Pane lists only
+its Window's panes. Sessions and running Agents have separate server-wide views.
+The shared custom menu uses Sidebar's bordered popup and two-line title/context
+rows, with search, paging, and full-width Back and Close rows. The popup caps its size at
+96 columns by 40 rows and uses all available space on very small screens. Labels
+use available cells without ellipses. Selection happens on release; dragging
+scrolls without activating. Back restores the originating Sidebar or Workbench
+menu. Wheel scrolling, touch, keyboard navigation and refresh positioning share
+one list component across Sidebar and filtered views. New Session prompts for a
+name, starts in the source pane's directory, and switches only the invoking
+client.
 Selecting an agent opens one configuration panel. Codex recommendations are
 loaded dynamically from the active CodexRadar cache. The menu shows the first
 four distinct categories in remote order and keeps the newest numeric model
@@ -538,18 +534,18 @@ invalidates an open menu's callbacks. Reopening the menu rechecks status.
 For pane teams, **Team members & progress** shows roles and member-reported
 status from `agent-team`, lets you focus any live member, and restores the
 main-vertical layout (`prefix Alt+4`). Native subagents remain managed inside
-the coding CLI. Both the statusbar and `prefix M-a` / `prefix M-t` use the same
-menu implementation, including touch behavior and small-screen pagination.
+the coding CLI. The status bar and `prefix+m` / `prefix+M-t` share the
+Workbench menu and custom menu component, including touch behavior and
+small-screen pagination.
 See [menu design and validation](docs/menus.md) for the interaction map and
 capability boundaries.
 
-`tmux-agent-workbench menu` and `prefix Alt+m` open a compact collection of
-Agent, Sidebar, Tmux, Host/SSH and CPU/resources controls. Each submenu returns
-to that collection. The source pane and client may also be supplied explicitly
-with `--pane` and `--client`.
+`tmux-agent-workbench menu` and `prefix+m` / `prefix+M-t` open the unified
+Workbench menu. Each submenu returns to that menu. The source pane and client
+may also be supplied explicitly with `--pane` and `--client`.
 
-Status-bar menus open after `MouseUp`. Host, tmux, Agent, Usage, Resources and
-Sidebar menus all use the same Menu model. In the new UI they have two-row buttons and a
+Status-bar menus open after `MouseUp`. Workbench, Host, Agent, Usage, Resources
+and Sidebar menus all use the same Menu model. Menus have two-row buttons and a
 content-sized popup capped at 60 columns. Menus share Sidebar's wheel/drag,
 keyboard and release handling; held presses never open the next menu early.
 Wheel moves the selection even when the list fits, and scrolls to keep it visible.

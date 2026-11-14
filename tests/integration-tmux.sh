@@ -268,8 +268,13 @@ if tmux -S "$socket" show-hooks -g client-resized | grep 'client-resized\[930\]'
 fi
 tmux -S "$socket" list-keys -T prefix -N | grep 'next layout without resizing sidebar$' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'select pane left with responsive zoom$' >/dev/null
-tmux -S "$socket" list-keys -T prefix -N | grep 'open compact tmux menu$' >/dev/null
-tmux -S "$socket" list-keys -T prefix -N | grep 'open combined Workbench menu$' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep 'M-t' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep -E '(^| )m( |$)' >/dev/null
+tmux -S "$socket" list-keys -T prefix -N | grep 'mark pane$' | grep 'M-m' >/dev/null
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_1_range)" = wb_workbench ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_range)" = wb_extract ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_visible)" = 1 ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_3_range)" = wb_quick_agent ]
 [ "$(tmux -S "$socket" show-option -gqv @workbench_plugin_dir)" = "$repo" ]
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \
@@ -307,7 +312,7 @@ if tmux -S "$socket" show-options -sv command-alias | grep 'wb-usage-status=.*sl
 tmux -S "$socket" list-keys -T prefix | grep 'MouseDown1Status.*switch-client -T prefix' >/dev/null
 tmux -S "$socket" list-keys -T prefix | grep 'MouseUp1Status.*switch-client -T root' >/dev/null
 tmux -S "$socket" list-keys -T root | grep 'MouseUp1Status' >/dev/null
-for status_range in wb_prefix wb_tmux wb_agent wb_sidebar wb_cpu wb_host wb_usage; do
+for status_range in wb_prefix wb_tmux wb_agent wb_sidebar wb_extract wb_cpu wb_host wb_usage; do
   [ "${#status_range}" -le 15 ]
 done
 tmux -S "$socket" list-panes -a -F '#{@pane_role}' | grep '^sidebar$' >/dev/null

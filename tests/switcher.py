@@ -287,8 +287,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         source = tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'source', '-n', 'window-zero',
                       '-x', '40', '-y', '20', '-P', '-F', '#{pane_id}', '/bin/sh')
         for key, value in (('mouse', 'on'), ('status', 'off'), ('default-shell', '/bin/sh'),
-                           ('status-keys', 'emacs'), ('exit-empty', 'off'), ('exit-unattached', 'off'),
-                           ('@workbench-ui', 'new')):
+                           ('status-keys', 'emacs'), ('exit-empty', 'off'), ('exit-unattached', 'off')):
             tmux('set-option', '-g', key, value)
         tmux('set-option', '-sg', 'escape-time', '50')
         tmux('select-pane', '-t', source, '-T', 'pane-left')
@@ -336,7 +335,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                      'shared switcher lost its scope or callback target in ' + mode)
                 assert client_value(sibling, '#{session_name}') == 'source'
                 reset()
-        print('PASS both menu modes use the same divided switch lists, search, identity guards and client isolation', flush=True)
+        print('PASS switch lists share custom navigation, search, identity guards and client isolation', flush=True)
         assert not desktop_calls.exists(), desktop_calls.read_text()
         print('PASS scoped switches stay in their client without desktop terminal activation', flush=True)
         # All bounded navigation panels must receive backdrop clicks, including
@@ -389,7 +388,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 wait(lambda: focused(session='other', pane=other), 'compatibility picker lost the target client')
                 assert client_value(sibling, '#{session_name}') == 'source'
                 reset()
-        print('PASS public Session/Agent pickers keep search, exact focus and client isolation in both menu modes', flush=True)
+        print('PASS public Session/Agent pickers share custom menu search, exact focus and client isolation', flush=True)
         # Both lines of a Sidebar entry must activate the same window, and
         # press-and-hold must not activate before release.
         for part in (0, 1):
@@ -525,7 +524,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         drain(.6)
         assert focused(window=windows[0])
         assert tmux('display-message', '-p', '-t', source, '#{pane_in_mode}') == '0'
-        print('PASS Switch submenu reopens its touch list and Close leaves native tree mode unused', flush=True)
+        print('PASS Switch submenu reopens its touch list and Close returns to Sidebar', flush=True)
         # Sidebar keyboard and contextual-menu entries use the same lists,
         # while Back returns to Sidebar rather than an unrelated tmux menu.
         prepare_popup()
@@ -688,7 +687,7 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         os.write(master, b'\x1b')
         finish_popup(sidebar)
         drain(.7)
-        print('PASS classic menu uses the shared switcher and preserves its Sidebar Back destination', flush=True)
+        print('PASS custom menu uses the shared switcher and preserves its Sidebar Back destination', flush=True)
     finally:
         resources.close()
         subprocess.run(['tmux', '-S', socket, 'kill-server'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

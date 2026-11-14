@@ -103,23 +103,48 @@ def check(height, target, section='agent'):
             assert ('Sessions' if section == 'session' else 'Agents') in rows[0] and '' in rows[0], rows
             row = next(i for i, line in enumerate(rows) if target_row(line))
             assert tmux('list-clients', '-F', '#{pane_id}') == main
-            # tmux before 3.8 cannot scroll native menus. Keep the menu test
-            # tall enough for all actions while the sidebar itself overflows;
-            # the 12-line cases below still cover first-click navigation.
+            # Keep this menu tall enough for all actions while the sidebar
+            # itself overflows; the 12-line cases below cover first-click
+            # navigation on short clients.
             if height == 16 and target == 'e-agent':
-                os.write(master, b'\x1b[<0;35;1M\x1b[<0;35;1m')
+                # The menu icon is the rightmost cell; the preceding cell is
+                # now the full-height separator between sort and menu.
+                os.write(master, b'\x1b[<0;36;1M\x1b[<0;36;1m')
                 output = b''
                 deadline = time.monotonic() + 5
-                while b'workbench' not in output and time.monotonic() < deadline:
+                expected = (b'Show / hide Sidebar', b'Toggle details',
+                            b'Next attention', b'Reload Workbench')
+                while not all(label in output for label in expected) and time.monotonic() < deadline:
                     output += drain(.05)
-                assert b'workbench' in output, output
-                assert b'New' in output, output
+                assert all(label in output for label in expected), output
                 os.write(master, b'\x1b')
                 drain(.7)
                 tmux('select-pane', '-t', main)
                 drain(.1)
                 assert 'Agents' in screen()[0] and '' in screen()[0]
                 print('PASS: scrolled sidebar opens its pinned top menu')
+                # All six fixture Agents are idle. Clicking the green count
+                # hides them; clicking it again restores the visible rows.
+                state_counts = '0<0<0<6'
+                header = screen()[0]
+                assert state_counts in header, header
+                idle_x = header.index(state_counts) + len(state_counts)
+                fixture_agents = ('a-target', 'b-agent', 'c-agent', 'd-agent', 'e-agent', 'z-source')
+
+                def fixture_cards_visible():
+                    return any(
+                        f'Task {name}' in line
+                        for line in screen()
+                        for name in fixture_agents
+                    )
+
+                os.write(master, f'\x1b[<0;{idle_x};1M\x1b[<0;{idle_x};1m'.encode())
+                wait_for(lambda: not fixture_cards_visible(), 'idle count did not filter Agent rows')
+                os.write(master, f'\x1b[<0;{idle_x};1M\x1b[<0;{idle_x};1m'.encode())
+                wait_for(lambda: fixture_cards_visible(), 'idle count did not restore Agent rows')
+                rows = screen()
+                row = next(i for i, line in enumerate(rows) if target_row(line))
+                print('PASS: idle count toggles Agent visibility and restores the rows')
             # Real terminal mouse input: tmux emits FocusGained before forwarding
             # MouseDown. The short viewport used to scroll here and hit z-source
             # (or b-agent), while the tall viewport already worked.

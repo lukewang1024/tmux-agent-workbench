@@ -21,9 +21,7 @@ while [ -h "$self" ]; do
   case $target in /*) self=$target ;; *) self=$(dirname "$self")/$target ;; esac
 done
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd -P)
-mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
-set -- "$script_dir/tmux-agent-workbench-cli" display-menu -- -M
-[ "$mouse_mode" != mouse ] || set -- "$@" -O
+set -- "$script_dir/tmux-agent-workbench-cli" display-menu --
 set -- "$@" -C 0 -c "$client" -t "$pane" \
   -T ' 󰍹 #H · SSH '
 session=$(tmux display-message -p -t "$pane" '#{session_id}')

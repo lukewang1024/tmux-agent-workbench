@@ -24,10 +24,10 @@ pub enum StatusMenuKind {
 pub enum View {
     #[default]
     Root,
-    Interface,
     Switch,
     Extract,
     Create,
+    CreateWindow,
     CreatePane,
     Kill,
     KillAgent,
@@ -92,8 +92,8 @@ impl Preset {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Single => tr("Single", "单人 · Single"),
-            Self::Team => tr("Team", "团队 · Team"),
+            Self::Single => tr("Single", "单人"),
+            Self::Team => tr("Team", "团队"),
         }
     }
 }
@@ -117,10 +117,10 @@ impl Scene {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Daily => tr("Daily development · daily", "日常开发 · daily"),
-            Self::Hard => tr("Complex tasks · hard", "复杂攻坚 · hard"),
-            Self::Batch => tr("Batch work · batch", "批量执行 · batch"),
-            Self::Computer => tr("Computer automation · computer", "电脑自动化 · computer"),
+            Self::Daily => tr("Daily development", "日常开发"),
+            Self::Hard => tr("Complex tasks", "复杂任务"),
+            Self::Batch => tr("Batch work", "批量执行"),
+            Self::Computer => tr("Computer automation", "电脑自动化"),
         }
     }
 
@@ -162,8 +162,6 @@ pub struct MenuOptions {
     pub panes: bool,
     #[arg(long)]
     pub guard: Option<String>,
-    #[arg(long, value_parser = ["mouse", "touch", "release"])]
-    pub input_mode: Option<String>,
     #[arg(long, value_parser = ["en", "zh"])]
     pub language: Option<String>,
     #[arg(long)]
@@ -172,7 +170,7 @@ pub struct MenuOptions {
 impl MenuOptions {
     fn route(&self) -> String {
         let mut route = format!(
-            "--view {} --tool {} --preset {}{}{}{}{} --language {}{}",
+            "--view {} --tool {} --preset {}{}{}{} --language {}{}",
             self.view.to_possible_value().unwrap().get_name(),
             self.tool.name(),
             self.preset.name(),
@@ -188,10 +186,6 @@ impl MenuOptions {
                 .map(|value| format!(" --recommendation {value}"))
                 .unwrap_or_default(),
             if self.panes { " --panes" } else { "" },
-            self.input_mode
-                .as_ref()
-                .map(|mode| format!(" --input-mode {mode}"))
-                .unwrap_or_default(),
             self.language
                 .as_deref()
                 .unwrap_or(crate::ui_language::name()),
@@ -326,9 +320,17 @@ impl LaunchSettings {
                     .unwrap_or_else(|| tr("Codex defaults", "Codex 默认值").into()),
             );
             parts.push(if self.preset.is_team() {
-                format!("Team/{}", if self.panes { "tmux" } else { "native" })
+                format!(
+                    "{} / {}",
+                    tr("Team", "团队"),
+                    if self.panes {
+                        "tmux"
+                    } else {
+                        tr("native", "原生")
+                    }
+                )
             } else {
-                "Single".into()
+                tr("Single", "单人").into()
             });
             parts.push(
                 if self.yolo {
@@ -356,9 +358,13 @@ impl LaunchSettings {
             }
         }
         if self.preset.is_team() {
-            parts.push(if self.panes { "tmux" } else { "Native" }.into());
+            parts.push(if self.panes {
+                "tmux".into()
+            } else {
+                tr("Native", "原生").into()
+            });
         }
-        parts.push("Auto approval".into());
+        parts.push(tr("Auto approval", "自动审批").into());
         parts.join(" · ")
     }
 }
@@ -454,8 +460,11 @@ enum ActionCommand {
     NewSession,
     Switch(crate::switcher::Kind),
     Kill(KillTarget),
-    SetUi(crate::ui::Mode),
-    Sidebar,
+    SidebarToggle,
+    SidebarDetails,
+    AttentionNext,
+    Reload,
+    QuickCreate,
     Metrics,
     Extract(&'static str),
     Agent(String),
@@ -479,10 +488,10 @@ enum KillTarget {
 impl KillTarget {
     fn label(self) -> &'static str {
         match self {
-            Self::Agent => "Agent",
-            Self::Window => "Window",
-            Self::Pane => "Pane",
-            Self::Session => "Session",
+            Self::Agent => tr("Agent", "智能体"),
+            Self::Window => tr("Window", "窗口"),
+            Self::Pane => tr("Pane", "窗格"),
+            Self::Session => tr("Session", "会话"),
         }
     }
 }
@@ -517,13 +526,13 @@ fn quick_agent(settings: Result<Option<LaunchSettings>>) -> Action {
             )
         }
         Ok(None) => (
-            tr("Create an Agent first", "先创建一次 Agent 即可复用").into(),
+            tr("Create an Agent first", "请先创建一次智能体").into(),
             ActionCommand::Disabled,
         ),
         Err(_) => (
             tr(
                 "Saved combination unavailable; choose Agent",
-                "上次配置不可用，请选择 Agent",
+                "上次配置不可用，请选择智能体",
             )
             .into(),
             ActionCommand::Disabled,
@@ -531,7 +540,37 @@ fn quick_agent(settings: Result<Option<LaunchSettings>>) -> Action {
     };
     Action {
         subtitle: Some(subtitle),
-        ..Action::new("quick-agent", "Quick Agent", 'q', command)
+        ..Action::new(
+            "quick-agent",
+            tr("Quick Agent", "快速创建智能体"),
+            'q',
+            command,
+        )
+    }
+}
+
+fn quick_create(settings: Result<Option<LaunchSettings>>) -> Action {
+    let subtitle = match settings {
+        Ok(Some(settings)) => settings.description(),
+        Ok(None) => tr(
+            "Reuse the last setup; choose an installed Agent below the first time",
+            "复用上次配置；首次使用请从下方选择已安装的智能体",
+        )
+        .into(),
+        Err(_) => tr(
+            "Saved setup unavailable; choose an installed Agent below",
+            "上次配置不可用，请从下方选择已安装的智能体",
+        )
+        .into(),
+    };
+    Action {
+        subtitle: Some(subtitle),
+        ..Action::new(
+            "quick-create",
+            tr("Quick create", "快速创建"),
+            'q',
+            ActionCommand::QuickCreate,
+        )
     }
 }
 
@@ -557,16 +596,11 @@ fn agent_targets(window: &str) -> Result<Vec<(String, bool)>> {
     .collect())
 }
 
-fn open_agent_status(
-    pane: &str,
-    client: &str,
-    stay_open: bool,
-    options: &MenuOptions,
-) -> Result<()> {
+fn open_agent_status(pane: &str, client: &str, options: &MenuOptions) -> Result<()> {
     // The active pane wins even before the detector publishes its next tick.
     let direct = Context::read(&Paths::discover()?, pane)?;
     if direct.agent.is_some() {
-        return show_agent_menu(&direct, client, stay_open, options);
+        return show_agent_menu(&direct, client, options);
     }
     let context = Context::read_launch(pane)?;
     let targets = agent_targets(&context.window)?;
@@ -584,7 +618,7 @@ fn open_agent_status(
         .or_else(|| targets.iter().find(|(_, last)| *last))
         .or_else(|| (targets.len() == 1).then(|| &targets[0]));
     if let Some((target, _)) = selected {
-        return focus_agent_menu(target, &context.window, client, stay_open, options);
+        return focus_agent_menu(target, &context.window, client, options);
     }
     if targets.is_empty() {
         if options.from_menu {
@@ -593,22 +627,13 @@ fn open_agent_status(
                 guard: Some(direct.guard.clone()),
                 ..options.clone()
             };
-            return run_with_context(
-                StatusMenuKind::Agent,
-                pane,
-                client,
-                None,
-                0,
-                stay_open,
-                &next,
-                &direct,
-            );
+            return run_with_context(StatusMenuKind::Agent, pane, client, None, 0, &next, &direct);
         }
         return message(
             client,
             tr(
                 "No interactive agent in this window",
-                "当前窗口没有可交互的 agent",
+                "当前窗口没有可交互的智能体",
             ),
         );
     }
@@ -624,19 +649,12 @@ fn open_agent_status(
         client,
         None,
         0,
-        stay_open,
         &next,
         &context,
     )
 }
 
-fn focus_agent_menu(
-    pane: &str,
-    window: &str,
-    client: &str,
-    stay_open: bool,
-    options: &MenuOptions,
-) -> Result<()> {
+fn focus_agent_menu(pane: &str, window: &str, client: &str, options: &MenuOptions) -> Result<()> {
     validate_pane(pane)?;
     let context = Context::read(&Paths::discover()?, pane)?;
     if context.window != window || context.agent.is_none() {
@@ -648,15 +666,10 @@ fn focus_agent_menu(
             ),
         );
     }
-    show_agent_menu(&context, client, stay_open, options)
+    show_agent_menu(&context, client, options)
 }
 
-fn show_agent_menu(
-    context: &Context,
-    client: &str,
-    stay_open: bool,
-    options: &MenuOptions,
-) -> Result<()> {
+fn show_agent_menu(context: &Context, client: &str, options: &MenuOptions) -> Result<()> {
     let pane = &context.pane;
     let window = &context.window;
     tmux(&["select-pane", "-t", pane])?;
@@ -680,7 +693,6 @@ fn show_agent_menu(
         client,
         None,
         0,
-        stay_open,
         &next,
         &context,
     )
@@ -692,7 +704,6 @@ pub fn run(
     client: &str,
     action: Option<&str>,
     page: usize,
-    stay_open: bool,
     options: &MenuOptions,
 ) -> Result<()> {
     if options.json && (action.is_some() || options.focus_agent) {
@@ -704,7 +715,7 @@ pub fn run(
     crate::ui_language::set_configured_language(&config.ui.language);
     crate::ui_language::set_language(options.language.as_deref());
     if kind == StatusMenuKind::Agent && options.focus_agent && action.is_none() {
-        return open_agent_status(pane, client, stay_open, options);
+        return open_agent_status(pane, client, options);
     }
     let context = match if launch_context(kind, options.view) {
         Context::read_launch(pane)
@@ -714,9 +725,194 @@ pub fn run(
         Ok(context) => context,
         Err(error) => return message(client, &format!("Menu unavailable: {error}")),
     };
-    run_with_context(
-        kind, pane, client, action, page, stay_open, options, &context,
+    run_with_context(kind, pane, client, action, page, options, &context)
+}
+
+pub fn extract_urls(pane: &str, client: &str) -> Result<()> {
+    validate_pane(pane)?;
+    if !executable("tmux-extrakto") {
+        return message(
+            client,
+            tr(
+                "Extract needs the tmux-extrakto helper installed on this host",
+                "提取功能需要在当前主机安装 tmux-extrakto",
+            ),
+        );
+    }
+    let paths = Paths::discover()?;
+    let config = crate::config::Config::load(&paths.config_file())?;
+    crate::ui_language::set_configured_language(&config.ui.language);
+    let context = match Context::read_launch(pane) {
+        Ok(context) => context,
+        Err(error) => return message(client, &format!("Extract unavailable: {error}")),
+    };
+    let output = Command::new("tmux-extrakto")
+        .args(["--urls", "--list-candidates", "--client", client, pane])
+        .current_dir(&context.cwd)
+        .output()?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim().chars().take(512).collect::<String>();
+        return message(
+            client,
+            if detail.is_empty() {
+                tr("Could not extract URLs", "无法提取 URL")
+            } else {
+                &detail
+            },
+        );
+    }
+    let urls: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let value = line
+                .strip_prefix("url: ")
+                .or_else(|| line.strip_prefix("url2: "))
+                .unwrap_or(line)
+                .trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        })
+        .collect();
+    if urls.is_empty() {
+        return message(client, tr("No URLs found", "没有找到 URL"));
+    }
+    let menu = crate::menu::Menu {
+        title: tr(
+            "URLs · Enter open · Ctrl-Y copy",
+            "URL · Enter 打开 · Ctrl-Y 复制",
+        )
+        .into(),
+        items: urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| crate::menu::Item {
+                id: index.to_string(),
+                label: url.clone(),
+                subtitle: None,
+                key: String::new(),
+                command: String::new(),
+                enabled: true,
+                role: crate::menu::Role::Body,
+            })
+            .collect(),
+        searchable: true,
+        prompt: None,
+        copy_key: Some("Ctrl-Y".into()),
+        wrap_items: true,
+    };
+    let Some(selection) = crate::menu::select(&menu, pane, client, 0)? else {
+        return Ok(());
+    };
+    let Some(url) = urls.get(selection.index) else {
+        return Ok(());
+    };
+    let mut command = Command::new("tmux-extrakto");
+    if selection.copy {
+        command.args(["--copy-text", url.as_str()]);
+    } else {
+        command.args(["--open-url", url.as_str()]);
+    }
+    let result = command
+        .args(["--client", client, pane])
+        .current_dir(&context.cwd)
+        .output()?;
+    if result.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&result.stderr);
+    let detail = detail.trim().chars().take(512).collect::<String>();
+    message(
+        client,
+        if detail.is_empty() {
+            tr("Could not copy URL", "无法复制 URL")
+        } else {
+            &detail
+        },
     )
+}
+
+pub fn quick_agent_or_create(pane: &str, client: &str, options: &MenuOptions) -> Result<()> {
+    validate_pane(pane)?;
+    let paths = Paths::discover()?;
+    let config = crate::config::Config::load(&paths.config_file())?;
+    crate::ui_language::set_configured_language(&config.ui.language);
+    crate::ui_language::set_language(options.language.as_deref());
+
+    let context = match Context::read_launch(pane) {
+        Ok(context) => context,
+        Err(error) => return message(client, &format!("Menu unavailable: {error}")),
+    };
+    let action = quick_agent(LaunchSettings::load(&paths));
+    let options = MenuOptions {
+        view: View::Launch,
+        guard: Some(context.guard.clone()),
+        ..options.clone()
+    };
+
+    if matches!(&action.command, ActionCommand::Launch(_)) {
+        if let Err(error) =
+            execute_action(&action, &context, client, &options, StatusMenuKind::Menu)
+        {
+            if let ActionCommand::Launch(settings) = &action.command {
+                let next = MenuOptions {
+                    view: View::Configure,
+                    launch_error: Some(error.to_string()),
+                    ..settings.options(&options)
+                };
+                return run_with_context(
+                    StatusMenuKind::Menu,
+                    pane,
+                    client,
+                    None,
+                    0,
+                    &next,
+                    &context,
+                );
+            }
+            return Err(error);
+        }
+        return Ok(());
+    }
+
+    run_with_context(
+        StatusMenuKind::Menu,
+        pane,
+        client,
+        None,
+        0,
+        &options,
+        &context,
+    )
+}
+
+fn quick_create_from_menu(
+    kind: StatusMenuKind,
+    pane: &str,
+    client: &str,
+    options: &MenuOptions,
+    context: &Context,
+) -> Result<()> {
+    let settings = (|| {
+        let paths = Paths::discover()?;
+        LaunchSettings::load(&paths)
+    })();
+    let action = quick_agent(settings);
+    if let ActionCommand::Launch(settings) = &action.command {
+        if let Err(error) = execute_action(&action, context, client, options, kind) {
+            let next = MenuOptions {
+                view: View::Configure,
+                launch_error: Some(error.to_string()),
+                ..settings.options(options)
+            };
+            return run(kind, pane, client, None, 0, &next);
+        }
+        return Ok(());
+    }
+    let next = MenuOptions {
+        view: View::Launch,
+        ..options.clone()
+    };
+    run_with_context(kind, pane, client, None, 0, &next, context)
 }
 
 pub fn open_root(pane: Option<&str>, client: Option<&str>) -> Result<()> {
@@ -749,7 +945,6 @@ pub fn open_root(pane: Option<&str>, client: Option<&str>) -> Result<()> {
         &client,
         None,
         0,
-        false,
         &MenuOptions::default(),
     )
 }
@@ -761,7 +956,6 @@ fn run_with_context(
     client: &str,
     action: Option<&str>,
     page: usize,
-    stay_open: bool,
     options: &MenuOptions,
     context: &Context,
 ) -> Result<()> {
@@ -846,21 +1040,12 @@ fn run_with_context(
                     launch_error: Some(format!("Could not save preference: {error}")),
                     ..options.clone()
                 };
-                return run_with_context(
-                    kind,
-                    pane,
-                    client,
-                    None,
-                    usize::MAX,
-                    stay_open,
-                    &next,
-                    context,
-                );
+                return run_with_context(kind, pane, client, None, usize::MAX, &next, context);
             }
         }
         if let ActionCommand::Navigate(next_kind, next) = &selected.command {
             if *next_kind == StatusMenuKind::Agent && next.focus_agent {
-                return open_agent_status(pane, client, stay_open, next);
+                return open_agent_status(pane, client, next);
             }
             if launch_context(kind, options.view) != launch_context(*next_kind, next.view) {
                 // Validate the old scope above before entering the new one.
@@ -874,14 +1059,15 @@ fn run_with_context(
                     guard: Some(context.guard.clone()),
                     ..next.clone()
                 };
-                return run_with_context(
-                    *next_kind, pane, client, None, 0, stay_open, &next, &context,
-                );
+                return run_with_context(*next_kind, pane, client, None, 0, &next, &context);
             }
-            return run_with_context(*next_kind, pane, client, None, 0, stay_open, next, context);
+            return run_with_context(*next_kind, pane, client, None, 0, next, context);
         }
         if let ActionCommand::AgentTarget(target) = &selected.command {
-            return focus_agent_menu(target, &context.window, client, stay_open, options);
+            return focus_agent_menu(target, &context.window, client, options);
+        }
+        if matches!(&selected.command, ActionCommand::QuickCreate) {
+            return quick_create_from_menu(kind, pane, client, options, context);
         }
         if let Err(error) = execute_action(selected, context, client, options, kind) {
             // This is an interactive callback: report the failure in the
@@ -892,7 +1078,7 @@ fn run_with_context(
                     launch_error: Some(error.to_string()),
                     ..settings.options(options)
                 };
-                return run(kind, pane, client, None, 0, stay_open, &next);
+                return run(kind, pane, client, None, 0, &next);
             }
             return message(client, &format!("Menu: {error}"));
         }
@@ -981,10 +1167,8 @@ fn run_with_context(
         items,
         searchable: false,
         prompt: None,
-        pager: Some(crate::menu::Pager {
-            before_page: base,
-            after_page: String::new(),
-        }),
+        copy_key: None,
+        wrap_items: false,
     };
     if options.json {
         println!("{}", serde_json::to_string(&menu)?);
@@ -1010,6 +1194,7 @@ fn tmux_action(id: &str, label: &str, key: char, args: &[&str]) -> Action {
         ActionCommand::Tmux(args.iter().map(|v| (*v).into()).collect()),
     )
 }
+
 fn actions(
     kind: StatusMenuKind,
     options: &MenuOptions,
@@ -1017,8 +1202,8 @@ fn actions(
 ) -> (String, Vec<Action>) {
     let mut actions = vec![];
     let mut title = match kind {
-        StatusMenuKind::Menu => tr("Menu", "菜单").into(),
-        StatusMenuKind::Sidebar => "Sidebar".into(),
+        StatusMenuKind::Menu => tr("Workbench", "工作台").into(),
+        StatusMenuKind::Sidebar => tr("Sidebar", "侧边栏").into(),
         StatusMenuKind::Host => {
             let hostname = tmux(&["display-message", "-p", "-t", &context.pane, "#{host}"])
                 .unwrap_or_default();
@@ -1030,7 +1215,7 @@ fn actions(
     let mut back = View::Root;
     match options.view {
         View::Extract => {
-            title = tr("Extract", "提取 · Extract").into();
+            title = tr("Extract", "提取").into();
             for (filter, label, key) in [
                 ("all", tr("General text", "通用文本"), 'a'),
                 ("paragraph", tr("Paragraphs", "段落"), 'p'),
@@ -1059,35 +1244,117 @@ fn actions(
             }
         }
         View::Switch => {
-            title = tr("Switch", "切换 · Switch").into();
+            title = tr("Switch", "切换").into();
+            if kind == StatusMenuKind::Menu {
+                actions.push(Action::new(
+                    "agents",
+                    tr("Agent", "智能体"),
+                    'a',
+                    ActionCommand::Switch(crate::switcher::Kind::Agent),
+                ));
+            }
             for (target, id, label, key) in [
-                (crate::switcher::Kind::Agent, "agents", "Agent", 'a'),
-                (crate::switcher::Kind::Window, "windows", "Window", 'w'),
-                (crate::switcher::Kind::Pane, "switch-panes", "Pane", 'p'),
-                (crate::switcher::Kind::Session, "sessions", "Session", 's'),
+                (
+                    crate::switcher::Kind::Window,
+                    "windows",
+                    tr("Window", "窗口"),
+                    'w',
+                ),
+                (
+                    crate::switcher::Kind::Pane,
+                    "switch-panes",
+                    tr("Pane", "窗格"),
+                    'p',
+                ),
+                (
+                    crate::switcher::Kind::Session,
+                    "sessions",
+                    tr("Session", "会话"),
+                    's',
+                ),
             ] {
                 actions.push(Action::new(id, label, key, ActionCommand::Switch(target)));
             }
         }
         View::Create => {
-            title = tr("Create", "创建 · Create").into();
-            actions.push(quick_agent((|| LaunchSettings::load(&Paths::discover()?))()));
-            actions.extend([
-                nav("launch", "Agent", 'a', kind, options.at(View::Launch)),
-                tmux_action("new", "Window", 'w', &["new-window"]),
-                nav(
-                    "create-pane",
-                    "Pane",
-                    'p',
-                    kind,
-                    options.at(View::CreatePane),
-                ),
-                Action::new("new-session", "Session", 's', ActionCommand::NewSession),
-            ]);
+            title = tr("Create", "创建").into();
+            if kind == StatusMenuKind::Menu {
+                actions.extend([
+                    nav(
+                        "create-agent",
+                        tr("Agent", "智能体"),
+                        'a',
+                        kind,
+                        options.at(View::Launch),
+                    ),
+                    nav(
+                        "create-pane",
+                        tr("Pane", "窗格"),
+                        'p',
+                        kind,
+                        options.at(View::CreatePane),
+                    ),
+                    nav(
+                        "create-window",
+                        tr("Window", "窗口"),
+                        'w',
+                        kind,
+                        options.at(View::CreateWindow),
+                    ),
+                    Action::new(
+                        "new-session",
+                        tr("Session", "会话"),
+                        's',
+                        ActionCommand::NewSession,
+                    ),
+                ]);
+            } else {
+                actions.extend([
+                    tmux_action("new", tr("Window", "窗口"), 'w', &["new-window"]),
+                    nav(
+                        "create-pane",
+                        tr("Pane", "窗格"),
+                        'p',
+                        kind,
+                        options.at(View::CreatePane),
+                    ),
+                    Action::new(
+                        "new-session",
+                        tr("Session", "会话"),
+                        's',
+                        ActionCommand::NewSession,
+                    ),
+                ]);
+                if executable("code") {
+                    actions.push(tmux_action(
+                        "editor",
+                        tr("Open project in VS Code", "在 VS Code 中打开项目"),
+                        'v',
+                        &[
+                            "new-window",
+                            "-n",
+                            "code",
+                            "code .; exec ${SHELL:-/bin/sh} -l",
+                        ],
+                    ));
+                }
+            }
+        }
+        View::CreateWindow => {
+            title = tr("Create Window", "创建窗口").into();
+            if kind == StatusMenuKind::Menu || kind == StatusMenuKind::Tmux {
+                back = View::Create;
+            }
+            actions.push(tmux_action(
+                "new-window",
+                tr("New window", "新建窗口"),
+                'w',
+                &["new-window"],
+            ));
             if executable("code") {
                 actions.push(tmux_action(
                     "editor",
-                    "Open project in VS Code",
+                    tr("Open project in VS Code", "在 VS Code 中打开项目"),
                     'v',
                     &[
                         "new-window",
@@ -1099,7 +1366,7 @@ fn actions(
             }
         }
         View::CreatePane => {
-            title = tr("Create Pane", "创建 Pane").into();
+            title = tr("Create Pane", "创建窗格").into();
             back = View::Create;
             actions.extend([
                 tmux_action(
@@ -1117,26 +1384,46 @@ fn actions(
             ]);
         }
         View::Kill => {
-            title = "Kill".into();
+            title = tr("Close", "关闭").into();
+            if kind == StatusMenuKind::Menu {
+                actions.push(nav(
+                    "kill-agent",
+                    tr("Agent", "智能体"),
+                    'a',
+                    kind,
+                    options.at(View::KillAgent),
+                ));
+            }
             for (view, id, label, key) in [
-                (View::KillAgent, "kill-agent", "Agent", 'a'),
-                (View::KillWindow, "kill-window", "Window", 'w'),
-                (View::KillPane, "kill-pane", "Pane", 'p'),
-                (View::KillSession, "kill-session", "Session", 's'),
+                (View::KillWindow, "kill-window", tr("Window", "窗口"), 'w'),
+                (View::KillPane, "kill-pane", tr("Pane", "窗格"), 'p'),
+                (
+                    View::KillSession,
+                    "kill-session",
+                    tr("Session", "会话"),
+                    's',
+                ),
             ] {
                 actions.push(nav(id, label, key, kind, options.at(view)));
             }
         }
         View::KillAgent | View::KillWindow | View::KillPane | View::KillSession => {
-            back = View::Kill;
+            back = if options.view == View::KillAgent
+                && kind == StatusMenuKind::Agent
+                && options.from_menu
+            {
+                View::Root
+            } else {
+                View::Kill
+            };
             let (target, detail) = match options.view {
                 View::KillAgent => (KillTarget::Agent, agent_title(context)),
-                View::KillWindow => (KillTarget::Window, tmux(&["display-message", "-p", "-t", &context.pane, "Window #{window_index}:#{window_name} (#{window_id}) · Session #{session_name}"]).unwrap_or_else(|_| context.window.clone())),
-                View::KillPane => (KillTarget::Pane, tmux(&["display-message", "-p", "-t", &context.pane, "Pane #{pane_index} (#{pane_id}) · #{pane_current_command} · Window #{window_index}:#{window_name}"]).unwrap_or_else(|_| context.pane.clone())),
-                View::KillSession => (KillTarget::Session, tmux(&["display-message", "-p", "-t", &context.pane, "Session #{session_name} (#{session_id})"]).unwrap_or_else(|_| context.session.clone())),
+                View::KillWindow => (KillTarget::Window, tmux(&["display-message", "-p", "-t", &context.pane, tr("Window #{window_index}:#{window_name} (#{window_id}) · Session #{session_name}", "窗口 #{window_index}:#{window_name} (#{window_id}) · 会话 #{session_name}")]).unwrap_or_else(|_| context.window.clone())),
+                View::KillPane => (KillTarget::Pane, tmux(&["display-message", "-p", "-t", &context.pane, tr("Pane #{pane_index} (#{pane_id}) · #{pane_current_command} · Window #{window_index}:#{window_name}", "窗格 #{pane_index} (#{pane_id}) · #{pane_current_command} · 窗口 #{window_index}:#{window_name}")]).unwrap_or_else(|_| context.pane.clone())),
+                View::KillSession => (KillTarget::Session, tmux(&["display-message", "-p", "-t", &context.pane, tr("Session #{session_name} (#{session_id})", "会话 #{session_name} (#{session_id})")]).unwrap_or_else(|_| context.session.clone())),
                 _ => unreachable!(),
             };
-            title = format!("Kill {}?", target.label());
+            title = format!("{} {}?", tr("Close", "关闭"), target.label());
             actions.push(Action {
                 id: "summary:target".into(),
                 ..Action::note(&detail)
@@ -1144,43 +1431,24 @@ fn actions(
             if !matches!(target, KillTarget::Agent) || context.agent.is_some() {
                 actions.push(Action::new(
                     "confirm-kill",
-                    &format!("Kill {}", target.label()),
+                    &format!("{} {}", tr("Close", "关闭"), target.label()),
                     'y',
                     ActionCommand::Kill(target),
                 ));
-            }
-        }
-        View::Interface => {
-            let current = crate::ui::Mode::current().unwrap_or_default();
-            for (mode, id, label, key) in [
-                (
-                    crate::ui::Mode::Old,
-                    "ui-old",
-                    tr("Classic · tmux menus", "旧版 · tmux 菜单"),
-                    'o',
-                ),
-                (
-                    crate::ui::Mode::New,
-                    "ui-new",
-                    tr("New · list menus", "新版 · 列表菜单"),
-                    'n',
-                ),
-            ] {
-                actions.push(Action::new(
-                    id,
-                    &format!("{} {label}", if current == mode { "●" } else { "○" }),
-                    key,
-                    ActionCommand::SetUi(mode),
-                ));
+            } else {
+                actions.push(Action::note(tr(
+                    "No running Agent",
+                    "当前没有运行中的智能体",
+                )));
             }
         }
         View::AgentTarget => {
-            title = tr("Choose agent", "选择 agent").into();
+            title = tr("Choose Agent", "选择智能体").into();
             if let Ok(targets) = agent_targets(&context.window) {
                 for (index, (pane, _)) in targets.iter().enumerate() {
                     actions.push(Action::new(
                         &format!("target:{pane}"),
-                        &format!("Agent {pane}"),
+                        &format!("{} {pane}", tr("Agent", "智能体")),
                         list_shortcut(index),
                         ActionCommand::AgentTarget(pane.clone()),
                     ));
@@ -1188,10 +1456,18 @@ fn actions(
             }
         }
         View::Launch => {
-            title = tr("Launch · choose agent", "启动 · 选择 agent").into();
-            if kind == StatusMenuKind::Tmux {
+            title = if kind == StatusMenuKind::Menu {
+                tr("Create Agent", "创建智能体").into()
+            } else {
+                tr("Launch · choose Agent", "启动 · 选择智能体").into()
+            };
+            if kind == StatusMenuKind::Menu || kind == StatusMenuKind::Tmux {
                 back = View::Create;
             }
+            actions.push(quick_create(
+                (|| LaunchSettings::load(&Paths::discover()?))(),
+            ));
+            let mut installed_agent = false;
             for (tool, key) in [
                 (Tool::Codex, 'x'),
                 (Tool::Claude, 'c'),
@@ -1199,6 +1475,7 @@ fn actions(
                 (Tool::Opencode, 'o'),
             ] {
                 if executable(tool.name()) {
+                    installed_agent = true;
                     actions.push(nav(
                         tool.name(),
                         tool.label(),
@@ -1216,10 +1493,10 @@ fn actions(
                     ));
                 }
             }
-            if actions.is_empty() {
+            if !installed_agent {
                 actions.push(Action::note(tr(
                     "No coding agents found on PATH",
-                    "PATH 中未找到 coding agent",
+                    "PATH 中未找到编程智能体",
                 )));
             }
         }
@@ -1362,11 +1639,11 @@ fn actions(
                 actions.push(nav(
                     "fast:toggle",
                     if options.no_fast {
-                        tr("Fast: force off · toggle", "Fast：强制关闭 · 切换")
+                        tr("Fast: force off · toggle", "快速模式：强制关闭 · 切换")
                     } else {
                         tr(
                             "Fast: follow recommendation · toggle",
-                            "Fast：跟随推荐 · 切换",
+                            "快速模式：跟随推荐 · 切换",
                         )
                     },
                     'f',
@@ -1378,7 +1655,7 @@ fn actions(
                     },
                 ));
             } else {
-                actions.push(Action::note("Auto approval"));
+                actions.push(Action::note(tr("Auto approval", "自动审批")));
             }
             actions.push(Action {
                 id: "summary".into(),
@@ -1400,44 +1677,58 @@ fn actions(
             } else {
                 actions.push(Action::note(tr(
                     "Required CLI / agent-team is unavailable",
-                    "所需 CLI / agent-team 不可用",
+                    "所需命令行工具 / agent-team 不可用",
                 )));
             }
         }
         View::Panes => {
-            title = tr("Layout", "布局 · Layout").into();
+            title = tr("Layout", "布局").into();
             actions.extend([
-                tmux_action("zoom", "Zoom / unzoom", 'z', &["resize-pane", "-Z"]),
+                tmux_action(
+                    "zoom",
+                    tr("Zoom / unzoom", "放大 / 还原"),
+                    'z',
+                    &["resize-pane", "-Z"],
+                ),
                 tmux_action(
                     "even-horizontal",
-                    "Even horizontal",
+                    tr("Even horizontal", "水平平铺"),
                     'h',
                     &["select-layout", "even-horizontal"],
                 ),
                 tmux_action(
                     "even-vertical",
-                    "Even vertical",
+                    tr("Even vertical", "垂直平铺"),
                     'v',
                     &["select-layout", "even-vertical"],
                 ),
                 tmux_action(
                     "layout",
-                    "Main vertical (prefix Alt+4)",
+                    tr("Main vertical (prefix Alt+4)", "主窗格在左（前缀键 Alt+4）"),
                     '4',
                     &["select-layout", "main-vertical"],
                 ),
-                tmux_action("tiled", "Tile panes", 't', &["select-layout", "tiled"]),
+                tmux_action(
+                    "tiled",
+                    tr("Tile panes", "平铺窗格"),
+                    't',
+                    &["select-layout", "tiled"],
+                ),
             ]);
         }
         View::Team => {
-            title = format!("Team · {}", context.role.as_deref().unwrap_or("members"));
+            title = format!(
+                "{} · {}",
+                tr("Team", "团队"),
+                context.role.as_deref().unwrap_or(tr("members", "成员"))
+            );
             for (index, member) in context.team.iter().enumerate() {
                 let label = format!(
                     "{}{}",
                     if member.pane == context.pane {
-                        "Current: "
+                        tr("Current: ", "当前：")
                     } else {
-                        "Go to "
+                        tr("Go to ", "前往")
                     },
                     member.label
                 );
@@ -1451,7 +1742,7 @@ fn actions(
             if !context.team.is_empty() {
                 actions.push(tmux_action(
                     "layout",
-                    "Restore team layout (Alt+4)",
+                    tr("Restore team layout (Alt+4)", "恢复团队布局（Alt+4）"),
                     'L',
                     &["select-layout", "main-vertical"],
                 ));
@@ -1462,13 +1753,16 @@ fn actions(
             if kind == StatusMenuKind::Agent {
                 back = View::More;
             }
-            actions.push(Action::note("Connect by pasting /adopt in a Feishu topic"));
+            actions.push(Action::note(tr(
+                "Connect by pasting /adopt in a Feishu topic",
+                "在飞书话题中粘贴 /adopt 连接",
+            )));
             if context.agent.is_some() {
                 if context.role.as_deref().is_some_and(|role| role != "lead") {
                     if let Some(lead) = context.team.iter().find(|m| m.label.starts_with("lead")) {
                         actions.push(Action::new(
                             "botmux-lead",
-                            "Go to team lead (recommended)",
+                            tr("Go to team lead (recommended)", "前往团队负责人（推荐）"),
                             'l',
                             ActionCommand::Focus(lead.pane.clone()),
                         ));
@@ -1476,17 +1770,31 @@ fn actions(
                 }
                 actions.push(Action::new(
                     "botmux-connect",
-                    "Prepare this pane's connect command...",
+                    tr(
+                        "Prepare this pane's connect command...",
+                        "生成当前窗格的连接命令...",
+                    ),
                     'c',
                     ActionCommand::Botmux("connect".into()),
                 ));
             }
             for (id, label, key) in [
-                ("status", "Daemon status...", 's'),
-                ("list", "List connections / disconnect help...", 'i'),
-                ("dashboard", "Dashboard URL...", 'd'),
-                ("start", "Start botmux...", 'r'),
-                ("setup", "Configure Feishu bot...", 'u'),
+                ("status", tr("Daemon status...", "守护进程状态..."), 's'),
+                (
+                    "list",
+                    tr(
+                        "List connections / disconnect help...",
+                        "连接列表 / 断开说明...",
+                    ),
+                    'i',
+                ),
+                ("dashboard", tr("Dashboard URL...", "控制面板网址..."), 'd'),
+                ("start", tr("Start botmux...", "启动 Botmux..."), 'r'),
+                (
+                    "setup",
+                    tr("Configure Feishu bot...", "配置飞书机器人..."),
+                    'u',
+                ),
             ] {
                 actions.push(Action::new(
                     &format!("botmux-{id}"),
@@ -1501,7 +1809,7 @@ fn actions(
             if kind == StatusMenuKind::Agent && botmux_available() {
                 actions.push(nav(
                     "botmux",
-                    "Botmux...",
+                    tr("Botmux...", "Botmux..."),
                     'b',
                     kind,
                     options.at(View::Botmux),
@@ -1516,118 +1824,123 @@ fn actions(
         }
         View::Root => match kind {
             StatusMenuKind::Menu => {
-                for (next_kind, id, label, key) in [
-                    (StatusMenuKind::Agent, "agent", "Agent", 'a'),
-                    (StatusMenuKind::Sidebar, "sidebar", "Sidebar", 's'),
-                    (StatusMenuKind::Tmux, "tmux", "Tmux", 't'),
-                    (
-                        StatusMenuKind::Host,
-                        "host",
-                        tr("Host / SSH", "主机 / SSH"),
-                        'h',
+                let submenu = |view| MenuOptions {
+                    from_menu: true,
+                    focus_agent: false,
+                    ..options.at(view)
+                };
+                actions.extend([
+                    nav(
+                        "create",
+                        tr("Create", "创建"),
+                        'c',
+                        kind,
+                        submenu(View::Create),
                     ),
-                ] {
-                    actions.push(nav(
-                        id,
-                        label,
-                        key,
-                        next_kind,
-                        MenuOptions {
-                            from_menu: true,
-                            focus_agent: next_kind == StatusMenuKind::Agent,
-                            ..options.at(View::Root)
-                        },
-                    ));
-                }
+                    nav(
+                        "switch",
+                        tr("Switch", "切换"),
+                        's',
+                        kind,
+                        submenu(View::Switch),
+                    ),
+                    nav("close", tr("Close", "关闭"), 'x', kind, submenu(View::Kill)),
+                    nav(
+                        "layout",
+                        tr("Layout", "布局"),
+                        'l',
+                        kind,
+                        submenu(View::Panes),
+                    ),
+                ]);
                 actions.push(nav(
                     "extract",
-                    tr("Extract", "提取 · Extract"),
+                    tr("Extract", "提取"),
                     'e',
                     kind,
                     options.at(View::Extract),
                 ));
+                actions.push(tmux_action(
+                    "detach",
+                    tr("Detach", "断开连接"),
+                    'd',
+                    &["detach-client"],
+                ));
+                actions.push(nav(
+                    "host",
+                    tr("Host / SSH", "主机 / SSH"),
+                    'h',
+                    StatusMenuKind::Host,
+                    MenuOptions {
+                        from_menu: true,
+                        focus_agent: false,
+                        ..options.at(View::Root)
+                    },
+                ));
                 actions.push(Action::new(
                     "metrics",
                     tr("CPU / resources", "CPU / 资源"),
-                    'c',
+                    'r',
                     ActionCommand::Metrics,
-                ));
-                actions.push(nav(
-                    "interface",
-                    tr("Interface · classic / new", "交互 · 旧版 / 新版"),
-                    'i',
-                    kind,
-                    options.at(View::Interface),
                 ));
             }
             StatusMenuKind::Sidebar => {
                 actions.push(Action::new(
-                    "overview",
-                    tr("Open Sidebar", "打开 Sidebar"),
-                    'b',
-                    ActionCommand::Sidebar,
+                    "visibility",
+                    tr("Show / hide Sidebar", "显示 / 隐藏侧边栏"),
+                    'v',
+                    ActionCommand::SidebarToggle,
                 ));
-                for (target, id, label, key) in [
-                    (
-                        crate::switcher::Kind::Session,
-                        "sessions",
-                        tr("Switch session", "切换会话"),
-                        's',
-                    ),
-                    (
-                        crate::switcher::Kind::Agent,
-                        "agents",
-                        tr("Switch agent", "切换 Agent"),
-                        'a',
-                    ),
-                    (
-                        crate::switcher::Kind::Window,
-                        "windows",
-                        tr("Switch window", "切换窗口"),
-                        'w',
-                    ),
-                    (
-                        crate::switcher::Kind::Pane,
-                        "panes",
-                        tr("Switch pane", "切换窗格"),
-                        'p',
-                    ),
-                ] {
-                    actions.push(Action::new(id, label, key, ActionCommand::Switch(target)));
-                }
+                actions.push(Action::new(
+                    "details",
+                    tr("Toggle details", "切换详情"),
+                    'd',
+                    ActionCommand::SidebarDetails,
+                ));
+                actions.push(Action::new(
+                    "attention-next",
+                    tr("Next attention", "下一条提醒"),
+                    'n',
+                    ActionCommand::AttentionNext,
+                ));
+                actions.push(Action::new(
+                    "reload",
+                    tr("Reload Workbench", "重新加载工作台"),
+                    'r',
+                    ActionCommand::Reload,
+                ));
             }
             StatusMenuKind::Tmux => {
                 actions.extend([
                     nav(
                         "create",
-                        tr("Create", "创建 · Create"),
+                        tr("Create", "创建"),
                         'c',
                         kind,
                         options.at(View::Create),
                     ),
                     nav(
                         "switch",
-                        tr("Switch", "切换 · Switch"),
+                        tr("Switch", "切换"),
                         's',
                         kind,
                         options.at(View::Switch),
                     ),
                     nav(
-                        "extract",
-                        tr("Extract", "提取 · Extract"),
-                        'e',
-                        kind,
-                        options.at(View::Extract),
-                    ),
-                    nav(
                         "panes",
-                        tr("Layout", "布局 · Layout"),
+                        tr("Layout", "布局"),
                         'l',
                         kind,
                         options.at(View::Panes),
                     ),
-                    nav("kill", "Kill", 'k', kind, options.at(View::Kill)),
-                    tmux_action("detach", "Detach", 'd', &["detach-client"]),
+                    nav(
+                        "kill",
+                        tr("Close", "关闭"),
+                        'k',
+                        kind,
+                        options.at(View::Kill),
+                    ),
+                    tmux_action("detach", tr("Detach", "断开连接"), 'd', &["detach-client"]),
                 ]);
             }
             StatusMenuKind::Agent => {
@@ -1641,7 +1954,7 @@ fn actions(
                         {
                             actions.push(Action::new(
                                 &format!("skill:{name}"),
-                                &format!("{name} · Skill"),
+                                &format!("{name} · {}", tr("Skill", "技能")),
                                 key,
                                 ActionCommand::Agent(input),
                             ));
@@ -1670,7 +1983,7 @@ fn actions(
                 if !context.team.is_empty() {
                     actions.push(nav(
                         "team",
-                        "Team members & progress...",
+                        tr("Team members & progress...", "团队成员与进度..."),
                         't',
                         kind,
                         options.at(View::Team),
@@ -1695,18 +2008,30 @@ fn actions(
                     }
                 }
                 if actions.is_empty() {
-                    actions.push(Action::note("No SSH hosts available"));
+                    actions.push(Action::note(tr(
+                        "No SSH hosts available",
+                        "没有可用的 SSH 主机",
+                    )));
                 }
             }
         },
     }
     if options.view != View::Root {
+        let back_options = options.at(back);
+        let back_options = if kind == StatusMenuKind::Menu && back == View::Root {
+            MenuOptions {
+                from_menu: false,
+                ..back_options
+            }
+        } else {
+            back_options
+        };
         actions.push(nav(
             "back",
             crate::menu_footer::back_label(),
             crate::menu_footer::BACK_KEY,
             kind,
-            options.at(back),
+            back_options,
         ));
     } else if options.from_menu && kind != StatusMenuKind::Menu {
         actions.push(nav(
@@ -1775,7 +2100,11 @@ fn reset_card_actions(context: &Context) -> Vec<Action> {
 
 fn agent_title(context: &Context) -> String {
     let Some(agent) = &context.agent else {
-        return format!("No foreground agent · {}", context.pane);
+        return format!(
+            "{} · {}",
+            tr("No foreground agent", "没有前台智能体"),
+            context.pane
+        );
     };
     let name = match agent.kind {
         AgentKind::Codex => "Codex",
@@ -1784,10 +2113,10 @@ fn agent_title(context: &Context) -> String {
         AgentKind::Opencode => "OpenCode",
     };
     let state = match context.state {
-        BaseState::Idle => "idle",
-        BaseState::Working => "working",
-        BaseState::Blocked => "needs input",
-        BaseState::Unknown => "state unknown",
+        BaseState::Idle => tr("idle", "空闲"),
+        BaseState::Working => tr("working", "运行中"),
+        BaseState::Blocked => tr("needs input", "需要输入"),
+        BaseState::Unknown => tr("state unknown", "状态未知"),
     };
     format!(
         "{name} · {state} · {}{}",
@@ -2024,7 +2353,7 @@ fn codex_fast_summary(options: &MenuOptions, recommendation: Option<&serde_json:
             None => tr("not specified by recommendation", "推荐未指定"),
         }
     };
-    format!("Fast: {value}")
+    format!("{}{value}", tr("Fast: ", "快速模式："))
 }
 
 fn codex_quick_fast_summary(
@@ -2032,17 +2361,17 @@ fn codex_quick_fast_summary(
     recommendation: Option<&serde_json::Value>,
 ) -> String {
     if options.no_fast {
-        tr("Fast off (forced)", "Fast 关闭（强制）").into()
+        tr("Fast off (forced)", "快速模式关闭（强制）").into()
     } else if options.recommendation.is_none() || recommendation.is_none() {
-        tr("Fast default", "Fast 默认").into()
+        tr("Fast default", "快速模式默认").into()
     } else {
         match recommendation
             .and_then(|item| item.get("fast"))
             .and_then(serde_json::Value::as_bool)
         {
-            Some(true) => tr("Fast on", "Fast 开启").into(),
-            Some(false) => tr("Fast off", "Fast 关闭").into(),
-            None => tr("Fast unspecified", "Fast 未指定").into(),
+            Some(true) => tr("Fast on", "快速模式开启").into(),
+            Some(false) => tr("Fast off", "快速模式关闭").into(),
+            None => tr("Fast unspecified", "快速模式未指定").into(),
         }
     }
 }
@@ -2245,7 +2574,7 @@ fn summary_lines(config: &serde_json::Value, team: bool) -> Result<Vec<String>> 
         return Ok(vec![
             tr(
                 "Model / thinking: tool defaults",
-                "模型 / thinking: 工具默认配置",
+                "模型 / 推理：使用工具默认配置",
             )
             .into(),
         ]);
@@ -2254,13 +2583,13 @@ fn summary_lines(config: &serde_json::Value, team: bool) -> Result<Vec<String>> 
     let effort = config
         .get("effort")
         .and_then(|value| value.as_str())
-        .unwrap_or("default");
+        .unwrap_or(tr("default", "默认"));
     let mut lines = vec![format!(
-        "{}: {model} · {effort}",
+        "{}{model} · {effort}",
         if team {
-            tr("Lead", "主代理")
+            tr("Lead: ", "主代理：")
         } else {
-            tr("Single", "单人")
+            tr("Single: ", "单人：")
         }
     )];
     if team {
@@ -2272,11 +2601,12 @@ fn summary_lines(config: &serde_json::Value, team: bool) -> Result<Vec<String>> 
             .get("worker_effort")
             .and_then(|value| value.as_str())
             .unwrap_or(effort);
-        lines.push(format!("{}: {worker} · {effort}", tr("Worker", "子代理")));
+        lines.push(format!("{}{worker} · {effort}", tr("Worker: ", "子代理：")));
     }
     if let Some(fast) = config.get("fast").and_then(|value| value.as_bool()) {
         lines.push(format!(
-            "Fast: {}",
+            "{}{}",
+            tr("Fast: ", "快速模式："),
             if fast {
                 tr("on", "开启")
             } else {
@@ -2423,27 +2753,56 @@ fn execute_action(
                 0,
             )?;
         }
-        ActionCommand::SetUi(mode) => {
-            mode.set()?;
-            run(
-                StatusMenuKind::Menu,
-                &context.pane,
-                client,
-                None,
-                0,
-                false,
-                &MenuOptions {
-                    language: options.language.clone(),
-                    ..Default::default()
-                },
-            )?;
+        ActionCommand::SidebarToggle => {
+            let plugin = tmux(&["show-option", "-gqv", "@workbench_plugin_dir"])?;
+            let script = std::path::Path::new(&plugin).join("bin/wb-responsive");
+            if plugin.is_empty() || !script.is_file() {
+                return Err("Sidebar toggle unavailable; reload Workbench".into());
+            }
+            let status = Command::new(script)
+                .args([&context.window, client])
+                .status()?;
+            if !status.success() {
+                return Err(format!("Sidebar toggle exited with {status}").into());
+            }
         }
-        ActionCommand::Sidebar => {
-            crate::sidebar::open_popup(
-                &crate::server::ServerIdentity::discover()?,
-                &context.pane,
-                client,
-            )?;
+        ActionCommand::SidebarDetails => {
+            let panes = tmux(&[
+                "list-panes",
+                "-t",
+                &context.window,
+                "-F",
+                "#{pane_id}|#{@pane_role}",
+            ])?;
+            if let Some(sidebar) = panes.lines().find_map(|line| {
+                let (pane, role) = line.split_once('|')?;
+                (role == "sidebar").then_some(pane)
+            }) {
+                tmux(&["send-keys", "-t", sidebar, "d"])?;
+            } else {
+                crate::sidebar::open_popup_detailed(
+                    &crate::server::ServerIdentity::discover()?,
+                    &context.pane,
+                    client,
+                )?;
+            }
+        }
+        ActionCommand::AttentionNext | ActionCommand::Reload => {
+            let executable = std::env::current_exe()?;
+            let mut command = Command::new(executable);
+            if matches!(&action.command, ActionCommand::AttentionNext) {
+                command.args(["attention", "next"]);
+            } else {
+                command.arg("reload");
+            }
+            let status = command
+                .env("TMUX_PANE", &context.pane)
+                .env("WORKBENCH_TARGET_CLIENT", client)
+                .env("WORKBENCH_SOURCE_PANE", &context.pane)
+                .status()?;
+            if !status.success() {
+                return Err(format!("Workbench action exited with {status}").into());
+            }
         }
         ActionCommand::Extract(filter) => {
             if !executable("tmux-extrakto") {
@@ -2681,7 +3040,10 @@ fn execute_action(
             tmux(&["select-window", "-t", &context.window])?;
             tmux(&["select-pane", "-t", pane])?;
         }
-        ActionCommand::Navigate(..) | ActionCommand::AgentTarget(..) | ActionCommand::Disabled => {
+        ActionCommand::Navigate(..)
+        | ActionCommand::AgentTarget(..)
+        | ActionCommand::QuickCreate
+        | ActionCommand::Disabled => {
             unreachable!()
         }
     }
@@ -2943,7 +3305,11 @@ mod tests {
         };
         assert_eq!(
             codex_fast_summary(&options, Some(&recommendation)),
-            format!("Fast: {}", tr("on · recommendation", "开启 · 推荐值"))
+            format!(
+                "{}{}",
+                tr("Fast: ", "快速模式："),
+                tr("on · recommendation", "开启 · 推荐值")
+            )
         );
         assert_eq!(
             codex_fast_summary(
@@ -2953,7 +3319,11 @@ mod tests {
                 },
                 Some(&recommendation)
             ),
-            format!("Fast: {}", tr("off · forced", "关闭 · 强制"))
+            format!(
+                "{}{}",
+                tr("Fast: ", "快速模式："),
+                tr("off · forced", "关闭 · 强制")
+            )
         );
         assert_eq!(
             codex_fast_summary(
@@ -2964,14 +3334,16 @@ mod tests {
                 None
             ),
             format!(
-                "Fast: {}",
+                "{}{}",
+                tr("Fast: ", "快速模式："),
                 tr("Codex default · no recommendation", "Codex 默认值 · 无推荐")
             )
         );
         assert_eq!(
             codex_fast_summary(&options, None),
             format!(
-                "Fast: {}",
+                "{}{}",
+                tr("Fast: ", "快速模式："),
                 tr(
                     "Codex default · recommendation unavailable",
                     "Codex 默认值 · 推荐不可用"
@@ -2981,13 +3353,18 @@ mod tests {
         assert_eq!(
             codex_fast_summary(&options, Some(&serde_json::json!({}))),
             format!(
-                "Fast: {}",
+                "{}{}",
+                tr("Fast: ", "快速模式："),
                 tr("not specified by recommendation", "推荐未指定")
             )
         );
         assert_eq!(
             codex_fast_summary(&options, Some(&serde_json::json!({"fast": false}))),
-            format!("Fast: {}", tr("off · recommendation", "关闭 · 推荐值"))
+            format!(
+                "{}{}",
+                tr("Fast: ", "快速模式："),
+                tr("off · recommendation", "关闭 · 推荐值")
+            )
         );
     }
 
@@ -3142,7 +3519,7 @@ mod tests {
             summary_lines(&serde_json::Value::Object(config), true).unwrap(),
             vec![tr(
                 "Model / thinking: tool defaults",
-                "模型 / thinking: 工具默认配置"
+                "模型 / 推理：使用工具默认配置"
             )]
         );
     }
@@ -3229,9 +3606,9 @@ mod tests {
         assert_eq!(
             summary,
             [
-                tr("Lead: lead · high", "主代理: lead · high"),
-                tr("Worker: worker · max", "子代理: worker · max"),
-                tr("Fast: off", "Fast: 关闭")
+                tr("Lead: lead · high", "主代理：lead · high"),
+                tr("Worker: worker · max", "子代理：worker · max"),
+                tr("Fast: off", "快速模式：关闭")
             ]
         );
         let route = MenuOptions {
@@ -3259,7 +3636,7 @@ mod tests {
             )
             .unwrap(),
             [
-                tr("Lead: tool default · default", "主代理: 工具默认 · default"),
+                tr("Lead: tool default · default", "主代理：工具默认 · 默认"),
                 tr("Worker: custom · max", "子代理: custom · max")
             ]
         );
@@ -3281,10 +3658,10 @@ mod tests {
             ] {
                 for view in [
                     View::Root,
-                    View::Interface,
                     View::Switch,
                     View::Extract,
                     View::Create,
+                    View::CreateWindow,
                     View::CreatePane,
                     View::Kill,
                     View::KillAgent,
@@ -3328,17 +3705,109 @@ mod tests {
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
             [
-                "agent",
-                "sidebar",
-                "tmux",
-                "host",
-                "extract",
-                "metrics",
-                "interface"
+                "create", "switch", "close", "layout", "extract", "detach", "host", "metrics"
             ]
         );
+        let (_, create) = actions(
+            StatusMenuKind::Menu,
+            &MenuOptions {
+                view: View::Create,
+                ..Default::default()
+            },
+            &context,
+        );
+        assert_eq!(
+            create
+                .iter()
+                .filter(|action| action.id != "back")
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Agent", "Pane", "Window", "Session"]
+        );
+        let (_, agents) = actions(
+            StatusMenuKind::Menu,
+            &MenuOptions {
+                view: View::Launch,
+                ..Default::default()
+            },
+            &context,
+        );
+        assert_eq!(
+            agents.first().map(|action| action.id.as_str()),
+            Some("quick-create")
+        );
+        assert!(matches!(agents[0].command, ActionCommand::QuickCreate));
+        assert!(agents.iter().all(|action| !matches!(
+            action.id.as_str(),
+            "new-window" | "create-pane" | "new-session" | "editor"
+        )));
+        let (_, switch) = actions(
+            StatusMenuKind::Menu,
+            &MenuOptions {
+                view: View::Switch,
+                from_menu: true,
+                ..Default::default()
+            },
+            &context,
+        );
+        assert_eq!(
+            switch
+                .iter()
+                .filter(|action| action.id != "back")
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Agent", "Window", "Pane", "Session"]
+        );
+        let (_, close) = actions(
+            StatusMenuKind::Menu,
+            &MenuOptions {
+                view: View::Kill,
+                from_menu: true,
+                ..Default::default()
+            },
+            &context,
+        );
+        assert_eq!(
+            close
+                .iter()
+                .filter(|action| action.id != "back")
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Agent", "Window", "Pane", "Session"]
+        );
+        let (_, agent_menu) = actions(StatusMenuKind::Agent, &MenuOptions::default(), &context);
+        assert!(agent_menu.iter().all(|action| !matches!(
+            action.id.as_str(),
+            "switch-agent" | "kill-agent" | "create-agent" | "close-agent"
+        )));
+        let (_, sidebar) = actions(StatusMenuKind::Sidebar, &MenuOptions::default(), &context);
+        assert_eq!(
+            sidebar
+                .iter()
+                .map(|action| (action.id.as_str(), action.key))
+                .collect::<Vec<_>>(),
+            [
+                ("visibility", 'v'),
+                ("details", 'd'),
+                ("attention-next", 'n'),
+                ("reload", 'r')
+            ]
+        );
+        let (_, menu_switch) = actions(
+            StatusMenuKind::Menu,
+            &MenuOptions {
+                from_menu: true,
+                view: View::Switch,
+                ..Default::default()
+            },
+            &context,
+        );
+        assert!(menu_switch.iter().any(|action| matches!(
+            &action.command,
+            ActionCommand::Navigate(StatusMenuKind::Menu, options)
+                if action.id == "back" && !options.from_menu
+        )));
         for kind in [
-            StatusMenuKind::Agent,
             StatusMenuKind::Sidebar,
             StatusMenuKind::Tmux,
             StatusMenuKind::Host,
@@ -3358,13 +3827,14 @@ mod tests {
     }
     #[test]
     fn tmux_groups_share_object_order_and_return_to_their_parent() {
+        crate::ui_language::set_language(Some("en"));
         let context = context(None, BaseState::Idle);
         let (_, root) = actions(StatusMenuKind::Tmux, &MenuOptions::default(), &context);
         assert_eq!(
             root.iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            ["create", "switch", "extract", "panes", "kill", "detach"]
+            ["create", "switch", "panes", "kill", "detach"]
         );
         for view in [View::Switch, View::Create, View::Kill] {
             let (_, group) = actions(
@@ -3378,16 +3848,11 @@ mod tests {
             assert_eq!(
                 group
                     .iter()
-                    .filter(|action| action.id != "quick-agent")
-                    .take(4)
+                    .take(3)
                     .map(|action| action.label.as_str())
                     .collect::<Vec<_>>(),
-                ["Agent", "Window", "Pane", "Session"]
+                ["Window", "Pane", "Session"]
             );
-            if view == View::Create {
-                assert_eq!(group[0].id, "quick-agent");
-                assert!(group[0].subtitle.is_some());
-            }
             assert!(group.iter().any(|action| matches!(&action.command,
                 ActionCommand::Navigate(StatusMenuKind::Tmux, next) if action.id == "back" && next.view == View::Root)));
             assert!(
@@ -3398,8 +3863,8 @@ mod tests {
         }
         for (view, parent) in [
             (View::CreatePane, View::Create),
+            (View::CreateWindow, View::Create),
             (View::Launch, View::Create),
-            (View::KillAgent, View::Kill),
             (View::KillWindow, View::Kill),
             (View::KillPane, View::Kill),
             (View::KillSession, View::Kill),
@@ -3423,6 +3888,58 @@ mod tests {
                 assert!(!launch_context(StatusMenuKind::Tmux, view));
             }
         }
+    }
+
+    #[test]
+    fn workbench_categories_use_one_language_at_a_time() {
+        let context = context(None, BaseState::Idle);
+        crate::ui_language::set_language(Some("en"));
+        let (_, english) = actions(StatusMenuKind::Menu, &MenuOptions::default(), &context);
+        assert_eq!(
+            english
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Create",
+                "Switch",
+                "Close",
+                "Layout",
+                "Extract",
+                "Detach",
+                "Host / SSH",
+                "CPU / resources"
+            ]
+        );
+        let (_, english_agent) = actions(StatusMenuKind::Agent, &MenuOptions::default(), &context);
+        assert!(english_agent.iter().all(|action| !matches!(
+            action.label.as_str(),
+            "Switch Agent" | "Kill Agent..." | "Create" | "Switch" | "Close"
+        )));
+
+        crate::ui_language::set_language(Some("zh"));
+        let (_, chinese) = actions(StatusMenuKind::Menu, &MenuOptions::default(), &context);
+        assert_eq!(
+            chinese
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "创建",
+                "切换",
+                "关闭",
+                "布局",
+                "提取",
+                "断开连接",
+                "主机 / SSH",
+                "CPU / 资源"
+            ]
+        );
+        let (_, chinese_agent) = actions(StatusMenuKind::Agent, &MenuOptions::default(), &context);
+        assert!(chinese_agent.iter().all(|action| !matches!(
+            action.label.as_str(),
+            "切换智能体" | "结束智能体..." | "创建" | "切换" | "关闭"
+        )));
     }
     #[test]
     fn targets_and_labels_are_not_shell_or_tmux_code() {

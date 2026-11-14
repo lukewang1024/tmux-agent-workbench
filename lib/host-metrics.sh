@@ -33,3 +33,5 @@ else
 fi
 tmux set-option -g @adaptive_cpu_min_width \
   "$(tmux show-option -gqv @workbench-host-metrics-min-width)"
+# Keep Host visible at every client width; CPU uses its own breakpoint.
+tmux set-option -g @adaptive_host_min_width 0

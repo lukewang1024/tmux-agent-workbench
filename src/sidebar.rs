@@ -89,6 +89,65 @@ impl SidebarView {
     }
 }
 
+const FILTERED_AGENT_STATES: [DisplayState; 4] = [
+    DisplayState::Blocked,
+    DisplayState::Done,
+    DisplayState::Working,
+    DisplayState::Idle,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentStateFilter {
+    visible: [bool; 4],
+}
+
+impl Default for AgentStateFilter {
+    fn default() -> Self {
+        Self { visible: [true; 4] }
+    }
+}
+
+impl AgentStateFilter {
+    fn is_visible(self, state: DisplayState) -> bool {
+        FILTERED_AGENT_STATES
+            .iter()
+            .position(|candidate| *candidate == state)
+            .map(|index| self.visible[index])
+            .unwrap_or(true)
+    }
+
+    fn toggle(&mut self, state: DisplayState) {
+        if let Some(index) = FILTERED_AGENT_STATES
+            .iter()
+            .position(|candidate| *candidate == state)
+        {
+            self.visible[index] = !self.visible[index];
+        }
+    }
+
+    fn enabled(self, state: DisplayState) -> bool {
+        FILTERED_AGENT_STATES
+            .iter()
+            .position(|candidate| *candidate == state)
+            .is_some_and(|index| self.visible[index])
+    }
+}
+
+fn agent_state_counts(snapshot: Option<&Snapshot>) -> [usize; 4] {
+    let mut counts = [0; 4];
+    if let Some(snapshot) = snapshot {
+        for agent in &snapshot.agents {
+            if let Some(index) = FILTERED_AGENT_STATES
+                .iter()
+                .position(|state| *state == agent.display_state)
+            {
+                counts[index] += 1;
+            }
+        }
+    }
+    counts
+}
+
 #[derive(Debug, Clone)]
 enum PinnedCard {
     Agent(FocusCard),
@@ -699,12 +758,21 @@ enum Action {
     Menu,
     Close,
     Sort,
+    Filter(DisplayState),
     Focus(String),
     FocusSession(String),
     ToggleSession(String),
 }
 
 pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_details(paths, server, false)
+}
+
+pub fn run_with_details(
+    paths: &Paths,
+    server: &ServerIdentity,
+    initial_details: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(config) = Config::load(&paths.config_file()) {
         crate::ui_language::set_configured_language(&config.ui.language);
     }
@@ -724,6 +792,7 @@ pub fn run(paths: &Paths, server: &ServerIdentity) -> Result<(), Box<dyn std::er
         server,
         initial_snapshot,
         &runtime_identity,
+        initial_details,
     );
     if let Err(error) = &result {
         let log = paths.state_dir.join("popup-actions.log");
@@ -746,6 +815,27 @@ pub fn open_popup(
     client: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     popup(server, pane, client, &["sidebar"])
+}
+
+pub fn open_popup_with_details(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+    details: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if details {
+        popup(server, pane, client, &["sidebar", "--details"])
+    } else {
+        open_popup(server, pane, client)
+    }
+}
+
+pub fn open_popup_detailed(
+    server: &ServerIdentity,
+    pane: &str,
+    client: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    open_popup_with_details(server, pane, client, true)
 }
 
 pub(crate) fn popup(
@@ -797,13 +887,14 @@ fn switch_sidebar_view(
     sort: AgentSort,
     teams: &TeamIndex,
     expanded: &HashSet<String>,
+    state_filter: AgentStateFilter,
     rows: &mut Vec<Row>,
     navigation: &mut NavigationList<Action>,
 ) -> io::Result<()> {
     *view = view.toggle();
     persist_sidebar_view(paths, *view)?;
     *rows = snapshot
-        .map(|value| view_rows(value, detailed, sort, teams, expanded, *view))
+        .map(|value| view_rows(value, detailed, sort, teams, expanded, *view, state_filter))
         .unwrap_or_default();
     *navigation = NavigationList::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
@@ -840,6 +931,7 @@ fn event_loop(
         Box<dyn std::error::Error>,
     >,
     runtime_identity: &str,
+    initial_details: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = paths.socket_for_server(&server.key);
     let fetch_socket = socket.clone();
@@ -875,7 +967,7 @@ fn event_loop(
             let _ = snapshot_tx.try_send((result, visible, shared_palette));
         }
     });
-    let mut detailed = false;
+    let mut detailed = initial_details;
     let mut agent_sort = Config::load(&paths.config_file())
         .map(|config| config.sidebar.agent_sort)
         .unwrap_or_default();
@@ -906,12 +998,31 @@ fn event_loop(
     let mut pending_view = None;
     let mut pending_sort = None;
     let mut expanded = HashSet::new();
+    let mut state_filter = AgentStateFilter::default();
     let mut rows = snapshot
         .as_ref()
-        .map(|snapshot| view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view))
+        .map(|snapshot| {
+            view_rows(
+                snapshot,
+                detailed,
+                agent_sort,
+                &teams,
+                &expanded,
+                view,
+                state_filter,
+            )
+        })
         .unwrap_or_default();
-    let mut focus_cards =
-        build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
+    let mut focus_cards = build_pinned_cards(
+        view,
+        detailed,
+        agent_sort,
+        &teams,
+        &expanded,
+        &focused,
+        &focused_sessions,
+        snapshot.as_ref(),
+    );
     let mut footer_hover = None;
     let mut navigation = NavigationList::<Action>::default();
     navigation.replace_rows(rows.iter().map(selection_key).collect());
@@ -956,7 +1067,15 @@ fn event_loop(
                     focused_sessions = data.sessions;
                     branches = data.branches;
                     selection_targets = data.selection_targets;
-                    rows = view_rows(&fetched, detailed, agent_sort, &teams, &expanded, view);
+                    rows = view_rows(
+                        &fetched,
+                        detailed,
+                        agent_sort,
+                        &teams,
+                        &expanded,
+                        view,
+                        state_filter,
+                    );
                     if view_changed {
                         navigation = NavigationList::default();
                     }
@@ -1016,8 +1135,16 @@ fn event_loop(
         }
         let notice = connection_notice(disconnected, snapshot.is_some());
         if dirty {
-            focus_cards =
-                build_pinned_cards(view, &rows, &focused, &focused_sessions, snapshot.as_ref());
+            focus_cards = build_pinned_cards(
+                view,
+                detailed,
+                agent_sort,
+                &teams,
+                &expanded,
+                &focused,
+                &focused_sessions,
+                snapshot.as_ref(),
+            );
         }
         let shown_focus = visible_focus_cards(content_height, notice, focus_cards.len());
         let viewport = SidebarViewport::new(content_height, notice, shown_focus);
@@ -1027,11 +1154,13 @@ fn event_loop(
             size.width,
             viewport.row_height as u16,
         ));
+        let status_counts = agent_state_counts(snapshot.as_ref());
         let leading: Vec<_> = action_regions(
             Rect::new(0, 0, size.width, size.height),
             view,
             agent_sort,
             popup_mode(),
+            status_counts,
             &focus_cards[..shown_focus],
             focus_cards.len(),
         )
@@ -1048,6 +1177,8 @@ fn event_loop(
                     agent_sort,
                     focus_cards.len(),
                     shown_focus,
+                    status_counts,
+                    state_filter,
                     footer_hover.as_ref(),
                     palette,
                 )];
@@ -1270,6 +1401,7 @@ fn event_loop(
                             agent_sort,
                             &teams,
                             &expanded,
+                            state_filter,
                             &mut rows,
                             &mut navigation,
                         )?;
@@ -1295,7 +1427,13 @@ fn event_loop(
                             }
                             if let Some(snapshot) = &snapshot {
                                 rows = view_rows(
-                                    snapshot, detailed, agent_sort, &teams, &expanded, view,
+                                    snapshot,
+                                    detailed,
+                                    agent_sort,
+                                    &teams,
+                                    &expanded,
+                                    view,
+                                    state_filter,
                                 );
                                 navigation.replace_rows(rows.iter().map(selection_key).collect());
                             }
@@ -1352,8 +1490,15 @@ fn event_loop(
                     KeyCode::Char('d') => {
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
-                            rows =
-                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                            rows = view_rows(
+                                snapshot,
+                                detailed,
+                                agent_sort,
+                                &teams,
+                                &expanded,
+                                view,
+                                state_filter,
+                            );
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
                     }
@@ -1410,6 +1555,7 @@ fn event_loop(
                     view,
                     agent_sort,
                     popup_mode(),
+                    status_counts,
                     &focus_cards[..shown_focus],
                     focus_cards.len(),
                 );
@@ -1453,6 +1599,7 @@ fn event_loop(
                             agent_sort,
                             &teams,
                             &expanded,
+                            state_filter,
                             &mut rows,
                             &mut navigation,
                         )?;
@@ -1472,8 +1619,31 @@ fn event_loop(
                         next_refresh = Instant::now();
                     }
                     Some(Hit::Action(Action::Menu)) => {
-                        if show_global_menu(Some((mouse.column, mouse.row)))? {
+                        if show_sidebar_menu()? {
                             return Ok(());
+                        }
+                    }
+                    Some(Hit::Action(Action::Filter(state))) => {
+                        let selected = rows.get(navigation.selected).and_then(selection_key);
+                        state_filter.toggle(state);
+                        if let Some(snapshot) = &snapshot {
+                            rows = view_rows(
+                                snapshot,
+                                detailed,
+                                agent_sort,
+                                &teams,
+                                &expanded,
+                                view,
+                                state_filter,
+                            );
+                            navigation = NavigationList::default();
+                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            if let Some(index) = selected.as_ref().and_then(|selected| {
+                                rows.iter()
+                                    .position(|row| selection_key(row).as_ref() == Some(selected))
+                            }) {
+                                navigation.select(index);
+                            }
                         }
                     }
                     Some(Hit::Action(Action::Sort)) => {
@@ -1485,8 +1655,15 @@ fn event_loop(
                         pending_sort = Some((agent_sort, Instant::now()));
                         let _ = refresh_tx.try_send(true);
                         if let Some(snapshot) = &snapshot {
-                            rows =
-                                view_rows(snapshot, detailed, agent_sort, &teams, &expanded, view);
+                            rows = view_rows(
+                                snapshot,
+                                detailed,
+                                agent_sort,
+                                &teams,
+                                &expanded,
+                                view,
+                                state_filter,
+                            );
                             navigation = NavigationList::default();
                             navigation.replace_rows(rows.iter().map(selection_key).collect());
                         }
@@ -1520,7 +1697,13 @@ fn event_loop(
                                 }
                                 if let Some(snapshot) = &snapshot {
                                     rows = view_rows(
-                                        snapshot, detailed, agent_sort, &teams, &expanded, view,
+                                        snapshot,
+                                        detailed,
+                                        agent_sort,
+                                        &teams,
+                                        &expanded,
+                                        view,
+                                        state_filter,
                                     );
                                     navigation
                                         .replace_rows(rows.iter().map(selection_key).collect());
@@ -1649,6 +1832,7 @@ fn key_event_direction(key: KeyCode, is_open: bool) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn build_team_rows(
     snapshot: &Snapshot,
     detailed: bool,
@@ -1656,7 +1840,26 @@ fn build_team_rows(
     teams: &TeamIndex,
     expanded: &HashSet<String>,
 ) -> Vec<Row> {
+    build_team_rows_filtered(
+        snapshot,
+        detailed,
+        agent_sort,
+        teams,
+        expanded,
+        AgentStateFilter::default(),
+    )
+}
+
+fn build_team_rows_filtered(
+    snapshot: &Snapshot,
+    detailed: bool,
+    agent_sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
+    state_filter: AgentStateFilter,
+) -> Vec<Row> {
     let mut agents = snapshot.agents.clone();
+    agents.retain(|agent| state_filter.is_visible(agent.display_state));
     agents.sort_by_key(stable_agent_key);
     // Only group live agents when the validated lead is present. Unmatched
     // agents remain visible independently.
@@ -1801,9 +2004,11 @@ fn view_rows(
     teams: &TeamIndex,
     expanded: &HashSet<String>,
     view: SidebarView,
+    state_filter: AgentStateFilter,
 ) -> Vec<Row> {
     if view == SidebarView::Agents {
-        let mut rows = build_team_rows(snapshot, detailed, sort, teams, expanded);
+        let mut rows =
+            build_team_rows_filtered(snapshot, detailed, sort, teams, expanded, state_filter);
         if let Some(section) = rows
             .iter()
             .position(|row| matches!(row, Row::Section("sessions")))
@@ -1830,16 +2035,34 @@ fn view_rows(
 
 fn build_pinned_cards(
     view: SidebarView,
-    rows: &[Row],
+    detailed: bool,
+    sort: AgentSort,
+    teams: &TeamIndex,
+    expanded: &HashSet<String>,
     focused: &FocusWindows,
     focused_sessions: &FocusSessions,
     snapshot: Option<&Snapshot>,
 ) -> Vec<PinnedCard> {
     match view {
-        SidebarView::Agents => build_focus_cards(rows, focused)
-            .into_iter()
-            .map(PinnedCard::Agent)
-            .collect(),
+        SidebarView::Agents => {
+            let rows = snapshot
+                .map(|value| {
+                    view_rows(
+                        value,
+                        detailed,
+                        sort,
+                        teams,
+                        expanded,
+                        view,
+                        AgentStateFilter::default(),
+                    )
+                })
+                .unwrap_or_default();
+            build_focus_cards(&rows, focused)
+                .into_iter()
+                .map(PinnedCard::Agent)
+                .collect()
+        }
         SidebarView::Sessions => {
             let mut sessions: Vec<_> = snapshot
                 .into_iter()
@@ -2150,13 +2373,6 @@ fn current_agent_instance(
         .map(|agent| agent.instance_id.clone())
 }
 
-fn sort_label(sort: AgentSort) -> &'static str {
-    match sort {
-        AgentSort::Grouped => crate::ui_language::text("grouped", "分组"),
-        AgentSort::Prioritized => crate::ui_language::text("prioritized", "按优先级"),
-    }
-}
-
 #[cfg(test)]
 fn render_row(row: &Row, selected: bool, width: u16) -> Line<'static> {
     render_row_with_palette(row, selected, width, SidebarPalette::default())
@@ -2447,20 +2663,65 @@ fn muted_style_with_palette(palette: SidebarPalette) -> Style {
     Style::default().fg(palette.muted)
 }
 
-/// One layout drives both the Powerline spans and their mouse/touch hit areas.
+#[derive(Clone)]
+struct HeaderPart {
+    text: String,
+    style: Style,
+    action: Option<Action>,
+}
+
+impl HeaderPart {
+    fn width(&self) -> usize {
+        Span::raw(&self.text).width()
+    }
+
+    fn background(&self, fallback: Color) -> Color {
+        self.style.bg.unwrap_or(fallback)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HeaderSeparator {
+    PowerlineForward,
+    PowerlineReverse,
+    PowerlinePill,
+    ThinMuted,
+}
+
+struct HeaderSection {
+    items: Vec<HeaderPart>,
+    separator: HeaderSeparator,
+    spaced: bool,
+}
+
+impl HeaderSection {
+    fn parts(&self, palette: SidebarPalette) -> Vec<HeaderPart> {
+        join_header_items(&self.items, self.separator, self.spaced, palette)
+    }
+}
+
+/// One configured part sequence drives rendering, width selection and hit regions.
 struct HeaderLayout {
-    labels: [String; 4],
-    gap: usize,
+    parts: Vec<HeaderPart>,
 }
 
 impl HeaderLayout {
-    fn new(width: u16, view: SidebarView, sort: AgentSort, total: usize, shown: usize) -> Self {
+    fn new(
+        width: u16,
+        view: SidebarView,
+        sort: AgentSort,
+        total: usize,
+        shown: usize,
+        counts: [usize; 4],
+        state_filter: AgentStateFilter,
+        hovered: Option<&Action>,
+        palette: SidebarPalette,
+    ) -> Self {
         let (label, view_icon) = match view {
             SidebarView::Agents => (crate::ui_language::text("Agents", "智能体"), "󰚩"),
             SidebarView::Sessions => (crate::ui_language::text("Sessions", "会话"), ""),
         };
-        let menu = crate::ui_language::text("menu", "菜单");
-        let icon = match sort {
+        let sort_icon = match sort {
             AgentSort::Grouped => "",
             AgentSort::Prioritized => "",
         };
@@ -2469,92 +2730,342 @@ impl HeaderLayout {
         } else {
             total.to_string()
         };
-        let sort_text = match (view, sort) {
-            (SidebarView::Sessions, AgentSort::Grouped) => crate::ui_language::text("name", "名称"),
-            _ => sort_label(sort),
-        };
-        let short_sort = match sort {
-            AgentSort::Grouped => sort_text,
-            AgentSort::Prioritized => crate::ui_language::text("priority", "优先"),
-        };
-        let candidates = [
-            [
-                format!(" {view_icon} {label} "),
-                format!("  {count} "),
-                format!(" {icon} {sort_text} "),
-                format!("  {menu} "),
-            ],
-            [
-                format!(" {view_icon} {label} "),
-                format!("  {count} "),
-                format!(" {icon} {sort_text} "),
-                "  ".into(),
-            ],
-            [
-                format!(" {view_icon} {label} "),
-                format!("  {count} "),
-                format!(" {icon} {short_sort} "),
-                "  ".into(),
-            ],
-            [
-                format!(" {view_icon} "),
-                format!("  {total} "),
-                format!(" {icon} "),
-                "  ".into(),
-            ],
-            [
-                view_icon.into(),
-                format!("{total}"),
-                icon.into(),
-                "".into(),
-            ],
+        let view_candidates = [
+            format!(" {view_icon} {label}"),
+            format!(" {view_icon}"),
+            view_icon.into(),
         ];
-        let required = |labels: &[String; 4]| {
-            labels
-                .iter()
-                .map(|label| Span::raw(label.as_str()).width())
-                .sum::<usize>()
-                + 4
+        let pinned_candidates = [
+            format!(" {count}"),
+            format!("{shown}"),
+            "".into(),
+            String::new(),
+        ];
+        let wants_states = view == SidebarView::Agents;
+        let try_layout = |show_states| {
+            let right = header_right_parts(
+                show_states,
+                sort_icon,
+                counts,
+                state_filter,
+                hovered,
+                palette,
+            );
+            let right_width = header_parts_width(&right);
+            for view_text in &view_candidates {
+                for pinned_text in &pinned_candidates {
+                    let left = header_left_parts(view_text, pinned_text, hovered, palette);
+                    if header_parts_width(&left) + right_width < usize::from(width) {
+                        return Some((left, right));
+                    }
+                }
+            }
+            None
         };
-        let labels = candidates
-            .iter()
-            .find(|labels| required(labels) <= usize::from(width))
-            .cloned()
-            .unwrap_or_else(|| candidates.last().unwrap().clone());
-        let gap = usize::from(width).saturating_sub(required(&labels));
-        Self { labels, gap }
+
+        let (left, right) = if wants_states && let Some((left, right)) = try_layout(true) {
+            (left, right)
+        } else if let Some((left, right)) = try_layout(false) {
+            (left, right)
+        } else {
+            let left = header_left_parts(view_icon, "", hovered, palette);
+            let right =
+                header_right_parts(false, sort_icon, counts, state_filter, hovered, palette);
+            (left, right)
+        };
+        let used_width = header_parts_width(&left) + header_parts_width(&right);
+        let gap = usize::from(width).saturating_sub(used_width);
+        let mut parts = left;
+        if gap > 0 {
+            parts.push(header_spacer(gap, palette.background));
+        }
+        parts.extend(right);
+        Self { parts }
     }
 
     fn regions(&self, area: Rect) -> Vec<(Rect, Action)> {
         if area.height == 0 {
             return Vec::new();
         }
-        let widths: Vec<_> = self
-            .labels
-            .iter()
-            .map(|label| Span::raw(label.as_str()).width() + 1)
-            .collect();
-        let starts = [
-            0,
-            widths[0],
-            widths[0] + widths[1] + self.gap,
-            widths[0] + widths[1] + self.gap + widths[2],
-        ];
-        [Action::View, Action::Pinned, Action::Sort, Action::Menu]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                let start = starts[index].min(usize::from(area.width));
-                let end = (starts[index] + widths[index]).min(usize::from(area.width));
-                (end > start).then(|| {
-                    (
+        let width = usize::from(area.width);
+        let mut cursor = 0usize;
+        let mut regions = Vec::new();
+        for part in &self.parts {
+            let part_width = part.width();
+            if let Some(action) = &part.action {
+                let start = cursor.min(width);
+                let end = cursor.saturating_add(part_width).min(width);
+                if start < end {
+                    regions.push((
                         Rect::new(area.x + start as u16, area.y, (end - start) as u16, 1),
-                        action,
-                    )
-                })
-            })
-            .collect()
+                        action.clone(),
+                    ));
+                }
+            }
+            cursor = cursor.saturating_add(part_width);
+        }
+        regions
     }
+}
+
+fn header_parts_width(parts: &[HeaderPart]) -> usize {
+    parts.iter().map(HeaderPart::width).sum()
+}
+
+fn header_spacer(width: usize, background: Color) -> HeaderPart {
+    HeaderPart {
+        text: " ".repeat(width),
+        style: Style::default().bg(background),
+        action: None,
+    }
+}
+
+fn header_button(text: &str, action: Action, foreground: Color, background: Color) -> HeaderPart {
+    HeaderPart {
+        text: text.into(),
+        style: Style::default().fg(foreground).bg(background),
+        action: Some(action),
+    }
+}
+
+fn header_separator_part(
+    separator: HeaderSeparator,
+    left: Color,
+    right: Color,
+    palette: SidebarPalette,
+) -> HeaderPart {
+    let (text, foreground, background) = match separator {
+        HeaderSeparator::PowerlineForward => ("", left, right),
+        HeaderSeparator::PowerlineReverse => ("", right, left),
+        HeaderSeparator::PowerlinePill => ("", left, right),
+        HeaderSeparator::ThinMuted => ("", palette.muted, left),
+    };
+    HeaderPart {
+        text: text.into(),
+        style: Style::default().fg(foreground).bg(background),
+        action: None,
+    }
+}
+
+fn append_header_separator(
+    parts: &mut Vec<HeaderPart>,
+    separator: HeaderSeparator,
+    left: Color,
+    right: Color,
+    spaced: bool,
+    palette: SidebarPalette,
+) {
+    if spaced {
+        parts.push(header_spacer(1, left));
+    }
+    parts.push(header_separator_part(separator, left, right, palette));
+    if spaced {
+        parts.push(header_spacer(1, right));
+    }
+}
+
+fn join_header_items(
+    items: &[HeaderPart],
+    separator: HeaderSeparator,
+    spaced: bool,
+    palette: SidebarPalette,
+) -> Vec<HeaderPart> {
+    let mut parts = Vec::new();
+    let mut previous_background = None;
+    for item in items {
+        let background = item.background(palette.background);
+        if let Some(previous) = previous_background {
+            append_header_separator(&mut parts, separator, previous, background, spaced, palette);
+        }
+        parts.push(item.clone());
+        previous_background = Some(background);
+    }
+    parts
+}
+
+fn join_header_sections(
+    sections: &[HeaderSection],
+    separator: HeaderSeparator,
+    spaced: bool,
+    palette: SidebarPalette,
+) -> Vec<HeaderPart> {
+    let mut parts = Vec::new();
+    let mut previous_background = None;
+    for section in sections {
+        let section_parts = section.parts(palette);
+        let Some(first) = section_parts.first() else {
+            continue;
+        };
+        let first_background = first.background(palette.background);
+        if let Some(previous) = previous_background {
+            append_header_separator(
+                &mut parts,
+                separator,
+                previous,
+                first_background,
+                spaced,
+                palette,
+            );
+        }
+        previous_background = section_parts
+            .last()
+            .map(|part| part.background(palette.background));
+        parts.extend(section_parts);
+    }
+    parts
+}
+
+fn header_left_parts(
+    view_text: &str,
+    pinned_text: &str,
+    hovered: Option<&Action>,
+    palette: SidebarPalette,
+) -> Vec<HeaderPart> {
+    let view_background = if hovered == Some(&Action::View) {
+        palette.hover
+    } else {
+        palette.raised
+    };
+    let view_foreground = if hovered == Some(&Action::View) {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let pinned_background = if hovered == Some(&Action::Pinned) {
+        palette.hover
+    } else {
+        palette.selection
+    };
+    let pinned_foreground = if hovered == Some(&Action::Pinned) {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let mut items = vec![header_button(
+        view_text,
+        Action::View,
+        view_foreground,
+        view_background,
+    )];
+    items[0].style = items[0].style.add_modifier(Modifier::BOLD);
+    if !pinned_text.is_empty() {
+        let mut pinned = header_button(
+            pinned_text,
+            Action::Pinned,
+            pinned_foreground,
+            pinned_background,
+        );
+        pinned.style = pinned.style.add_modifier(Modifier::BOLD);
+        items.push(pinned);
+    }
+    let mut parts = HeaderSection {
+        items,
+        separator: HeaderSeparator::PowerlineForward,
+        spaced: true,
+    }
+    .parts(palette);
+    let background = parts
+        .last()
+        .map(|part| part.background(palette.background))
+        .unwrap_or(palette.background);
+    parts.push(header_spacer(1, background));
+    parts.push(header_separator_part(
+        HeaderSeparator::PowerlineForward,
+        background,
+        palette.background,
+        palette,
+    ));
+    parts
+}
+
+fn header_right_parts(
+    show_states: bool,
+    sort_icon: &str,
+    counts: [usize; 4],
+    state_filter: AgentStateFilter,
+    hovered: Option<&Action>,
+    palette: SidebarPalette,
+) -> Vec<HeaderPart> {
+    let sorting = if hovered == Some(&Action::Sort) {
+        palette.hover
+    } else {
+        palette.raised
+    };
+    let menu = if hovered == Some(&Action::Menu) {
+        palette.hover
+    } else {
+        palette.selection
+    };
+    let sort_foreground = if hovered == Some(&Action::Sort) {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let menu_foreground = if hovered == Some(&Action::Menu) {
+        palette.header_hover_foreground
+    } else {
+        palette.header_foreground
+    };
+    let controls = HeaderSection {
+        items: vec![
+            header_button(sort_icon, Action::Sort, sort_foreground, sorting),
+            header_button("", Action::Menu, menu_foreground, menu),
+        ],
+        separator: HeaderSeparator::PowerlinePill,
+        spaced: true,
+    };
+    let mut sections = Vec::new();
+    if show_states {
+        let states_background = palette.selection;
+        let items = FILTERED_AGENT_STATES
+            .iter()
+            .enumerate()
+            .map(|(index, state)| {
+                let action = Action::Filter(*state);
+                let background = if hovered == Some(&action) {
+                    palette.hover
+                } else {
+                    states_background
+                };
+                let foreground = if hovered == Some(&action) {
+                    palette.header_hover_foreground
+                } else {
+                    state_color_with_palette(*state, palette)
+                };
+                HeaderPart {
+                    text: counts[index].to_string(),
+                    style: Style::default().fg(foreground).bg(background).add_modifier(
+                        if state_filter.enabled(*state) {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::DIM
+                        },
+                    ),
+                    action: Some(action),
+                }
+            })
+            .collect();
+        sections.push(HeaderSection {
+            items,
+            separator: HeaderSeparator::ThinMuted,
+            spaced: true,
+        });
+    }
+    sections.push(controls);
+    let content = join_header_sections(&sections, HeaderSeparator::PowerlineReverse, true, palette);
+    let first_background = content
+        .first()
+        .map(|part| part.background(palette.background))
+        .unwrap_or(palette.background);
+    let mut parts = vec![header_separator_part(
+        HeaderSeparator::PowerlineReverse,
+        palette.background,
+        first_background,
+        palette,
+    )];
+    parts.push(header_spacer(1, first_background));
+    parts.extend(content);
+    parts
 }
 
 #[cfg(test)]
@@ -2572,6 +3083,8 @@ fn render_header(
         sort,
         total,
         shown,
+        [0; 4],
+        AgentStateFilter::default(),
         hovered,
         SidebarPalette::default(),
     )
@@ -2583,67 +3096,29 @@ fn render_header_with_palette(
     sort: AgentSort,
     total: usize,
     shown: usize,
+    counts: [usize; 4],
+    state_filter: AgentStateFilter,
     hovered: Option<&Action>,
     palette: SidebarPalette,
 ) -> Line<'static> {
-    let layout = HeaderLayout::new(width, view, sort, total, shown);
-    // Share the status bar's adaptive palette and keep Powerline joins aligned.
-    let selected = |action: Action, color: Color| {
-        if hovered == Some(&action) {
-            palette.hover
-        } else {
-            color
-        }
-    };
-    let view_hovered = hovered == Some(&Action::View);
-    let pinned_hovered = hovered == Some(&Action::Pinned);
-    let sort_hovered = hovered == Some(&Action::Sort);
-    let menu_hovered = hovered == Some(&Action::Menu);
-    let first = selected(Action::View, palette.raised);
-    let pinned = selected(Action::Pinned, palette.selection);
-    let sorting = selected(Action::Sort, palette.selection);
-    let menu = selected(Action::Menu, palette.raised);
-    let view_fg = if view_hovered {
-        palette.header_hover_foreground
-    } else {
-        palette.header_foreground
-    };
-    let pinned_fg = if pinned_hovered {
-        palette.header_hover_foreground
-    } else {
-        palette.header_foreground
-    };
-    let sort_fg = if sort_hovered {
-        palette.header_hover_foreground
-    } else {
-        palette.header_foreground
-    };
-    let menu_fg = if menu_hovered {
-        palette.header_hover_foreground
-    } else {
-        palette.header_foreground
-    };
-    let [agents, count, sort, menu_label] = layout.labels;
-    Line::from(vec![
-        Span::styled(
-            agents,
-            Style::default()
-                .fg(view_fg)
-                .bg(first)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("", Style::default().fg(first).bg(pinned)),
-        Span::styled(count, Style::default().fg(pinned_fg).bg(pinned)),
-        Span::styled("", Style::default().fg(pinned).bg(palette.background)),
-        Span::styled(
-            " ".repeat(layout.gap),
-            Style::default().bg(palette.background),
-        ),
-        Span::styled("", Style::default().fg(sorting).bg(palette.background)),
-        Span::styled(sort, Style::default().fg(sort_fg).bg(sorting)),
-        Span::styled("", Style::default().fg(menu).bg(sorting)),
-        Span::styled(menu_label, Style::default().fg(menu_fg).bg(menu)),
-    ])
+    let layout = HeaderLayout::new(
+        width,
+        view,
+        sort,
+        total,
+        shown,
+        counts,
+        state_filter,
+        hovered,
+        palette,
+    );
+    Line::from(
+        layout
+            .parts
+            .into_iter()
+            .map(|part| Span::styled(part.text, part.style))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn render_close_with_palette(
@@ -2667,6 +3142,7 @@ fn action_regions(
     view: SidebarView,
     agent_sort: AgentSort,
     is_popup: bool,
+    counts: [usize; 4],
     focus_cards: &[PinnedCard],
     total_focus: usize,
 ) -> Vec<(Rect, Action)> {
@@ -2689,8 +3165,18 @@ fn action_regions(
         }
     }
     actions.extend(
-        HeaderLayout::new(area.width, view, agent_sort, total_focus, focus_cards.len())
-            .regions(area),
+        HeaderLayout::new(
+            area.width,
+            view,
+            agent_sort,
+            total_focus,
+            focus_cards.len(),
+            counts,
+            AgentStateFilter::default(),
+            None,
+            SidebarPalette::default(),
+        )
+        .regions(area),
     );
     for (index, card) in focus_cards.iter().enumerate() {
         let y = 1 + 2 * index as u16;
@@ -2722,6 +3208,10 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
         ),
         crate::ui_language::text("-p · pin / unpin item", "-p · 置顶 / 取消置顶"),
         crate::ui_language::text("-1–9 · open a pinned item", "-1–9 · 打开置顶项"),
+        crate::ui_language::text(
+            "-click blocked/done/working/idle counts · filter Agents",
+            "-点击阻塞/完成/进行中/空闲数字 · 筛选智能体",
+        ),
         crate::ui_language::text("-m · item menu", "-m · 项目菜单"),
         crate::ui_language::text("-N · projects", "-N · 项目"),
         crate::ui_language::text("-i · temporary Git tool", "-i · 临时 Git 工具"),
@@ -3752,110 +4242,23 @@ fn show_row_menu(
     }
 }
 
-fn show_global_menu(anchor: Option<(u16, u16)>) -> Result<bool, Box<dyn std::error::Error>> {
-    let executable = std::env::current_exe()?.display().to_string();
-    let executable = shell_quote(&executable);
+fn show_sidebar_menu() -> Result<bool, Box<dyn std::error::Error>> {
     let sidebar_pane = source_pane().ok_or("sidebar source pane unavailable")?;
     if !safe_target(&sidebar_pane, '%') {
         return Err("invalid sidebar pane id".into());
     }
-    let navigation = |kind: &str| -> Result<String, Box<dyn std::error::Error>> {
-        Ok(format!(
-            "run-shell -b {}",
-            shell_quote(&format!(
-                "{} switch {} --pane {} --client {} --return-to {} --language {}",
-                executable,
-                kind,
-                shell_quote(&sidebar_pane),
-                shell_quote(&current_client()?),
-                switch_return_to().name(),
-                crate::ui_language::name()
-            ))
-        ))
-    };
-    let mut items = vec![
-        (
-            crate::ui_language::text("New", "新建"),
-            "N",
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!(
-                    "WORKBENCH_SOURCE_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench pick project",
-                    shell_quote(&current_client()?)
-                ))
-            ),
-        ),
-        (
-            crate::ui_language::text("Temporary Git tool", "临时 Git 工具"),
-            "i",
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!(
-                    "TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench pick repo",
-                    shell_quote(&current_client()?)
-                ))
-            ),
-        ),
-        (
-            crate::ui_language::text("New workspace", "新建工作区"),
-            "W",
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!(
-                    "TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench new --prompt",
-                    shell_quote(&current_client()?)
-                ))
-            ),
-        ),
-        (
-            crate::ui_language::text("New task", "新建任务"),
-            "T",
-            format!(
-                "run-shell -b {}",
-                shell_quote(&format!(
-                    "env -u WORKBENCH_SESSION -u WORKBENCH_TASK -u WORKBENCH_FEATURE TMUX_PANE={sidebar_pane} WORKBENCH_TARGET_CLIENT={} tmux-agent-workbench task new --prompt",
-                    shell_quote(&current_client()?)
-                ))
-            ),
-        ),
-        (
-            crate::ui_language::text("Rebuild projects", "重建项目列表"),
-            "R",
-            "run-shell -b tmux-agent-workbench projects rebuild".into(),
-        ),
-        (
-            crate::ui_language::text("Details", "详情"),
-            "d",
-            format!("send-keys -t {sidebar_pane} d"),
-        ),
-        (
-            crate::ui_language::text("Sessions", "会话"),
-            "s",
-            navigation("session")?,
-        ),
-        (
-            crate::ui_language::text("Agents", "智能体"),
-            "a",
-            navigation("agent")?,
-        ),
-        (
-            crate::ui_language::text("Next", "下一条提醒"),
-            "n",
-            format!("run-shell \"{} attention next\"", executable),
-        ),
-        (
-            crate::ui_language::text("Reload", "重新加载"),
-            "r",
-            format!("run-shell \"{} reload\"", executable),
-        ),
-    ];
-    if popup_mode() {
-        // Once this popup closes there is no sidebar pane to receive these
-        // synthetic keys. The direct keyboard shortcuts remain available in
-        // the TUI; omit only the menu entries whose target would be stale.
-        items.retain(|(label, _, _)| *label != crate::ui_language::text("Details", "详情"));
-    }
-    show_menu("workbench", anchor, anchor.is_some(), &items)
+    let client = current_client()?;
+    run_workbench(
+        &[
+            "status-menu",
+            "sidebar",
+            "--pane",
+            &sidebar_pane,
+            "--client",
+            &client,
+        ],
+        true,
+    )
 }
 
 pub(crate) fn run_workbench(
@@ -4007,9 +4410,6 @@ fn show_menu(
     let client = current_client()?;
     let (x, y) = menu_position(anchor, pointer_bottom_right);
     let mut args = vec![
-        "display-menu".to_owned(),
-        "-M".to_owned(),
-        "-O".to_owned(),
         "-c".to_owned(),
         client.clone(),
         "-T".to_owned(),
@@ -4040,7 +4440,7 @@ fn show_menu(
     }
     args.extend(crate::menu_footer::close_item(!popup_mode()));
     let mut command_args = vec!["display-menu".to_owned(), "--".to_owned()];
-    command_args.extend(args.into_iter().skip(1));
+    command_args.extend(args);
     run_workbench(
         &command_args.iter().map(String::as_str).collect::<Vec<_>>(),
         true,
@@ -4321,6 +4721,7 @@ mod tests {
             SidebarView::Agents,
             AgentSort::Grouped,
             false,
+            [0; 4],
             &cards,
             cards.len(),
         );
@@ -4349,7 +4750,7 @@ mod tests {
 
     #[test]
     fn pinned_header_and_sort_use_one_language_and_match_hit_regions() {
-        for (language, agents, sort) in [
+        for (language, agents, _sort) in [
             ("en", "Agents", "prioritized"),
             ("zh-CN", "智能体", "按优先级"),
             ("ja-JP", "Agents", "prioritized"),
@@ -4359,26 +4760,57 @@ mod tests {
                 render_header(48, SidebarView::Agents, AgentSort::Prioritized, 2, 2, None)
                     .to_string();
             assert!(
-                heading.contains(agents) && heading.contains(" 2") && heading.contains(sort),
+                heading.contains(agents) && heading.contains(" 2"),
                 "{heading}"
             );
             assert!(heading.contains('') && heading.contains(''), "{heading}");
-            for width in [18, 26, 36, 48] {
+            assert!(heading.contains("") && !heading.contains("menu"));
+            assert!(!heading.contains("prioritized") && !heading.contains("按优先级"));
+            for width in [18, 26, 32, 36, 48] {
+                let layout = HeaderLayout::new(
+                    width,
+                    SidebarView::Agents,
+                    AgentSort::Prioritized,
+                    2,
+                    2,
+                    [1, 2, 3, 4],
+                    AgentStateFilter::default(),
+                    None,
+                    SidebarPalette::default(),
+                );
+                let show_states = layout
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part.action.as_ref(), Some(Action::Filter(_))));
                 let actions = action_regions(
                     Rect::new(0, 0, width, 10),
                     SidebarView::Agents,
                     AgentSort::Prioritized,
                     false,
+                    [1, 2, 3, 4],
                     &[],
                     2,
                 );
                 let mut list = NavigationList::<Action>::default();
                 list.replace_rows(vec![]);
-                for expected in [Action::View, Action::Pinned, Action::Sort, Action::Menu] {
-                    let (area, _) = actions
+                for expected in [
+                    Action::View,
+                    Action::Sort,
+                    Action::Menu,
+                    Action::Filter(DisplayState::Blocked),
+                    Action::Filter(DisplayState::Done),
+                    Action::Filter(DisplayState::Working),
+                    Action::Filter(DisplayState::Idle),
+                ] {
+                    let area = actions
                         .iter()
                         .find(|(_, action)| *action == expected)
-                        .unwrap();
+                        .map(|(area, _)| area);
+                    if matches!(expected, Action::Filter(_)) && !show_states {
+                        assert!(area.is_none());
+                        continue;
+                    }
+                    let area = area.unwrap();
                     assert_eq!(
                         list.hit(area.x + area.width / 2, 0, &actions),
                         Some(Hit::Action(expected))
@@ -4391,6 +4823,219 @@ mod tests {
             }
         }
         crate::ui_language::set_language(None);
+    }
+
+    #[test]
+    fn status_counts_filter_agent_rows_and_dim_disabled_states() {
+        let snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        let counts = agent_state_counts(Some(&snapshot));
+        assert_eq!(counts, [1, 0, 0, 0]);
+
+        let all_rows = view_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &TeamIndex::new(),
+            &HashSet::new(),
+            SidebarView::Agents,
+            AgentStateFilter::default(),
+        );
+        assert!(all_rows.iter().any(|row| {
+            row_agent(row).is_some_and(|agent| agent.display_state == DisplayState::Blocked)
+        }));
+
+        let mut filter = AgentStateFilter::default();
+        filter.toggle(DisplayState::Blocked);
+        let filtered_rows = view_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &TeamIndex::new(),
+            &HashSet::new(),
+            SidebarView::Agents,
+            filter,
+        );
+        assert!(!filtered_rows.iter().any(|row| {
+            row_agent(row).is_some_and(|agent| agent.display_state == DisplayState::Blocked)
+        }));
+        filter.toggle(DisplayState::Blocked);
+        let restored_rows = view_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &TeamIndex::new(),
+            &HashSet::new(),
+            SidebarView::Agents,
+            filter,
+        );
+        assert!(restored_rows.iter().any(|row| {
+            row_agent(row).is_some_and(|agent| agent.display_state == DisplayState::Blocked)
+        }));
+        filter.toggle(DisplayState::Blocked);
+
+        let heading = render_header_with_palette(
+            48,
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            1,
+            1,
+            counts,
+            AgentStateFilter::default(),
+            None,
+            SidebarPalette::default(),
+        );
+        assert!(heading.to_string().contains("1  0  0  0"));
+        let blocked = heading
+            .spans
+            .iter()
+            .find(|span| span.content == "1")
+            .unwrap();
+        assert_eq!(blocked.style.fg, Some(SidebarPalette::default().alert));
+
+        let dimmed = render_header_with_palette(
+            48,
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            1,
+            1,
+            counts,
+            filter,
+            None,
+            SidebarPalette::default(),
+        );
+        let blocked = dimmed
+            .spans
+            .iter()
+            .find(|span| span.content == "1")
+            .unwrap();
+        assert_eq!(blocked.style.fg, Some(SidebarPalette::default().alert));
+        assert!(blocked.style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn hidden_agent_state_keeps_pinned_name_and_restores_list_rows() {
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../tests/golden/snapshot-v1.json")).unwrap();
+        snapshot.agents[0].thread_name = Some("Pinned Codex task".into());
+        let agent = snapshot.agents[0].clone();
+        let window = FocusWindow {
+            id: agent.target.window_id.clone(),
+            session_id: agent.target.session_id.clone(),
+            session_name: agent.target.session_name.clone(),
+            name: agent.target.window_name.clone(),
+            index: agent.target.window_index,
+            pane: agent.target.pane_id.clone(),
+            state: agent.display_state,
+            assistant: false,
+        };
+        let focused = FocusWindows::from([(window.id.clone(), window)]);
+        let teams = TeamIndex::new();
+        let expanded = HashSet::new();
+        let mut filter = AgentStateFilter::default();
+        filter.toggle(DisplayState::Blocked);
+
+        let filtered_rows = view_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &expanded,
+            SidebarView::Agents,
+            filter,
+        );
+        assert!(!filtered_rows.iter().any(|row| {
+            row_agent(row).is_some_and(|row_agent| row_agent.instance_id == agent.instance_id)
+        }));
+
+        let pinned = build_pinned_cards(
+            SidebarView::Agents,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &expanded,
+            &focused,
+            &FocusSessions::new(),
+            Some(&snapshot),
+        );
+        let [PinnedCard::Agent(card)] = pinned.as_slice() else {
+            panic!("expected the focused agent to remain pinned");
+        };
+        assert_eq!(
+            card.agent
+                .as_ref()
+                .map(|pinned_agent| pinned_agent.instance_id.as_str()),
+            Some(agent.instance_id.as_str())
+        );
+        assert!(
+            render_focus_card(card, false, 48)[0]
+                .to_string()
+                .contains("Pinned Codex task")
+        );
+
+        filter.toggle(DisplayState::Blocked);
+        let restored_rows = view_rows(
+            &snapshot,
+            false,
+            AgentSort::Grouped,
+            &teams,
+            &expanded,
+            SidebarView::Agents,
+            filter,
+        );
+        assert!(restored_rows.iter().any(|row| {
+            row_agent(row).is_some_and(|row_agent| row_agent.instance_id == agent.instance_id)
+        }));
+    }
+
+    #[test]
+    fn sort_and_menu_icons_use_a_full_height_powerline_separator() {
+        let palette = SidebarPalette::default();
+        let header = render_header_with_palette(
+            48,
+            SidebarView::Agents,
+            AgentSort::Grouped,
+            1,
+            1,
+            [1, 0, 0, 0],
+            AgentStateFilter::default(),
+            None,
+            palette,
+        );
+        let menu = header
+            .spans
+            .iter()
+            .position(|span| span.content == "")
+            .unwrap();
+        let separator = &header.spans[menu - 2];
+        assert_eq!(header.spans[menu - 1].content, " ");
+        assert_eq!(header.spans[menu - 3].content, " ");
+        assert_eq!(separator.content, "");
+        assert_eq!(separator.style.fg, Some(palette.raised));
+        assert_eq!(separator.style.bg, Some(palette.selection));
+        assert!(header.to_string().contains("1  0  0  0"));
+        assert!(header.to_string().contains("0  "));
+        assert!(header.to_string().contains("  "));
+    }
+
+    #[test]
+    fn header_hit_regions_stay_inside_narrow_terminal_widths() {
+        for width in 0..=3 {
+            let actions = action_regions(
+                Rect::new(0, 0, width, 1),
+                SidebarView::Agents,
+                AgentSort::Grouped,
+                false,
+                [1, 2, 3, 4],
+                &[],
+                0,
+            );
+            assert!(
+                actions
+                    .iter()
+                    .all(|(area, _)| area.width > 0 && area.x + area.width <= width)
+            );
+        }
     }
 
     #[test]
@@ -4781,6 +5426,7 @@ mod tests {
             SidebarView::Agents,
             AgentSort::Grouped,
             true,
+            [0; 4],
             &[],
             0,
         );

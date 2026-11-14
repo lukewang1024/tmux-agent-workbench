@@ -358,9 +358,7 @@ menu() {
   trae_line=$(printf '%-25s%s' 'Trae' "$trae_mark")
   opencode_line=$(printf '%-25s%s' 'OpenCode' "$opencode_mark")
 
-  mouse_mode=$("$script_dir/workbench-menu-mouse-mode" "$client" 2>/dev/null || printf '%s\n' mouse)
-  set -- "$script_dir/tmux-agent-workbench-cli" display-menu -- -M
-  [ "$mouse_mode" != mouse ] || set -- "$@" -O
+  set -- "$script_dir/tmux-agent-workbench-cli" display-menu --
   set -- "$@" -C 0 -c "$client" -b rounded -T " Usage · $name " -x C -y C
   set -- "$@" \
     "#{?#{==:1,1},-,}$daily_line" '' '' \
