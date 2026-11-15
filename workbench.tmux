@@ -231,7 +231,12 @@ if [ -n "$ATTENTION_BIN" ]; then
   if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then
     tmux display-message "tmux-agent-workbench: binary $installed_version differs from repo $expected_version; run ./install"
   fi
-  tmux run-shell -b "\"$ATTENTION_BIN\" daemon ensure >/dev/null 2>&1 || tmux display-message 'tmux-agent-workbench: daemon failed to start; run doctor'"
+  # Initial config loading precedes the first session. Starting the daemon
+  # there makes its has-session liveness check exit before tmux is ready.
+  # Reloads can start immediately; cold starts use after-new-session instead.
+  daemon_start="\"$ATTENTION_BIN\" daemon ensure >/dev/null 2>&1 || tmux display-message 'tmux-agent-workbench: daemon failed to start; run doctor'"
+  tmux set-hook -g 'after-new-session[921]' "run-shell -b \"${daemon_start//\"/\\\"}\""
+  tmux run-shell -b "if tmux has-session 2>/dev/null; then $daemon_start; fi"
   tmux set-hook -g 'after-new-window[921]' \
     "run-shell -b '\"$ATTENTION_BIN\" daemon wake >/dev/null 2>&1'"
   tmux set-hook -g 'after-split-window[921]' \
