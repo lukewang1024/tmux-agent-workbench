@@ -68,6 +68,15 @@ export XDG_RUNTIME_DIR="$test_root/runtime"
 export TMUX_AGENT_WORKBENCH_TMUX_SOCKET="$socket"
 export TMUX_AGENT_WORKBENCH_BIN="$binary"
 
+# Integration fixtures must never send notifications or play audio on the host.
+api_mock_bin=$test_root/api-mock-bin
+mkdir -p "$api_mock_bin"
+for api_command in termux-notification termux-media-player termux-vibrate termux-toast; do
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$api_mock_bin/$api_command"
+  chmod +x "$api_mock_bin/$api_command"
+done
+export PATH="$api_mock_bin:$PATH"
+
 # Closing a responsive popup by HUP/INT is a successful user action. Preserve
 # other display-popup failures so tmux still reports real launcher errors.
 responsive_mock_bin=$test_root/responsive-mock-bin

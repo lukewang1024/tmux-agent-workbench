@@ -28,6 +28,7 @@ if command -v bash >/dev/null 2>&1; then
   bash --posix test/test-resolve-session.sh
 fi
 "$python_runner" -B -m unittest discover -s test -p 'test_host_metrics*.py'
+"$python_runner" tests/daemon-startup.py
 "$python_runner" tests/status-prefix-mouse.py
 cargo fmt --check
 cargo test --locked
