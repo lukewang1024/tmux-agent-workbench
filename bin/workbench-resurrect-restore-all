@@ -10,6 +10,10 @@ if ! "$script_dir/workbench-resurrect-team" restore; then
   printf '%s\n' 'workbench resurrect: refusing assistant restore without matching snapshot metadata' >&2
   exit 1
 fi
+if ! "$script_dir/workbench-resurrect-team" remap-restore; then
+  printf '%s\n' 'workbench resurrect: could not map restored assistant panes' >&2
+  exit 1
+fi
 export WORKBENCH_TEAM_RESTORE_HELPER="$script_dir/workbench-resurrect-team"
 failed=0
 if ! "$script_dir/workbench-assistant-sessions" restore; then
