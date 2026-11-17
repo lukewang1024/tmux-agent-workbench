@@ -18,6 +18,13 @@ trae_home=${TRAE_HOME:-$HOME/.trae}
 resurrect_dir=$(workbench_resurrect_dir)
 output="$resurrect_dir/workbench-trae-sessions.json"
 
+# tmux-resurrect runs hooks from the server, where TMUX is not inherited.
+# Give Workbench's native snapshot command the explicit server socket instead.
+if [ -z "${TMUX_AGENT_WORKBENCH_TMUX_SOCKET:-}" ]; then
+	TMUX_AGENT_WORKBENCH_TMUX_SOCKET=$(wb_tmux display-message -p '#{socket_path}')
+	export TMUX_AGENT_WORKBENCH_TMUX_SOCKET
+fi
+
 mkdir -p "$resurrect_dir"
 umask 077
 temporary=$(mktemp "$output.tmp.XXXXXX")
