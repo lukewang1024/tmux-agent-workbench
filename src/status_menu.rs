@@ -10,8 +10,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-const CODEX_RADAR_MENU_CATEGORY_LIMIT: usize = 4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusMenuKind {
     Menu,
@@ -1531,7 +1529,7 @@ fn actions(
                 } else {
                     actions.push(Action::note(tr(
                         "CodexRadar recommendations",
-                        "CodexRadar 站长推荐",
+                        "CodexRadar 场景推荐",
                     )));
                 }
                 for (index, recommendation) in recommendations.iter().enumerate() {
@@ -1548,10 +1546,10 @@ fn actions(
                     if !valid_recommendation_id(id) {
                         continue;
                     }
-                    let key = list_shortcut(index + 1);
-                    if key == '\0' {
-                        continue;
-                    }
+                    // Numeric shortcuts avoid conflicting with mode, permission,
+                    // and navigation keys. Further scenes remain selectable by
+                    // arrow keys or mouse instead of being silently hidden.
+                    let key = "23456789".chars().nth(index).unwrap_or('\0');
                     actions.push(nav(
                         &format!("recommendation:{id}"),
                         &choice_label(
@@ -2479,7 +2477,6 @@ fn codex_radar_menu_recommendations() -> Vec<serde_json::Value> {
 
     categories
         .into_iter()
-        .take(CODEX_RADAR_MENU_CATEGORY_LIMIT)
         .filter_map(|(_, choices)| {
             choices
                 .into_iter()

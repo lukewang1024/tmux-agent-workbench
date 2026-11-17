@@ -88,8 +88,11 @@ tmux metadata only. Agent commands additionally discover and verify the live
 foreground process; changed targets or unavailable actions show a message.
 Launch previews read local agent-team JSON settings and the active CodexRadar
 cache; they do not scan processes or query a model catalog. The Codex menu shows
-the first four distinct remote categories and the newest numeric model version
-within each category. Its Codex defaults choice appears only when no usable
+all distinct scenarios in cache order and the newest numeric model version
+within each category. Agent-team may calculate the choices from benchmark data
+or fall back to Station Picks. The first eight scenarios have numeric shortcuts;
+further scenarios are selectable with navigation keys or the mouse. Its Codex
+defaults choice appears only when no usable
 recommendations are available. Opening Create Agent → Codex prepares the cache
 once for that menu visit. If no cache exists,
 it fetches synchronously. If a cache exists and is at least 24 hours old, it

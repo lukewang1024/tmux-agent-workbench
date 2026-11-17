@@ -471,9 +471,12 @@ one list component across Sidebar and filtered views. New Session prompts for a
 name, starts in the source pane's directory, and switches only the invoking
 client.
 Selecting an agent opens one configuration panel. Codex recommendations are
-loaded dynamically from the active CodexRadar cache. The menu shows the first
-four distinct categories in remote order and keeps the newest numeric model
-version in each category. When recommendations exist, the first one is selected
+loaded dynamically from the active agent-team CodexRadar cache. The menu shows
+all distinct scenarios in cache order and keeps the newest numeric model
+version in each category. Agent-team can publish calculated trade-off choices
+or fall back to the site's Station Picks. The first eight scenarios have
+numeric shortcuts; additional scenarios remain available through navigation or
+mouse. When recommendations exist, the first one is selected
 on entry and the Codex defaults choice is hidden. Without recommendations, the
 menu offers Codex defaults. Trae keeps its daily, hard and batch scenes. All
 tools expose Single/Team and, for Team, Native/tmux choices in the same panel.

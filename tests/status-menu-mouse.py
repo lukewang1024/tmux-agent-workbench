@@ -1501,6 +1501,46 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
+
+        # The complete scene list must be reachable in the real menu, including
+        # both categories that used to be silently dropped after the fourth.
+        menu_json = json.loads(subprocess.check_output(
+            [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+             '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'],
+            env=env, text=True))
+        entries = [item for item in menu_json['items'] if item['id'].startswith('recommendation:')]
+        assert [item['id'] for item in entries] == [
+            'recommendation:pick-daily-sol-high',
+            'recommendation:pick-computer-terra-max',
+            'recommendation:pick-hard-astra-xhigh',
+            'recommendation:pick-background-gpt6-luna-max',
+            'recommendation:pick-realtime-astra-low',
+            'recommendation:pick-blue-team-sol-xhigh',
+        ], entries
+        assert [item['key'] for item in entries] == list('234567')
+        assert any(item['label'] == 'CodexRadar 场景推荐' for item in menu_json['items'])
+        assert not any(item['label'] == 'CodexRadar 站长推荐' for item in menu_json['items'])
+
+        cache_file = radar_cache_dir / 'codexradar-recommendations.json'
+        original_cache = cache_file.read_text()
+        try:
+            expanded = json.loads(original_cache)
+            expanded['recommendations']['items'].extend(
+                {'id': f'extra-{index}', 'source_key': f'extra-{index}',
+                 'label': f'Extra {index}', 'model': 'gpt-6.1-sol', 'effort': 'high'}
+                for index in range(4))
+            cache_file.write_text(json.dumps(expanded))
+            expanded_menu = json.loads(subprocess.check_output(
+                [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                 '--view', 'configure', '--tool', 'codex', '--json'], env=env, text=True))
+            expanded_entries = [item for item in expanded_menu['items']
+                                if item['id'].startswith('recommendation:')]
+            assert len(expanded_entries) == 10
+            assert [item['key'] for item in expanded_entries] == list('23456789') + ['', '']
+            assert all(item['enabled'] for item in expanded_entries)
+        finally:
+            cache_file.write_text(original_cache)
+
         for recommendation_id, shortcut, model, team, panes, expected in [
                 ('pick-daily-sol-high', None, 'gpt-6.1-sol', True, False,
                  ['start', 'codex', '--recommendation', 'pick-daily-sol-high', '--team']),
@@ -1513,7 +1553,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, False,
                  ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team']),
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, True,
-                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux'])]:
+                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux']),
+                ('pick-realtime-astra-low', b'6', 'gpt-6-astra', False, False,
+                 ['start', 'codex', '--recommendation', 'pick-realtime-astra-low']),
+                ('pick-blue-team-sol-xhigh', b'7', 'gpt-5.6-sol', True, False,
+                 ['start', 'codex', '--recommendation', 'pick-blue-team-sol-xhigh', '--team'])]:
             menu = open_menu([core, 'menu', '--pane', pane, '--client', client],
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu, b'Create', b'Switch', b'Close')
@@ -1569,7 +1613,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 tmux('kill-window', '-t', next(w for w in after if w not in before))
                 trace.unlink()
                 drain(.3)
-        print('PASS daily, background and computer remote recommendations launch native/tmux Teams')
+        print('PASS all six recommendation scenes, including interactive and blue-team launches')
 
         for tool in ('claude', 'opencode'):
             for preset, key in (('single', b's'), ('team', b't')):
