@@ -187,6 +187,24 @@ def restored_indexes():
     return mapping
 
 
+def restored_index_maps():
+    """Return live-to-saved and unambiguous saved-to-live pane indexes."""
+    live_to_saved = restored_indexes()
+    saved_to_live = {}
+    ambiguous = set()
+    for (session, window, live), saved in live_to_saved.items():
+        if saved is None:
+            continue
+        key = (session, window, saved)
+        if key in saved_to_live:
+            ambiguous.add(key)
+        else:
+            saved_to_live[key] = live
+    for key in ambiguous:
+        saved_to_live.pop(key, None)
+    return live_to_saved, saved_to_live
+
+
 def remap_assistant_sidecars(mapping):
     directory = sidecar().parent
     for filename in ('assistant-sessions.json', 'workbench-trae-sessions.json'):
@@ -214,6 +232,11 @@ def remap_assistant_sidecars(mapping):
                 atomic(path, data)
         except (OSError, ValueError, TypeError, AttributeError):
             continue
+
+
+def remap_restored_assistant_sidecars():
+    _, saved_to_live = restored_index_maps()
+    remap_assistant_sidecars(saved_to_live)
 
 
 def remap_pane_contents(mapping):
@@ -414,7 +437,20 @@ def restore():
         except OSError:
             pass
     rows = inventory()
-    targets = {(s, w, p): (window, pane, marker, cmd) for s, w, p, window, pane, marker, cmd in rows}
+    live_to_saved = restored_indexes()
+    targets = {}
+    ambiguous_targets = set()
+    for s, w, p, window, pane, marker, cmd in rows:
+        saved_pane = live_to_saved.get((s, w, p), p)
+        if saved_pane is None:
+            continue
+        key = (s, w, saved_pane)
+        if key in targets:
+            ambiguous_targets.add(key)
+        else:
+            targets[key] = (window, pane, marker, cmd)
+    for key in ambiguous_targets:
+        targets.pop(key, None)
     socket = tmux('display-message', '-p', '#{socket_path}')
     stat = os.stat(socket)
     if (not isinstance(saved, dict) or not isinstance(before, dict)
@@ -567,6 +603,8 @@ if __name__ == '__main__':
             before_restore()
         elif sys.argv[1:] == ['restore']:
             restore()
+        elif sys.argv[1:] == ['remap-restore']:
+            remap_restored_assistant_sidecars()
         elif sys.argv[1:] == ['finish-restore']:
             finish_restore()
         elif len(sys.argv) == 4 and sys.argv[1] == 'resume':
