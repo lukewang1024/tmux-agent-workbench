@@ -86,14 +86,14 @@ carry a hash of the target identity and rebuild their available actions before
 executing. Window and launch menus check the pane, session and directory using
 tmux metadata only. Agent commands additionally discover and verify the live
 foreground process; changed targets or unavailable actions show a message.
-Launch previews read local agent-team JSON settings and the active CodexRadar
+Launch previews read local agent-team JSON settings and the active recommendation
 cache; they do not scan processes or query a model catalog. The Codex menu shows
 all distinct scenarios in cache order and the newest numeric model version
-within each category. Agent-team may calculate the choices from benchmark data
-or fall back to Station Picks. The first eight scenarios have numeric shortcuts;
-further scenarios are selectable with navigation keys or the mouse. Its Codex
-defaults choice appears only when no usable
-recommendations are available. Opening Create Agent → Codex prepares the cache
+within each category. Agent-team calculates choices from available benchmark
+data. The first eight scenarios have numeric shortcuts;
+further scenarios are selectable with navigation keys or the mouse. The Codex
+defaults choice remains available whether or not recommendations exist.
+Opening Create Agent → Codex prepares the cache
 once for that menu visit. If no cache exists,
 it fetches synchronously. If a cache exists and is at least 24 hours old, it
 starts a background refresh while keeping the current cache in use. The refresh
@@ -241,7 +241,7 @@ applications, btop and interactive botmux commands retain their own UI.
 
 ## Scene launch policy
 
-Codex recommendation choices come directly from the active CodexRadar cache.
+Codex recommendation choices come from the active agent-team recommendation cache.
 The menu does not define Codex categories or model tiers locally. Opening Create
 Agent → Codex prepares the cache: the first request is synchronous, and a cache
 older than 24 hours refreshes asynchronously while the current cached values
