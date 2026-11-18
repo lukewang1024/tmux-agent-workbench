@@ -1545,21 +1545,30 @@ fn actions(
                         },
                     ));
                 }
-                if codex_radar_cache().is_some_and(|cache| {
+                if let Some(scenes) = codex_radar_cache().and_then(|cache| {
                     cache
                         .get("unavailable_scenes")
                         .and_then(serde_json::Value::as_array)
-                        .is_some_and(|scenes| {
-                            scenes.iter().any(|scene| {
-                                scene.get("key").and_then(serde_json::Value::as_str)
-                                    == Some("computer")
-                            })
-                        })
+                        .cloned()
                 }) {
-                    actions.push(Action::note(tr(
-                        "Computer automation · comparable data unavailable",
-                        "电脑自动化 · 缺少可比数据",
-                    )));
+                    for scene in scenes {
+                        let label = scene
+                            .get("label")
+                            .and_then(serde_json::Value::as_str)
+                            .map(sanitize_remote_label)
+                            .or_else(|| {
+                                (scene.get("key").and_then(serde_json::Value::as_str)
+                                    == Some("computer"))
+                                .then(|| tr("Computer automation", "电脑自动化").into())
+                            });
+                        if let Some(label) = label.filter(|label| !label.is_empty()) {
+                            actions.push(Action::note(&format!(
+                                "{} · {}",
+                                label,
+                                tr("comparable data unavailable", "缺少可比数据")
+                            )));
+                        }
+                    }
                 }
                 if codex_radar_cache().is_some_and(|cache| {
                     cache
@@ -1570,6 +1579,28 @@ fn actions(
                     actions.push(Action::note(tr(
                         "Model availability not verified",
                         "模型可用性未验证",
+                    )));
+                }
+                if codex_radar_cache().is_some_and(|cache| {
+                    cache
+                        .get("source_status")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|sources| {
+                            sources.values().any(|source| {
+                                source
+                                    .get("last_error")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some()
+                                    && source
+                                        .get("fetched_at")
+                                        .and_then(serde_json::Value::as_f64)
+                                        .is_some()
+                            })
+                        })
+                }) {
+                    actions.push(Action::note(tr(
+                        "Some benchmarks failed to refresh · using cached results",
+                        "部分基准更新失败 · 沿用缓存结果",
                     )));
                 }
                 actions.push(nav(

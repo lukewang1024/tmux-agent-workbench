@@ -1543,12 +1543,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert len(expanded_entries) == 10
             assert [item['key'] for item in expanded_entries] == list('23456789') + ['', '']
             assert all(item['enabled'] for item in expanded_entries)
-            expanded['unavailable_scenes'] = [{'key': 'computer'}]
+            expanded['unavailable_scenes'] = [{'key': 'computer'}, {'key': 'daily', 'label': '日常开发'}]
+            expanded['source_status'] = {'modeldial': {'last_error': 'URLError', 'fetched_at': 123}}
             cache_file.write_text(json.dumps(expanded))
             missing_menu = json.loads(subprocess.check_output(
                 [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                  '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'], env=env, text=True))
             assert any('电脑自动化 · 缺少可比数据' in item['label'] for item in missing_menu['items'])
+            assert any('日常开发 · 缺少可比数据' in item['label'] for item in missing_menu['items'])
+            assert any('部分基准更新失败 · 沿用缓存结果' in item['label'] for item in missing_menu['items'])
         finally:
             cache_file.write_text(original_cache)
 
