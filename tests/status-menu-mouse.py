@@ -86,11 +86,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         {'id': 'pick-realtime-astra-low', 'source_key': 'real_time_interaction', 'label': 'Real-time interaction · GPT-6 Astra low', 'model': 'gpt-6-astra', 'effort': 'low'},
         {'id': 'pick-blue-team-sol-xhigh', 'source_key': 'blue_team', 'label': 'Blue team · GPT-5.6 Sol xhigh', 'model': 'gpt-5.6-sol', 'effort': 'xhigh'},
     ]
-    (radar_cache_dir / 'codexradar-recommendations.json').write_text(json.dumps({
-        'version': 2, 'source_url': 'https://api.codexradar.com/api/v1/radar-insights',
+    for item in radar_items:
+        item['worker_model'] = item['model']
+        item['worker_effort'] = item['effort']
+    radar_items[2]['worker_model'] = 'gpt-6.1-sol'
+    (radar_cache_dir / 'recommendations.json').write_text(json.dumps({
+        'version': 2, 'source_url': 'https://www.tbench.ai/?version=4.1',
         'recommendations': {'items': radar_items},
     }))
-    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/codexradar-recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["model"],"worker_effort":item["effort"],"fast":item.get("fast",False)} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
+    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["worker_model"],"worker_effort":item["worker_effort"],"fast":item.get("fast",False)} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
     # Panel previews read the same declarative settings as agent-team. Any
     # --dry-run process on the interaction path is a regression, including
     # the very first agent selection with an empty cache.
@@ -1288,7 +1292,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for key, expected in [(b'x', b'gpt-6.1-sol')]:
             started = time.monotonic()
             os.write(master, key)
-            wait_for_text(client_process, b'CodexRadar recommendations', expected)
+            wait_for_text(client_process, b'Scenario recommendations', expected)
             if key == b'x':
                 print('Cold agent selection redraw milliseconds:', round((time.monotonic() - started) * 1000), flush=True)
             drain(0.15)
@@ -1518,10 +1522,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             'recommendation:pick-blue-team-sol-xhigh',
         ], entries
         assert [item['key'] for item in entries] == list('234567')
-        assert any(item['label'] == 'CodexRadar 场景推荐' for item in menu_json['items'])
-        assert not any(item['label'] == 'CodexRadar 站长推荐' for item in menu_json['items'])
+        assert any(item['label'] == '场景推荐' for item in menu_json['items'])
+        assert not any('CodexRadar' in item['label'] for item in menu_json['items'])
+        assert any(item['id'] == 'codex:defaults' for item in menu_json['items'])
 
-        cache_file = radar_cache_dir / 'codexradar-recommendations.json'
+        cache_file = radar_cache_dir / 'recommendations.json'
         original_cache = cache_file.read_text()
         try:
             expanded = json.loads(original_cache)
@@ -1538,6 +1543,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             assert len(expanded_entries) == 10
             assert [item['key'] for item in expanded_entries] == list('23456789') + ['', '']
             assert all(item['enabled'] for item in expanded_entries)
+            expanded['unavailable_scenes'] = [{'key': 'computer'}]
+            cache_file.write_text(json.dumps(expanded))
+            missing_menu = json.loads(subprocess.check_output(
+                [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                 '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'], env=env, text=True))
+            assert any('电脑自动化 · 缺少可比数据' in item['label'] for item in missing_menu['items'])
         finally:
             cache_file.write_text(original_cache)
 
@@ -1567,7 +1578,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             wait_for_text(client_process, b'Quick create', b'Codex', b'Claude Code')
             drain(0.15)
             os.write(master, b'x')
-            rendered = wait_for_text(client_process, b'CodexRadar recommendations', b'gpt-6.1-sol')
+            rendered = wait_for_text(client_process, b'Scenario recommendations', b'gpt-6.1-sol')
             if shortcut is not None:
                 # Arrow through the tier list and confirm with Enter. This
                 # used to launch the first tier before applying the choice.
@@ -1576,7 +1587,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             if team:
                 os.write(master, b't')
                 rendered = wait_for_text(client_process, model.encode())
-                assert ('Worker: ' + model).encode() in screen_text(rendered)
+                worker = 'gpt-6.1-sol' if recommendation_id == 'pick-hard-astra-xhigh' else model
+                assert ('Worker: ' + worker).encode() in screen_text(rendered)
             assert '临时调整'.encode() not in screen_text(rendered)
             if panes:
                 os.write(master, b'm')
