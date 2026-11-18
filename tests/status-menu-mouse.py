@@ -1549,9 +1549,9 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             missing_menu = json.loads(subprocess.check_output(
                 [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
                  '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'], env=env, text=True))
-            assert any('电脑自动化 · 缺少可比数据' in item['label'] for item in missing_menu['items'])
-            assert any('日常开发 · 缺少可比数据' in item['label'] for item in missing_menu['items'])
-            assert any('部分基准更新失败 · 沿用缓存结果' in item['label'] for item in missing_menu['items'])
+            assert any('电脑自动化 · 暂无推荐' in item['label'] for item in missing_menu['items'])
+            assert any('日常开发 · 暂无推荐' in item['label'] for item in missing_menu['items'])
+            assert not any('基准' in item['label'] for item in missing_menu['items'])
         finally:
             cache_file.write_text(original_cache)
 

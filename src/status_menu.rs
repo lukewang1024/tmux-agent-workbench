@@ -1565,7 +1565,7 @@ fn actions(
                             actions.push(Action::note(&format!(
                                 "{} · {}",
                                 label,
-                                tr("comparable data unavailable", "缺少可比数据")
+                                tr("recommendation unavailable", "暂无推荐")
                             )));
                         }
                     }
@@ -1579,28 +1579,6 @@ fn actions(
                     actions.push(Action::note(tr(
                         "Model availability not verified",
                         "模型可用性未验证",
-                    )));
-                }
-                if codex_radar_cache().is_some_and(|cache| {
-                    cache
-                        .get("source_status")
-                        .and_then(serde_json::Value::as_object)
-                        .is_some_and(|sources| {
-                            sources.values().any(|source| {
-                                source
-                                    .get("last_error")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some()
-                                    && source
-                                        .get("fetched_at")
-                                        .and_then(serde_json::Value::as_f64)
-                                        .is_some()
-                            })
-                        })
-                }) {
-                    actions.push(Action::note(tr(
-                        "Some benchmarks failed to refresh · using cached results",
-                        "部分基准更新失败 · 沿用缓存结果",
                     )));
                 }
                 actions.push(nav(
