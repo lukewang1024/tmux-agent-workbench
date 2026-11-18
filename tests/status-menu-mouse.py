@@ -86,11 +86,15 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         {'id': 'pick-realtime-astra-low', 'source_key': 'real_time_interaction', 'label': 'Real-time interaction · GPT-6 Astra low', 'model': 'gpt-6-astra', 'effort': 'low'},
         {'id': 'pick-blue-team-sol-xhigh', 'source_key': 'blue_team', 'label': 'Blue team · GPT-5.6 Sol xhigh', 'model': 'gpt-5.6-sol', 'effort': 'xhigh'},
     ]
-    (radar_cache_dir / 'codexradar-recommendations.json').write_text(json.dumps({
-        'version': 2, 'source_url': 'https://api.codexradar.com/api/v1/radar-insights',
+    for item in radar_items:
+        item['worker_model'] = item['model']
+        item['worker_effort'] = item['effort']
+    radar_items[2]['worker_model'] = 'gpt-6.1-sol'
+    (radar_cache_dir / 'recommendations.json').write_text(json.dumps({
+        'version': 2, 'source_url': 'https://www.tbench.ai/?version=4.1',
         'recommendations': {'items': radar_items},
     }))
-    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/codexradar-recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["model"],"worker_effort":item["effort"],"fast":item.get("fast",False)} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
+    preview.write_text('import json, os, sys\nfrom pathlib import Path\na=sys.argv[1:]\ntool=a[1]\nchoice=a[a.index("--recommendation")+1] if "--recommendation" in a else None\ncache=Path(os.environ["XDG_CACHE_HOME"],"agent-team/recommendations.json")\nitems=json.loads(cache.read_text())["recommendations"]["items"]\nitem=next((x for x in items if x["id"]==choice),None)\nteam="--team" in a\ncfg={"model":item["model"],"effort":item["effort"],"worker_model":item["worker_model"],"worker_effort":item["worker_effort"],"fast":item.get("fast",False)} if item else {"fast":False}\nprint(json.dumps({"config":cfg}))\n')
     # Panel previews read the same declarative settings as agent-team. Any
     # --dry-run process on the interaction path is a regression, including
     # the very first agent selection with an empty cache.
@@ -1288,7 +1292,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         for key, expected in [(b'x', b'gpt-6.1-sol')]:
             started = time.monotonic()
             os.write(master, key)
-            wait_for_text(client_process, b'CodexRadar recommendations', expected)
+            wait_for_text(client_process, b'Scenario recommendations', expected)
             if key == b'x':
                 print('Cold agent selection redraw milliseconds:', round((time.monotonic() - started) * 1000), flush=True)
             drain(0.15)
@@ -1501,6 +1505,56 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             'tmux new-window -t "$session" -n test-team -c "$PWD" ' + shlex.quote(str(shim / 'codex')) + '\n' +
             ';; *) exec ' + shlex.quote(str(shim / 'codex')) + ' ;; esac\n')
         team_cli.chmod(0o755)
+
+        # The complete scene list must be reachable in the real menu, including
+        # both categories that used to be silently dropped after the fourth.
+        menu_json = json.loads(subprocess.check_output(
+            [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+             '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'],
+            env=env, text=True))
+        entries = [item for item in menu_json['items'] if item['id'].startswith('recommendation:')]
+        assert [item['id'] for item in entries] == [
+            'recommendation:pick-daily-sol-high',
+            'recommendation:pick-computer-terra-max',
+            'recommendation:pick-hard-astra-xhigh',
+            'recommendation:pick-background-gpt6-luna-max',
+            'recommendation:pick-realtime-astra-low',
+            'recommendation:pick-blue-team-sol-xhigh',
+        ], entries
+        assert [item['key'] for item in entries] == list('234567')
+        assert any(item['label'] == '场景推荐' for item in menu_json['items'])
+        assert not any('CodexRadar' in item['label'] for item in menu_json['items'])
+        assert any(item['id'] == 'codex:defaults' for item in menu_json['items'])
+
+        cache_file = radar_cache_dir / 'recommendations.json'
+        original_cache = cache_file.read_text()
+        try:
+            expanded = json.loads(original_cache)
+            expanded['recommendations']['items'].extend(
+                {'id': f'extra-{index}', 'source_key': f'extra-{index}',
+                 'label': f'Extra {index}', 'model': 'gpt-6.1-sol', 'effort': 'high'}
+                for index in range(4))
+            cache_file.write_text(json.dumps(expanded))
+            expanded_menu = json.loads(subprocess.check_output(
+                [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                 '--view', 'configure', '--tool', 'codex', '--json'], env=env, text=True))
+            expanded_entries = [item for item in expanded_menu['items']
+                                if item['id'].startswith('recommendation:')]
+            assert len(expanded_entries) == 10
+            assert [item['key'] for item in expanded_entries] == list('23456789') + ['', '']
+            assert all(item['enabled'] for item in expanded_entries)
+            expanded['unavailable_scenes'] = [{'key': 'computer'}, {'key': 'daily', 'label': '日常开发'}]
+            expanded['source_status'] = {'modeldial': {'last_error': 'URLError', 'fetched_at': 123}}
+            cache_file.write_text(json.dumps(expanded))
+            missing_menu = json.loads(subprocess.check_output(
+                [core, 'status-menu', 'tmux', '--pane', pane, '--client', client,
+                 '--view', 'configure', '--tool', 'codex', '--language', 'zh', '--json'], env=env, text=True))
+            assert any('电脑自动化 · 暂无推荐' in item['label'] for item in missing_menu['items'])
+            assert any('日常开发 · 暂无推荐' in item['label'] for item in missing_menu['items'])
+            assert not any('基准' in item['label'] for item in missing_menu['items'])
+        finally:
+            cache_file.write_text(original_cache)
+
         for recommendation_id, shortcut, model, team, panes, expected in [
                 ('pick-daily-sol-high', None, 'gpt-6.1-sol', True, False,
                  ['start', 'codex', '--recommendation', 'pick-daily-sol-high', '--team']),
@@ -1513,7 +1567,11 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, False,
                  ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team']),
                 ('pick-computer-terra-max', b'3', 'gpt-6.1-terra', True, True,
-                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux'])]:
+                 ['start', 'codex', '--recommendation', 'pick-computer-terra-max', '--team', '--tmux']),
+                ('pick-realtime-astra-low', b'6', 'gpt-6-astra', False, False,
+                 ['start', 'codex', '--recommendation', 'pick-realtime-astra-low']),
+                ('pick-blue-team-sol-xhigh', b'7', 'gpt-5.6-sol', True, False,
+                 ['start', 'codex', '--recommendation', 'pick-blue-team-sol-xhigh', '--team'])]:
             menu = open_menu([core, 'menu', '--pane', pane, '--client', client],
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             wait_for_text(menu, b'Create', b'Switch', b'Close')
@@ -1523,7 +1581,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             wait_for_text(client_process, b'Quick create', b'Codex', b'Claude Code')
             drain(0.15)
             os.write(master, b'x')
-            rendered = wait_for_text(client_process, b'CodexRadar recommendations', b'gpt-6.1-sol')
+            rendered = wait_for_text(client_process, b'Scenario recommendations', b'gpt-6.1-sol')
             if shortcut is not None:
                 # Arrow through the tier list and confirm with Enter. This
                 # used to launch the first tier before applying the choice.
@@ -1532,7 +1590,8 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
             if team:
                 os.write(master, b't')
                 rendered = wait_for_text(client_process, model.encode())
-                assert ('Worker: ' + model).encode() in screen_text(rendered)
+                worker = 'gpt-6.1-sol' if recommendation_id == 'pick-hard-astra-xhigh' else model
+                assert ('Worker: ' + worker).encode() in screen_text(rendered)
             assert '临时调整'.encode() not in screen_text(rendered)
             if panes:
                 os.write(master, b'm')
@@ -1569,7 +1628,7 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
                 tmux('kill-window', '-t', next(w for w in after if w not in before))
                 trace.unlink()
                 drain(.3)
-        print('PASS daily, background and computer remote recommendations launch native/tmux Teams')
+        print('PASS all six recommendation scenes, including interactive and blue-team launches')
 
         for tool in ('claude', 'opencode'):
             for preset, key in (('single', b's'), ('team', b't')):

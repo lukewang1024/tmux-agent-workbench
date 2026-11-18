@@ -10,8 +10,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-const CODEX_RADAR_MENU_CATEGORY_LIMIT: usize = 4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusMenuKind {
     Menu,
@@ -1508,31 +1506,11 @@ fn actions(
                 let recommendations = codex_radar_menu_recommendations();
                 if recommendations.is_empty() {
                     actions.push(Action::note(tr(
-                        "CodexRadar recommendations unavailable · using Codex defaults",
-                        "CodexRadar 推荐暂不可用 · 将使用 Codex 默认值",
+                        "Recommendations unavailable · using Codex defaults",
+                        "推荐暂不可用 · 将使用 Codex 默认值",
                     )));
-                    actions.push(nav(
-                        "recommendation:default",
-                        &choice_label(
-                            tr(
-                                "Codex defaults · native model and effort",
-                                "Codex 默认值 · 使用原生模型与档位",
-                            ),
-                            true,
-                        ),
-                        list_shortcut(0),
-                        kind,
-                        MenuOptions {
-                            recommendation: None,
-                            launch_error: None,
-                            ..options.at(View::Configure)
-                        },
-                    ));
                 } else {
-                    actions.push(Action::note(tr(
-                        "CodexRadar recommendations",
-                        "CodexRadar 站长推荐",
-                    )));
+                    actions.push(Action::note(tr("Scenario recommendations", "场景推荐")));
                 }
                 for (index, recommendation) in recommendations.iter().enumerate() {
                     let Some(id) = recommendation.get("id").and_then(serde_json::Value::as_str)
@@ -1548,10 +1526,10 @@ fn actions(
                     if !valid_recommendation_id(id) {
                         continue;
                     }
-                    let key = list_shortcut(index + 1);
-                    if key == '\0' {
-                        continue;
-                    }
+                    // Numeric shortcuts avoid conflicting with mode, permission,
+                    // and navigation keys. Further scenes remain selectable by
+                    // arrow keys or mouse instead of being silently hidden.
+                    let key = "23456789".chars().nth(index).unwrap_or('\0');
                     actions.push(nav(
                         &format!("recommendation:{id}"),
                         &choice_label(
@@ -1567,6 +1545,59 @@ fn actions(
                         },
                     ));
                 }
+                if let Some(scenes) = codex_radar_cache().and_then(|cache| {
+                    cache
+                        .get("unavailable_scenes")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                }) {
+                    for scene in scenes {
+                        let label = scene
+                            .get("label")
+                            .and_then(serde_json::Value::as_str)
+                            .map(sanitize_remote_label)
+                            .or_else(|| {
+                                (scene.get("key").and_then(serde_json::Value::as_str)
+                                    == Some("computer"))
+                                .then(|| tr("Computer automation", "电脑自动化").into())
+                            });
+                        if let Some(label) = label.filter(|label| !label.is_empty()) {
+                            actions.push(Action::note(&format!(
+                                "{} · {}",
+                                label,
+                                tr("recommendation unavailable", "暂无推荐")
+                            )));
+                        }
+                    }
+                }
+                if codex_radar_cache().is_some_and(|cache| {
+                    cache
+                        .get("catalog_verified")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+                }) {
+                    actions.push(Action::note(tr(
+                        "Model availability not verified",
+                        "模型可用性未验证",
+                    )));
+                }
+                actions.push(nav(
+                    "codex:defaults",
+                    &choice_label(
+                        tr(
+                            "Codex defaults · choose model after launch",
+                            "Codex 默认值 · 启动后可选模型",
+                        ),
+                        options.recommendation.is_none(),
+                    ),
+                    '0',
+                    kind,
+                    MenuOptions {
+                        recommendation: None,
+                        launch_error: None,
+                        ..options.at(View::Configure)
+                    },
+                ));
             } else if options.tool == Tool::Traex {
                 actions.push(Action::note(tr("Scene", "场景")));
                 for &(scene, key) in Scene::choices(options.tool) {
@@ -2213,7 +2244,7 @@ fn choice_label(label: &str, selected: bool) -> String {
     format!("{} {label}", if selected { "●" } else { "○" })
 }
 
-// Preview fields from the launcher's local JSON and the active CodexRadar cache.
+// Preview fields from the launcher's local JSON and the recommendation cache.
 // Preparing the cache happens once when the interactive Codex Configure view opens.
 // The launcher remains responsible for validation and the actual launch plan.
 fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
@@ -2233,8 +2264,10 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
                     }
                 }
                 if team {
-                    for (target, source) in [("worker_model", "model"), ("worker_effort", "effort")]
-                    {
+                    for (target, source) in [
+                        ("worker_model", "worker_model"),
+                        ("worker_effort", "worker_effort"),
+                    ] {
                         if let Some(value) = recommendation
                             .get(source)
                             .and_then(serde_json::Value::as_str)
@@ -2257,8 +2290,8 @@ fn launch_summary(options: &MenuOptions) -> Result<Vec<String>> {
         if missing {
             lines.push(
                 tr(
-                    "No CodexRadar tier selected; using Codex defaults",
-                    "未选择可用的 CodexRadar 档位；将使用 Codex 默认值",
+                    "No recommendation selected; using Codex defaults",
+                    "未选择可用的推荐档位；将使用 Codex 默认值",
                 )
                 .into(),
             );
@@ -2389,7 +2422,7 @@ fn parse_recommendation_id(value: &str) -> std::result::Result<String, String> {
     if valid_recommendation_id(value) {
         Ok(value.to_owned())
     } else {
-        Err("invalid CodexRadar recommendation id".into())
+        Err("invalid recommendation id".into())
     }
 }
 
@@ -2405,7 +2438,7 @@ fn codex_radar_cache() -> Option<serde_json::Value> {
     let cache_root = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))?;
-    let cache_path = cache_root.join("agent-team/codexradar-recommendations.json");
+    let cache_path = cache_root.join("agent-team/recommendations.json");
     let bytes = std::fs::read(cache_path).ok()?;
     let cache: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     (cache.get("version").and_then(serde_json::Value::as_u64) == Some(2)).then_some(cache)
@@ -2479,7 +2512,6 @@ fn codex_radar_menu_recommendations() -> Vec<serde_json::Value> {
 
     categories
         .into_iter()
-        .take(CODEX_RADAR_MENU_CATEGORY_LIMIT)
         .filter_map(|(_, choices)| {
             choices
                 .into_iter()
@@ -2501,9 +2533,25 @@ fn codex_radar_recommendation(id: &str) -> Option<serde_json::Value> {
     if !valid_recommendation_id(id) {
         return None;
     }
-    codex_radar_recommendations()
-        .into_iter()
+    let cache = codex_radar_cache()?;
+    std::iter::once(&cache)
+        .chain(
+            cache
+                .get("history")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .flat_map(|snapshot| {
+            snapshot
+                .get("recommendations")
+                .and_then(|r| r.get("items"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
         .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .cloned()
 }
 
 fn has_summary_tier_pair(
@@ -2626,7 +2674,7 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
     if options.tool == Tool::Codex {
         if let Some(recommendation) = options.recommendation.as_deref() {
             if !valid_recommendation_id(recommendation) {
-                return Err("Invalid CodexRadar recommendation id".into());
+                return Err("Invalid recommendation id".into());
             }
             args.extend(["--recommendation".into(), recommendation.into()]);
         }

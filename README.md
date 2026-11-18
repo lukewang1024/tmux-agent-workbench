@@ -471,21 +471,25 @@ one list component across Sidebar and filtered views. New Session prompts for a
 name, starts in the source pane's directory, and switches only the invoking
 client.
 Selecting an agent opens one configuration panel. Codex recommendations are
-loaded dynamically from the active CodexRadar cache. The menu shows the first
-four distinct categories in remote order and keeps the newest numeric model
-version in each category. When recommendations exist, the first one is selected
-on entry and the Codex defaults choice is hidden. Without recommendations, the
-menu offers Codex defaults. Trae keeps its daily, hard and batch scenes. All
+loaded dynamically from the active agent-team recommendation cache. The menu shows
+all distinct scenarios in cache order and keeps the newest numeric model
+version in each category. Agent-team calculates choices from the available
+benchmark data. The first eight scenarios have
+numeric shortcuts; additional scenarios remain available through navigation or
+mouse. When recommendations exist, the first one is selected on entry. The
+Codex defaults choice remains available regardless of recommendations. Trae
+keeps its daily, hard and batch scenes. All
 tools expose Single/Team and, for Team, Native/tmux choices in the same panel.
 Codex has a Fast control that follows the selected recommendation by default or
 forces Fast off. The preview shows the recommendation's Fast value, the
 explicit override, or the Codex default when no recommendation is available.
 
-The panel previews the selected model and effort from the CodexRadar cache; it
+The panel previews the selected model and effort from the recommendation cache; it
 does not query a model catalog. Opening Create Agent → Codex prepares the cache
 once, with asynchronous daily refresh after the first successful fetch. Workbench
 does not duplicate model configuration; agent-team resolves recommendation IDs
-and falls back to Codex defaults if an ID is missing.
+and uses Codex defaults when no recommendation is selected. An unknown explicit
+ID fails instead of silently changing the selected model.
 
 ```sh
 agent start codex --recommendation <ID>
