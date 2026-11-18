@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
-use ratatui::layout::{Position, Rect, Size};
+use ratatui::layout::{Alignment, Position, Rect, Size};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
@@ -53,7 +53,14 @@ impl Geometry {
 #[derive(Default)]
 struct Backdrop {
     panes: Vec<(i32, i32, u16, u16, String)>,
-    status: Vec<(u16, String)>,
+    status: Vec<StatusLine>,
+}
+
+#[derive(Default)]
+struct StatusLine {
+    row: u16,
+    left_and_windows: String,
+    right: String,
 }
 
 impl Backdrop {
@@ -81,15 +88,10 @@ impl Backdrop {
             "#{status}\t#{status-position}\t#{window_offset_x}\t#{window_offset_y}\t#{T:status-left}\t#{W:#{T:window-status-format}}\t#{T:status-right}",
         ).ok().flatten().unwrap_or_default();
         let fields: Vec<_> = context.splitn(7, '\t').collect();
-        let status_lines = if std::env::var("WORKBENCH_POPUP_STATUS_VISIBLE").as_deref() == Ok("1")
-        {
-            0
-        } else {
-            match fields.first().copied().unwrap_or("off") {
-                "on" => 1,
-                "off" => 0,
-                number => number.parse::<u16>().unwrap_or(0).min(screen.height),
-            }
+        let status_lines = match fields.first().copied().unwrap_or("off") {
+            "on" => 1,
+            "off" => 0,
+            number => number.parse::<u16>().unwrap_or(0).min(screen.height),
         };
         let top_status = fields.get(1) == Some(&"top");
         let offset_x = fields
@@ -107,14 +109,19 @@ impl Backdrop {
             } else {
                 screen.height.saturating_sub(status_lines)
             };
-            result.status.push((
-                y,
-                fields
+            result.status.push(StatusLine {
+                row: y,
+                left_and_windows: fields
+                    .get(4..6)
+                    .unwrap_or_default()
                     .iter()
-                    .skip(4)
                     .map(|value| crate::menu::plain_label(value))
                     .collect::<String>(),
-            ));
+                right: fields
+                    .get(6)
+                    .map(|value| crate::menu::plain_label(value))
+                    .unwrap_or_default(),
+            });
         }
         let Some(panes) = output(&[
             "list-panes",
@@ -176,10 +183,19 @@ impl Backdrop {
                 .scroll(((-y).max(0) as u16, (-x).max(0) as u16))
                 .render(rect, &mut buffer);
         }
-        for (row, text) in &self.status {
-            Paragraph::new(text.as_str())
+        for line in &self.status {
+            let row = Rect::new(0, line.row, area.width, 1);
+            let right_width = Span::raw(line.right.as_str())
+                .width()
+                .min(usize::from(area.width)) as u16;
+            let left_width = row.width.saturating_sub(right_width);
+            Paragraph::new(line.left_and_windows.as_str())
                 .style(muted)
-                .render(Rect::new(0, *row, area.width, 1), &mut buffer);
+                .render(Rect::new(0, line.row, left_width, 1), &mut buffer);
+            Paragraph::new(line.right.as_str())
+                .alignment(Alignment::Right)
+                .style(muted)
+                .render(row, &mut buffer);
         }
         // A wide backdrop glyph starting just outside the card can suppress
         // its first border cell in Buffer::diff. Clip that overlapping glyph.
@@ -792,5 +808,30 @@ mod tests {
             );
             assert_eq!(buffer[(card.right() - 1, row)].symbol(), "│");
         }
+    }
+
+    #[test]
+    fn backdrop_keeps_status_right_group_at_the_right_edge() {
+        let screen = Size::new(80, 30);
+        let geometry = Geometry::new(
+            screen,
+            Sizing::Menu {
+                width: 30,
+                height: 12,
+            },
+        );
+        let backdrop = Backdrop {
+            panes: vec![],
+            status: vec![StatusLine {
+                row: 0,
+                left_and_windows: "SESSION WINDOW".into(),
+                right: "HOST AGENT".into(),
+            }],
+        };
+
+        let buffer = backdrop.render(geometry);
+        assert_eq!(buffer[(0, 0)].symbol(), "S");
+        assert_eq!(buffer[(70, 0)].symbol(), "H");
+        assert_eq!(buffer[(79, 0)].symbol(), "T");
     }
 }
