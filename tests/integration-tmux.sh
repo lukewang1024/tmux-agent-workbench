@@ -280,12 +280,16 @@ tmux -S "$socket" list-keys -T prefix -N | grep 'select pane left with responsiv
 tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep 'M-t' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'open Workbench menu$' | grep -E '(^| )m( |$)' >/dev/null
 tmux -S "$socket" list-keys -T prefix -N | grep 'mark pane$' | grep 'M-m' >/dev/null
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_1_range)" = wb_workbench ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_range)" = wb_quick_agent ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_2_visible)" = 1 ]
-[ -z "$(tmux -S "$socket" show-option -gqv @adaptive_action_3_range)" ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_right_action_1_range)" = wb_extract_url ]
-[ "$(tmux -S "$socket" show-option -gqv @adaptive_right_action_1_visible)" = 1 ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_menu_range)" = wb_workbench ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_menu_visible)" = 1 ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_quick_agent_range)" = wb_quick_agent ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_quick_agent_visible)" = 1 ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_extract_range)" = wb_extract_url ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_action_workbench_extract_visible)" = 1 ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_status_left_accent_order)" = session ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_status_left_neutral_order)" = 'action:workbench_menu action:workbench_quick_agent' ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_status_right_accent_order)" = context ]
+[ "$(tmux -S "$socket" show-option -gqv @adaptive_status_right_neutral_order)" = 'action:workbench_extract cpu time date battery host' ]
 [ "$(tmux -S "$socket" show-option -gqv @workbench_plugin_dir)" = "$repo" ]
 tmux -S "$socket" list-keys -T prefix -N | grep 'toggle Workbench agent sidebar$' >/dev/null
 if tmux -S "$socket" list-keys -T prefix -N | \

@@ -70,19 +70,23 @@ tmux set-option -g @adaptive_host_range_close '#[range=]'
 tmux set-option -g @adaptive_cpu_range_open '#[range=user|wb_cpu]'
 tmux set-option -g @adaptive_cpu_range_close '#[range=]'
 . "$CURRENT_DIR/lib/host-metrics.sh"
-# Frequent controls bracket the window list: Workbench and Quick Agent on the
-# left, URL extraction on the inner edge of status-right.
-tmux set-option -g @adaptive_action_1_icon ''
-tmux set-option -g @adaptive_action_1_range wb_workbench
-tmux set-option -g @adaptive_action_1_visible 1
-tmux set-option -g @adaptive_action_2_icon '+'
-tmux set-option -g @adaptive_action_2_range wb_quick_agent
-tmux set-option -g @adaptive_action_2_visible 1
-tmux set-option -g @adaptive_action_3_icon ''
-tmux set-option -g @adaptive_action_3_range ''
-tmux set-option -g @adaptive_right_action_1_icon ''
-tmux set-option -g @adaptive_right_action_1_range wb_extract_url
-tmux set-option -g @adaptive_right_action_1_visible 1
+# Register named actions independently of their placement. The theme order
+# options compose these IDs into the four status regions.
+tmux set-option -goq @adaptive_action_workbench_menu_icon ''
+tmux set-option -goq @adaptive_action_workbench_menu_range wb_workbench
+tmux set-option -goq @adaptive_action_workbench_menu_visible 1
+tmux set-option -goq @adaptive_action_workbench_quick_agent_icon '+'
+tmux set-option -goq @adaptive_action_workbench_quick_agent_range wb_quick_agent
+tmux set-option -goq @adaptive_action_workbench_quick_agent_visible 1
+tmux set-option -goq @adaptive_action_workbench_extract_icon ''
+tmux set-option -goq @adaptive_action_workbench_extract_range wb_extract_url
+tmux set-option -goq @adaptive_action_workbench_extract_visible 1
+tmux set-option -goq @adaptive_status_left_accent_order 'session'
+tmux set-option -goq @adaptive_status_left_neutral_order \
+  'action:workbench_menu action:workbench_quick_agent'
+tmux set-option -goq @adaptive_status_right_accent_order 'context'
+tmux set-option -goq @adaptive_status_right_neutral_order \
+  'action:workbench_extract cpu time date battery host'
 tmux set-option -g @adaptive_usage ''
 tmux set-option -g @adaptive_usage_range_open '#[range=user|wb_usage]'
 tmux set-option -g @adaptive_usage_range_close '#[range=]'
