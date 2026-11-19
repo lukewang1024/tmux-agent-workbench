@@ -34,6 +34,7 @@ jobs:
       windows_companion: ${{ steps.prepare.outputs.windows_companion }}
       windows_arm64: ${{ steps.prepare.outputs.windows_arm64 }}
       required_assets: ${{ steps.prepare.outputs.required_assets }}
+      rust_matrix: ${{ steps.prepare.outputs.rust_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,55 +49,13 @@ jobs:
     needs: prepare
     if: >-
       needs.prepare.outputs.enabled == 'true' &&
-      needs.prepare.outputs.rust_changed == 'true' &&
-      (
-        needs.prepare.outputs.full_matrix == 'true' ||
-        (needs.prepare.outputs.ish_target == 'true' && matrix.target == 'i586-unknown-linux-musl') ||
-        matrix.target == 'aarch64-linux-android' ||
-        matrix.target == 'x86_64-unknown-linux-gnu' ||
-        matrix.target == 'aarch64-apple-darwin'
-      )
+      needs.prepare.outputs.rust_changed == 'true'
     # Intel macOS runs the full tmux suite and a release build on slower hosts.
     timeout-minutes: 60
     continue-on-error: ${{ matrix.priority == 'low' }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            android: false
-            priority: low
-          - os: macos-15
-            target: aarch64-apple-darwin
-            android: false
-            priority: high
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            android: false
-            priority: high
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            android: false
-            priority: low
-          - os: ubuntu-24.04
-            target: i586-unknown-linux-musl
-            android: false
-            priority: low
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            android: false
-            priority: low
-          - os: ubuntu-24.04
-            target: aarch64-linux-android
-            android: true
-            android_linker: aarch64-linux-android24-clang
-            priority: high
-          - os: ubuntu-24.04
-            target: x86_64-linux-android
-            android: true
-            android_linker: x86_64-linux-android24-clang
-            priority: low
+      matrix: ${{ fromJSON(needs.prepare.outputs.rust_matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
