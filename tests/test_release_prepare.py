@@ -64,9 +64,89 @@ class ReleaseGateTest(unittest.TestCase):
         result = self.prepare()
         self.assertEqual(result['source'], self.head)
         self.assertEqual(result['tag'], 'v1.2.3')
+        self.assertEqual(result['full_matrix'], 'true')
+        self.assertEqual(result['rust_changed'], 'true')
+        self.assertEqual(result['ish_target'], 'true')
+        self.assertEqual(result['windows_companion'], 'true')
+        self.assertEqual(result['windows_arm64'], 'true')
+        self.assertEqual(result['required_assets'], '5')
         self.assertEqual(self.git('rev-parse', 'v1.2.3^{commit}'), self.head)
         self.assertIn(self.head, self.git('ls-remote', 'origin', 'refs/tags/v1.2.3^{}'))
         self.assertEqual(self.prepare(), {'enabled': 'false'})
+
+    def test_prerelease_uses_compact_build_matrix(self):
+        self.git('tag', '-a', 'v1.2.2', self.head, '-m', 'previous release')
+        Path('Cargo.toml').write_text('[package]\nname="fixture"\nversion="1.2.4-beta.1"\n')
+        self.git('add', 'Cargo.toml')
+        self.git('commit', '-qm', 'prerelease source')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', head)
+        self.workflow['head_sha'] = head
+
+        result = self.prepare()
+
+        self.assertEqual(result['tag'], 'v1.2.4-beta.1')
+        self.assertEqual(result['full_matrix'], 'false')
+        self.assertEqual(result['rust_changed'], 'true')
+        self.assertEqual(result['ish_target'], 'false')
+        self.assertEqual(result['windows_companion'], 'false')
+        self.assertEqual(result['windows_arm64'], 'false')
+        self.assertEqual(result['required_assets'], '3')
+
+    def test_ish_compatibility_change_adds_only_i586_archive(self):
+        self.git('tag', '-a', 'v1.2.3', self.head, '-m', 'previous release')
+        Path('Cargo.toml').write_text('[package]\nname="fixture"\nversion="1.2.4-beta.1"\n')
+        Path('src').mkdir()
+        Path('src/compat.rs').write_text('// iSH compatibility change\n')
+        self.git('add', 'Cargo.toml', 'src/compat.rs')
+        self.git('commit', '-qm', 'update iSH compatibility')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', head)
+        self.workflow['head_sha'] = head
+
+        result = self.prepare()
+
+        self.assertEqual(result['rust_changed'], 'true')
+        self.assertEqual(result['ish_target'], 'true')
+        self.assertEqual(result['windows_companion'], 'false')
+        self.assertEqual(result['required_assets'], '3')
+
+    def test_windows_change_adds_only_x64_client_artifacts(self):
+        self.git('tag', '-a', 'v1.2.3', self.head, '-m', 'previous release')
+        Path('Cargo.toml').write_text('[package]\nname="fixture"\nversion="1.2.4-beta.1"\n')
+        Path('windows-companion').mkdir()
+        Path('windows-companion/wb-client.csproj').write_text('<Project />\n')
+        self.git('add', 'Cargo.toml', 'windows-companion/wb-client.csproj')
+        self.git('commit', '-qm', 'update Windows companion')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', head)
+        self.workflow['head_sha'] = head
+
+        result = self.prepare()
+
+        self.assertEqual(result['rust_changed'], 'true')
+        self.assertEqual(result['ish_target'], 'false')
+        self.assertEqual(result['windows_companion'], 'true')
+        self.assertEqual(result['windows_arm64'], 'false')
+        self.assertEqual(result['required_assets'], '5')
+
+    def test_stable_windows_arm64_is_optional_and_only_for_changed_client(self):
+        self.git('tag', '-a', 'v1.2.2', self.head, '-m', 'previous release')
+        Path('windows-companion').mkdir()
+        Path('windows-companion/Program.cs').write_text('// Windows client change\n')
+        self.git('add', 'windows-companion/Program.cs')
+        self.git('commit', '-qm', 'update Windows client')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', head)
+        self.workflow['head_sha'] = head
+
+        result = self.prepare()
+
+        self.assertEqual(result['full_matrix'], 'true')
+        self.assertEqual(result['rust_changed'], 'false')
+        self.assertEqual(result['windows_companion'], 'true')
+        self.assertEqual(result['windows_arm64'], 'true')
+        self.assertEqual(result['required_assets'], '2')
 
     def test_repair_uses_original_tag_not_new_main(self):
         self.git('tag', 'v1.2.3')

@@ -6,9 +6,35 @@ from pathlib import Path
 import subprocess
 import tomllib
 
+ISH_COMPATIBILITY_PATHS = {
+    'src/compat.rs',
+    'src/ipc.rs',
+    'src/main.rs',
+}
+RUST_ARTIFACT_PATHS = {
+    'Cargo.toml',
+    'Cargo.lock',
+    'build.rs',
+    'README.md',
+    'LICENSE',
+    'docs/assistant-sessions.md',
+}
+
 
 def run(*args):
     return subprocess.check_output(args, text=True).strip()
+
+
+def changed_paths(source):
+    previous = subprocess.run(
+        ['git', 'describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', f'{source}^'],
+        text=True, capture_output=True, check=False)
+    if previous.returncode != 0:
+        # On the first release there is no baseline to compare against. Build
+        # every platform once rather than accidentally publishing no assets.
+        return {'*'}
+    base = previous.stdout.strip()
+    return set(run('git', 'diff', '--name-only', f'{base}..{source}').splitlines())
 
 
 def prepare():
@@ -48,7 +74,27 @@ def prepare():
             'tag', '-a', tag, main, '-m', f'Release {tag}'], check=True)
         subprocess.run(['git', 'push', 'origin', f'refs/tags/{tag}'], check=True)
         source = main
-    return {'enabled': 'true', 'tag': tag, 'source': source, 'validation': main}
+    full_matrix = '-' not in version
+    paths = changed_paths(source)
+    rust_changed = '*' in paths or bool(paths & RUST_ARTIFACT_PATHS) or any(
+        path.startswith(('src/', 'LICENSES/', '.cargo/')) for path in paths)
+    ish_target = '*' in paths or bool(paths & ISH_COMPATIBILITY_PATHS)
+    windows_companion = '*' in paths or any(
+        path.startswith('windows-companion/') for path in paths)
+    windows_arm64 = full_matrix and windows_companion
+    required_assets = (3 if rust_changed else 0) + (2 if windows_companion else 0)
+    return {
+        'enabled': 'true',
+        'tag': tag,
+        'source': source,
+        'validation': main,
+        'full_matrix': str(full_matrix).lower(),
+        'rust_changed': str(rust_changed).lower(),
+        'ish_target': str(ish_target).lower(),
+        'windows_companion': str(windows_companion).lower(),
+        'windows_arm64': str(windows_arm64).lower(),
+        'required_assets': str(required_assets),
+    }
 
 
 if __name__ == '__main__':

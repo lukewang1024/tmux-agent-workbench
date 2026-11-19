@@ -9,7 +9,8 @@ Run `sh tests/verify.sh` locally before shipping for the full P1 regression
 suite: formatting, all Rust tests, isolated tmux integration, relay pairing,
 and the installer. Manual CI dispatch runs this suite on Ubuntu and Apple
 Silicon macOS, plus the P2 iSH static-target and Intel title-hook checks.
-The release workflow continues to run the full native checks.
+Stable releases run the full native release checks; prereleases use the fast
+target set below.
 Linux and Apple Silicon macOS CI build tmux 3.7c with its official SHA-256.
 Ubuntu 24.04's bundled tmux 3.4 lacks the existing menu mouse flags, while
 Homebrew may already ship a newer menu implementation. The macOS source
@@ -33,15 +34,38 @@ the release workflow. It creates `v<package version>` only when that tag does
 not exist. CI on PR heads, failed runs, and superseded main commits cannot tag.
 An ordinary PR without a version change does not create a release.
 
+| Selection | Required targets | Optional targets |
+| --- | --- | --- |
+| Standard release | Termux arm64 (`aarch64-linux-android`), Linux x64 (`x86_64-unknown-linux-gnu`), Apple Silicon macOS (`aarch64-apple-darwin`) | iSH i586 (`i586-unknown-linux-musl`) when its compatibility code changes |
+| `windows-companion/` changed | Windows x64 client | Windows ARM64 client on a full release |
+| Full release | The same three standard targets | Intel macOS, Linux musl x64, iSH i586, Linux ARM64, Android x64, and Windows ARM64 when its client code changed |
+
+The release workflow compares the tagged source with the previous release.
+Rust artifacts run only when Rust source, Cargo metadata, or files packaged
+with the Rust binary changed. Windows builds run only when
+`windows-companion/` changed. Full releases expand the architecture range for
+the affected component; they do not force unrelated components to build.
+Standard targets and a changed Windows x64 client are required. Extra targets
+run at low priority: their failures do not block publication, and only their
+successful archives are included. Windows ARM64 starts after Windows x64 has
+completed.
+
+The iSH i586 binary serves iSH's 32-bit x86 Linux environment on iOS; iSH
+provides that environment through user-mode x86 emulation ([iSH project](https://github.com/ish-app/ish)).
+It is not a typical Linux desktop architecture. Full releases run the macOS
+tmux integration suite. At most twelve archives/checksum files are published;
+the final set can be smaller when low-priority builds fail or the corresponding
+component did not change.
+
 The iSH i586 target uses Rust 1.95.0 in CI and release, matching the tested
 App Store emulator build; other targets continue to use stable Rust.
 
-The workflow builds all eight Rust targets (including static i586 musl for iSH) and both Windows companion targets,
-collects artifacts, then publishes in a single final job. New releases stay
-in draft until all twelve archive/checksum files have been uploaded. Failed
-builds never become Latest. The build jobs are in the same workflow as tag
-creation because a tag pushed with GITHUB_TOKEN does not trigger another
-push workflow. GitHub Actions uses a read-only token for PR CI.
+The workflow collects successful artifacts, then publishes in a single final
+job after all required targets succeed. Failed required builds never publish;
+failed low-priority targets are simply omitted. Stable releases become Latest
+after required targets pass. The build jobs are in the same workflow as tag
+creation because a tag pushed with GITHUB_TOKEN does not trigger another push
+workflow. GitHub Actions uses a read-only token for PR CI.
 
 ## Recover an incomplete release
 
