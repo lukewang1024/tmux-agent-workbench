@@ -438,8 +438,11 @@ owns sampling, caching, width defaults and the menu action. Set
 for mode selection, platform support and the standalone CLI.
 
 Session/Sidebar and tmux controls form the left group, followed by window
-labels. CPU, URL extraction, Host and Agent status remain on the right, with a
-flat outer edge. The action buttons appear in order: Workbench → Extract → `+`.
+labels. By default, the left accent is the Session control and the left neutral
+buttons are Workbench then Quick Agent (`+`). The right neutral order is Extract,
+CPU, time, date, battery and Host; Agent status is in the right accent. Host
+remains neutral. These four regions can be ordered independently; see
+[custom status-bar layout](#custom-status-bar-layout).
 Workbench opens the same menu as `m` and `M-t`; Extract has its own button and
 remains in the menu. Agent status opens Agent commands as `M-a`. The session label performs the
 same responsive Sidebar toggle as `Tab`.
@@ -449,6 +452,32 @@ The Host segment is a separate clickable range: it launches the existing
 `ssh-connect` effective inventory as a tmux menu; choosing a Host opens a new
 window and connects there. Host filtering and SSH behavior remain owned by the
 dotfiles command rather than duplicated in Workbench.
+
+### Custom status-bar layout
+
+When [tmux-adaptive-theme](https://github.com/lukewang1024/tmux-adaptive-theme)
+is installed, set the four order options in `.tmux.conf` to choose each region's
+contents and order. Lists are space-separated. Built-in items are `session` on
+the left and `context`, `cpu`, `time`, `date`, `battery` and `host` on the
+right. Workbench registers the semantic action IDs `workbench_menu`,
+`workbench_quick_agent` and `workbench_extract`; place an action with
+`action:<id>`.
+
+This reproduces Workbench's defaults:
+
+```tmux
+set -g @adaptive_status_left_accent_order "session"
+set -g @adaptive_status_left_neutral_order "action:workbench_menu action:workbench_quick_agent"
+set -g @adaptive_status_right_accent_order "context"
+set -g @adaptive_status_right_neutral_order "action:workbench_extract cpu time date battery host"
+```
+
+The left accent renders before the left neutral region. On the right, neutral
+renders before accent, with accent at the outer edge. The theme omits hidden
+items and their separators; a region disappears when all its items are hidden.
+To hide a Workbench action, set its `@adaptive_action_<id>_visible` option to a
+tmux format that evaluates to `0`. Reapply `tmux-adaptive-theme.tmux` after
+changing the order options in a running server.
 
 The Workbench menu opens from the left status-bar control or `m` / `M-t`.
 Create first offers Agent, Pane, Window and Session; Agent opens Quick create
