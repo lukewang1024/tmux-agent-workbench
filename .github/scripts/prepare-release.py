@@ -19,6 +19,31 @@ RUST_ARTIFACT_PATHS = {
     'LICENSE',
     'docs/assistant-sessions.md',
 }
+RUST_TARGETS = [
+    {'os': 'macos-15-intel', 'target': 'x86_64-apple-darwin',
+     'android': False, 'priority': 'low'},
+    {'os': 'macos-15', 'target': 'aarch64-apple-darwin',
+     'android': False, 'priority': 'high'},
+    {'os': 'ubuntu-24.04', 'target': 'x86_64-unknown-linux-gnu',
+     'android': False, 'priority': 'high'},
+    {'os': 'ubuntu-24.04', 'target': 'x86_64-unknown-linux-musl',
+     'android': False, 'priority': 'low'},
+    {'os': 'ubuntu-24.04', 'target': 'i586-unknown-linux-musl',
+     'android': False, 'priority': 'low'},
+    {'os': 'ubuntu-24.04-arm', 'target': 'aarch64-unknown-linux-gnu',
+     'android': False, 'priority': 'low'},
+    {'os': 'ubuntu-24.04', 'target': 'aarch64-linux-android',
+     'android': True, 'android_linker': 'aarch64-linux-android24-clang',
+     'priority': 'high'},
+    {'os': 'ubuntu-24.04', 'target': 'x86_64-linux-android',
+     'android': True, 'android_linker': 'x86_64-linux-android24-clang',
+     'priority': 'low'},
+]
+STANDARD_TARGETS = {
+    'aarch64-apple-darwin',
+    'x86_64-unknown-linux-gnu',
+    'aarch64-linux-android',
+}
 
 
 def run(*args):
@@ -35,6 +60,21 @@ def changed_paths(source):
         return {'*'}
     base = previous.stdout.strip()
     return set(run('git', 'diff', '--name-only', f'{base}..{source}').splitlines())
+
+
+def rust_target_matrix(full_matrix, rust_changed, ish_target):
+    if not rust_changed:
+        targets = [target for target in RUST_TARGETS
+                   if target['target'] == 'x86_64-unknown-linux-gnu']
+    elif full_matrix:
+        targets = RUST_TARGETS
+    else:
+        targets = [target for target in RUST_TARGETS
+                   if target['target'] in STANDARD_TARGETS]
+        if ish_target:
+            targets.extend(target for target in RUST_TARGETS
+                           if target['target'] == 'i586-unknown-linux-musl')
+    return {'include': targets}
 
 
 def prepare():
@@ -94,6 +134,9 @@ def prepare():
         'windows_companion': str(windows_companion).lower(),
         'windows_arm64': str(windows_arm64).lower(),
         'required_assets': str(required_assets),
+        'rust_matrix': json.dumps(
+            rust_target_matrix(full_matrix, rust_changed, ish_target),
+            separators=(',', ':')),
     }
 
 

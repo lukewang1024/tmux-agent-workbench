@@ -48,6 +48,10 @@ class ReleaseGateTest(unittest.TestCase):
         self.event.write_text(json.dumps({'workflow_run': self.workflow}))
         return release.prepare()
 
+    @staticmethod
+    def selected_targets(result):
+        return json.loads(result['rust_matrix'])['include']
+
     def test_only_successful_current_main_push_can_tag(self):
         cases = [('conclusion', 'failure'), ('event', 'pull_request'),
                  ('head_branch', 'feature'), ('head_sha', '0' * 40),
@@ -70,6 +74,7 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertEqual(result['windows_companion'], 'true')
         self.assertEqual(result['windows_arm64'], 'true')
         self.assertEqual(result['required_assets'], '5')
+        self.assertEqual(len(self.selected_targets(result)), 8)
         self.assertEqual(self.git('rev-parse', 'v1.2.3^{commit}'), self.head)
         self.assertIn(self.head, self.git('ls-remote', 'origin', 'refs/tags/v1.2.3^{}'))
         self.assertEqual(self.prepare(), {'enabled': 'false'})
@@ -92,6 +97,10 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertEqual(result['windows_companion'], 'false')
         self.assertEqual(result['windows_arm64'], 'false')
         self.assertEqual(result['required_assets'], '3')
+        self.assertEqual({target['target'] for target in self.selected_targets(result)}, {
+            'aarch64-linux-android', 'x86_64-unknown-linux-gnu',
+            'aarch64-apple-darwin',
+        })
 
     def test_ish_compatibility_change_adds_only_i586_archive(self):
         self.git('tag', '-a', 'v1.2.3', self.head, '-m', 'previous release')
@@ -110,6 +119,9 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertEqual(result['ish_target'], 'true')
         self.assertEqual(result['windows_companion'], 'false')
         self.assertEqual(result['required_assets'], '3')
+        selected = {target['target']: target for target in self.selected_targets(result)}
+        self.assertEqual(len(selected), 4)
+        self.assertEqual(selected['i586-unknown-linux-musl']['priority'], 'low')
 
     def test_windows_change_adds_only_x64_client_artifacts(self):
         self.git('tag', '-a', 'v1.2.3', self.head, '-m', 'previous release')
@@ -129,6 +141,7 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertEqual(result['windows_companion'], 'true')
         self.assertEqual(result['windows_arm64'], 'false')
         self.assertEqual(result['required_assets'], '5')
+        self.assertEqual(len(self.selected_targets(result)), 3)
 
     def test_stable_windows_arm64_is_optional_and_only_for_changed_client(self):
         self.git('tag', '-a', 'v1.2.2', self.head, '-m', 'previous release')
@@ -147,6 +160,7 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertEqual(result['windows_companion'], 'true')
         self.assertEqual(result['windows_arm64'], 'true')
         self.assertEqual(result['required_assets'], '2')
+        self.assertEqual(len(self.selected_targets(result)), 1)
 
     def test_repair_uses_original_tag_not_new_main(self):
         self.git('tag', 'v1.2.3')
