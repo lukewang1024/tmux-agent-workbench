@@ -28,6 +28,12 @@ jobs:
       tag: ${{ steps.prepare.outputs.tag }}
       source: ${{ steps.prepare.outputs.source }}
       validation: ${{ steps.prepare.outputs.validation }}
+      full_matrix: ${{ steps.prepare.outputs.full_matrix }}
+      rust_changed: ${{ steps.prepare.outputs.rust_changed }}
+      ish_target: ${{ steps.prepare.outputs.ish_target }}
+      windows_companion: ${{ steps.prepare.outputs.windows_companion }}
+      windows_arm64: ${{ steps.prepare.outputs.windows_arm64 }}
+      required_assets: ${{ steps.prepare.outputs.required_assets }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,9 +46,19 @@ jobs:
         run: python3 .github/scripts/prepare-release.py
   build:
     needs: prepare
-    if: needs.prepare.outputs.enabled == 'true'
+    if: >-
+      needs.prepare.outputs.enabled == 'true' &&
+      needs.prepare.outputs.rust_changed == 'true' &&
+      (
+        needs.prepare.outputs.full_matrix == 'true' ||
+        (needs.prepare.outputs.ish_target == 'true' && matrix.target == 'i586-unknown-linux-musl') ||
+        matrix.target == 'aarch64-linux-android' ||
+        matrix.target == 'x86_64-unknown-linux-gnu' ||
+        matrix.target == 'aarch64-apple-darwin'
+      )
     # Intel macOS runs the full tmux suite and a release build on slower hosts.
     timeout-minutes: 60
+    continue-on-error: ${{ matrix.priority == 'low' }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,29 +66,37 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             android: false
+            priority: low
           - os: macos-15
             target: aarch64-apple-darwin
             android: false
+            priority: high
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             android: false
+            priority: high
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             android: false
+            priority: low
           - os: ubuntu-24.04
             target: i586-unknown-linux-musl
             android: false
+            priority: low
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             android: false
+            priority: low
           - os: ubuntu-24.04
             target: aarch64-linux-android
             android: true
             android_linker: aarch64-linux-android24-clang
+            priority: high
           - os: ubuntu-24.04
             target: x86_64-linux-android
             android: true
             android_linker: x86_64-linux-android24-clang
+            priority: low
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -138,7 +162,7 @@ jobs:
       - run: cargo test --locked --target "${{ matrix.target }}"
         if: '!matrix.android'
       - run: tests/integration-tmux.sh
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && needs.prepare.outputs.full_matrix == 'true'
       - run: tests/relay-pairing.sh
         if: '!matrix.android'
       - run: tests/install.sh
@@ -157,18 +181,13 @@ jobs:
           name: rust-${{ matrix.target }}
           path: tmux-agent-workbench-${{ matrix.target }}.tar.gz
           if-no-files-found: error
-  windows-companion:
+  windows_x64:
     needs: prepare
-    if: needs.prepare.outputs.enabled == 'true'
+    if: >-
+      needs.prepare.outputs.enabled == 'true' &&
+      needs.prepare.outputs.windows_companion == 'true'
     timeout-minutes: 30
-    strategy:
-      matrix:
-        include:
-          - runtime: win-x64
-            runner: windows-2025
-          - runtime: win-arm64
-            runner: windows-11-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
         with:
@@ -176,35 +195,83 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-      - run: dotnet publish windows-companion/wb-client.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true
+      - run: dotnet publish windows-companion/wb-client.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
       - shell: pwsh
         run: |
-          $archive = "wb-client-${{ matrix.runtime }}.zip"
-          Compress-Archive -Path "windows-companion/bin/Release/net9.0-windows10.0.19041.0/${{ matrix.runtime }}/publish/*" -DestinationPath $archive
+          $archive = "wb-client-win-x64.zip"
+          Compress-Archive -Path "windows-companion/bin/Release/net9.0-windows10.0.19041.0/win-x64/publish/*" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ matrix.runtime }}
+          name: windows-win-x64
           path: |
-            wb-client-${{ matrix.runtime }}.zip
-            wb-client-${{ matrix.runtime }}.zip.sha256
+            wb-client-win-x64.zip
+            wb-client-win-x64.zip.sha256
+          if-no-files-found: error
+  windows_arm64:
+    needs: [prepare, windows_x64]
+    if: >-
+      needs.prepare.outputs.enabled == 'true' &&
+      needs.prepare.outputs.windows_arm64 == 'true'
+    timeout-minutes: 30
+    continue-on-error: true
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet publish windows-companion/wb-client.csproj -c Release -r win-arm64 --self-contained true -p:PublishSingleFile=true
+      - shell: pwsh
+        run: |
+          $archive = "wb-client-win-arm64.zip"
+          Compress-Archive -Path "windows-companion/bin/Release/net9.0-windows10.0.19041.0/win-arm64/publish/*" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-win-arm64
+          path: |
+            wb-client-win-arm64.zip
+            wb-client-win-arm64.zip.sha256
           if-no-files-found: error
   publish:
-    needs: [prepare, build, windows-companion]
+    needs: [prepare, build, windows_x64, windows_arm64]
+    if: >-
+      always() &&
+      needs.prepare.outputs.enabled == 'true' &&
+      (
+        needs.prepare.outputs.windows_companion != 'true' ||
+        needs.windows_x64.result == 'success'
+      )
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Publish only after every target succeeds
+      - name: Publish after required targets succeed
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REQUIRED_ASSETS: ${{ needs.prepare.outputs.required_assets }}
+          RUST_CHANGED: ${{ needs.prepare.outputs.rust_changed }}
+          WINDOWS_CHANGED: ${{ needs.prepare.outputs.windows_companion }}
         run: |
-          test "$(find dist -type f | wc -l)" -eq 12
+          test "$(find dist -type f | wc -l)" -ge "$REQUIRED_ASSETS"
+          if [ "$RUST_CHANGED" = true ]; then
+            test -f dist/tmux-agent-workbench-aarch64-linux-android.tar.gz
+            test -f dist/tmux-agent-workbench-x86_64-unknown-linux-gnu.tar.gz
+            test -f dist/tmux-agent-workbench-aarch64-apple-darwin.tar.gz
+          fi
+          if [ "$WINDOWS_CHANGED" = true ]; then
+            test -f dist/wb-client-win-x64.zip
+            test -f dist/wb-client-win-x64.zip.sha256
+          fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
           fi
