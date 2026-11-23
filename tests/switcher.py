@@ -204,10 +204,8 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
                 for bottom in range(top + 1, len(rows)):
                     if rows[bottom][left] == '└' and rows[bottom][right] == '┘':
                         assert right - left + 1 == min(96, max(32, size[0] * 9 // 10)), rows
-                        status = tmux('show-option', '-gqv', 'status')
-                        status_lines = 0 if status == 'off' else 1 if status == 'on' else int(status)
-                        available_height = size[1] - status_lines
-                        assert bottom - top + 1 == min(40, max(12, available_height * 9 // 10)), rows
+                        # The overlay covers the status line and uses the full client height.
+                        assert bottom - top + 1 == min(40, max(12, size[1] * 9 // 10)), rows
                         return left + 1, top + 1, right - left - 1, bottom - top - 1
             if time.monotonic() >= deadline:
                 break
@@ -660,7 +658,17 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
              'touching the Session pin did not pin the session')
         wait(lambda: ' 1' in visible_rows()[0], 'session pin count did not update')
         assert sidebar.poll() is None and focused(window=windows[0]), 'pin touch also switched sessions'
-        close(sidebar)
+        wait(lambda: 'wheel-0' in visible_rows()[1], 'pinned Session card did not appear')
+        tap(10, 2)
+        drain(.2)
+        assert sidebar.poll() is None and focused(window=windows[0]), 'selecting a Session closed the popup'
+        tap(10, 3)
+        finish_popup(sidebar)
+        action_log = Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench' / 'popup-actions.log'
+        assert sidebar.returncode == 0, (
+            sidebar.stderr.read(), action_log.read_text() if action_log.exists() else '')
+        wait(lambda: focused(session='wheel-0'), 'click on the selected Session did not activate it')
+        assert client_value(sibling, '#{session_name}') == 'source'
         (Path(env['XDG_STATE_HOME']) / 'tmux-agent-workbench' / 'sidebar-view').unlink(missing_ok=True)
         print('PASS overview Sidebar shares wheel limits, refresh stability and release cancellation with filtered lists', flush=True)
     finally:

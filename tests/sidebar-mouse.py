@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""First-click navigation must use the row visible before tmux focuses the sidebar."""
+"""Mouse selection uses the visible item and remains separate from hover and focus."""
 from contextlib import ExitStack
 import fcntl
 import os
@@ -145,20 +145,44 @@ def check(height, target, section='agent'):
                 rows = screen()
                 row = next(i for i, line in enumerate(rows) if target_row(line))
                 print('PASS: idle count toggles Agent visibility and restores the rows')
-            # Real terminal mouse input: tmux emits FocusGained before forwarding
-            # MouseDown. The short viewport used to scroll here and hit z-source
-            # (or b-agent), while the tall viewport already worked.
+            # Give up the keyboard selection without resetting the viewport.
+            # tmux emits FocusGained before forwarding the next MouseDown.
+            tmux('select-pane', '-t', sidebar)
+            drain(.15)
+            tmux('select-pane', '-t', main)
+            drain(.2)
             os.write(master, f'\x1b[<35;5;{row + 1}M'.encode())
             drain(0.1)
-            os.write(master, f'\x1b[<0;5;{row + 1}M\x1b[<0;5;{row + 1}m'.encode())
+            click = f'\x1b[<0;5;{row + 1}M\x1b[<0;5;{row + 1}m'.encode()
+            os.write(master, click)
+            wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == sidebar,
+                     f'first {section} click did not focus the sidebar')
+            drain(.2)
+            assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
+            if height == 40:
+                # Hover over another Agent and use the real keyboard binding.
+                # Both p and Enter must still target the clicked Agent.
+                other_row = next(i for i, line in enumerate(screen()) if 'Task b-agent' in line)
+                os.write(master, f'\x1b[<35;5;{other_row + 1}M'.encode())
+                drain(.15)
+                other_window = tmux('display-message', '-p', '-t', 'b-agent', '#{window_id}')
+                target_window = tmux('display-message', '-p', '-t', target, '#{window_id}')
+                os.write(master, b'p')
+                wait_for(lambda: tmux('show-option', '-wqv', '-t', target_window, '@agent_focus') == '1',
+                         'p did not pin the clicked Agent')
+                assert tmux('show-option', '-wqv', '-t', other_window, '@agent_focus') == ''
+                assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
+                os.write(master, b'\r')
+            else:
+                os.write(master, click)
             try:
                 wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == target_pane,
-                         f'first click did not focus {target}')
+                         f'activation did not focus {target}')
             except AssertionError:
                 raise AssertionError((height, target, rows,
                                       tmux('list-clients', '-F', '#{session_name} #{pane_id}'),
                                       screen())) from None
-            print(f'PASS: pinned actions and first click focus {section} {target} at height {height}')
+            print(f'PASS: select and activate {section} {target} at height {height}')
         finally:
             # A detached client can block flushing its final redraw on macOS.
             # Release the PTY before waiting for the client to be reaped.

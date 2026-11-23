@@ -359,7 +359,7 @@ pinned count opens the pinned menu for the current view; the sort and global
 menu segments are also touchable. Pinned cards stay just below the bar. Select
 an Agent or session and press `p`, or use its item menu, to pin or unpin it.
 In Sessions, tap the pin icon at the right of a row to toggle its pin.
-Click a pinned card, or press its `1`–`9` shortcut, to visit it. Each view has
+Press a pinned card's `1`–`9` shortcut to visit it directly. Each view has
 its own pinned items, which also remain in its scrolling list. Keyboard, wheel,
 and touch navigation can move between pinned cards and ordinary rows. On short
 screens, the pinned menu still contains every pinned item.
@@ -372,13 +372,15 @@ remembered across sidebars. Agents can be sorted by `grouped` (stable
 session/window/pane order) or `prioritized` (blocked > done > working > idle >
 unknown). Sessions can be sorted by name or priority. Press `d` to toggle
 more detail, including Agent kind, human-readable window/pane indices, process id, state source, hook
-health, and matched rule. Enter or left-click focuses a row; `m` or right-click
-opens session/agent actions. The top row opens the tmuxinator-project picker and
+health, and matched rule. Click an item or use the arrow keys to select it.
+Mouse hover previews an item and keeps the current selection. Press Enter or
+click the selected item to focus its pane. This also applies to pinned cards.
+`m` or right-click opens session/agent actions. The top row opens the tmuxinator-project picker and
 the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
 `Ctrl-D` close the popup; the footer and global menu also expose a mouse-driven
 close action. Those exit keys are popup-only and do not terminate a persistent
-sidebar pane. Activating a session or Agent with Enter or a left click also
-closes the popup after the navigation succeeds.
+sidebar pane. The popup closes when navigation to an activated session or Agent
+succeeds.
 
 Agent cards show the agent thread-name on the first line. For Codex sessions
 without hook metadata, Workbench reads the thread title from the Codex terminal
@@ -395,8 +397,8 @@ Pane Teams appear as a single task, collapsed by default. The lead row shows
 worker count and `!N` / `✓N` for blocked / done workers, including when the
 team is collapsed. Its status color and agent type follow the lead agent. Press Space or
 Left/Right on the lead, or click its arrow,
-to collapse or expand the indented workers; Enter or a click on a worker
-focuses its pane. A worker card shows its task title, then its member name and
+to collapse or expand the indented workers. Press Enter or click again on a
+selected worker to focus its pane. A worker card shows its task title, then its member name and
 status. An explicit received new-task message takes precedence over the agent
 thread title; the original brief and member name are fallbacks. Priority sorting
 keeps the team together and uses its most

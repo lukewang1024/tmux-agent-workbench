@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='wb-assistant-pin-', dir='/tmp') as root
                                       env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
             tmux('select-pane', '-t', sidebar)
             drain(.5)
-            os.write(master, b'\x1b[<35;5;2M')  # Hover the personal-assistant card.
+            os.write(master, b'\x1b[<0;5;2M\x1b[<0;5;2m')  # Select the personal assistant.
             drain(.2)
             os.write(master, b'p')
             time.sleep(.4)
