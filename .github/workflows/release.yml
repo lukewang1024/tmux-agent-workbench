@@ -11,6 +11,10 @@ on:
         description: 'Rebuild an existing immutable tag using CI-validated test tooling'
         required: true
         type: string
+      repair_ish_only:
+        description: 'Rebuild only the iSH i586 asset for this tag'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -30,7 +34,7 @@ jobs:
       validation: ${{ steps.prepare.outputs.validation }}
       full_matrix: ${{ steps.prepare.outputs.full_matrix }}
       rust_changed: ${{ steps.prepare.outputs.rust_changed }}
-      ish_target: ${{ steps.prepare.outputs.ish_target }}
+      repair_ish_only: ${{ steps.prepare.outputs.repair_ish_only }}
       windows_companion: ${{ steps.prepare.outputs.windows_companion }}
       windows_arm64: ${{ steps.prepare.outputs.windows_arm64 }}
       required_assets: ${{ steps.prepare.outputs.required_assets }}
@@ -44,6 +48,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPAIR_RELEASE_TAG: ${{ inputs.repair_release_tag }}
+          REPAIR_ISH_ONLY: ${{ inputs.repair_ish_only }}
         run: python3 .github/scripts/prepare-release.py
   build:
     needs: prepare
@@ -219,10 +224,13 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           REQUIRED_ASSETS: ${{ needs.prepare.outputs.required_assets }}
           RUST_CHANGED: ${{ needs.prepare.outputs.rust_changed }}
+          REPAIR_ISH_ONLY: ${{ needs.prepare.outputs.repair_ish_only }}
           WINDOWS_CHANGED: ${{ needs.prepare.outputs.windows_companion }}
         run: |
           test "$(find dist -type f | wc -l)" -ge "$REQUIRED_ASSETS"
-          if [ "$RUST_CHANGED" = true ]; then
+          if [ "$REPAIR_ISH_ONLY" = true ]; then
+            test -f dist/tmux-agent-workbench-i586-unknown-linux-musl.tar.gz
+          elif [ "$RUST_CHANGED" = true ]; then
             test -f dist/tmux-agent-workbench-aarch64-linux-android.tar.gz
             test -f dist/tmux-agent-workbench-x86_64-unknown-linux-gnu.tar.gz
             test -f dist/tmux-agent-workbench-aarch64-apple-darwin.tar.gz
