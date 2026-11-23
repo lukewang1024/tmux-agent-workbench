@@ -879,6 +879,21 @@ fn refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 1 } else { 5 })
 }
 
+fn sidebar_navigation(rows: &[Row]) -> NavigationList<Action> {
+    let mut navigation = NavigationList::default();
+    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    navigation.selection_visible = false;
+    navigation
+}
+
+fn style_hover(line: Line<'static>, hovered: bool, palette: SidebarPalette) -> Line<'static> {
+    if hovered {
+        line.style(Style::default().bg(palette.raised))
+    } else {
+        line
+    }
+}
+
 fn switch_sidebar_view(
     paths: &Paths,
     view: &mut SidebarView,
@@ -896,8 +911,7 @@ fn switch_sidebar_view(
     *rows = snapshot
         .map(|value| view_rows(value, detailed, sort, teams, expanded, *view, state_filter))
         .unwrap_or_default();
-    *navigation = NavigationList::default();
-    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    *navigation = sidebar_navigation(rows);
     Ok(())
 }
 
@@ -1034,9 +1048,7 @@ fn event_loop(
         &focused_sessions,
         snapshot.as_ref(),
     );
-    let mut footer_hover = None;
-    let mut navigation = NavigationList::<Action>::default();
-    navigation.replace_rows(rows.iter().map(selection_key).collect());
+    let mut navigation = sidebar_navigation(&rows);
     let mut startup_selection = None;
     if let Some(snapshot) = &snapshot
         && let Some(index) = initial_row(&rows, snapshot, &selection_targets, is_popup)
@@ -1045,6 +1057,7 @@ fn event_loop(
             startup_selection = selection_key(&rows[index]);
         }
         navigation.select(index);
+        navigation.selection_visible = false;
     }
     let mut disconnected = snapshot.is_none();
     let mut last_success = snapshot.as_ref().map(|_| Instant::now());
@@ -1088,9 +1101,10 @@ fn event_loop(
                         state_filter,
                     );
                     if view_changed {
-                        navigation = NavigationList::default();
+                        navigation = sidebar_navigation(&rows);
+                    } else {
+                        navigation.replace_rows(rows.iter().map(selection_key).collect());
                     }
-                    navigation.replace_rows(rows.iter().map(selection_key).collect());
                     disconnected = false;
                     last_success = Some(Instant::now());
                     if initial_selection {
@@ -1100,6 +1114,7 @@ fn event_loop(
                             startup_selection = index.and_then(|index| selection_key(&rows[index]));
                         }
                         navigation.select(index.unwrap_or(0));
+                        navigation.selection_visible = false;
                     } else if let Some(selected) = startup_selection.as_ref() {
                         let current = current_agent_selection(&rows, &fetched, &selection_targets)
                             .and_then(|index| selection_key(&rows[index]));
@@ -1108,8 +1123,7 @@ fn event_loop(
                             // focused, before tmux returns to the main pane.
                             // Do not retain that stale automatic scroll after
                             // a newer shared frame observes the focus change.
-                            navigation = NavigationList::default();
-                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            navigation = sidebar_navigation(&rows);
                             startup_selection = None;
                         }
                     }
@@ -1183,6 +1197,10 @@ fn event_loop(
         if dirty {
             terminal.draw(|frame| {
                 let area = frame.area();
+                let hovered_action = match &navigation.hovered {
+                    Some(Hit::Action(action)) => Some(action),
+                    _ => None,
+                };
                 let mut header = vec![render_header_with_palette(
                     area.width,
                     view,
@@ -1191,20 +1209,18 @@ fn event_loop(
                     shown_focus,
                     status_counts,
                     state_filter,
-                    footer_hover.as_ref(),
+                    hovered_action,
                     palette,
                 )];
                 for card in focus_cards.iter().take(shown_focus) {
                     let action = card.action();
-                    let highlighted = footer_hover.as_ref() == Some(&action)
-                        || navigation.is_highlighted(&Hit::Action(action));
-                    header.extend(render_pinned_card_with_palette(
-                        card,
-                        highlighted,
-                        area.width,
-                        palette,
-                        &branches,
-                    ));
+                    let selected = navigation.focused_action() == Some(&action);
+                    let lines = render_pinned_card_with_palette(
+                        card, selected, area.width, palette, &branches,
+                    );
+                    header.extend(lines.map(|line| {
+                        style_hover(line, !selected && hovered_action == Some(&action), palette)
+                    }));
                 }
                 if let Some(notice) = notice {
                     let notice = match notice {
@@ -1227,7 +1243,7 @@ fn event_loop(
                 );
                 navigation.render(frame, |index, selected| {
                     let row = &rows[index];
-                    if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
+                    let line = if let (SidebarView::Sessions, Row::Session(session)) = (view, row)
                         && area.width >= 8
                     {
                         let mut line = render_sidebar_row_with_palette(
@@ -1254,7 +1270,8 @@ fn event_loop(
                         render_sidebar_row_with_palette(
                             row, selected, area.width, &focused, palette, &branches,
                         )
-                    }
+                    };
+                    style_hover(line, !selected && navigation.is_hovered(index), palette)
                 });
                 if rows.is_empty() && notice != Some("disconnected") {
                     frame.render_widget(
@@ -1289,7 +1306,7 @@ fn event_loop(
                     frame.render_widget(
                         Paragraph::new(render_close_with_palette(
                             area.width,
-                            footer_hover.as_ref(),
+                            hovered_action,
                             palette,
                         )),
                         Rect::new(0, area.height - 1, area.width, 1),
@@ -1330,23 +1347,8 @@ fn event_loop(
         }
         dirty = true;
         match input {
-            Event::FocusGained => {
-                // tmux focuses this pane before forwarding a mouse click. Keep
-                // the selection and viewport stable until that click is handled;
-                // selecting the current agent here can scroll a different row
-                // underneath the pending mouse coordinates. Initial selection
-                // is resolved when the first snapshot arrives above.
-                if navigation.focused_action().is_none() {
-                    navigation.selection_visible = true;
-                }
-            }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 navigation.cancel_press();
-                if key.code != KeyCode::Char('p') {
-                    // Once the user navigates with keys, act on the keyboard
-                    // selection instead of a previously hovered Focus card.
-                    footer_hover = None;
-                }
                 if popup_mode()
                     && (key.code == KeyCode::Esc
                         || (key.modifiers.contains(event::KeyModifiers::CONTROL)
@@ -1370,7 +1372,7 @@ fn event_loop(
                         }
                     }
                     KeyCode::Char('p') => {
-                        let result = match navigation.focused_action().or(footer_hover.as_ref()) {
+                        let result = match navigation.focused_action() {
                             Some(Action::Focus(window)) => {
                                 let assistant =
                                     focused.get(window).is_some_and(|item| item.assistant);
@@ -1420,7 +1422,11 @@ fn event_loop(
                         pending_view = Some((view, Instant::now()));
                         let _ = refresh_tx.try_send(true);
                     }
-                    _ if navigation.navigate(key.code) => {}
+                    _ if navigation.navigate(key.code) => {
+                        if navigation.focused_action().is_none() {
+                            navigation.selection_visible = true;
+                        }
+                    }
                     KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
                         if navigation.selection_visible
                             && let Some(Row::Team(_, summary) | Row::TeamSub(_, _, summary)) =
@@ -1462,7 +1468,10 @@ fn event_loop(
                                     .transpose()?
                                     .unwrap_or(false)
                             }
-                            _ => activate(&rows, navigation.selected)?,
+                            _ if navigation.selection_visible => {
+                                activate(&rows, navigation.selected)?
+                            }
+                            _ => false,
                         };
                         if popup_mode() && navigated {
                             return Ok(());
@@ -1482,7 +1491,7 @@ fn event_loop(
                                     false
                                 }
                             }
-                            _ => show_row_menu(
+                            _ if navigation.selection_visible => show_row_menu(
                                 &rows,
                                 navigation.selected,
                                 Some((
@@ -1494,6 +1503,7 @@ fn event_loop(
                                 &focused,
                                 &focused_sessions,
                             )?,
+                            _ => false,
                         };
                         if shown {
                             return Ok(());
@@ -1582,8 +1592,9 @@ fn event_loop(
                         }
                     }
                 }
-                let hit = navigation.mouse(mouse, &actions);
-                let hit = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                let click = navigation.selecting_mouse(mouse, &actions);
+                let right_click = mouse.kind == MouseEventKind::Down(MouseButton::Right);
+                let click = if right_click {
                     navigation
                         .hit(mouse.column, mouse.row, &actions)
                         .filter(|hit| {
@@ -1593,16 +1604,16 @@ fn event_loop(
                                     | Hit::Action(Action::Focus(_) | Action::FocusSession(_))
                             )
                         })
+                        .map(|hit| (hit, false))
                 } else {
-                    hit
+                    click
                 };
-                footer_hover = match &navigation.hovered {
-                    Some(Hit::Action(action)) => Some(action.clone()),
-                    _ => None,
+                let Some((hit, was_selected)) = click else {
+                    continue;
                 };
                 match hit {
-                    Some(Hit::Action(Action::Close)) => return Ok(()),
-                    Some(Hit::Action(Action::View)) => {
+                    Hit::Action(Action::Close) => return Ok(()),
+                    Hit::Action(Action::View) => {
                         switch_sidebar_view(
                             paths,
                             &mut view,
@@ -1618,25 +1629,29 @@ fn event_loop(
                         pending_view = Some((view, Instant::now()));
                         let _ = refresh_tx.try_send(true);
                     }
-                    Some(Hit::Action(Action::Pinned)) => {
+                    Hit::Action(Action::Pinned) => {
                         if show_pinned_menu(&focus_cards, view, Some((mouse.column, mouse.row)))? {
                             return Ok(());
                         }
                     }
-                    Some(Hit::Action(Action::ToggleSession(session))) => {
+                    Hit::Action(Action::ToggleSession(session)) => {
                         if let Err(error) = toggle_session_focus(server, &session) {
                             append_sidebar_log(paths, &format!("focus-toggle error={error}"));
                         }
                         let _ = refresh_tx.try_send(true);
                         next_refresh = Instant::now();
                     }
-                    Some(Hit::Action(Action::Menu)) => {
+                    Hit::Action(Action::Menu) => {
                         if show_sidebar_menu()? {
                             return Ok(());
                         }
                     }
-                    Some(Hit::Action(Action::Filter(state))) => {
-                        let selected = rows.get(navigation.selected).and_then(selection_key);
+                    Hit::Action(Action::Filter(state)) => {
+                        let selected = if navigation.is_selected(navigation.selected) {
+                            rows.get(navigation.selected).and_then(selection_key)
+                        } else {
+                            None
+                        };
                         state_filter.toggle(state);
                         if let Some(snapshot) = &snapshot {
                             rows = view_rows(
@@ -1648,8 +1663,7 @@ fn event_loop(
                                 view,
                                 state_filter,
                             );
-                            navigation = NavigationList::default();
-                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            navigation = sidebar_navigation(&rows);
                             if let Some(index) = selected.as_ref().and_then(|selected| {
                                 rows.iter()
                                     .position(|row| selection_key(row).as_ref() == Some(selected))
@@ -1658,7 +1672,7 @@ fn event_loop(
                             }
                         }
                     }
-                    Some(Hit::Action(Action::Sort)) => {
+                    Hit::Action(Action::Sort) => {
                         agent_sort = match agent_sort {
                             AgentSort::Grouped => AgentSort::Prioritized,
                             AgentSort::Prioritized => AgentSort::Grouped,
@@ -1676,28 +1690,26 @@ fn event_loop(
                                 view,
                                 state_filter,
                             );
-                            navigation = NavigationList::default();
-                            navigation.replace_rows(rows.iter().map(selection_key).collect());
+                            navigation = sidebar_navigation(&rows);
                         }
                     }
-                    Some(Hit::Action(action @ (Action::Focus(_) | Action::FocusSession(_)))) => {
+                    Hit::Action(action @ (Action::Focus(_) | Action::FocusSession(_))) => {
                         if let Some(card) = focus_cards
                             .iter()
                             .take(shown_focus)
                             .find(|card| card.action() == action)
                         {
-                            let navigated =
-                                if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
-                                    show_pinned_card_menu(card, Some((mouse.column, mouse.row)))?
-                                } else {
-                                    activate_pinned(card)?
-                                };
+                            let navigated = if right_click {
+                                show_pinned_card_menu(card, Some((mouse.column, mouse.row)))?
+                            } else {
+                                was_selected && activate_pinned(card)?
+                            };
                             if popup_mode() && navigated {
                                 return Ok(());
                             }
                         }
                     }
-                    Some(Hit::Item(_)) => {
+                    Hit::Item(_) => {
                         let clicked_row = navigation.scroll
                             + usize::from(mouse.row.saturating_sub(viewport.first_row as u16));
                         if mouse.kind == MouseEventKind::Up(MouseButton::Left) && mouse.column <= 2
@@ -1723,7 +1735,7 @@ fn event_loop(
                                 continue;
                             }
                         }
-                        let navigated = if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+                        let navigated = if right_click {
                             show_row_menu(
                                 &rows,
                                 navigation.selected,
@@ -1732,19 +1744,15 @@ fn event_loop(
                                 &focused_sessions,
                             )?
                         } else {
-                            activate(&rows, navigation.selected)?
+                            was_selected && activate(&rows, navigation.selected)?
                         };
                         if popup_mode() && navigated {
                             return Ok(());
                         }
                     }
-                    None => {}
                 }
             }
-            Event::FocusLost => {
-                navigation.blur();
-                footer_hover = None;
-            }
+            Event::FocusLost => navigation.blur(),
             _ => {}
         }
     }
@@ -3242,7 +3250,11 @@ fn action_regions(
 fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
     let items = [
         crate::ui_language::text("-j/k ↑/↓ · move", "-j/k ↑/↓ · 移动"),
-        crate::ui_language::text("-Enter · open / focus", "-Enter · 打开 / 切换"),
+        crate::ui_language::text("-click · select item", "-点击 · 选中条目"),
+        crate::ui_language::text(
+            "-Enter / click selected item · open",
+            "-Enter / 点击选中项 · 切换",
+        ),
         crate::ui_language::text(
             "-Space / ←/→ / h/l · collapse / expand team",
             "-Space / ←/→ / h/l · 收起 / 展开团队",
@@ -3255,7 +3267,7 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
             "-Tab · switch Agents / Sessions",
             "-Tab · 切换智能体 / 会话",
         ),
-        crate::ui_language::text("-p · pin / unpin item", "-p · 置顶 / 取消置顶"),
+        crate::ui_language::text("-p · pin / unpin selection", "-p · 置顶 / 取消置顶选中项"),
         crate::ui_language::text("-1–9 · open a pinned item", "-1–9 · 打开置顶项"),
         crate::ui_language::text(
             "-click blocked/done/working/idle counts · filter Agents",
@@ -3783,6 +3795,25 @@ fn toggle_session_focus(
     Ok(())
 }
 
+fn focus_command() -> Result<Command, Box<dyn std::error::Error>> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args(["focus", "--responsive"]);
+    if let Some(source) = source_pane() {
+        command.args(["--source-pane", &source]);
+    }
+    if popup_mode()
+        && let Ok(client) = std::env::var("WORKBENCH_TARGET_CLIENT")
+        && !client.is_empty()
+    {
+        command.args(["--client", &client]);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
 fn activate_focus(card: &FocusCard) -> Result<bool, Box<dyn std::error::Error>> {
     let pane = card
         .agent
@@ -3795,24 +3826,15 @@ fn activate_focus(card: &FocusCard) -> Result<bool, Box<dyn std::error::Error>> 
     {
         return Ok(false);
     }
-    let mut command = Command::new(std::env::current_exe()?);
-    command.args([
-        "focus",
-        "--responsive",
-        "--session",
-        &card.window.session_id,
-        "--window",
-        &card.window.id,
-        "--pane",
-        pane,
-    ]);
-    if let Some(source) = source_pane() {
-        command.args(["--source-pane", &source]);
-    }
-    Ok(command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    Ok(focus_command()?
+        .args([
+            "--session",
+            &card.window.session_id,
+            "--window",
+            &card.window.id,
+            "--pane",
+            pane,
+        ])
         .status()?
         .success())
 }
@@ -4012,24 +4034,18 @@ fn show_focus_menu(
 fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
     match rows.get(selected) {
         Some(Row::Session(session) | Row::SessionSub(session)) => {
-            let mut command = Command::new(std::env::current_exe()?);
-            command.args(["focus", "--responsive", "--session", &session.session_id]);
-            if let Some(source) = source_pane() {
-                command.args(["--source-pane", &source]);
-            }
+            let mut command = focus_command()?;
+            command.args(["--session", &session.session_id]);
             if let Some(window) = &session.last_active_window_id {
                 command.args(["--window", window]);
             }
             if let Some(pane) = &session.last_active_pane_id {
                 command.args(["--pane", pane]);
             }
-            let status = command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
-            if !status.success() {
-                return Err("could not focus selected session".into());
+            let output = command.stderr(Stdio::piped()).output()?;
+            if !output.status.success() {
+                let error = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("could not focus selected session: {}", error.trim()).into());
             }
             return Ok(true);
         }
@@ -4055,24 +4071,15 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             | Row::TeamWorker(agent, _)
             | Row::TeamWorkerSub(agent, _),
         ) => {
-            let mut command = Command::new(std::env::current_exe()?);
-            command.args([
-                "focus",
-                "--responsive",
-                "--session",
-                &agent.target.session_id,
-                "--window",
-                &agent.target.window_id,
-                "--pane",
-                &agent.target.pane_id,
-            ]);
-            if let Some(source) = source_pane() {
-                command.args(["--source-pane", &source]);
-            }
-            let status = command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+            let status = focus_command()?
+                .args([
+                    "--session",
+                    &agent.target.session_id,
+                    "--window",
+                    &agent.target.window_id,
+                    "--pane",
+                    &agent.target.pane_id,
+                ])
                 .status()?;
             if !status.success() {
                 return Err("could not focus selected Agent".into());
@@ -4080,24 +4087,15 @@ fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::E
             return Ok(true);
         }
         Some(Row::Conversation(agent, _)) => {
-            let mut command = Command::new(std::env::current_exe()?);
-            command.args([
-                "focus",
-                "--responsive",
-                "--session",
-                &agent.target.session_id,
-                "--window",
-                &agent.target.window_id,
-                "--pane",
-                &agent.target.pane_id,
-            ]);
-            if let Some(source) = source_pane() {
-                command.args(["--source-pane", &source]);
-            }
-            let status = command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+            let status = focus_command()?
+                .args([
+                    "--session",
+                    &agent.target.session_id,
+                    "--window",
+                    &agent.target.window_id,
+                    "--pane",
+                    &agent.target.pane_id,
+                ])
                 .status()?;
             if !status.success() {
                 return Err("could not focus selected conversation".into());

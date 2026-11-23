@@ -221,12 +221,18 @@ with tempfile.TemporaryDirectory(prefix='wb-upgrade-', dir='/tmp') as directory,
         assert tmux(primary, 'list-clients', '-F', '#{pane_id}') == primary['main']
         os.write(master, f'\x1b[<35;5;{row + 1}M'.encode())
         drain(.1)
-        os.write(master, f'\x1b[<0;5;{row + 1}M\x1b[<0;5;{row + 1}m'.encode())
+        click = f'\x1b[<0;5;{row + 1}M\x1b[<0;5;{row + 1}m'.encode()
+        os.write(master, click)
+        wait_for(lambda: tmux(primary, 'list-clients', '-F', '#{pane_id}') == pane,
+                 'the first click after upgrade did not focus the sidebar')
+        drain(.2)
+        assert tmux(primary, 'list-clients', '-F', '#{pane_id}') == pane
+        os.write(master, click)
         wait_for(lambda: tmux(primary, 'list-clients', '-F', '#{pane_id}') == target,
-                 'the first click after upgrade did not focus the target agent')
+                 'clicking the selected item after upgrade did not focus the target agent')
         errors = root / 'state/tmux-agent-workbench/popup-actions.log'
         assert not errors.exists() or 'sidebar-error' not in errors.read_text(), 'sidebar failed after upgrade'
-        print('PASS the first real mouse click after atomic upgrade switches to the target agent')
+        print('PASS real mouse clicks select and activate the target agent after atomic upgrade')
     finally:
         for server in servers:
             status = subprocess.run([str(core), 'daemon', 'status'], env=server['env'],

@@ -255,12 +255,16 @@ with tempfile.TemporaryDirectory(prefix='wb-sidebar-focus-') as root, ExitStack(
         tmux('set-option', '-w', '-t', target_window, '@agent_focus', '1')
         wait(lambda: 'Priority task' in screen()[1], 'focus card returns after external change')
 
-        # A mouse click on either line focuses the exact original agent pane.
+        # The title and context lines share one selection.
         tmux('select-pane', '-t', main)
         drain(.3)
         os.write(master, b'\x1b[<0;5;2M\x1b[<0;5;2m')
+        wait(lambda: tmux('list-clients', '-F', '#{pane_id}') == sidebar, 'select pinned card')
+        drain(.2)
+        assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
+        os.write(master, b'\x1b[<0;5;3M\x1b[<0;5;3m')
         wait(lambda: tmux('list-clients', '-F', '#{session_name}:#{pane_id}') == f'a-target:{target}',
-             'focus card click')
+             'activate selected pinned card')
         assert before == tmux('list-panes', '-a', '-F', '#{session_name}:#{window_id}:#{pane_pid}')
         print('PASS focus cards stay pinned, toggle in the sidebar, and focus the original task', flush=True)
     finally:

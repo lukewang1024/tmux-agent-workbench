@@ -40,6 +40,7 @@ struct Press<A> {
     hit: Hit<A>,
     row: u16,
     dragged: bool,
+    was_selected: bool,
 }
 
 pub(crate) struct NavigationList<A> {
@@ -316,15 +317,21 @@ impl<A: Clone + Eq> NavigationList<A> {
     }
 
     pub fn is_selected(&self, row: usize) -> bool {
-        self.selection_visible
-            && self.focused_action.is_none()
-            && self
-                .rows
-                .get(row)
-                .and_then(Option::as_ref)
-                .is_some_and(|key| {
-                    self.rows.get(self.selected).and_then(Option::as_ref) == Some(key)
-                })
+        self.selected_key()
+            .is_some_and(|key| self.rows.get(row).and_then(Option::as_deref) == Some(key))
+    }
+
+    fn selected_key(&self) -> Option<&str> {
+        if self.selection_visible && self.focused_action.is_none() {
+            self.rows.get(self.selected).and_then(Option::as_deref)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_hovered(&self, row: usize) -> bool {
+        matches!(&self.hovered, Some(Hit::Item(key))
+            if self.rows.get(row).and_then(Option::as_ref) == Some(key))
     }
 
     pub fn render(
@@ -402,30 +409,83 @@ impl<A: Clone + Eq> NavigationList<A> {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, actions: &[(Rect, A)]) -> Option<Hit<A>> {
+        self.handle_mouse(mouse, actions, true).map(|(hit, _)| hit)
+    }
+
+    /// Hover previews an entry. A click selects it on release and reports
+    /// whether it was already selected when pressed.
+    pub fn selecting_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        actions: &[(Rect, A)],
+    ) -> Option<(Hit<A>, bool)> {
+        self.handle_mouse(mouse, actions, false)
+    }
+
+    fn is_entry(&self, hit: &Hit<A>) -> bool {
+        match hit {
+            Hit::Item(_) => true,
+            Hit::Action(action) => self.leading_actions.contains(action),
+        }
+    }
+
+    fn select_pointer_hit(&mut self, hit: Option<&Hit<A>>, row: u16) {
+        self.focused_action = match hit {
+            Some(Hit::Action(action)) => Some(action.clone()),
+            _ => None,
+        };
+        if let Some(Hit::Item(key)) = hit
+            && let Some(index) = self.nearest(
+                key,
+                self.scroll + usize::from(row.saturating_sub(self.area.y)),
+            )
+        {
+            self.selected = self.start(index);
+            self.selection_visible = true;
+        }
+    }
+
+    fn select_pointer_entry(&mut self, hit: &Hit<A>, row: u16) {
+        self.select_pointer_hit(Some(hit), row);
+        self.selection_visible = matches!(hit, Hit::Item(_));
+    }
+
+    fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        actions: &[(Rect, A)],
+        select_on_hover: bool,
+    ) -> Option<(Hit<A>, bool)> {
         let hit = self.hit(mouse.column, mouse.row, actions);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.focused_action = match &hit {
-                    Some(Hit::Action(action)) => Some(action.clone()),
-                    _ => None,
+                let was_selected = match &hit {
+                    Some(Hit::Item(key)) => self.selected_key() == Some(key),
+                    Some(Hit::Action(action)) => self.focused_action.as_ref() == Some(action),
+                    None => false,
                 };
-                if let Some(Hit::Item(key)) = &hit
-                    && let Some(index) = self.nearest(
-                        key,
-                        self.scroll + usize::from(mouse.row.saturating_sub(self.area.y)),
-                    )
-                {
-                    self.selected = self.start(index);
-                    self.selection_visible = true;
+                if select_on_hover {
+                    self.select_pointer_hit(hit.as_ref(), mouse.row);
+                } else {
+                    self.hovered = hit.clone();
                 }
                 self.follow_selection = false;
                 self.pressed = hit.map(|hit| Press {
                     hit,
                     row: mouse.row,
                     dragged: false,
+                    was_selected,
                 });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if !select_on_hover
+                    && let Some(press) = &self.pressed
+                    && !press.dragged
+                    && self.is_entry(&press.hit)
+                {
+                    let hit = press.hit.clone();
+                    self.select_pointer_entry(&hit, press.row);
+                }
                 if let Some(press) = &mut self.pressed {
                     press.dragged = true;
                     let delta = isize::try_from(press.row).unwrap_or(0)
@@ -463,16 +523,23 @@ impl<A: Clone + Eq> NavigationList<A> {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if !select_on_hover {
+                    self.hovered = hit.clone();
+                }
                 if let Some(press) = self.pressed.take()
                     && !press.dragged
                     && hit.as_ref() == Some(&press.hit)
                 {
-                    return hit;
+                    if !select_on_hover && self.is_entry(&press.hit) {
+                        self.select_pointer_entry(&press.hit, mouse.row);
+                    }
+                    return Some((press.hit, press.was_selected));
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 self.cancel_press();
-                if matches!(&self.hovered, Some(Hit::Action(action)) if !self.leading_actions.contains(action))
+                if select_on_hover
+                    && matches!(&self.hovered, Some(Hit::Action(action)) if !self.leading_actions.contains(action))
                 {
                     self.focused_action = None;
                 }
@@ -501,23 +568,20 @@ impl<A: Clone + Eq> NavigationList<A> {
             }
             MouseEventKind::Moved => {
                 self.hovered = hit.clone();
-                self.focused_action = match &hit {
-                    Some(Hit::Action(action)) => Some(action.clone()),
-                    _ => None,
-                };
-                self.selection_visible = matches!(hit, Some(Hit::Item(_)));
-                if let Some(Hit::Item(key)) = hit
-                    && let Some(index) = self.nearest(
-                        &key,
-                        self.scroll + usize::from(mouse.row.saturating_sub(self.area.y)),
-                    )
-                {
-                    self.selected = self.start(index);
+                if select_on_hover {
+                    self.selection_visible = matches!(hit, Some(Hit::Item(_)));
+                    self.select_pointer_hit(hit.as_ref(), mouse.row);
                 }
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.cancel_press();
-                if let Some(Hit::Item(key)) = hit
+                if !select_on_hover {
+                    if let Some(hit) = &hit
+                        && self.is_entry(hit)
+                    {
+                        self.select_pointer_entry(hit, mouse.row);
+                    }
+                } else if let Some(Hit::Item(key)) = hit
                     && let Some(index) = self.nearest(
                         &key,
                         self.scroll + usize::from(mouse.row.saturating_sub(self.area.y)),
@@ -800,6 +864,42 @@ mod tests {
         assert_eq!(list.hit(5, 2, &[]), None);
         assert_eq!(list.hit(5, 6, &[]), None);
         assert_eq!(list.hit(0, 3, &[]), None);
+    }
+
+    #[test]
+    fn click_selection_is_independent_of_hover_for_rows_and_pins() {
+        let mut list = list();
+        let actions = [(Rect::new(1, 0, 24, 2), "pin")];
+        list.set_leading_actions(&actions);
+        list.blur();
+
+        list.selecting_mouse(mouse(MouseEventKind::Moved, 3), &actions);
+        assert!(list.is_hovered(1));
+        assert!(!list.is_selected(1));
+        list.selecting_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3), &actions);
+        assert!(!list.is_selected(1));
+        assert_eq!(
+            list.selecting_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4), &actions),
+            Some((Hit::Item("a".into()), false))
+        );
+
+        list.selecting_mouse(mouse(MouseEventKind::Moved, 0), &actions);
+        assert_eq!(list.hovered, Some(Hit::Action("pin")));
+        assert!(list.is_selected(1));
+        list.selecting_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3), &actions);
+        assert_eq!(
+            list.selecting_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4), &actions),
+            Some((Hit::Item("a".into()), true))
+        );
+
+        list.navigate(KeyCode::Home);
+        list.selecting_mouse(mouse(MouseEventKind::Moved, 3), &actions);
+        assert_eq!(list.focused_action(), Some(&"pin"));
+        list.selecting_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0), &actions);
+        assert_eq!(
+            list.selecting_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 1), &actions),
+            Some((Hit::Action("pin"), true))
+        );
     }
 
     #[test]

@@ -258,8 +258,11 @@ with tempfile.TemporaryDirectory(prefix='wb-team-sidebar-') as root, ExitStack()
         wait_for(lambda: any('focus_worker' in line for line in screen()), 'focus team not expanded')
         row = next(i for i, line in enumerate(screen()) if 'focus_worker' in line)
         click(5, row)
+        drain(.2)
+        assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
+        click(5, row)
         wait_for(lambda: tmux('list-clients', '-F', '#{pane_id}') == focus_worker,
-                 'worker click did not focus')
+                 'click on selected worker did not focus')
         print('PASS: team sidebar navigation, identity, and closed-team worker suppression')
     finally:
         os.close(master)
