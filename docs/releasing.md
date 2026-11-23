@@ -82,6 +82,14 @@ repair of the missing host-metrics fixture without changing shipped code.
 Existing release notes are preserved; artifacts are uploaded after all targets
 succeed. No release tag is moved or overwritten.
 
+To fill in a missing iSH archive for a tag that supports iSH, select the
+iSH-only repair. This builds the original tagged source and requires the i586
+archive before uploading it. Existing archives for other platforms stay in place.
+
+```sh
+gh workflow run release.yml --ref main -f repair_release_tag=v2.0.0-beta.83 -f repair_ish_only=true
+```
+
 If Ubuntu's default archives cannot be reached, the P0 gate, Linux P1 and
 release jobs retry their test dependencies using signed Ubuntu mirrors. Package
 signature verification remains enabled; the binaries are still built from the

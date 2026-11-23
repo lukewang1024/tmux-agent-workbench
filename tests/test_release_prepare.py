@@ -37,7 +37,7 @@ class ReleaseGateTest(unittest.TestCase):
                              head_repository={'full_name': 'owner/repo'}, head_sha=self.head)
         self.env = patch.dict(os.environ, GITHUB_EVENT_PATH=str(self.event),
                               GITHUB_REPOSITORY='owner/repo', GITHUB_EVENT_NAME='workflow_run',
-                              REPAIR_RELEASE_TAG='')
+                              REPAIR_RELEASE_TAG='', REPAIR_ISH_ONLY='')
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -186,6 +186,34 @@ class ReleaseGateTest(unittest.TestCase):
         with patch.dict(os.environ, GITHUB_EVENT_NAME='workflow_dispatch'), patch.object(release, 'run', fake_run):
             with self.assertRaisesRegex(RuntimeError, 'must pass CI'):
                 self.prepare()
+
+    def test_ish_repair_adds_only_the_missing_asset_to_a_slim_prerelease(self):
+        Path('src').mkdir()
+        Path('src/compat.rs').write_text('// iSH compatibility\n')
+        self.git('add', 'src/compat.rs')
+        self.git('commit', '-qm', 'add iSH compatibility')
+        self.git('tag', 'v1.2.3')
+        Path('Cargo.toml').write_text('[package]\nname="fixture"\nversion="1.2.4-beta.1"\n')
+        self.git('add', 'Cargo.toml')
+        self.git('commit', '-qm', 'prerelease source')
+        source = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', source)
+        self.workflow['head_sha'] = source
+
+        original = self.prepare()
+        self.assertEqual(original['ish_target'], 'false')
+
+        with patch.dict(os.environ, REPAIR_RELEASE_TAG=original['tag'], REPAIR_ISH_ONLY='true'):
+            result = self.prepare()
+
+        self.assertEqual(result['source'], source)
+        self.assertEqual(result['repair_ish_only'], 'true')
+        self.assertEqual(result['required_assets'], '1')
+        self.assertEqual(result['windows_companion'], 'false')
+        self.assertEqual(self.selected_targets(result), [{
+            'os': 'ubuntu-24.04', 'target': 'i586-unknown-linux-musl',
+            'android': False, 'priority': 'high',
+        }])
 
 
 if __name__ == '__main__':

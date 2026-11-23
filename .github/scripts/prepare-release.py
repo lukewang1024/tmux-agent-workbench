@@ -95,6 +95,9 @@ def prepare():
         if not any(item['head_sha'] == main for item in runs['workflow_runs']):
             raise RuntimeError('Current main must pass CI before release recovery')
     repair = os.environ.get('REPAIR_RELEASE_TAG', '')
+    repair_ish_only = os.environ.get('REPAIR_ISH_ONLY') == 'true'
+    if repair_ish_only and not repair:
+        raise RuntimeError('An existing release tag is required for an iSH asset repair')
     if repair:
         subprocess.run(['git', 'check-ref-format', f'refs/tags/{repair}'], check=True)
         source = run('git', 'rev-parse', f'refs/tags/{repair}^{{commit}}')
@@ -123,6 +126,18 @@ def prepare():
         path.startswith('windows-companion/') for path in paths)
     windows_arm64 = full_matrix and windows_companion
     required_assets = (3 if rust_changed else 0) + (2 if windows_companion else 0)
+    rust_matrix = rust_target_matrix(full_matrix, rust_changed, ish_target)
+    if repair_ish_only:
+        # Do not ship iSH binaries for tags from before the runtime supported it.
+        if subprocess.run(['git', 'cat-file', '-e', f'{source}:src/compat.rs']).returncode:
+            raise RuntimeError(f'{tag} does not contain iSH runtime compatibility')
+        full_matrix = windows_companion = windows_arm64 = False
+        rust_changed = ish_target = True
+        required_assets = 1
+        rust_matrix = {'include': [
+            dict(target, priority='high') for target in RUST_TARGETS
+            if target['target'] == 'i586-unknown-linux-musl'
+        ]}
     return {
         'enabled': 'true',
         'tag': tag,
@@ -131,12 +146,11 @@ def prepare():
         'full_matrix': str(full_matrix).lower(),
         'rust_changed': str(rust_changed).lower(),
         'ish_target': str(ish_target).lower(),
+        'repair_ish_only': str(repair_ish_only).lower(),
         'windows_companion': str(windows_companion).lower(),
         'windows_arm64': str(windows_arm64).lower(),
         'required_assets': str(required_assets),
-        'rust_matrix': json.dumps(
-            rust_target_matrix(full_matrix, rust_changed, ish_target),
-            separators=(',', ':')),
+        'rust_matrix': json.dumps(rust_matrix, separators=(',', ':')),
     }
 
 
