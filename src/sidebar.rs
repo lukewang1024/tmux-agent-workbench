@@ -191,6 +191,12 @@ pub(crate) struct SharedSidebarData {
     sort: Option<AgentSort>,
 }
 
+struct SidebarFrame {
+    snapshot: Snapshot,
+    data: SharedSidebarData,
+    foreground_pane: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SidebarPalette {
     background: Color,
@@ -894,6 +900,21 @@ fn style_hover(line: Line<'static>, hovered: bool, palette: SidebarPalette) -> L
     }
 }
 
+fn mark_foreground(mut line: Line<'static>, palette: SidebarPalette) -> Line<'static> {
+    if let Some(first) = line.spans.first_mut()
+        && first.content.starts_with(' ')
+    {
+        let marker = Span::styled("▏", first.style.fg(palette.info));
+        first.content.to_mut().remove(0);
+        line.spans.insert(0, marker);
+    }
+    line
+}
+
+fn is_foreground_agent(agent: &AgentSnapshot, pane: Option<&str>) -> bool {
+    !agent.exited && pane == Some(agent.target.pane_id.as_str())
+}
+
 fn switch_sidebar_view(
     paths: &Paths,
     view: &mut SidebarView,
@@ -1005,9 +1026,9 @@ fn event_loop(
     let initial_state = initial_snapshot
         .map_err(|error| error.to_string())
         .and_then(|(snapshot, surface)| sidebar_state(snapshot, surface.as_ref()));
-    let (mut snapshot, initial_data) = match initial_state {
-        Ok((snapshot, data)) => (Some(snapshot), data),
-        Err(_) => (None, SharedSidebarData::default()),
+    let (mut snapshot, initial_data, mut foreground_pane) = match initial_state {
+        Ok(frame) => (Some(frame.snapshot), frame.data, frame.foreground_pane),
+        Err(_) => (None, SharedSidebarData::default(), None),
     };
     if let Some(saved) = initial_data.sort {
         agent_sort = saved;
@@ -1082,7 +1103,12 @@ fn event_loop(
             // focus event, rather than waiting for the slow visibility probe.
             next_refresh = Instant::now() + refresh_interval(visible || low_process_churn);
             match result {
-                Ok((fetched, data)) => {
+                Ok(SidebarFrame {
+                    snapshot: fetched,
+                    data,
+                    foreground_pane: current_pane,
+                }) => {
+                    foreground_pane = current_pane;
                     let view_changed =
                         apply_shared_preference(&mut view, &mut pending_view, data.view);
                     apply_shared_preference(&mut agent_sort, &mut pending_sort, data.sort);
@@ -1215,10 +1241,18 @@ fn event_loop(
                 for card in focus_cards.iter().take(shown_focus) {
                     let action = card.action();
                     let selected = navigation.focused_action() == Some(&action);
-                    let lines = render_pinned_card_with_palette(
+                    let [title, subtitle] = render_pinned_card_with_palette(
                         card, selected, area.width, palette, &branches,
                     );
-                    header.extend(lines.map(|line| {
+                    let title = if let PinnedCard::Agent(card) = card
+                        && card.agent.as_ref().is_some_and(|agent| {
+                            is_foreground_agent(agent, foreground_pane.as_deref())
+                        }) {
+                        mark_foreground(title, palette)
+                    } else {
+                        title
+                    };
+                    header.extend([title, subtitle].map(|line| {
                         style_hover(line, !selected && hovered_action == Some(&action), palette)
                     }));
                 }
@@ -1270,6 +1304,14 @@ fn event_loop(
                         render_sidebar_row_with_palette(
                             row, selected, area.width, &focused, palette, &branches,
                         )
+                    };
+                    let line = match row {
+                        Row::Agent(agent) | Row::Team(agent, _) | Row::TeamWorker(agent, _)
+                            if is_foreground_agent(agent, foreground_pane.as_deref()) =>
+                        {
+                            mark_foreground(line, palette)
+                        }
+                        _ => line,
                     };
                     style_hover(line, !selected && navigation.is_hovered(index), palette)
                 });
@@ -1828,12 +1870,44 @@ fn fetch_sidebar_frame(
 fn sidebar_state(
     mut snapshot: Snapshot,
     shared: Option<&crate::tmux::SurfaceInventory>,
-) -> Result<(Snapshot, SharedSidebarData), String> {
-    let data = shared
-        .and_then(|surface| surface.sidebar.as_ref())
+) -> Result<SidebarFrame, String> {
+    let (surface, data) = shared
+        .and_then(|surface| Some((surface, surface.sidebar.as_ref()?)))
         .ok_or_else(|| "shared sidebar inventory unavailable".to_owned())?;
     prune_closed_pane_tombstones(&mut snapshot, &data.live_panes);
-    Ok((snapshot, data.clone()))
+    Ok(SidebarFrame {
+        snapshot,
+        data: data.clone(),
+        foreground_pane: source_pane()
+            .and_then(|source| foreground_pane(surface, &source).map(str::to_owned)),
+    })
+}
+
+fn foreground_pane<'a>(
+    surface: &'a crate::tmux::SurfaceInventory,
+    source: &str,
+) -> Option<&'a str> {
+    let window = surface.rows.lines().find_map(|row| {
+        let (window, rest) = row.split_once('\t')?;
+        (rest.split_once('\t')?.0 == source).then_some(window)
+    })?;
+    surface.rows.lines().find_map(|row| {
+        let mut fields = row.split('\t');
+        if fields.next()? != window {
+            return None;
+        }
+        let pane = fields.next()?;
+        // The inventory puts pane_active in column 10 and the pane role in
+        // column 12. If the sidebar owns tmux focus, keep its prior content pane.
+        if fields.nth(7)? != "1" {
+            return None;
+        }
+        if fields.nth(1)? == "sidebar" {
+            surface.last_panes.get(window).map(String::as_str)
+        } else {
+            Some(pane)
+        }
+    })
 }
 
 fn prune_closed_pane_tombstones(snapshot: &mut Snapshot, live_panes: &HashSet<String>) {
@@ -3250,6 +3324,7 @@ fn action_regions(
 fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
     let items = [
         crate::ui_language::text("-j/k ↑/↓ · move", "-j/k ↑/↓ · 移动"),
+        crate::ui_language::text("-▏ · foreground Agent", "-▏ · 前台智能体"),
         crate::ui_language::text("-click · select item", "-点击 · 选中条目"),
         crate::ui_language::text(
             "-Enter / click selected item · open",

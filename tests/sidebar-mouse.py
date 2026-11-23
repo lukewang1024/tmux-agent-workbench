@@ -68,6 +68,11 @@ def check(height, target, section='agent'):
                      shlex.quote(fixture))
             main = tmux('display-message', '-p', '-t', 'z-source', '#{pane_id}')
             target_pane = tmux('display-message', '-p', '-t', target, '#{pane_id}')
+            support = None
+            if height == 40:
+                support = tmux('split-window', '-d', '-h', '-t', main,
+                               '-P', '-F', '#{pane_id}', 'exec sleep 120')
+                tmux('set-option', '-w', '-t', main, '@agent_focus', '1')
             processes.enter_context(running_daemon(core, env))
             sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
                            '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
@@ -77,6 +82,15 @@ def check(height, target, section='agent'):
                                       env=env, stdin=slave, stdout=slave, stderr=slave,
                                       start_new_session=True)
             wait_for(lambda: any('Task ' in line for line in screen()), 'sidebar did not render')
+            def marked_source_rows():
+                return sum(line.startswith('▏') and 'Task z-source' in line for line in screen())
+
+            if support is not None:
+                wait_for(lambda: marked_source_rows() == 2, 'foreground Agent was not marked in both cards')
+                tmux('select-pane', '-t', support)
+                wait_for(lambda: marked_source_rows() == 0, 'foreground marker remained while the shell was active')
+                tmux('select-pane', '-t', main)
+                wait_for(lambda: marked_source_rows() == 2, 'foreground marker did not return to the Agent')
             # Let the initial snapshot select the current agent, then browse back
             # to the top without giving the sidebar focus, as mouse scrolling does.
             drain(1.3)
@@ -160,6 +174,10 @@ def check(height, target, section='agent'):
             drain(.2)
             assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
             if height == 40:
+                drain(1.3)
+                assert marked_source_rows() == 2, screen()
+                assert not any(line.startswith('▏') and target in line for line in screen())
+                print('PASS: foreground markers follow pane focus and survive sidebar selection')
                 # Hover over another Agent and use the real keyboard binding.
                 # Both p and Enter must still target the clicked Agent.
                 other_row = next(i for i, line in enumerate(screen()) if 'Task b-agent' in line)
