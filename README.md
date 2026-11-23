@@ -375,6 +375,8 @@ more detail, including Agent kind, human-readable window/pane indices, process i
 health, and matched rule. Click an item or use the arrow keys to select it.
 Mouse hover previews an item and keeps the current selection. Press Enter or
 click the selected item to focus its pane. This also applies to pinned cards.
+The bar on the left spans both lines of the foreground Agent's card and uses
+its status color. It stays with the Agent when the sidebar receives focus.
 `m` or right-click opens session/agent actions. The top row opens the tmuxinator-project picker and
 the global action menu. In responsive popup mode, `Escape`, `Ctrl-C`, and
 `Ctrl-D` close the popup; the footer and global menu also expose a mouse-driven

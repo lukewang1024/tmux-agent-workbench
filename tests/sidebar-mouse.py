@@ -26,7 +26,7 @@ def check(height, target, section='agent'):
         env = dict(os.environ, TERM='xterm-256color',
                    TMUX_AGENT_WORKBENCH_TMUX_SOCKET=socket,
                    WORKBENCH_FIXTURE_SECONDS='120')
-        for key in ('TMUX', 'TMUX_PANE', 'WORKBENCH_SOURCE_PANE', 'WORKBENCH_POPUP'):
+        for key in ('TMUX', 'TMUX_PANE', 'WORKBENCH_SOURCE_PANE', 'WORKBENCH_POPUP', 'NO_COLOR'):
             env.pop(key, None)
         for key in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
             env[key] = root + '/' + key
@@ -68,6 +68,13 @@ def check(height, target, section='agent'):
                      shlex.quote(fixture))
             main = tmux('display-message', '-p', '-t', 'z-source', '#{pane_id}')
             target_pane = tmux('display-message', '-p', '-t', target, '#{pane_id}')
+            support = None
+            if height == 40:
+                tmux('set-option', '-g', '@adaptive_palette',
+                     '{"version":1,"accent":"colour72","warning":"colour166"}')
+                support = tmux('split-window', '-d', '-h', '-t', main,
+                               '-P', '-F', '#{pane_id}', 'exec sleep 120')
+                tmux('set-option', '-w', '-t', main, '@agent_focus', '1')
             processes.enter_context(running_daemon(core, env))
             sidebar = tmux('split-window', '-b', '-h', '-l', '36', '-t', 'z-source',
                            '-P', '-F', '#{pane_id}', shlex.quote(core) + ' sidebar')
@@ -77,6 +84,32 @@ def check(height, target, section='agent'):
                                       env=env, stdin=slave, stdout=slave, stderr=slave,
                                       start_new_session=True)
             wait_for(lambda: any('Task ' in line for line in screen()), 'sidebar did not render')
+            def source_cards_marked(expected):
+                lines = screen()
+                titles = [index for index, line in enumerate(lines) if 'Task z-source' in line]
+                return len(titles) == 2 and all(
+                    index + 1 < len(lines)
+                    and lines[index].startswith('▏') == expected
+                    and lines[index + 1].startswith('▏') == expected
+                    for index in titles
+                )
+
+            def marker_color_matches(color):
+                lines = tmux('capture-pane', '-p', '-e', '-t', sidebar).splitlines()
+                markers = [line.partition('▏')[0] for line in lines if '▏' in line]
+                return len(markers) == 4 and all(f'38;5;{color}m' in prefix for prefix in markers)
+
+            if support is not None:
+                wait_for(lambda: source_cards_marked(True), 'both lines of the foreground cards must be marked')
+                wait_for(lambda: marker_color_matches(72), 'foreground markers did not use the idle color')
+                tmux('select-pane', '-t', main, '-T', '⠴ Task z-source')
+                wait_for(lambda: marker_color_matches(166), 'foreground markers did not follow the working state')
+                tmux('select-pane', '-t', main, '-T', 'Ready')
+                wait_for(lambda: marker_color_matches(72), 'foreground markers did not return to the idle color')
+                tmux('select-pane', '-t', support)
+                wait_for(lambda: source_cards_marked(False), 'foreground marker remained while the shell was active')
+                tmux('select-pane', '-t', main)
+                wait_for(lambda: source_cards_marked(True), 'foreground marker did not return to the Agent')
             # Let the initial snapshot select the current agent, then browse back
             # to the top without giving the sidebar focus, as mouse scrolling does.
             drain(1.3)
@@ -160,6 +193,10 @@ def check(height, target, section='agent'):
             drain(.2)
             assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
             if height == 40:
+                drain(1.3)
+                assert source_cards_marked(True), screen()
+                assert not any(line.startswith('▏') and target in line for line in screen())
+                print('PASS: foreground markers follow Agent status and pane focus and survive sidebar selection')
                 # Hover over another Agent and use the real keyboard binding.
                 # Both p and Enter must still target the clicked Agent.
                 other_row = next(i for i, line in enumerate(screen()) if 'Task b-agent' in line)
