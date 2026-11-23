@@ -82,15 +82,22 @@ def check(height, target, section='agent'):
                                       env=env, stdin=slave, stdout=slave, stderr=slave,
                                       start_new_session=True)
             wait_for(lambda: any('Task ' in line for line in screen()), 'sidebar did not render')
-            def marked_source_rows():
-                return sum(line.startswith('▏') and 'Task z-source' in line for line in screen())
+            def source_cards_marked(expected):
+                lines = screen()
+                titles = [index for index, line in enumerate(lines) if 'Task z-source' in line]
+                return len(titles) == 2 and all(
+                    index + 1 < len(lines)
+                    and lines[index].startswith('▏') == expected
+                    and lines[index + 1].startswith('▏') == expected
+                    for index in titles
+                )
 
             if support is not None:
-                wait_for(lambda: marked_source_rows() == 2, 'foreground Agent was not marked in both cards')
+                wait_for(lambda: source_cards_marked(True), 'both lines of the foreground cards must be marked')
                 tmux('select-pane', '-t', support)
-                wait_for(lambda: marked_source_rows() == 0, 'foreground marker remained while the shell was active')
+                wait_for(lambda: source_cards_marked(False), 'foreground marker remained while the shell was active')
                 tmux('select-pane', '-t', main)
-                wait_for(lambda: marked_source_rows() == 2, 'foreground marker did not return to the Agent')
+                wait_for(lambda: source_cards_marked(True), 'foreground marker did not return to the Agent')
             # Let the initial snapshot select the current agent, then browse back
             # to the top without giving the sidebar focus, as mouse scrolling does.
             drain(1.3)
@@ -175,7 +182,7 @@ def check(height, target, section='agent'):
             assert tmux('list-clients', '-F', '#{pane_id}') == sidebar
             if height == 40:
                 drain(1.3)
-                assert marked_source_rows() == 2, screen()
+                assert source_cards_marked(True), screen()
                 assert not any(line.startswith('▏') and target in line for line in screen())
                 print('PASS: foreground markers follow pane focus and survive sidebar selection')
                 # Hover over another Agent and use the real keyboard binding.

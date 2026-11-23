@@ -901,11 +901,14 @@ fn style_hover(line: Line<'static>, hovered: bool, palette: SidebarPalette) -> L
 }
 
 fn mark_foreground(mut line: Line<'static>, palette: SidebarPalette) -> Line<'static> {
-    if let Some(first) = line.spans.first_mut()
-        && first.content.starts_with(' ')
-    {
+    if let Some(first) = line.spans.iter_mut().find(|span| !span.content.is_empty()) {
         let marker = Span::styled("▏", first.style.fg(palette.info));
-        first.content.to_mut().remove(0);
+        if first.content.starts_with(' ') {
+            first.content.to_mut().remove(0);
+        } else {
+            // On narrow sidebars the status can fill the entire line.
+            first.content = fit_text(&first.content, first.width().saturating_sub(1)).into();
+        }
         line.spans.insert(0, marker);
     }
     line
@@ -1241,18 +1244,19 @@ fn event_loop(
                 for card in focus_cards.iter().take(shown_focus) {
                     let action = card.action();
                     let selected = navigation.focused_action() == Some(&action);
-                    let [title, subtitle] = render_pinned_card_with_palette(
+                    let lines = render_pinned_card_with_palette(
                         card, selected, area.width, palette, &branches,
                     );
-                    let title = if let PinnedCard::Agent(card) = card
-                        && card.agent.as_ref().is_some_and(|agent| {
-                            is_foreground_agent(agent, foreground_pane.as_deref())
-                        }) {
-                        mark_foreground(title, palette)
-                    } else {
-                        title
-                    };
-                    header.extend([title, subtitle].map(|line| {
+                    let foreground = matches!(card, PinnedCard::Agent(card)
+                    if card.agent.as_ref().is_some_and(|agent| {
+                        is_foreground_agent(agent, foreground_pane.as_deref())
+                    }));
+                    header.extend(lines.map(|line| {
+                        let line = if foreground {
+                            mark_foreground(line, palette)
+                        } else {
+                            line
+                        };
                         style_hover(line, !selected && hovered_action == Some(&action), palette)
                     }));
                 }
@@ -1306,7 +1310,12 @@ fn event_loop(
                         )
                     };
                     let line = match row {
-                        Row::Agent(agent) | Row::Team(agent, _) | Row::TeamWorker(agent, _)
+                        Row::Agent(agent)
+                        | Row::AgentSub(agent, _)
+                        | Row::Team(agent, _)
+                        | Row::TeamSub(agent, _, _)
+                        | Row::TeamWorker(agent, _)
+                        | Row::TeamWorkerSub(agent, _)
                             if is_foreground_agent(agent, foreground_pane.as_deref()) =>
                         {
                             mark_foreground(line, palette)
@@ -5872,13 +5881,22 @@ mod tests {
         let mut agent = snapshot.agents[0].clone();
         agent.target.session_name = "文档体验优化方向".into();
         agent.target.window_name = "修复公式插入时的布局问题".into();
-        for width in [12, 26, 36, 80] {
+        let palette = SidebarPalette::default();
+        for width in [1, 12, 26, 36, 80] {
             for row in [
                 Row::Agent(agent.clone()),
                 Row::AgentSub(agent.clone(), AgentSort::Grouped),
             ] {
-                assert_eq!(render_row(&row, false, width).width(), usize::from(width));
-                assert_eq!(render_row(&row, true, width).width(), usize::from(width));
+                for selected in [false, true] {
+                    let line = render_row(&row, selected, width);
+                    assert_eq!(line.width(), usize::from(width));
+                    let marked = mark_foreground(line, palette);
+                    assert_eq!(marked.width(), usize::from(width));
+                    assert_eq!(marked.spans[0].content, "▏");
+                    if selected {
+                        assert_eq!(marked.spans[0].style.bg, Some(palette.selection));
+                    }
+                }
             }
         }
         agent.target.window_name.clear();
