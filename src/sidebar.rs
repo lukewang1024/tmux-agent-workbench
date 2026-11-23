@@ -900,9 +900,16 @@ fn style_hover(line: Line<'static>, hovered: bool, palette: SidebarPalette) -> L
     }
 }
 
-fn mark_foreground(mut line: Line<'static>, palette: SidebarPalette) -> Line<'static> {
+fn mark_foreground(
+    mut line: Line<'static>,
+    state: DisplayState,
+    palette: SidebarPalette,
+) -> Line<'static> {
     if let Some(first) = line.spans.iter_mut().find(|span| !span.content.is_empty()) {
-        let marker = Span::styled("▏", first.style.fg(palette.info));
+        let marker = Span::styled(
+            "▏",
+            first.style.fg(state_color_with_palette(state, palette)),
+        );
         if first.content.starts_with(' ') {
             first.content.to_mut().remove(0);
         } else {
@@ -1247,13 +1254,17 @@ fn event_loop(
                     let lines = render_pinned_card_with_palette(
                         card, selected, area.width, palette, &branches,
                     );
-                    let foreground = matches!(card, PinnedCard::Agent(card)
-                    if card.agent.as_ref().is_some_and(|agent| {
-                        is_foreground_agent(agent, foreground_pane.as_deref())
-                    }));
+                    let foreground_state = match card {
+                        PinnedCard::Agent(card) => card
+                            .agent
+                            .as_ref()
+                            .filter(|agent| is_foreground_agent(agent, foreground_pane.as_deref()))
+                            .map(|agent| agent.display_state),
+                        PinnedCard::Session(_) => None,
+                    };
                     header.extend(lines.map(|line| {
-                        let line = if foreground {
-                            mark_foreground(line, palette)
+                        let line = if let Some(state) = foreground_state {
+                            mark_foreground(line, state, palette)
                         } else {
                             line
                         };
@@ -1318,7 +1329,7 @@ fn event_loop(
                         | Row::TeamWorkerSub(agent, _)
                             if is_foreground_agent(agent, foreground_pane.as_deref()) =>
                         {
-                            mark_foreground(line, palette)
+                            mark_foreground(line, agent.display_state, palette)
                         }
                         _ => line,
                     };
@@ -5890,9 +5901,13 @@ mod tests {
                 for selected in [false, true] {
                     let line = render_row(&row, selected, width);
                     assert_eq!(line.width(), usize::from(width));
-                    let marked = mark_foreground(line, palette);
+                    let marked = mark_foreground(line, agent.display_state, palette);
                     assert_eq!(marked.width(), usize::from(width));
                     assert_eq!(marked.spans[0].content, "▏");
+                    assert_eq!(
+                        marked.spans[0].style.fg,
+                        Some(state_color_with_palette(agent.display_state, palette))
+                    );
                     if selected {
                         assert_eq!(marked.spans[0].style.bg, Some(palette.selection));
                     }
