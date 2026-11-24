@@ -27,6 +27,7 @@ layout:   reorganise batch-worker|snapshot|apply|restore
           auto-split status|finish
 titles:   title set [task-name] [--session <direction>] | title status
 clients:  attach, client serve|status|setup|open-url
+web:      web serve|invite|node
 ui:       menu, sidebar, popup, switch window|session|agent|pane, pick repo|project|session|agent
 tmux:     resurrect save|restore|status|clean|relaunch candidates|seed|add
 system:   conventions, status, doctor, config, hooks, daemon
@@ -102,6 +103,18 @@ case $command_name in
     ;;
   attach) need_core; exec "$core" client attach "$@" ;;
   client) need_core; exec "$core" client "$@" ;;
+  web)
+    command -v node >/dev/null 2>&1 || {
+      echo 'tmux-agent-workbench web requires Node.js 22 or later' >&2
+      exit 127
+    }
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) < 22 ? 1 : 0)' || {
+      echo 'tmux-agent-workbench web requires Node.js 22 or later' >&2
+      exit 1
+    }
+    WORKBENCH_WEB_CORE=$core WORKBENCH_WEB_USAGE=$plugin_dir/bin/workbench-codex-limits \
+      exec node "$plugin_dir/web/cli.mjs" "$@"
+    ;;
   sidebar) need_core; exec "$core" sidebar "$@" ;;
   popup)
     need_core

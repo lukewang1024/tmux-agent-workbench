@@ -1,2 +1,3 @@
 /target/
 /bin/tmux-agent-workbench
+/web/node_modules/
