@@ -13,13 +13,13 @@ const paneFormat = [
   'pane_id', 'session_id', 'window_id', 'pane_pid', 'pid', 'start_time',
   'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'pane_dead',
   '@workbench-web-pane', 'pane_in_mode',
-].map((field) => '#{' + field + '}').join('\t');
+].map((field) => '#{' + field + '}').join('|');
 const limitsFile = join(workbenchState, 'usage', 'codex-limits.json');
 const maxBytes = 384 * 1024;
 const ttl = 20_000;
 
 function paneFrom(line) {
-  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode] = line.split('\t');
+  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode] = line.split('|');
   if (!/^%\d+$/.test(pane) || !/^\$\d+$/.test(session) || !/^@\d+$/.test(window)
       || ![processId, serverId, startTime].every((value) => /^\d+$/.test(value)) || dead === '1') return null;
   return {
