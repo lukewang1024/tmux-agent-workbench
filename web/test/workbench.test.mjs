@@ -58,7 +58,8 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
 test('tmux control mode streams a background Pane and sends input to that exact PTY', async (t) => {
   const directory = await scratch(t);
   const socket = join(directory, 't');
-  const environment = { ...process.env };
+  // The interactive fixture must interpret the UTF-8 bytes used in the assertion.
+  const environment = { ...process.env, LC_ALL: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8' };
   delete environment.TMUX;
   delete environment.TMUX_PANE;
   const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { env: environment, encoding: 'utf8', timeout: 4000 }).trim();
