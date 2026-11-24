@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { startServer } from '../server.mjs';
-import { hash, Store } from '../state.mjs';
+import { hash, readJson, Store } from '../state.mjs';
 import { LocalNode } from '../tmux.mjs';
 
 async function scratch(t) {
@@ -118,7 +120,15 @@ test('gateway protects data and accepts an outbound node handshake only after en
     });
     assert.equal(crossOrigin, 403);
     const invite = store.issue('node', 'remote');
-    const config = await enrollNode(address, invite);
+    const connectorState = join(store.directory, 'fixture-connector');
+    const joiner = spawn(process.execPath, [fileURLToPath(new URL('../cli.mjs', import.meta.url)),
+      'node', 'join', '--gateway', address, '--state', connectorState],
+    { stdio: ['pipe', 'ignore', 'inherit'] });
+    const exited = once(joiner, 'close');
+    await delay(80);
+    joiner.stdin.end(invite + '\n');
+    assert.equal((await exited)[0], 0);
+    const config = readJson(join(connectorState, 'connector.json'));
     await assert.rejects(enrollNode(address, invite), { status: 403 });
     const connected = new Promise((resolve) => {
       connector = runConnector(config, { ...local, close: resolve }, controller.signal);

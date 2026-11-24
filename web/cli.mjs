@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -31,8 +30,16 @@ function configuration(args) {
   });
 }
 
-function inputSecret() {
-  if (!process.stdin.isTTY) return Promise.resolve(readFileSync(0, 'utf8').trim());
+async function inputSecret() {
+  if (!process.stdin.isTTY) {
+    // A pipe from SSH can be temporarily empty and nonblocking on macOS.
+    const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    for await (const line of reader) {
+      reader.close();
+      return line.trim();
+    }
+    throw new Error('No invitation was provided.');
+  }
   process.stderr.write('Node invitation: ');
   const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
   const reader = createInterface({ input: process.stdin, output, terminal: true });
@@ -121,7 +128,7 @@ async function main() {
       const { enrollNode } = await import('./connector.mjs');
       const registered = await enrollNode(values.gateway, await inputSecret());
       writeJson(connector, registered);
-      process.stdout.write('Paired ' + registered.id + '. Start it with workbench web node run.\n');
+      process.stdout.write('Paired ' + registered.id + '. Start it with tmux-agent-workbench web node run.\n');
       return;
     }
     if (action === 'run' && !name) {
