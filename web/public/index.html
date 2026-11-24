@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f8faff">
+  <title>Workbench Web</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script src="/vendor/passkeys.js" defer></script>
+  <script src="/vendor/xterm.js" defer></script>
+  <script src="/vendor/fit.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <symbol id="icon-agents" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="14" rx="3"/><path d="M8 9.5h.01m4 0h.01m4 0h.01M8 14h8"/></symbol>
+    <symbol id="icon-machines" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01m4-10h6m-6 10h6"/></symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m7.5 9 3 3-3 3m6 0h3"/></symbol>
+    <symbol id="icon-mine" viewBox="0 0 24 24"><circle cx="12" cy="7.5" r="3.25"/><path d="M5 20v-1.5A4.5 4.5 0 0 1 9.5 14h5a4.5 4.5 0 0 1 4.5 4.5V20"/></symbol>
+    <symbol id="icon-back" viewBox="0 0 24 24"><path d="m14.5 5.5-6.5 6.5 6.5 6.5"/></symbol>
+    <symbol id="icon-next" viewBox="0 0 24 24"><path d="m9.5 5.5 6.5 6.5-6.5 6.5"/></symbol>
+    <symbol id="icon-down" viewBox="0 0 24 24"><path d="m5.5 9.5 6.5 6.5 6.5-6.5"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="10" r="4"/><path d="m11.2 12.6 6.3 6.4h2.5v-2.6l-1.6-1.6h-2v-2"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--wash)"/><circle cx="15" cy="17" r="2.5" fill="var(--wash)"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></symbol>
+    <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M11 4H5v16h6m2-8h8m-4-4 4 4-4 4"/></symbol>
+  </svg>
+  <main class="app" id="app" data-route="login">
+    <nav class="app-nav" aria-label="主导航">
+      <span class="nav-brand"><span class="brand-mark" aria-hidden="true"></span><span class="nav-brand-text">Workbench Web</span></span>
+      <button class="nav-button" type="button" data-route="agents" title="Agents"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-agents"></use></svg></span><span class="nav-label">Agents</span></button>
+      <button class="nav-button" type="button" data-route="machines" title="机器"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-machines"></use></svg></span><span class="nav-label">机器</span></button>
+      <button class="nav-button" type="button" data-route="terminals" title="终端"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-terminal"></use></svg></span><span class="nav-label">终端</span></button>
+      <button class="nav-button" type="button" data-route="mine" title="我的"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-mine"></use></svg></span><span class="nav-label">我的</span></button>
+    </nav>
+    <div class="app-body">
+      <div class="workspace" id="workspace" data-mobile-view="list" hidden>
+        <section class="screen" id="list" aria-labelledby="list-heading">
+          <header class="bar list-top">
+            <h1 id="list-heading" tabindex="-1">Agents</h1>
+            <button class="primary" type="button" data-pane><span class="plus" aria-hidden="true">＋</span>开 Pane</button>
+          </header>
+          <div class="list-content">
+            <button class="machine-trigger" id="machine" type="button" aria-haspopup="dialog">
+              <b id="scope"></b><span class="machine-meta"><span id="health"></span><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg></span>
+            </button>
+            <div id="groups"></div>
+          </div>
+        </section>
+        <section class="screen" id="detail" hidden>
+          <header class="bar detail-bar">
+            <button class="plain icon back" id="back" type="button" aria-label="返回 Agent 列表"><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
+            <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
+            <button class="plain icon" type="button" aria-label="开 Pane" title="开 Pane" data-pane><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg></button>
+          </header>
+          <div class="tabs" id="detail-tabs" role="tablist" aria-label="任务视图">
+            <button type="button" id="chat-tab" role="tab" aria-controls="chat" aria-selected="true">对话</button>
+            <button type="button" id="term-tab" role="tab" aria-controls="term" aria-selected="false">终端</button>
+          </div>
+          <div class="panel" id="chat" role="tabpanel" aria-labelledby="chat-tab">
+            <div class="history">
+              <button class="plain earlier" id="older" type="button">加载更早消息</button>
+              <div id="messages"></div>
+            </div>
+            <div class="composer-wrap">
+              <div class="composer-inner">
+                <p id="chat-error" class="message-error" role="status" hidden></p>
+                <p class="composer-label"><span class="dot" aria-hidden="true"></span><span id="chat-status"></span></p>
+                <form class="composer" id="chat-form">
+                  <textarea rows="1" id="chat-input" aria-label="发给当前 Agent" placeholder="继续聊…"></textarea>
+                  <button class="primary" type="submit" id="send">发送</button>
+                </form>
+              </div>
+            </div>
+          </div>
+          <div class="panel terminal-panel" id="term" role="tabpanel" aria-labelledby="term-tab" hidden>
+            <div class="terminal">
+              <div class="terminal-bar">
+                <b id="term-target"></b><span id="term-state" class="terminal-state">连接中</span>
+              </div>
+              <div class="terminal-screen" id="term-screen" aria-label="Pane 输出"></div>
+            </div>
+            <div class="keys">
+              <div class="key-scroll" aria-label="终端快捷键">
+                <button type="button" data-key="Ctrl" aria-pressed="false" disabled>Ctrl</button>
+                <button type="button" data-key="Esc" disabled>Esc</button>
+                <button type="button" data-key="Tab" disabled>Tab</button>
+                <button type="button" data-key="↑" aria-label="上箭头" disabled>↑</button>
+                <button type="button" data-key="↓" aria-label="下箭头" disabled>↓</button>
+                <button type="button" data-key="←" aria-label="左箭头" disabled>←</button>
+                <button type="button" data-key="→" aria-label="右箭头" disabled>→</button>
+              </div>
+              <button type="button" class="control" id="control">启用输入</button>
+            </div>
+            <form class="term-entry" id="term-form" hidden>
+              <input id="term-input" autocomplete="off" aria-label="输入终端文字" placeholder="输入终端文字">
+              <button class="secondary" type="submit">回车</button>
+            </form>
+          </div>
+          <div class="detail-empty" id="detail-empty" hidden></div>
+        </section>
+      </div>
+      <section class="page" id="machines" aria-labelledby="machines-heading" hidden>
+        <div class="page-content">
+          <header class="page-head"><h1 id="machines-heading" tabindex="-1">机器</h1></header>
+          <p class="machine-summary" id="machine-summary"></p>
+          <div class="node-list" id="node-list"></div>
+        </div>
+      </section>
+      <section class="page" id="mine" aria-labelledby="mine-heading" hidden>
+        <div class="page-content">
+          <header class="page-head">
+            <button class="plain icon back" id="mine-back" type="button" aria-label="返回我的" hidden><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
+            <h1 id="mine-heading" tabindex="-1">我的</h1>
+          </header>
+          <div class="mine-grid" id="mine-home">
+            <section class="usage" aria-labelledby="usage-heading">
+              <div class="usage-head"><h2 id="usage-heading">用量</h2><span class="usage-provider">Codex</span></div>
+              <div id="usage-windows"></div>
+              <div class="quota-toolbar">
+                <p class="quota-note" id="usage-note"></p>
+                <button class="plain" type="button" id="usage-refresh">刷新</button>
+              </div>
+            </section>
+            <div class="personal-links">
+              <button class="profile-row" type="button" id="mine-passkeys"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-key"></use></svg></span><span class="row-copy"><b>通行密钥</b><small>管理登录设备</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
+              <button class="profile-row" type="button" id="mine-preferences"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-settings"></use></svg></span><span class="row-copy"><b>设置</b><small>安装与登录</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
+            </div>
+          </div>
+          <div class="subpage" id="mine-keys" hidden>
+            <div id="key-list"></div>
+            <button class="primary" type="button" id="add-key">添加通行密钥</button>
+          </div>
+          <div class="subpage" id="mine-settings" hidden>
+            <button class="profile-row" type="button" id="install"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-download"></use></svg></span><span class="row-copy"><b>安装到桌面</b><small>从安卓桌面打开 Workbench Web</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
+            <button class="profile-row" type="button" id="signout"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-logout"></use></svg></span><span class="row-copy"><b>退出登录</b><small>结束当前浏览器会话</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
+          </div>
+        </div>
+      </section>
+      <section class="screen login" id="login">
+        <div class="login-inner">
+          <span class="brand"><span class="brand-mark" aria-hidden="true"></span>Workbench Web</span>
+          <h1 id="login-heading" tabindex="-1">登录工作台</h1>
+          <p>用手机屏幕锁验证身份，进入你的工作台。</p>
+          <p id="login-error" class="message-error" role="alert" hidden></p>
+          <button class="primary" type="button" id="passkey">使用通行密钥</button>
+          <button class="plain" type="button" id="enroll">首次绑定设备</button>
+        </div>
+      </section>
+    </div>
+    <dialog class="overlay" id="overlay" aria-labelledby="sheet-title">
+      <section class="sheet">
+        <header class="sheet-head">
+          <h2 id="sheet-title"></h2>
+          <button class="plain icon" type="button" id="close" aria-label="关闭弹窗" autofocus><svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg></button>
+        </header>
+        <div id="sheet-body"></div>
+      </section>
+    </dialog>
+    <div class="toast" id="toast" role="status" hidden></div>
+  </main>
+
+</body>
+</html>

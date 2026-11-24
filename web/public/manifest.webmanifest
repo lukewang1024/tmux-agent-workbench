@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "Workbench Web",
+  "short_name": "Workbench",
+  "description": "Agent 会话、机器与 tmux Pane",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fcfdff",
+  "theme_color": "#f8faff",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
