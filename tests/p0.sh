@@ -10,8 +10,9 @@ cargo fmt --check
 cargo test --locked --lib --bin tmux-agent-workbench
 cargo run --locked --quiet --bin tmux-agent-workbench -- --version | grep -q tmux-agent-workbench
 "$python_runner" "$repo/tests/macos-spawn-events.py" "$repo/target/debug/tmux-agent-workbench"
+cargo build --locked --example codex
+"$python_runner" "$repo/tests/snapshot-observe.py" "$repo/target/debug/tmux-agent-workbench" "$repo/target/debug/examples/codex"
 if [ "$(uname -s)" = Darwin ]; then
-  cargo build --locked --example codex
   "$python_runner" "$repo/tests/low-process-churn.py" "$repo/target/debug/tmux-agent-workbench"
 fi
 "$python_runner" -B -m unittest discover -s tests -p test_botmux.py

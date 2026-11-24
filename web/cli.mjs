@@ -8,11 +8,11 @@ import { LocalNode } from './tmux.mjs';
 
 const usage = 'Usage: tmux-agent-workbench web COMMAND\n\n'
   + '  serve [--origin URL] [--listen HOST:PORT] [--name NAME] [--socket PATH]\n'
-  + '        [--cert PATH --key PATH] [--fabric-node NAME=EXECUTOR]\n'
+  + '        [--cert PATH --key PATH] [--fabric-node NAME=EXECUTOR] [--observe-snapshot]\n'
   + '  invite --origin URL              Create a one-time Passkey enrollment link\n'
   + '  node invite NAME                Create a one-time node invitation\n'
   + '  node join --gateway URL         Enroll this host (invitation read from stdin)\n'
-  + '  node run [--socket PATH]         Run the enrolled host connector\n'
+  + '  node run [--socket PATH] [--observe-snapshot]   Run the enrolled host connector\n'
   + '  node list | node revoke NAME    Inspect or revoke paired nodes\n'
   + '  node forget                     Remove this host’s saved connector credential\n\n'
   + 'Commands accept --state PATH to override the XDG state directory.\n';
@@ -26,6 +26,7 @@ function configuration(args) {
       socket: { type: 'string' }, cert: { type: 'string' }, key: { type: 'string' },
       state: { type: 'string' }, gateway: { type: 'string' },
       'fabric-node': { type: 'string', multiple: true },
+      'observe-snapshot': { type: 'boolean' },
     },
   });
 }
@@ -55,6 +56,7 @@ function local(values) {
     socket: values.socket,
     core: process.env.WORKBENCH_WEB_CORE,
     usage: process.env.WORKBENCH_WEB_USAGE,
+    observeSnapshot: values['observe-snapshot'],
   });
 }
 

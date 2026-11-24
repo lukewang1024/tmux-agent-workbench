@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::manifest::ManifestSet;
 use crate::model::{
     AgentEventReport, AgentKind, AgentSnapshot, BaseState, ConversationRole,
-    DetachedAgentEventReport, DisplayState, SessionSnapshot, session_rollup,
+    DetachedAgentEventReport, DisplayState, SessionSnapshot, Snapshot, session_rollup,
 };
 use crate::process::{AgentProcess, ProcessSource, ProcessTree};
 use crate::server::ServerIdentity;
@@ -18,6 +18,7 @@ use crate::tmux::{Pane, Tmux, TmuxError, TmuxSource};
 
 pub struct Detector {
     tmux: Tmux,
+    manage_tmux: bool,
     processes: ProcessTree,
     machine: StateMachine,
     panes: HashMap<String, Pane>,
@@ -75,6 +76,7 @@ impl Detector {
     pub fn new(server: ServerIdentity) -> Self {
         Self {
             tmux: Tmux::new(server),
+            manage_tmux: true,
             processes: ProcessTree::default(),
             machine: StateMachine::default(),
             panes: HashMap::new(),
@@ -95,6 +97,33 @@ impl Detector {
             last_actions: None,
             metadata: HashMap::new(),
         }
+    }
+
+    /// Read the same agent inventory as the daemon, without its tmux management.
+    pub fn observe_snapshot(
+        server: ServerIdentity,
+        config: &Config,
+        manifests: &ManifestSet,
+        now_ms: u64,
+    ) -> Result<Snapshot, TmuxError> {
+        let mut snapshot = Snapshot::empty(server.socket_path.to_string_lossy(), now_ms);
+        let mut observer = Self {
+            manage_tmux: false,
+            ..Self::new(server)
+        };
+        let panes = observer.tmux.panes()?;
+        observer.scan_processes(manifests, now_ms, config.detection.low_process_churn, panes)?;
+        let now = Instant::now();
+        let panes: Vec<_> = observer.panes.values().cloned().collect();
+        for pane in panes {
+            if let Some(process) = observer.agents.get(&pane.root_pid).cloned() {
+                observer.capture(&pane, process, config, manifests, now, now_ms, None);
+            }
+        }
+        snapshot.generation = now_ms;
+        snapshot.agents = observer.machine_snapshots();
+        snapshot.sessions = observer.sessions();
+        Ok(snapshot)
     }
 
     pub(crate) fn set_interactive_waiters(&mut self, waiters: Arc<AtomicUsize>) {
@@ -798,37 +827,39 @@ impl Detector {
         let agents = self
             .processes
             .agents_for_roots(&roots, &manifests.aliases());
-        let interactive = self.processes.interactive_foreground_roots(&agents);
-        if crate::task_placement::isolate(self.tmux.server(), &panes, &agents, &interactive) {
-            panes = self.tmux.panes()?;
-        }
-        // Avoid rewriting identical pane options on every scan. Changed panes
-        // and wake events publish immediately; periodic repair catches an
-        // option changed externally without holding the state lock each tick.
-        let mut actions: Vec<_> = panes
-            .iter()
-            .map(|pane| {
-                (
-                    pane.target.pane_id.clone(),
-                    pane.target.window_id.clone(),
-                    pane.pane_active,
-                    interactive.contains(&pane.root_pid),
-                )
-            })
-            .collect();
-        actions.sort();
-        let repair_after = if self.is_idle() { 60 } else { 5 };
-        let unchanged = low_process_churn
-            && self.last_actions.as_ref().is_some_and(|(previous, at)| {
-                previous == &actions && at.elapsed() < Duration::from_secs(repair_after)
-            });
-        if !unchanged
-            && self
-                .tmux
-                .publish_agent_actions(&panes, &interactive)
-                .is_ok()
-        {
-            self.last_actions = Some((actions, Instant::now()));
+        if self.manage_tmux {
+            let interactive = self.processes.interactive_foreground_roots(&agents);
+            if crate::task_placement::isolate(self.tmux.server(), &panes, &agents, &interactive) {
+                panes = self.tmux.panes()?;
+            }
+            // Avoid rewriting identical pane options on every scan. Changed panes
+            // and wake events publish immediately; periodic repair catches an
+            // option changed externally without holding the state lock each tick.
+            let mut actions: Vec<_> = panes
+                .iter()
+                .map(|pane| {
+                    (
+                        pane.target.pane_id.clone(),
+                        pane.target.window_id.clone(),
+                        pane.pane_active,
+                        interactive.contains(&pane.root_pid),
+                    )
+                })
+                .collect();
+            actions.sort();
+            let repair_after = if self.is_idle() { 60 } else { 5 };
+            let unchanged = low_process_churn
+                && self.last_actions.as_ref().is_some_and(|(previous, at)| {
+                    previous == &actions && at.elapsed() < Duration::from_secs(repair_after)
+                });
+            if !unchanged
+                && self
+                    .tmux
+                    .publish_agent_actions(&panes, &interactive)
+                    .is_ok()
+            {
+                self.last_actions = Some((actions, Instant::now()));
+            }
         }
         for pane in &panes {
             let Some(agent) = agents.get(&pane.root_pid) else {

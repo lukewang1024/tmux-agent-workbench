@@ -43,6 +43,9 @@ enum Command {
     Snapshot {
         #[arg(long)]
         json: bool,
+        /// Inspect this tmux server without starting a daemon or managing its panes.
+        #[arg(long)]
+        observe: bool,
     },
     Sidebar {
         #[arg(long, requires_all = ["pane", "client"])]
@@ -1588,7 +1591,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("{total} {idle}");
         return Ok(());
     }
-    let paths = Paths::discover()?;
+    let paths = if matches!(&cli.command, Command::Snapshot { observe: true, .. }) {
+        Paths::discover_read_only()?
+    } else {
+        Paths::discover()?
+    };
     match cli.command {
         Command::HostCpuCounters => unreachable!(),
         Command::AutoSplit { command } => match command {
@@ -1818,8 +1825,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ManifestSet::load(&paths.manifests_dir())?;
             println!("configuration valid: {}", paths.config_file().display());
         }
-        Command::Snapshot { json } => {
-            let value = ipc_call(&paths, "snapshot.get", serde_json::Value::Null)?;
+        Command::Snapshot { json, observe } => {
+            let value = if observe {
+                let server = ServerIdentity::discover()?;
+                let config = Config::load(&paths.config_file())?;
+                let manifests = ManifestSet::load(&paths.manifests_dir())?;
+                serde_json::to_value(tmux_agent_workbench::detection::Detector::observe_snapshot(
+                    server,
+                    &config,
+                    &manifests,
+                    now_ms(),
+                )?)?
+            } else {
+                ipc_call(&paths, "snapshot.get", serde_json::Value::Null)?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
