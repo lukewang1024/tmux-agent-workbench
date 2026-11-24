@@ -19,6 +19,12 @@ pub(crate) struct DaemonSockets {
 
 impl Paths {
     pub fn discover() -> io::Result<Self> {
+        let paths = Self::discover_read_only()?;
+        paths.ensure_private_runtime()?;
+        Ok(paths)
+    }
+
+    pub fn discover_read_only() -> io::Result<Self> {
         let home =
             dirs::home_dir().ok_or_else(|| io::Error::other("home directory unavailable"))?;
         let config_root = env::var_os("XDG_CONFIG_HOME")
@@ -32,14 +38,12 @@ impl Paths {
             .unwrap_or_else(|| home.join(".cache"));
         let uid = unsafe { libc::geteuid() };
         let runtime_dir = bounded_runtime_dir(uid);
-        let paths = Self {
+        Ok(Self {
             config_dir: config_root.join("tmux-agent-workbench"),
             state_dir: state_root.join("tmux-agent-workbench"),
             cache_dir: cache_root.join("tmux-agent-workbench"),
             runtime_dir,
-        };
-        paths.ensure_private_runtime()?;
-        Ok(paths)
+        })
     }
 
     pub fn config_file(&self) -> PathBuf {

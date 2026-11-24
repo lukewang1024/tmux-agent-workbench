@@ -52,10 +52,11 @@ export class LocalNode {
   refreshedUsage = null;
   history = new History();
 
-  constructor({ socket, core, usage }) {
+  constructor({ socket, core, usage, observeSnapshot = false }) {
     this.socket = socket || process.env.TMUX_AGENT_WORKBENCH_TMUX_SOCKET || process.env.TMUX?.split(',')[0];
     this.core = core || 'tmux-agent-workbench';
     this.usageCommand = usage;
+    this.observeSnapshot = observeSnapshot;
     this.env = { ...process.env };
     delete this.env.TMUX;
     delete this.env.TMUX_PANE;
@@ -79,7 +80,9 @@ export class LocalNode {
   async snapshot(fresh = false) {
     if (!fresh && this.recentSnapshot?.expires > Date.now()) return this.recentSnapshot.task;
     const task = this.socketPath().then(async (socket) => {
-      const { stdout } = await run(this.core, ['snapshot', '--json'], {
+      const args = ['snapshot', '--json'];
+      if (this.observeSnapshot) args.push('--observe');
+      const { stdout } = await run(this.core, args, {
         env: { ...this.env, TMUX_AGENT_WORKBENCH_TMUX_SOCKET: socket },
         timeout: 8000, maxBuffer: 4 * 1024 * 1024,
       });

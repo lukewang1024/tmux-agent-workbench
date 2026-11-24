@@ -76,6 +76,14 @@ initiates an outbound WebSocket, keeps it alive, and reconnects when the route
 returns. Run it as a user service on Linux or as a LaunchAgent on macOS where
 appropriate. The process needs the Workbench launcher, Node.js, and tmux on PATH.
 
+Hosts that have the Workbench core binary and an existing tmux server can run
+the connector with --observe-snapshot. Set WORKBENCH_WEB_CORE to the absolute
+core path when running web/cli.mjs directly. Agent inventory in this mode is a
+one-shot observation through the Workbench detector, so it works without a
+daemon, hooks, or changes to the server's layout and options. The display can
+only include thread identity and status that the detector can infer from live
+process and pane data.
+
 A machine with an existing SSH route can connect through a loopback forward
 to the gateway's listener. For example, running an SSH forward from a remote
 host supports a Mac with its SSH server disabled:
