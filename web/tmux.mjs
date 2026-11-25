@@ -4,9 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { History, hasThread } from './history.mjs';
+import { History, hasThread, sameProcess } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
+import { codexComposer, codexSettings, modelChangeConfirmed, readModels } from './codex.mjs';
 
 const run = promisify(execFile);
 const webSession = '__workbench_web';
@@ -64,6 +65,9 @@ export class LocalNode {
   watches = new Map();
   recentSnapshot = null;
   recentThreads = new WeakMap();
+  recentModels = null;
+  agentProcesses = new WeakMap();
+  promptReceipts = new Map();
   refreshingUsage = null;
   refreshedUsage = null;
   history = new History();
@@ -159,15 +163,21 @@ export class LocalNode {
       const target = byLocation.get(agent.target.session_id + '/' + agent.target.pane_id)
         || byPane.get(agent.target.pane_id);
       if (!target) continue;
-      if (!agent.exited && !agent.stale && agent.kind === 'codex' && !hasThread(agent.hook_session_id)) {
+      const runningCodex = !agent.exited && !agent.stale && agent.kind === 'codex';
+      const thread = runningCodex && hasThread(agent.hook_session_id) ? agent.hook_session_id : null;
+      const observedProcess = Number.isInteger(agent.process?.pid) && agent.process.pid > 0
+        && Number.isSafeInteger(agent.process.started_at_ticks) && agent.process.started_at_ticks > 0;
+      if (runningCodex && !thread && observedProcess) {
         missingThreads.push(agent);
       }
-      agents.push({
+      const record = {
         id: agent.instance_id, title: agent.label || agent.target.window_name || agent.kind,
         kind: agent.kind, state: agent.display_state, session: agent.target.session_name, pane: target,
-        exited: agent.exited, stale: agent.stale, canClose: closableAgent(agent), thread: agent.hook_session_id,
-        structured: !agent.exited && !agent.stale && agent.kind === 'codex' && hasThread(agent.hook_session_id),
-      });
+        exited: agent.exited, stale: agent.stale, canClose: closableAgent(agent), thread,
+        structured: Boolean(thread), chat: runningCodex && (Boolean(thread) || observedProcess),
+      };
+      if (observedProcess) this.agentProcesses.set(record, agent.process);
+      agents.push(record);
     }
     if (missingThreads.length) {
       let task = this.recentThreads.get(data);
@@ -198,7 +208,7 @@ export class LocalNode {
       return {
         id: agent?.id || card.window, title: agent?.title || card.title, pane, state: card.state,
         kind: agent?.kind || 'shell', session: sessions.find(({ id }) => id === card.session)?.title,
-        structured: agent?.structured, canClose: agent?.canClose, thread: agent?.thread, assistant: card.assistant,
+        structured: agent?.structured, chat: agent?.chat, canClose: agent?.canClose, thread: agent?.thread, assistant: card.assistant,
       };
     });
     const terminals = agents.filter(({ pane }) => !pane.owned)
@@ -307,34 +317,146 @@ export class LocalNode {
   }
 
   async transcript(agentId, before, thread) {
-    const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.structured);
+    const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.chat);
     if (!entry) throw new Failure(404, 'No structured history for this running agent.');
     if (thread && entry.thread !== thread) throw new Failure(409, 'The active thread changed. Reopen the agent.');
-    return this.history.page(entry.thread, before);
+    if (!entry.thread) return { messages: [], before: null };
+    try {
+      return await this.history.page(entry.thread, before);
+    } catch (error) {
+      if (error instanceof Failure && error.status === 404 && !before) return { messages: [], before: null };
+      throw error;
+    }
   }
 
-  async sendPrompt(agentId, thread, text, paneKey) {
+  async chatAgent(agentId, thread, paneKey) {
+    const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.chat);
+    if (!entry || entry.thread !== (thread ?? null) || entry.pane.key !== paneKey) {
+      throw new Failure(409, 'The active thread changed. Reopen the agent.');
+    }
+    const process = this.agentProcesses.get(entry);
+    if (process && !await sameProcess(process)) throw new Failure(409, 'The Agent is no longer running.');
+    return entry;
+  }
+
+  async sendPrompt(agentId, thread, text, paneKey, requestId) {
     if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 16_384
         || /[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/.test(text)) {
       throw new Failure(400, 'Enter a text message under 16 KB.');
     }
-    const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.structured);
-    if (!entry || entry.thread !== thread || entry.pane.key !== paneKey) throw new Failure(409, 'The active thread changed. Reopen the agent.');
-    if (!promptStates.includes(entry.state) || entry.pane.inMode) {
-      throw new Failure(409, 'The Agent cannot accept input right now.');
+    if (requestId != null && !hasThread(requestId)) throw new Failure(400, 'Invalid message request ID.');
+    const receiptKey = requestId && [agentId, paneKey, requestId].join('/');
+    const previous = this.promptReceipts.get(receiptKey);
+    if (previous) {
+      if (previous.text !== text) throw new Failure(409, 'A message request ID was reused with different text.');
+      return previous.response;
     }
+    const canSend = (entry) => !entry.pane.inMode && (entry.thread ? promptStates.includes(entry.state) : entry.state === 'idle');
+    const entry = await this.chatAgent(agentId, thread, paneKey);
+    if (!canSend(entry)) throw new Failure(409, 'The Agent cannot accept input right now.');
     let after;
+    let submittedAt;
     await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), {
       bracketed: true,
       submit: true,
       check: async () => {
-        const latest = (await this.catalog(true)).agents.find((item) => item.id === agentId);
-        if (!latest?.structured || latest.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
-            || !promptStates.includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
-        after = await this.history.endOffset(thread).catch(() => undefined);
+        const latest = await this.chatAgent(agentId, thread, paneKey);
+        if (!canSend(latest)) throw new Failure(409, 'The agent can no longer accept this message.');
+        if (latest.thread) after = await this.history.endOffset(latest.thread).catch(() => undefined);
+        else submittedAt = Date.now();
       },
     });
-    return { after };
+    const response = submittedAt === undefined ? { after } : { submittedAt };
+    if (receiptKey) {
+      this.promptReceipts.set(receiptKey, { text, response });
+      if (this.promptReceipts.size > 256) this.promptReceipts.delete(this.promptReceipts.keys().next().value);
+    }
+    return response;
+  }
+
+  async interrupt({ agent, thread, pane }) {
+    const entry = await this.chatAgent(agent, thread, pane);
+    if (entry.state !== 'working' || entry.pane.inMode) throw new Failure(409, 'The Agent is not running a turn.');
+    const target = await this.verify(entry.pane);
+    if (target.inMode) throw new Failure(409, 'The Agent is not running a turn.');
+    await this.tmux(['send-keys', '-t', target.pane, 'Escape']);
+    this.recentSnapshot = null;
+    return {};
+  }
+
+  models() {
+    if (this.recentModels?.until > Date.now()) return this.recentModels.task;
+    const task = readModels(this.env).catch((error) => {
+      if (this.recentModels?.task === task) this.recentModels = null;
+      throw error;
+    });
+    this.recentModels = { task, until: Date.now() + 60_000 };
+    return task;
+  }
+
+  async codexScreen(pane) {
+    const target = await this.verify(pane);
+    if (target.inMode) throw new Failure(409, 'Leave tmux copy mode before changing the model.');
+    const text = await this.tmux(['capture-pane', '-p', '-e', '-t', target.pane]);
+    return { text, cursor: target.y };
+  }
+
+  async waitCodexScreen(pane, check, timeout) {
+    const until = Date.now() + timeout;
+    do {
+      const screen = await this.codexScreen(pane);
+      if (check(screen)) return true;
+      await delay(100);
+    } while (Date.now() < until);
+    return false;
+  }
+
+  async settings({ agent, thread, pane }) {
+    const entry = await this.chatAgent(agent, thread, pane);
+    const [models, screen] = await Promise.all([this.models(), this.codexScreen(entry.pane)]);
+    return { ...codexSettings(screen.text, screen.cursor, models), models };
+  }
+
+  async changeSettings({ agent, thread, pane, model, effort }) {
+    const allowed = (entry) => {
+      if (!closeStates.includes(entry.state) || entry.pane.inMode) {
+        throw new Failure(409, 'Wait for the current turn to finish before changing the model.');
+      }
+    };
+    const entry = await this.chatAgent(agent, thread, pane);
+    allowed(entry);
+    const models = await this.models();
+    const option = models.find((item) => item.id === model);
+    if (!option || (option.efforts.length ? !option.efforts.includes(effort) : effort != null)) {
+      throw new Failure(400, 'Select a model and thinking level supported by Codex.');
+    }
+    const before = await this.codexScreen(entry.pane);
+    const current = codexSettings(before.text, before.cursor, models);
+    const wanted = { model, effort: effort ?? null };
+    if (current.model === wanted.model && current.effort === wanted.effort) return wanted;
+    const command = '/model ' + model + (effort ? ' --reasoning=' + effort : '');
+    await this.paste(entry.pane, Buffer.from(command), {
+      bracketed: true,
+      check: async () => {
+        allowed(await this.chatAgent(agent, thread, pane));
+        const screen = await this.codexScreen(entry.pane);
+        if (codexComposer(screen.text, screen.cursor) !== '') {
+          throw new Failure(409, 'Clear the draft in the Codex terminal before changing the model.');
+        }
+      },
+    });
+    const entered = await this.waitCodexScreen(entry.pane, (screen) =>
+      codexComposer(screen.text, screen.cursor)?.replaceAll(/\s+/g, '') === command.replaceAll(/\s+/g, ''), 1400);
+    if (!entered) throw new Failure(409, 'Codex did not accept the model command.');
+    await this.tmux(['send-keys', '-t', entry.pane.pane, 'Enter']);
+    const initial = modelChangeConfirmed(before.text, model, effort);
+    const confirmed = await this.waitCodexScreen(entry.pane, (screen) => {
+      const updated = codexSettings(screen.text, screen.cursor, models);
+      return updated.model === wanted.model && updated.effort === wanted.effort
+        || modelChangeConfirmed(screen.text, model, effort) > initial;
+    }, 2800);
+    if (!confirmed) throw new Failure(409, 'Codex did not confirm the model change.');
+    return wanted;
   }
 
   async paste(pane, bytes, { bracketed = false, submit = false, check } = {}) {
@@ -532,7 +654,10 @@ export class LocalNode {
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before, args.thread);
-      case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane);
+      case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId);
+      case 'interrupt': return this.interrupt(args);
+      case 'chat-settings': return this.settings(args);
+      case 'change-chat-settings': return this.changeSettings(args);
       case 'create': return this.create(args.split, args.session, args.anchor);
       case 'open': return this.watchOpen(args.pane);
       case 'read': return this.watchRead(args.watch, args.after);

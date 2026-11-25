@@ -84,6 +84,10 @@ async function startTimes(pids) {
   return times;
 }
 
+export async function sameProcess({ pid, started_at_ticks }) {
+  return (await startTimes([pid])).get(pid) === started_at_ticks;
+}
+
 export function stripGoalContext(text) {
   let visible = text;
   for (let start; (start = visible.match(goalContext)); ) {

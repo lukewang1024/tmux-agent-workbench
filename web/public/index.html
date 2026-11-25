@@ -33,6 +33,7 @@
     <symbol id="icon-external" viewBox="0 0 24 24"><path d="M13 5h6v6m0-6-9 9m8 0v4H6V6h4"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></symbol>
     <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
     <symbol id="icon-select" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
     <symbol id="icon-share" viewBox="0 0 24 24"><path d="M12 15V3m-4 4 4-4 4 4M7 11H5v9h14v-9h-2"/></symbol>
@@ -102,10 +103,17 @@
             <div class="composer-wrap">
               <div class="composer-inner">
                 <p id="chat-error" class="message-error" role="status" hidden></p>
-                <p class="composer-label" id="composer-label" role="status">
-                  <span class="dot" aria-hidden="true"></span><span id="chat-status"></span>
+                <div class="composer-label" id="composer-label">
+                  <span class="dot" aria-hidden="true"></span><span id="chat-status" role="status"></span>
                   <span class="working-dots" id="working-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
-                </p>
+                  <button type="button" class="stop-agent" id="stop-agent" aria-label="{{stopCurrentTurn}}" title="{{stopCurrentTurn}}" hidden>
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-stop"></use></svg><span>{{stopTurn}}</span>
+                  </button>
+                  <button type="button" class="picker-button composer-settings" id="chat-settings" aria-haspopup="dialog" aria-label="{{modelAndThinking}}" hidden>
+                    <span class="picker-value" id="chat-settings-label">{{modelAndThinking}}</span>
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+                  </button>
+                </div>
                 <form class="composer" id="chat-form">
                   <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" placeholder="{{continueConversation}}"></textarea>
                   <button class="composer-send" type="submit" id="send" aria-label="{{send}}" title="{{send}}">

@@ -8,12 +8,19 @@ The Agents and Sessions lists use the Sidebar's grouping, priority, status
 colors and pins. Pinning and sorting update the same state on the target machine
 that its Sidebar reads.
 
-The Agent view opens the original Codex conversation. Workbench thread metadata
-or the rollout open in the verified Codex process identifies the conversation.
+The Agent view opens the original Codex conversation. A fresh Agent can receive
+its first message while its transcript is empty. Workbench thread metadata or
+the rollout open in the verified Codex process identifies the saved conversation.
 Scroll up to load earlier messages. Messages can be copied individually or
 together through the selection control. Chat sends follow-ups while the Agent
 is idle, working or done. Codex handles submitting the message in the active
 conversation. Respond to permission prompts on the Agent's machine.
+
+Open **Model & thinking** beside the composer when the Agent is idle to edit
+the live Codex session. The model list comes from Codex on that machine, and
+the available thinking levels follow the selected model. **Stop** interrupts
+the current turn and keeps the Agent available to continue. Drafts and failed
+sends stay in the browser so you can return to the chat and retry.
 
 The provider marks identify the Agent CLIs in the list and belong to their
 respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],

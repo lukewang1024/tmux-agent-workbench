@@ -164,7 +164,7 @@ h1, h2, h3, p { margin: 0; }
 .message.human .outgoing-row .bubble { margin-left: 0; }
 .delivery-pending, .delivery-failed { display: grid; place-items: center; flex: none; width: 18px; height: 18px; margin-block-end: 5px; border-radius: 50%; }
 .delivery-pending::before { content: ""; width: 13px; height: 13px; border: 1.5px solid var(--muted); border-inline-end-color: transparent; border-radius: 50%; }
-.delivery-failed { color: var(--danger); background: var(--danger-wash); }
+.delivery-failed { display: inline-flex; gap: 2px; width: auto; min-height: 25px; border: 0; padding: 0 6px; border-radius: 7px; color: var(--danger); background: var(--danger-wash); font-size: 11px; font-weight: 650; }
 .delivery-failed .glyph { width: 13px; height: 13px; stroke-width: 2.2; }
 #messages[data-outgoing] > .empty { display: none; }
 @media (prefers-reduced-motion: no-preference) {
@@ -212,6 +212,9 @@ h1, h2, h3, p { margin: 0; }
 .composer-send:disabled { background: var(--quiet); color: var(--muted); opacity: 1; }
 .composer-label { display: flex; align-items: center; gap: 5px; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
 .composer-label .dot { background: var(--state-color, var(--muted)); }
+.stop-agent { display: inline-flex; flex: none; align-items: center; gap: 2px; min-height: 23px; padding: 0 5px; border: 0; border-radius: 5px; background: var(--quiet); color: var(--ink); font-size: 11px; font-weight: 650; }
+.stop-agent .glyph { width: 13px; height: 13px; fill: currentColor; }
+.composer-settings { max-width: 52%; min-height: 25px; margin-inline-start: auto; padding: 0 5px; border-color: var(--line); font-size: 11px; }
 .working-dots { display: inline-flex; align-items: center; gap: 3px; }
 .working-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
 @media (prefers-reduced-motion: no-preference) {

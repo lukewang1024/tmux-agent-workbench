@@ -242,15 +242,23 @@ export async function startServer({ local, localName, store, listen, origin, cer
       });
       return json(res, { ...page, messages });
     }
-    if (path === '/api/prompt' && method === 'POST') {
+    if (path === '/api/chat-settings' && method === 'GET') {
+      const [agent, thread, pane] = ['agent', 'thread', 'pane'].map((key) => request.searchParams.get(key));
+      return json(res, await node(request.searchParams.get('node') || 'local').request('chat-settings', { agent, thread, pane }));
+    }
+    const chatOperation = {
+      '/api/prompt': 'prompt', '/api/interrupt': 'interrupt', '/api/chat-settings': 'change-chat-settings',
+    }[path];
+    if (typeof chatOperation === 'string' && method === 'POST') {
       const input = await body(req);
       if (typeof input.pane !== 'string' || !/^\d+(?:\.\d+){3}$/.test(input.pane)) throw new Failure(400, 'Invalid Pane.');
       const lease = input.node + ':' + input.pane;
-      if (leases.has(lease)) throw new Failure(409, 'Release terminal input before sending from chat.');
+      if (leases.has(lease)) throw new Failure(409, chatOperation === 'prompt'
+        ? 'Release terminal input before sending from chat.' : 'Release terminal input before controlling the Agent.');
       const prompt = {};
       leases.set(lease, prompt);
       try {
-        return json(res, await node(input.node).request('prompt', input));
+        return json(res, await node(input.node).request(chatOperation, input));
       } finally {
         if (leases.get(lease) === prompt) leases.delete(lease);
       }

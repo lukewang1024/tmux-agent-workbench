@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { WebSocket } from 'ws';
+import { codexComposer, codexSettings, modelChangeConfirmed } from '../codex.mjs';
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
@@ -35,6 +36,19 @@ test('tmux palette preserves indexed and true colors while discarding invalid ro
   });
   assert.equal(tmuxPalette('light|light|||{"version":2}'), undefined);
   assert.equal(tmuxPalette('light|light|||broken'), undefined);
+});
+
+test('Codex settings read the live footer and distinguish the placeholder from terminal drafts', () => {
+  const models = [{ id: 'gpt-6.2-sol', label: 'GPT-6.2-Sol' }, { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' }];
+  const footer = '  GPT-6.1 Terra max · fixture';
+  const placeholder = '\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m';
+  const screen = ['  GPT-6.2-Sol high · earlier command', placeholder, footer].join('\n');
+  assert.deepEqual(codexSettings(screen, 1, models), { model: 'gpt-6.1-terra', effort: 'max' });
+  assert.equal(codexComposer(screen, 1), '');
+  assert.equal(codexComposer('› Ask Codex to do anything\n' + footer, 0), 'Ask Codex to do anything');
+  assert.equal(codexComposer('› A native draft\n  continued\n' + footer, 1), 'A native draft continued');
+  assert.equal(modelChangeConfirmed('• Model changed to gpt-6.2-sol ultra for this session only', 'gpt-6.2-sol', 'ultra'), 1);
+  assert.equal(modelChangeConfirmed('• Model changed to gpt-6.2-sol high for this session only', 'gpt-6.2-sol', 'ultra'), 0);
 });
 
 test('node invites are scoped to one identity, single-use, and revocable', async (t) => {
@@ -207,6 +221,58 @@ test('a working Codex thread accepts a follow-up in the same Pane', async (t) =>
     state = 'blocked';
     await assert.rejects(node.sendPrompt('agent', thread, 'ignored', entry.pane.key), { status: 409 });
     await assert.rejects(node.transcript('agent', null, 'a different thread'), { status: 409 });
+  } finally {
+    node.close();
+    tmux('kill-server');
+  }
+});
+
+test('an empty live Codex Pane accepts the first prompt and enforces the thread once it binds', async (t) => {
+  const socket = join(await scratch(t), 't');
+  const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', timeout: 4000 }).trim();
+  const pane = tmux('-f', '/dev/null', 'new-session', '-ds', 'fixture', '-PF', '#{pane_id}', 'exec /bin/sh -i');
+  const session = tmux('display-message', '-p', '-t', pane, '#{session_id}');
+  const pid = Number(tmux('display-message', '-p', '-t', pane, '#{pane_pid}'));
+  const started = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+  }).trim();
+  let started_at_ticks = Date.parse(started + ' UTC') / 1000;
+  let thread = null;
+  let kind = 'codex';
+  const node = new LocalNode({ socket });
+  node.history = new History(await scratch(t));
+  node.snapshot = async () => ({
+    sessions: [],
+    agents: [{
+      instance_id: 'agent', kind, hook_session_id: thread, display_state: 'idle',
+      process: { pid, started_at_ticks },
+      target: { pane_id: pane, session_id: session },
+    }],
+  });
+  try {
+    const [entry] = (await node.catalog()).agents;
+    assert.equal(entry.chat, true);
+    assert.equal(entry.structured, false);
+    assert.deepEqual(await node.transcript('agent', null, null), { messages: [], before: null });
+    await assert.rejects(node.sendPrompt('agent', null, 'ignored', '0.0.0.0'), { status: 409 });
+    const requestId = 'c5a27de3-936f-446e-9de1-797eaa1cfc99';
+    const text = "printf 'FIRST:%s\\n' received";
+    const receipt = await node.sendPrompt('agent', null, text, entry.pane.key, requestId);
+    assert.ok(Number.isFinite(receipt.submittedAt));
+    for (let tries = 0; tries < 20 && !tmux('capture-pane', '-pt', pane).split('\n').includes('FIRST:received'); tries++) await delay(30);
+    assert.ok(tmux('capture-pane', '-pt', pane).split('\n').includes('FIRST:received'));
+    thread = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
+    assert.deepEqual(await node.sendPrompt('agent', null, text, entry.pane.key, requestId), receipt);
+    assert.equal(tmux('capture-pane', '-pt', pane).split('\n').filter((line) => line === 'FIRST:received').length, 1);
+    await assert.rejects(node.sendPrompt('agent', thread, 'different', entry.pane.key, requestId), { status: 409 });
+    await assert.rejects(node.sendPrompt('agent', null, 'ignored', entry.pane.key), { status: 409 });
+    assert.deepEqual(await node.transcript('agent', null, thread), { messages: [], before: null });
+    started_at_ticks--;
+    await assert.rejects(node.sendPrompt('agent', thread, 'ignored', entry.pane.key), { status: 409 });
+    kind = 'claude';
+    const [changed] = (await node.catalog(true)).agents;
+    assert.equal(changed.chat, false);
+    await assert.rejects(node.interrupt({ agent: 'agent', thread, pane: entry.pane.key }), { status: 409 });
   } finally {
     node.close();
     tmux('kill-server');

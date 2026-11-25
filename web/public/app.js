@@ -52,8 +52,10 @@ const expandedTeams = new Set();
 const expandedSessions = new Set();
 const drafts = new Map();
 const outgoing = new Map();
+const chatModels = new Map();
 let transcript = null;
 let submitting = false;
+let stopping = null;
 let terminal = null;
 let suppressHoldClick = false;
 const linkTabs = new Map();
@@ -150,7 +152,90 @@ function recordKey(item) {
   const identity = item.sessionRecord ? item.pane?.key.split('.').slice(0, 2).join('.') : item.pane?.key;
   return [item.node, item.id, identity || ''].join('/');
 }
-function conversationKey() { return activeKey + '/' + (active?.thread || ''); }
+function supportsChat(item = active) { return Boolean(item?.chat ?? item?.structured); }
+
+function conversationKey(item = active) {
+  return item?.thread ? item.node + '/thread/' + item.thread : recordKey(item);
+}
+
+const draftStorage = 'workbench-chat-v1/draft/';
+const deliveryStorage = 'workbench-chat-v1/delivery/';
+
+function cacheChat(key, value) {
+  try {
+    if (value) localStorage.setItem(key, JSON.stringify(value));
+    else localStorage.removeItem(key);
+  } catch {}
+}
+
+function rememberDraft(key, text, retry) {
+  if (text) drafts.set(key, { text, retry });
+  else drafts.delete(key);
+  cacheChat(draftStorage + key, drafts.get(key));
+}
+
+function restoreChats() {
+  try {
+    for (const storageKey of Object.keys(localStorage)) {
+      const isDraft = storageKey.startsWith(draftStorage);
+      if (!isDraft && !storageKey.startsWith(deliveryStorage)) continue;
+      let saved;
+      try { saved = JSON.parse(localStorage.getItem(storageKey)); } catch { continue; }
+      if (typeof saved?.text !== 'string' || !saved.text) continue;
+      if (isDraft) {
+        drafts.set(storageKey.slice(draftStorage.length), saved);
+        continue;
+      }
+      if (storageKey !== deliveryStorage + saved.id || typeof saved.key !== 'string'
+          || !['sending', 'sent', 'failed'].includes(saved.state)) continue;
+      if (saved.state === 'sending') {
+        saved.state = 'failed';
+        saved.error = t('sendUnconfirmed');
+      }
+      const queue = outgoing.get(saved.key) || { entries: [], matched: new Set() };
+      queue.entries.push(saved);
+      outgoing.set(saved.key, queue);
+    }
+    for (const [key, queue] of outgoing) {
+      queue.entries.sort((a, b) => a.startedAt - b.startedAt);
+      const failed = queue.entries.findLast((entry) => entry.state === 'failed');
+      if (failed && !drafts.has(key)) drafts.set(key, { text: failed.text, retry: failed.id });
+    }
+  } catch {}
+}
+
+function promoteChats(nodes) {
+  for (const machine of nodes) {
+    for (const agent of machine.agents || []) {
+      if (!agent.thread) continue;
+      const item = withMachine(agent, machine);
+      const previous = conversationKey({ ...item, thread: null });
+      const key = conversationKey(item);
+      const draft = drafts.get(previous);
+      const queue = outgoing.get(previous);
+      if (chatModels.has(previous)) {
+        chatModels.set(key, chatModels.get(previous));
+        chatModels.delete(previous);
+      }
+      if (!draft && !queue) continue;
+      if (draft && !drafts.has(key)) rememberDraft(key, draft.text, draft.retry);
+      if (queue) {
+        const current = outgoing.get(key);
+        for (const entry of queue.entries) {
+          entry.key = key;
+          cacheChat(deliveryStorage + entry.id, entry);
+        }
+        if (current) {
+          current.entries.push(...queue.entries);
+          current.entries.sort((a, b) => a.startedAt - b.startedAt);
+          for (const id of queue.matched) current.matched.add(id);
+        } else outgoing.set(key, queue);
+      }
+      if (draft) rememberDraft(previous, '');
+      outgoing.delete(previous);
+    }
+  }
+}
 function focus(id) { byId(id).focus({ preventScroll: true }); }
 
 function historyView(up) {
@@ -640,7 +725,7 @@ function paintDetail() {
   byId('detail').querySelector('.detail-bar').hidden = !active;
   byId('new-shell').hidden = route !== 'sessions' || !opened || !active?.pane;
   const empty = byId('detail-empty');
-  byId('chat').hidden = !(route === 'agents' && active?.structured);
+  byId('chat').hidden = !(route === 'agents' && supportsChat());
   if (route !== 'sessions' || !active) byId('session-tree').hidden = true;
   paintMessageSelection();
   if (route !== 'sessions' || !active) byId('term').hidden = true;
@@ -653,14 +738,14 @@ function paintDetail() {
   byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
   if (route === 'sessions') { paintSessionPanes(empty); return; }
   stopTerminal();
-  empty.hidden = Boolean(active.structured);
-  if (!active.structured) { empty.textContent = t('noReadableHistory'); return; }
+  empty.hidden = supportsChat();
+  if (!supportsChat()) { empty.textContent = t('noReadableHistory'); return; }
   if (!opened && mobile.matches) return;
   paintComposer();
   const key = conversationKey();
   if (transcript?.key !== key) {
-    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: false, selected: null };
-    byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
+    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: !active.thread, selected: null };
+    byId('messages').replaceChildren(make('p', active.thread ? 'day' : 'empty', t(active.thread ? 'readingHistory' : 'noMessages')));
     byId('history-progress').hidden = true;
     paintMessageNavigation();
     paintOutgoing();
@@ -730,16 +815,31 @@ function paintComposer() {
   const key = conversationKey();
   if (chatInput.dataset.thread !== key) {
     chatInput.dataset.thread = key;
-    chatInput.value = drafts.get(key) || '';
+    chatInput.value = drafts.get(key)?.text || '';
   }
-  const ready = ['idle', 'done', 'working'].includes(active.state) && !active.pane.inMode;
+  const ready = (active.thread ? ['idle', 'done', 'working'].includes(active.state) : active.state === 'idle') && !active.pane.inMode;
   const working = active.state === 'working';
   byId('send').disabled = !ready || submitting;
+  for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = byId('send').disabled;
   const label = t(working ? 'agentWorking' : active.state === 'blocked' ? 'agentBlocked'
     : ready ? 'originalConversation' : 'agentInputUnavailable');
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
   byId('working-dots').hidden = !working;
+  const stop = byId('stop-agent');
+  const pendingStop = stopping?.key === activeKey;
+  if (pendingStop && !working) stopping = null;
+  stop.hidden = !working || !active.chat || active.pane.inMode;
+  stop.disabled = pendingStop || submitting;
+  stop.querySelector('span').textContent = t(pendingStop ? 'stoppingTurn' : 'stopTurn');
+  const settings = byId('chat-settings');
+  settings.hidden = !active.chat;
+  settings.disabled = submitting || !['idle', 'done'].includes(active.state) || active.pane.inMode;
+  settings.title = t(settings.disabled ? 'changeModelWhenIdle' : 'modelAndThinking');
+  const selected = chatModels.get(conversationKey());
+  byId('chat-settings-label').textContent = selected?.model
+    ? [selected.label, selected.effort && t('effort_' + selected.effort)].filter(Boolean).join(' · ')
+    : t('modelAndThinking');
   byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
   resizeComposer();
 }
@@ -750,9 +850,98 @@ function resizeComposer() {
   chatInput.style.height = chatInput.scrollHeight + 'px';
 }
 
+async function stopAgent() {
+  const stop = byId('stop-agent');
+  if (stop.hidden || stop.disabled || !active) return;
+  const item = active;
+  const request = { key: activeKey };
+  const repaint = () => { if (route === 'agents' && supportsChat()) paintComposer(); };
+  stopping = request;
+  repaint();
+  try {
+    await api('/api/interrupt', 'POST', { node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread });
+    await refresh(true);
+    if (activeKey === request.key) loadHistory();
+  } catch (error) {
+    if (stopping === request) stopping = null;
+    if (signedIn) toast(error.message);
+    repaint();
+  }
+  setTimeout(() => {
+    if (stopping !== request) return;
+    stopping = null;
+    repaint();
+  }, 3500);
+}
+
+async function showChatSettings() {
+  const control = byId('chat-settings');
+  if (control.hidden || control.disabled || !active) return;
+  const key = conversationKey();
+  const { node, id: agent, thread, pane: { key: pane } } = active;
+  const target = { node, agent, pane, thread };
+  const wait = make('p', 'sheet-note', t('loadingModelOptions'));
+  sheet(t('modelAndThinking'), wait);
+  try {
+    const { models, model, effort } = await api(pathWith('/api/chat-settings', { node, agent, pane, ...(thread ? { thread } : {}) }));
+    if (!overlay.open || !wait.isConnected || key !== conversationKey()) return;
+    const chosen = models.find(({ id }) => id === model);
+    if (chosen) chatModels.set(key, { model, effort, label: chosen.label });
+    paintComposer();
+    const form = make('form', 'workspace-form');
+    const modelPicker = make('button', 'picker-button');
+    const effortPicker = make('button', 'picker-button');
+    const modelLabel = make('label', '', t('model'));
+    const effortLabel = make('label', '', t('thinkingLevel'));
+    modelLabel.append(modelPicker);
+    effortLabel.append(effortPicker);
+    const submit = make('button', 'primary', t('applyChatSettings'));
+    submit.type = 'submit';
+    const error = make('p', 'message-error');
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+
+    const updateEfforts = (value, preferred) => {
+      const selected = models.find(({ id }) => id === value);
+      const options = selected.efforts.map((level) => ({ value: level, label: t('effort_' + level) }));
+      setPicker(effortPicker, t('thinkingLevel'), options, preferred || selected.defaultEffort);
+      effortLabel.hidden = !options.length;
+    };
+    setPicker(modelPicker, t('model'), models.map(({ id, label }) => ({ value: id, label })), model, updateEfforts);
+    updateEfforts(modelPicker.value, effort);
+    form.append(modelLabel, effortLabel, error, submit);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      const selected = models.find(({ id }) => id === modelPicker.value);
+      const thinking = effortPicker.value || null;
+      submit.disabled = modelPicker.disabled = effortPicker.disabled = true;
+      error.hidden = true;
+      try {
+        const saved = await api('/api/chat-settings', 'POST', { ...target, model: selected.id, effort: thinking });
+        if (signedIn && active?.pane?.key === pane && active.node === node && active.id === agent) {
+          chatModels.set(conversationKey(), { ...saved, label: selected.label });
+          paintComposer();
+        }
+        if (form.isConnected) closeSheet();
+      } catch (failure) {
+        error.textContent = failure.message;
+        error.hidden = false;
+      } finally {
+        submit.disabled = modelPicker.disabled = false;
+        effortPicker.disabled = !selected.efforts.length;
+      }
+    });
+    byId('sheet-body').replaceChildren(form);
+    modelPicker.focus();
+  } catch (error) {
+    if (wait.isConnected) wait.textContent = error.message;
+  }
+}
+
 function loadHistory(older = false) {
   const target = transcript;
-  if (!active || !target || (older && !target.before)) return;
+  if (!active?.thread || !target || (older && !target.before)) return;
   if (target.loading) return target.loading;
   const query = { node: active.node, agent: active.id, thread: active.thread };
   if (older) query.before = target.before;
@@ -815,7 +1004,7 @@ function paintMessageNavigation() {
   const target = transcript;
   const scroller = byId('history');
   const navigation = byId('message-navigation');
-  navigation.hidden = route !== 'agents' || !active?.structured || !target?.loaded
+  navigation.hidden = route !== 'agents' || !supportsChat() || !target?.loaded
     || target.key !== conversationKey() || Boolean(target.selected) || !scroller.clientHeight
     || (!target.before && scroller.scrollHeight <= scroller.clientHeight);
   if (navigation.hidden) return;
@@ -1002,8 +1191,8 @@ function paintLinkPanel() {
 function paintMessageSelection() {
   const count = transcript?.selected?.size || 0;
   const selecting = Boolean(transcript?.selected);
-  byId('chat-menu').hidden = selecting || route !== 'agents' || !active?.structured || !active.pane;
-  byId('chat-actions').hidden = !selecting || route !== 'agents' || !active?.structured
+  byId('chat-menu').hidden = selecting || route !== 'agents' || !supportsChat() || !active.pane;
+  byId('chat-actions').hidden = !selecting || route !== 'agents' || !supportsChat()
     || transcript?.key !== conversationKey() || !transcript.rows.size;
   byId('back').setAttribute('aria-label', t(selecting ? 'cancelMessageSelection'
     : route === 'agents' ? 'backToAgents' : 'backToSessions'));
@@ -1042,7 +1231,15 @@ function matchOutgoing(queue, messages) {
     const index = queue.entries.findIndex((entry) => text === entry.match && (entry.after !== null
       ? message.id >= entry.after : entry.state !== 'sending' && Date.parse(message.time) >= entry.startedAt));
     if (index >= 0) {
-      queue.entries.splice(index, 1);
+      const [entry] = queue.entries.splice(index, 1);
+      cacheChat(deliveryStorage + entry.id, null);
+      if (drafts.get(entry.key)?.retry === entry.id) {
+        rememberDraft(entry.key, '');
+        if (chatInput.dataset.thread === entry.key) {
+          chatInput.value = '';
+          resizeComposer();
+        }
+      }
       queue.matched.add(message.id);
       changed = true;
     }
@@ -1061,11 +1258,17 @@ function paintOutgoing() {
     const row = make('div', 'outgoing-row');
     if (entry.state !== 'sent') {
       const failed = entry.state === 'failed';
-      const indicator = make('span', failed ? 'delivery-failed' : 'delivery-pending');
-      indicator.setAttribute('role', 'img');
-      indicator.setAttribute('aria-label', t(failed ? 'messageSendFailed' : 'messageSending'));
-      indicator.title = failed ? entry.error : t('messageSending');
-      if (failed) indicator.append(glyph('close'));
+      const indicator = failed ? button(t('retrySend'), 'delivery-failed', () => send(entry.text, entry))
+        : make('span', 'delivery-pending');
+      if (failed) {
+        indicator.disabled = byId('send').disabled;
+        indicator.prepend(glyph('close'));
+        indicator.title = entry.error || t('messageSendFailed');
+      } else {
+        indicator.setAttribute('role', 'img');
+        indicator.setAttribute('aria-label', t('messageSending'));
+        indicator.title = t('messageSending');
+      }
       row.append(indicator);
     }
     row.append(messageContent(entry.text, true));
@@ -1145,54 +1348,68 @@ function renderHistory(target, added, older) {
   }
 }
 
-async function send() {
-  if (byId('send').disabled || !chatInput.value.trim() || !active) return;
-  exitMessageSelection();
+async function send(text = chatInput.value, retry = null) {
+  if (byId('send').disabled || !text.trim() || !active) return;
   const item = active;
   const key = conversationKey();
-  const text = chatInput.value;
+  const previous = retry || outgoing.get(key)?.entries.findLast((entry) => entry.state === 'failed' && entry.text === text);
+  if (previous && item.thread) await loadHistory();
+  if (byId('send').disabled || conversationKey() !== key || route !== 'agents') return;
   const queue = outgoing.get(key) || { entries: [], matched: new Set() };
-  const previous = queue.entries.findLast((entry) => entry.state === 'failed' && entry.text === text);
-  const entry = previous || { text, match: matchingText(text) };
+  if (previous && (previous.state !== 'failed' || !queue.entries.includes(previous))) return;
+  exitMessageSelection();
+  const entry = previous || { id: crypto.randomUUID(), key, text, match: matchingText(text) };
   entry.state = 'sending';
   entry.startedAt = Date.now();
-  entry.after = transcript?.loaded ? transcript.latest + 1 : null;
+  entry.after = item.thread && transcript?.loaded ? transcript.latest + 1 : null;
   if (previous) queue.entries.splice(queue.entries.indexOf(previous), 1);
   queue.entries.push(entry);
   outgoing.set(key, queue);
-  drafts.delete(key);
-  chatInput.value = '';
-  const current = () => signedIn && route === 'agents' && conversationKey() === key;
+  cacheChat(deliveryStorage + entry.id, entry);
+  if (!retry || drafts.get(key)?.retry === retry.id) {
+    rememberDraft(key, '');
+    chatInput.value = '';
+  }
+  const current = () => signedIn && route === 'agents' && conversationKey() === entry.key;
   submitting = true;
   paintComposer();
   paintOutgoing();
   const scroller = byId('history');
   scroller.scrollTop = scroller.scrollHeight;
   try {
-    const { after } = await api('/api/prompt', 'POST', { node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text });
+    const { after, submittedAt } = await api('/api/prompt', 'POST', {
+      node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text, requestId: entry.id,
+    });
     entry.state = 'sent';
-    if (Number.isSafeInteger(after) && after >= 0) entry.after = Math.max(after, entry.after ?? 0);
+    if (Number.isSafeInteger(after) && after >= 0) entry.after = after;
+    if (Number.isFinite(submittedAt)) entry.startedAt = submittedAt;
+    const delivered = outgoing.get(entry.key);
     if (current()) {
-      if (transcript?.key === key) matchOutgoing(queue, transcript.rows.values());
-      if (!queue.entries.length && outgoing.get(key) === queue) outgoing.delete(key);
+      if (transcript?.key === entry.key) matchOutgoing(delivered, transcript.rows.values());
+      if (delivered && !delivered.entries.length) outgoing.delete(entry.key);
       paintOutgoing();
       loadHistory();
     }
+    if (delivered?.entries.includes(entry)) cacheChat(deliveryStorage + entry.id, entry);
   } catch (error) {
-    if (!queue.entries.includes(entry) || outgoing.get(key) !== queue) return;
+    if (!outgoing.get(entry.key)?.entries.includes(entry)) return;
     entry.state = 'failed';
     entry.error = error.message;
-    if (!drafts.get(key)) drafts.set(key, text);
+    cacheChat(deliveryStorage + entry.id, entry);
+    if (!drafts.has(entry.key)) rememberDraft(entry.key, text, entry.id);
     if (current()) {
       const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
-      chatInput.value = drafts.get(key);
+      chatInput.value = drafts.get(entry.key)?.text || '';
       resizeComposer();
       paintOutgoing();
       if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
     }
   } finally {
     submitting = false;
-    if (active?.structured && route === 'agents') paintComposer();
+    if (supportsChat() && route === 'agents') {
+      paintComposer();
+      paintOutgoing();
+    }
   }
 }
 
@@ -1527,6 +1744,7 @@ async function refresh(force = false) {
     if (!signedIn || revision !== refreshing) return;
     const fingerprint = JSON.stringify(result);
     if (fingerprint !== overview || force) {
+      promoteChats(result.nodes);
       machines = result.nodes;
       overview = fingerprint;
       if (isWorkspace()) paintWorkspace();
@@ -1681,6 +1899,7 @@ function registerSheet() {
 }
 
 function signedOn() {
+  restoreChats();
   signedIn = true;
   route = 'agents';
   overview = '';
@@ -1707,6 +1926,8 @@ function signedOut() {
   launching = null;
   drafts.clear();
   outgoing.clear();
+  chatModels.clear();
+  stopping = null;
   byId('outgoing-messages').replaceChildren();
   activeLink = '';
   byId('link-pages').replaceChildren();
@@ -1786,8 +2007,10 @@ document.addEventListener('keydown', (event) => {
   }
 });
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
+byId('stop-agent').addEventListener('click', stopAgent);
+byId('chat-settings').addEventListener('click', showChatSettings);
 chatInput.addEventListener('input', () => {
-  drafts.set(conversationKey(), chatInput.value);
+  rememberDraft(conversationKey(), chatInput.value);
   resizeComposer();
 });
 byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
@@ -1956,5 +2179,5 @@ api('/api/session').then(({ authenticated }) => {
 setInterval(() => {
   if (document.hidden) return;
   refresh();
-  if (signedIn && route === 'agents' && active?.structured && (opened || !mobile.matches)) loadHistory();
+  if (signedIn && route === 'agents' && supportsChat() && (opened || !mobile.matches)) loadHistory();
 }, 3000);
