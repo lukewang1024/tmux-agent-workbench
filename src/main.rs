@@ -46,6 +46,23 @@ enum Command {
         /// Inspect this tmux server without starting a daemon or managing its panes.
         #[arg(long)]
         observe: bool,
+        /// Include the shared Sidebar lists, pins and palette.
+        #[arg(long, requires = "json")]
+        sidebar: bool,
+        #[arg(long, requires = "sidebar", value_enum, hide = true)]
+        hide_state: Vec<DisplayState>,
+    },
+    #[command(hide = true)]
+    SidebarSort {
+        #[arg(long, value_enum)]
+        sort: tmux_agent_workbench::config::AgentSort,
+    },
+    #[command(hide = true)]
+    WebLaunchAgent {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        session: String,
     },
     Sidebar {
         #[arg(long, requires_all = ["pane", "client"])]
@@ -1825,8 +1842,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ManifestSet::load(&paths.manifests_dir())?;
             println!("configuration valid: {}", paths.config_file().display());
         }
-        Command::Snapshot { json, observe } => {
-            let value = if observe {
+        Command::Snapshot {
+            json,
+            observe,
+            sidebar,
+            hide_state,
+        } => {
+            let mut value = if observe {
                 let server = ServerIdentity::discover()?;
                 let config = Config::load(&paths.config_file())?;
                 let manifests = ManifestSet::load(&paths.manifests_dir())?;
@@ -1837,8 +1859,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     now_ms(),
                 )?)?
             } else {
-                ipc_call(&paths, "snapshot.get", serde_json::Value::Null)?
+                let data = if sidebar {
+                    serde_json::json!({"include_surface": true, "refresh_surface": true})
+                } else {
+                    serde_json::Value::Null
+                };
+                ipc_call(&paths, "snapshot.get", data)?
             };
+            if sidebar {
+                tmux_agent_workbench::sidebar::add_web_view(
+                    &paths,
+                    &ServerIdentity::discover()?,
+                    &mut value,
+                    &hide_state,
+                )?;
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
@@ -1850,6 +1885,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     snapshot.generation
                 );
             }
+        }
+        Command::SidebarSort { sort } => {
+            tmux_agent_workbench::sidebar::persist_agent_sort(&paths, sort)?;
+        }
+        Command::WebLaunchAgent { pane, session } => {
+            let pane =
+                tmux_agent_workbench::status_menu::launch_web_agent(&paths, &pane, &session)?;
+            println!("{}", serde_json::json!({ "pane": pane }));
         }
         Command::Sidebar {
             popup,

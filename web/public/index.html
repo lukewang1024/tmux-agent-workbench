@@ -18,6 +18,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <symbol id="icon-agents" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="14" rx="3"/><path d="M8 9.5h.01m4 0h.01m4 0h.01M8 14h8"/></symbol>
     <symbol id="icon-machines" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01m4-10h6m-6 10h6"/></symbol>
+    <symbol id="icon-sessions" viewBox="0 0 24 24"><path d="M3 8V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z"/><path d="M7 11h10m-10 4h6"/></symbol>
     <symbol id="icon-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m7.5 9 3 3-3 3m6 0h3"/></symbol>
     <symbol id="icon-mine" viewBox="0 0 24 24"><circle cx="12" cy="7.5" r="3.25"/><path d="M5 20v-1.5A4.5 4.5 0 0 1 9.5 14h5a4.5 4.5 0 0 1 4.5 4.5V20"/></symbol>
     <symbol id="icon-back" viewBox="0 0 24 24"><path d="m14.5 5.5-6.5 6.5 6.5 6.5"/></symbol>
@@ -25,30 +26,31 @@
     <symbol id="icon-down" viewBox="0 0 24 24"><path d="m5.5 9.5 6.5 6.5 6.5-6.5"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15.5 3 5.5 5.5-4 1.5-3 4v3l-1.5 1.5-7-7L7 10h3l4-3Zm-6 11.5L4 20"/></symbol>
     <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="10" r="4"/><path d="m11.2 12.6 6.3 6.4h2.5v-2.6l-1.6-1.6h-2v-2"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--wash)"/><circle cx="15" cy="17" r="2.5" fill="var(--wash)"/></symbol>
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></symbol>
     <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M11 4H5v16h6m2-8h8m-4-4 4 4-4 4"/></symbol>
   </svg>
   <main class="app" id="app" data-route="login">
-    <nav class="app-nav" aria-label="{{mainNavigation}}">
-      <span class="nav-brand"><span class="brand-mark" aria-hidden="true"></span><span class="nav-brand-text">Workbench Web</span></span>
-      <button class="nav-button" type="button" data-route="agents" title="{{agents}}"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-agents"></use></svg></span><span class="nav-label">{{agents}}</span></button>
-      <button class="nav-button" type="button" data-route="machines" title="{{machines}}"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-machines"></use></svg></span><span class="nav-label">{{machines}}</span></button>
-      <button class="nav-button" type="button" data-route="terminals" title="{{terminals}}"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-terminal"></use></svg></span><span class="nav-label">{{terminals}}</span></button>
-      <button class="nav-button" type="button" data-route="mine" title="{{profile}}"><span class="nav-icon"><svg class="glyph" aria-hidden="true"><use href="#icon-mine"></use></svg></span><span class="nav-label">{{profile}}</span></button>
-    </nav>
+    <header class="home-bar" id="home-bar" hidden>
+      <button class="module-trigger" id="modules" type="button" aria-haspopup="dialog" aria-label="{{mainNavigation}}">
+        <span class="brand-mark" aria-hidden="true"></span><b id="module-label">{{agents}}</b><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+      </button>
+      <button class="machine-trigger" id="machine" type="button" aria-haspopup="dialog">
+        <svg class="glyph" aria-hidden="true"><use href="#icon-machines"></use></svg><b id="scope"></b>
+        <span class="machine-meta" id="health"></span><svg class="glyph chevron" aria-hidden="true"><use href="#icon-down"></use></svg>
+      </button>
+    </header>
     <div class="app-body">
       <div class="workspace" id="workspace" data-mobile-view="list" hidden>
         <section class="screen" id="list" aria-labelledby="list-heading">
           <header class="bar list-top">
-            <h1 id="list-heading" tabindex="-1">{{agents}}</h1>
-            <button class="primary" type="button" data-pane><span class="plus" aria-hidden="true">＋</span>{{openPane}}</button>
+            <h1 class="sr-only" id="list-heading" tabindex="-1">{{agents}}</h1>
+            <div class="state-filters" id="state-filters" role="group" aria-label="{{agentStates}}"></div>
+            <button class="primary" id="new-agent" type="button"><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newAgent}}</button>
           </header>
           <div class="list-content">
-            <button class="machine-trigger" id="machine" type="button" aria-haspopup="dialog">
-              <b id="scope"></b><span class="machine-meta"><span id="health"></span><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg></span>
-            </button>
             <div id="groups"></div>
           </div>
         </section>
@@ -56,13 +58,9 @@
           <header class="bar detail-bar">
             <button class="plain icon back" id="back" type="button" aria-label="{{backToAgents}}"><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
             <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
-            <button class="plain icon" type="button" aria-label="{{openPane}}" title="{{openPane}}" data-pane><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg></button>
+            <button class="secondary" id="new-shell" type="button" hidden><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newTerminal}}</button>
           </header>
-          <div class="tabs" id="detail-tabs" role="tablist" aria-label="{{taskView}}">
-            <button type="button" id="chat-tab" role="tab" aria-controls="chat" aria-selected="true">{{conversation}}</button>
-            <button type="button" id="term-tab" role="tab" aria-controls="term" aria-selected="false">{{terminal}}</button>
-          </div>
-          <div class="panel" id="chat" role="tabpanel" aria-labelledby="chat-tab">
+          <div class="panel" id="chat" aria-label="{{conversation}}" hidden>
             <div class="history">
               <button class="plain earlier" id="older" type="button">{{olderMessages}}</button>
               <div id="messages"></div>
@@ -78,24 +76,27 @@
               </div>
             </div>
           </div>
-          <div class="panel terminal-panel" id="term" role="tabpanel" aria-labelledby="term-tab" hidden>
+          <div class="panel terminal-panel" id="term" aria-label="{{terminal}}" hidden>
             <div class="terminal">
               <div class="terminal-bar">
-                <b id="term-target"></b><span id="term-state" class="terminal-state">{{connecting}}</span>
+                <select id="shells" aria-label="{{terminal}}"></select><span id="term-state" class="terminal-state">{{connecting}}</span>
+                <button type="button" class="control" id="control" aria-pressed="false" disabled>{{enableInput}}</button>
               </div>
               <div class="terminal-screen" id="term-screen" aria-label="{{paneOutput}}"></div>
             </div>
-            <div class="keys">
-              <div class="key-scroll" aria-label="{{terminalShortcuts}}">
-                <button type="button" data-key="Ctrl" aria-pressed="false" disabled>Ctrl</button>
-                <button type="button" data-key="Esc" disabled>Esc</button>
-                <button type="button" data-key="Tab" disabled>Tab</button>
-                <button type="button" data-key="↑" aria-label="{{arrowUp}}" disabled>↑</button>
-                <button type="button" data-key="↓" aria-label="{{arrowDown}}" disabled>↓</button>
-                <button type="button" data-key="←" aria-label="{{arrowLeft}}" disabled>←</button>
-                <button type="button" data-key="→" aria-label="{{arrowRight}}" disabled>→</button>
-              </div>
-              <button type="button" class="control" id="control">{{enableInput}}</button>
+            <div class="keys" role="group" aria-label="{{terminalShortcuts}}">
+              <button type="button" data-key="Esc" disabled>Esc</button>
+              <button type="button" data-key="Tab" disabled>Tab</button>
+              <button type="button" data-key="Home" disabled>Home</button>
+              <button type="button" data-key="↑" aria-label="{{arrowUp}}" disabled>↑</button>
+              <button type="button" data-key="End" disabled>End</button>
+              <button type="button" data-key="PageUp" aria-label="{{pageUp}}" disabled>PgUp</button>
+              <button type="button" data-key="Ctrl" aria-pressed="false" disabled>Ctrl</button>
+              <button type="button" data-key="Alt" aria-pressed="false" disabled>Alt</button>
+              <button type="button" data-key="←" aria-label="{{arrowLeft}}" disabled>←</button>
+              <button type="button" data-key="↓" aria-label="{{arrowDown}}" disabled>↓</button>
+              <button type="button" data-key="→" aria-label="{{arrowRight}}" disabled>→</button>
+              <button type="button" data-key="PageDown" aria-label="{{pageDown}}" disabled>PgDn</button>
             </div>
             <form class="term-entry" id="term-form" hidden>
               <input id="term-input" autocomplete="off" aria-label="{{terminalText}}" placeholder="{{terminalText}}">

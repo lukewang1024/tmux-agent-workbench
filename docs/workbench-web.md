@@ -1,15 +1,22 @@
 # Workbench Web
 
 Workbench Web is an optional, single-operator PWA distributed in the
-tmux-agent-workbench source tree. It uses the Workbench snapshot for running
-Agent identity, titles, tmux grouping and status. The gateway joins the local
-tmux server with any machines you explicitly pair.
+tmux-agent-workbench source tree. The gateway joins the local tmux server with
+any machines you explicitly pair. Use the top-left menu to switch between
+Agents, Sessions, Machines and Profile, and the machine picker to change scope.
+The Agents and Sessions lists use the Sidebar's grouping, priority, status
+colors and pins. Pinning and sorting update the same state on the target machine
+that its Sidebar reads.
 
 The Agent view opens the original Codex conversation when the Workbench snapshot
 identifies its thread. History comes from the Codex rollout on that machine.
-Other Agent types can be opened in their terminal. Chat sends into a live Codex
-pane when its verified thread is idle or done. For a permission prompt, open
-the terminal and respond there.
+Chat sends into a live Codex pane when its verified thread is idle or done.
+Respond to permission prompts on the Agent's machine.
+
+**New Agent** asks for the target machine and tmux session. It starts the
+Agent in that session using the machine's saved Sidebar launch settings. On a
+machine with no saved setup, it uses the first installed Agent CLI in the
+Sidebar's tool order.
 
 ## Start a local preview
 
@@ -135,11 +142,11 @@ has previously connected shows as offline when its connection is lost.
 
 ## Panes and login
 
-The terminal view starts in watch mode. Enable input to become the single
-browser writer for that Pane. You can open a Shell in a dedicated Workbench Web
-window, or split the selected task window on the same machine. Independent
-Web windows can resize to the terminal viewport. Existing panes follow their
-tmux geometry. Reconnecting attaches to the original Pane while it still exists.
+Open a Session and choose **New Terminal** to start a fresh Shell in a new
+window or split Pane. Its terminal starts in watch mode. Enable input to become
+the single browser writer for that Pane. Independent Web windows can resize to
+the terminal viewport. Splits follow their tmux geometry. Reconnecting attaches
+to the original Shell while it still exists.
 
 The gateway runs with the authority of the tmux user on paired machines. A
 signed-in operator can open terminals and send their input. Protect the gateway

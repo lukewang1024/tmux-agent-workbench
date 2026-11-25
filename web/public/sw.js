@@ -6,7 +6,7 @@ const files = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon-192
 const shell = new Set(files);
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(files)));
+  event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(files)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {

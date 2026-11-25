@@ -9,31 +9,35 @@ const overlay = byId('overlay');
 const mobile = window.matchMedia('(max-width: 767px)');
 const chatInput = byId('chat-input');
 const termInput = byId('term-input');
-const nav = [...document.querySelectorAll('.nav-button')];
 const passkeys = window.SimpleWebAuthnBrowser;
 const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
 const connectionError = t(loopback ? 'sshTunnelUnavailable' : 'gatewayUnavailable');
-const stateNames = { idle: t('idle'), blocked: t('attention'), working: t('working'), done: t('done'), unknown: t('unknownStatus') };
+const stateNames = { idle: t('idle'), blocked: t('blocked'), working: t('working'), done: t('done'), unknown: t('unknownStatus') };
 const nodeStates = { pending: t('pending'), offline: t('offline'), online: t('online') };
-const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', trae: 'Trae', shell: 'Shell' };
+const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', trae: 'Trae', traex: 'Trae', shell: t('terminal') };
 const marks = { codex: 'Cx', claude: 'Cl', opencode: 'Oc', trae: 'Tr', shell: '>_' };
-const labels = { agents: t('agents'), terminals: t('terminals') };
+const labels = { agents: t('agents'), sessions: t('sessions'), machines: t('machines'), mine: t('profile') };
+const states = ['blocked', 'done', 'working', 'idle'];
 
 let signedIn = false;
 let route = 'login';
 let scope = 'all';
 let opened = false;
-let view = 'chat';
 let minePage = 'home';
 let machines = [];
 let overview = '';
 let active = null;
 let activeKey = '';
 let toastTimer;
+let refreshing = 0;
 let syncing = false;
+let launching = null;
 let installPrompt;
 let enrollment = readEnrollment();
 const selection = new Map();
+const selectedShell = new Map();
+const hiddenStates = new Set();
+const expandedTeams = new Set();
 const drafts = new Map();
 let transcript = null;
 let submitting = false;
@@ -110,6 +114,7 @@ function pathWith(path, query) {
 }
 
 function sheet(title, ...contents) {
+  delete overlay.dataset.position;
   byId('sheet-title').textContent = title;
   byId('sheet-body').replaceChildren(...contents);
   if (!overlay.open) overlay.showModal();
@@ -120,12 +125,17 @@ function closeSheet() {
   if (overlay.open) overlay.close();
 }
 
-function isWorkspace() { return route === 'agents' || route === 'terminals'; }
-function recordKey(item) { return item ? item.node + '/' + item.pane.key + '/' + item.id + '/' + (item.thread || '') : ''; }
+function isWorkspace() { return route === 'agents' || route === 'sessions'; }
+function recordKey(item) {
+  if (!item) return '';
+  const identity = item.sessionRecord ? item.pane?.key.split('.').slice(0, 2).join('.') : item.pane?.key;
+  return [item.node, item.id, identity || ''].join('/');
+}
+function conversationKey() { return activeKey + '/' + (active?.thread || ''); }
 function focus(id) { byId(id).focus({ preventScroll: true }); }
 
 function save(method, up = false) {
-  history[method]({ workbench: true, route, scope, opened, minePage, view, selected: activeKey, up }, '');
+  history[method]({ workbench: true, route, scope, opened, minePage, selected: activeKey, up }, '');
 }
 
 function navigate(target, node = scope) {
@@ -134,6 +144,7 @@ function navigate(target, node = scope) {
     return;
   }
   closeSheet();
+  launching = null;
   route = target;
   scope = node;
   opened = false;
@@ -157,86 +168,211 @@ function paint() {
   app.dataset.route = route;
   byId('workspace').hidden = !isWorkspace();
   for (const name of ['machines', 'mine', 'login']) byId(name).hidden = name !== route;
-  for (const item of nav) {
-    if (item.dataset.route === route) item.setAttribute('aria-current', 'page');
-    else item.removeAttribute('aria-current');
-  }
   if (isWorkspace()) paintWorkspace();
   else {
     stopTerminal();
     if (route === 'machines') paintMachines();
     if (route === 'mine') paintMine();
+    paintHeader();
   }
+}
+
+function paintHeader() {
+  byId('home-bar').hidden = !signedIn || (isWorkspace() && opened && mobile.matches)
+    || (route === 'mine' && minePage !== 'home');
+  byId('module-label').textContent = labels[route] || '';
+  byId('machine').hidden = !isWorkspace();
+  const machine = machines.find(({ id }) => id === scope);
+  byId('scope').textContent = machine?.name || t('allMachines');
+  byId('health').textContent = machine ? nodeStates[machine.state] : t('onlineCount', {
+    count: machines.filter(({ state }) => state === 'online').length,
+  });
 }
 
 function scopedMachines() {
   return scope === 'all' ? machines : machines.filter(({ id }) => id === scope);
 }
 
-function entries(machine) {
-  const rows = route === 'terminals' ? machine.terminals : machine.agents;
-  return (rows || []).map((item) => ({
-    ...item,
-    session: item.kind === 'shell' ? t(item.pane.resizable ? 'webTerminals' : 'splitPane') : item.session,
-    id: item.id || item.pane.key,
-    node: machine.id,
-    host: machine.name,
-  }));
+function withMachine(item, machine) {
+  return { ...item, node: machine.id, host: machine.name };
+}
+
+function records(machine) {
+  if (route === 'sessions') {
+    const sessions = new Map((machine.sessions || []).map((item) => [item.id, withMachine({ ...item, sessionRecord: true }, machine)]));
+    const ids = machine.sidebar?.sessionRows || [...sessions.keys()];
+    return {
+      rows: ids.map((id) => sessions.get(id)).filter(Boolean),
+      pinned: (machine.sidebar?.pinnedSessions || []).map((id) => sessions.get(id)).filter(Boolean),
+    };
+  }
+  const agents = new Map((machine.agents || []).map((item) => [item.id, withMachine(item, machine)]));
+  const rows = [];
+  let teamOpen = false;
+  for (const item of machine.sidebar?.agentRows || [...agents.values()].filter(({ state }) => !hiddenStates.has(state))) {
+    if (item.group !== undefined) { rows.push(item); continue; }
+    if (item.team) teamOpen = expandedTeams.has(machine.id + '/' + item.id);
+    if (agents.has(item.id) && (!item.worker || teamOpen)) rows.push({ ...agents.get(item.id), ...item });
+  }
+  return { rows, pinned: (machine.pinnedAgents || []).map((item) => withMachine(item, machine)) };
 }
 
 function paintWorkspace() {
-  const rows = scopedMachines().flatMap(entries);
-  const previous = activeKey;
+  const rows = scopedMachines().flatMap((machine) => {
+    const { rows, pinned } = records(machine);
+    return [...rows.filter((item) => item.id), ...pinned];
+  });
+  const previous = conversationKey();
   active = rows.find((item) => recordKey(item) === selection.get(route)) || rows[0] || null;
   activeKey = recordKey(active);
-  if (previous !== activeKey) {
-    view = route === 'agents' && active?.structured ? 'chat' : 'terminal';
+  if (previous !== conversationKey()) {
     transcript = null;
     status('chat-error');
     stopTerminal();
   }
-  if (!active) opened = false;
+  if (!active || (opened && selection.has(route) && selection.get(route) !== activeKey)) opened = false;
   byId('workspace').dataset.mobileView = opened ? 'detail' : 'list';
+  paintHeader();
   paintCollection();
   paintDetail();
 }
 
+function stateDot(state, colors) {
+  const dot = make('span', 'state-dot');
+  const color = colors?.[state];
+  if (/^#[0-9a-f]{6}$/i.test(color || '')) dot.style.setProperty('--state-color', color);
+  dot.setAttribute('aria-hidden', 'true');
+  return dot;
+}
+
+function paintStateFilters() {
+  const filters = byId('state-filters');
+  filters.hidden = route !== 'agents';
+  if (filters.hidden) return;
+  const nodes = scopedMachines().filter((machine) => machine.snapshotAvailable);
+  const activeFilter = document.activeElement?.dataset.filter;
+  filters.replaceChildren(...states.map((state) => {
+    const count = nodes.reduce((sum, machine) => sum + (machine.sidebar?.stats?.find((item) => item.state === state)?.count
+      ?? machine.agents?.filter((agent) => agent.state === state).length ?? 0), 0);
+    const chip = button('', 'filter-chip', () => {
+      if (hiddenStates.has(state)) hiddenStates.delete(state);
+      else hiddenStates.add(state);
+      paintStateFilters();
+      refresh(true);
+    });
+    chip.dataset.filter = state;
+    chip.title = stateNames[state];
+    chip.setAttribute('aria-pressed', String(!hiddenStates.has(state)));
+    chip.setAttribute('aria-label', stateNames[state] + ', ' + count);
+    chip.append(stateDot(state, nodes.find((node) => node.sidebar)?.sidebar.colors),
+      make('span', 'filter-label', stateNames[state]), make('b', '', String(count)));
+    if (state === activeFilter) requestAnimationFrame(() => chip.focus({ preventScroll: true }));
+    return chip;
+  }));
+}
+
+function recordRow(item, machine, pinned, focusKey) {
+  const session = route === 'sessions';
+  const container = make('div', 'record-row' + (item.worker ? ' worker-row' : ''));
+  const row = button('', 'agent-row', () => openRecord(item));
+  row.dataset.record = recordKey(item);
+  if (row.dataset.record === activeKey && (opened || !mobile.matches)) row.setAttribute('aria-current', 'true');
+  const icon = make('span', 'agent-tag ' + (item.kind || 'session'), session ? undefined : marks[item.kind] || '>_');
+  if (session) icon.append(glyph('sessions'));
+  icon.setAttribute('aria-hidden', 'true');
+  const copy = make('span', 'record-copy');
+  const title = item.worker ? item.worker.name : item.title;
+  const subtype = session ? [t('agentCount', { count: item.agentCount }), item.branch].filter(Boolean).join(' · ')
+    : [item.worker?.title || kindNames[item.kind], machine.sidebar?.sort === 'grouped' ? '' : item.session].filter(Boolean).join(' · ');
+  copy.append(make('b', '', title), make('span', 'agent-meta', subtype));
+  if (item.exited) copy.append(make('span', 'agent-meta', t('agentExited')));
+  const badge = make('span', 'record-state');
+  badge.title = stateNames[item.state] || '';
+  badge.append(stateDot(item.state, machine.sidebar?.colors), make('span', 'sr-only', badge.title));
+  row.append(icon, copy, badge);
+  container.append(row);
+  if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
+  if (item.team) {
+    const key = machine.id + '/' + item.id;
+    const team = button(String(item.team.workers), 'row-action team-toggle', () => {
+      if (expandedTeams.has(key)) expandedTeams.delete(key);
+      else expandedTeams.add(key);
+      paintWorkspace();
+    });
+    team.prepend(glyph('down'));
+    team.setAttribute('aria-expanded', String(expandedTeams.has(key)));
+    team.setAttribute('aria-label', t('teamWorkers', { count: item.team.workers, blocked: item.team.blocked, done: item.team.done }));
+    container.append(team);
+  }
+  if (machine.sidebar && item.pane && !item.worker) {
+    const target = session ? item.id : item.pane.window;
+    const assistant = !session && machine.pinnedAgents?.some((card) => card.pane?.window === target && card.assistant);
+    const pin = button('', 'row-action pin-button', async () => {
+      pin.disabled = true;
+      try {
+        await api('/api/pins', 'POST', { node: machine.id, scope: session ? 'session' : 'agent', target, pane: item.pane.key, pinned: !pinned });
+        await refresh(true);
+      } catch (error) { toast(error.message); }
+      finally { pin.disabled = Boolean(assistant); }
+    });
+    pin.append(glyph('pin'));
+    pin.disabled = Boolean(assistant);
+    pin.title = t(assistant ? 'assistantPinned' : pinned ? 'unpin' : 'pin');
+    pin.setAttribute('aria-label', pin.title);
+    pin.setAttribute('aria-pressed', String(pinned));
+    container.append(pin);
+  }
+  return container;
+}
+
 function paintCollection() {
-  const selected = machines.find(({ id }) => id === scope);
-  byId('scope').textContent = selected?.name || t('allMachines');
-  byId('health').textContent = selected ? nodeStates[selected.state] : t('onlineCount', {
-    count: machines.filter(({ state }) => state === 'online').length,
-  });
   byId('list-heading').textContent = labels[route];
+  byId('new-agent').disabled = !machines.some((machine) => machine.sidebar?.launchTool && machine.sessions?.some((session) => session.pane));
+  paintStateFilters();
   const groups = byId('groups');
   const focusKey = document.activeElement?.dataset.record;
   groups.replaceChildren();
 
   for (const machine of scopedMachines()) {
     const group = make('section', 'group');
-    const rows = entries(machine);
+    const { rows, pinned } = records(machine);
     const heading = make('h3');
-    const count = machine.state === 'online'
-      ? t(route === 'agents' ? 'agentCount' : 'paneCount', { count: rows.length }) : nodeStates[machine.state];
-    heading.append(make('span', machine.state === 'online' ? 'dot' : 'dot off'), machine.name, make('span', 'count', count));
+    const count = machine.state === 'online' && machine.snapshotAvailable
+      ? t(route === 'agents' ? 'agentCount' : 'sessionCount', {
+        count: (route === 'agents' ? machine.agents : machine.sessions)?.length || 0,
+      }) : nodeStates[machine.state];
+    heading.append(make('span', machine.state === 'online' ? 'dot' : 'dot off'), make('span', 'group-name', machine.name), make('span', 'count', count));
+    if (machine.sidebar) {
+      const sort = make('select', 'sort-select');
+      sort.setAttribute('aria-label', t('sortOrder', { machine: machine.name }));
+      sort.add(new Option(t(route === 'agents' ? 'groupBySession' : 'sortByName'), 'grouped'));
+      sort.add(new Option(t('prioritized'), 'prioritized'));
+      sort.value = machine.sidebar.sort;
+      sort.addEventListener('change', async () => {
+        sort.disabled = true;
+        try {
+          await api('/api/sidebar-sort', 'POST', { node: machine.id, sort: sort.value });
+          await refresh(true);
+        } catch (error) { sort.value = machine.sidebar.sort; toast(error.message); }
+        finally { sort.disabled = false; }
+      });
+      heading.append(sort);
+    }
     group.append(heading);
-    if (!rows.length) {
+    const pinnedIds = new Set(pinned.map((item) => route === 'sessions' ? item.id : item.pane?.window));
+    if (pinned.length) {
+      const rack = make('div', 'pinned-records');
+      rack.append(make('h4', 'subheading', t('pinned')), ...pinned.map((item) => recordRow(item, machine, true, focusKey)));
+      group.append(rack);
+    }
+    if (!rows.length && !pinned.length) {
       const message = machine.state === 'pending' ? 'waitingForPairing' : machine.state === 'offline' ? 'nodeReconnect'
-        : machine.snapshotAvailable === false && route === 'agents' ? 'snapshotUnavailable' : 'noSessions';
+        : !machine.snapshotAvailable ? 'snapshotUnavailable' : route === 'sessions' ? 'noSessions'
+          : machine.agents?.length ? 'noMatchingAgents' : 'noAgents';
       group.append(make('div', 'empty', t(message)));
     }
-    for (const item of rows) {
-      const row = button('', 'agent-row', () => openRecord(item));
-      row.dataset.record = recordKey(item);
-      if (row.dataset.record === activeKey) row.setAttribute('aria-current', 'true');
-      const icon = make('span', 'agent-tag ' + item.kind, marks[item.kind] || '·');
-      icon.setAttribute('aria-hidden', 'true');
-      const copy = make('span');
-      copy.append(make('b', '', item.title), make('span', 'agent-meta', (item.session || '') + ' / ' + (kindNames[item.kind] || item.kind)));
-      row.append(icon, copy, make('span', 'status ' + (item.state || ''), stateNames[item.state] || ''));
-      group.append(row);
-      if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
-    }
+    group.append(...rows.map((item) => item.group !== undefined ? make('h4', 'subheading', item.group)
+      : recordRow(item, machine, pinnedIds.has(route === 'sessions' ? item.id : item.pane?.window), focusKey)));
     groups.append(group);
   }
   if (!machines.length) groups.append(make('div', 'empty', t('loadingWorkspace')));
@@ -244,6 +380,7 @@ function paintCollection() {
 
 function openRecord(item) {
   const fromList = !opened;
+  launching = null;
   opened = true;
   selection.set(route, recordKey(item));
   paintWorkspace();
@@ -252,58 +389,70 @@ function openRecord(item) {
 }
 
 function paintDetail() {
-  const detail = byId('detail');
-  detail.hidden = false;
-  detail.querySelector('.detail-bar').hidden = !active;
-  byId('detail-empty').hidden = Boolean(active);
+  byId('detail').hidden = false;
+  byId('detail').querySelector('.detail-bar').hidden = !active;
+  byId('new-shell').hidden = route !== 'sessions' || !opened || !active?.pane;
+  const empty = byId('detail-empty');
+  byId('chat').hidden = !(route === 'agents' && active?.structured);
+  if (route !== 'sessions' || !active) byId('term').hidden = true;
   if (!active) {
-    byId('detail-empty').textContent = t('chooseMachine');
-    byId('detail-tabs').hidden = true;
-    byId('chat').hidden = true;
-    byId('term').hidden = true;
+    empty.hidden = false;
+    empty.textContent = t(route === 'sessions' ? 'selectSession' : 'chooseMachine');
     return;
   }
   byId('detail-name').textContent = active.title;
-  byId('detail-context').textContent = active.host + ' / ' + (active.session || kindNames[active.kind] || '');
-  byId('back').setAttribute('aria-label', t(route === 'agents' ? 'backToAgents' : 'backToTerminals'));
-  const canChat = route === 'agents' && active.structured;
-  byId('detail-tabs').hidden = !canChat;
-  if (!canChat) view = 'terminal';
-  const inChat = view === 'chat';
-  byId('chat').hidden = !inChat;
-  byId('term').hidden = inChat;
-  for (const [id, selected] of [['chat-tab', inChat], ['term-tab', !inChat]]) {
-    byId(id).setAttribute('aria-selected', String(selected));
-    byId(id).tabIndex = selected ? 0 : -1;
+  byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
+  byId('back').setAttribute('aria-label', t(route === 'agents' ? 'backToAgents' : 'backToSessions'));
+  if (route === 'sessions') { paintShells(empty); return; }
+  stopTerminal();
+  empty.hidden = Boolean(active.structured);
+  if (!active.structured) { empty.textContent = t('noReadableHistory'); return; }
+  if (!opened && mobile.matches) return;
+  paintComposer();
+  const key = conversationKey();
+  if (transcript?.key !== key) {
+    transcript = { key, rows: new Map(), before: null, loaded: false, busy: false };
+    byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
+    byId('older').hidden = true;
+    loadHistory();
   }
-  if (!opened && mobile.matches) { stopTerminal(); return; }
-  if (inChat) {
-    stopTerminal();
-    paintComposer();
-    if (transcript?.key !== activeKey) {
-      transcript = { key: activeKey, rows: new Map(), before: null, loaded: false, busy: false };
-      byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
-      byId('older').hidden = true;
-      loadHistory();
-    }
-  } else startTerminal();
 }
 
-function tab(next) {
-  if (view === next) return;
-  view = next;
-  paintDetail();
-  save('replaceState', history.state?.up || false);
+function sessionShells() {
+  return (machines.find(({ id }) => id === active?.node)?.terminals || [])
+    .filter((item) => item.kind === 'shell' && item.pane.owned && item.pane.session === active.id);
+}
+
+function paintShells(empty) {
+  const shells = opened ? sessionShells() : [];
+  const selected = selectedShell.get(active.node + '/' + active.id);
+  const pane = (shells.find((item) => item.pane.key === selected) || shells[0])?.pane;
+  empty.hidden = Boolean(pane);
+  byId('term').hidden = !pane;
+  if (!pane) {
+    stopTerminal();
+    empty.textContent = t(!opened ? 'selectSession' : active.pane ? 'noShells' : 'noSessionPane');
+    return;
+  }
+  const picker = byId('shells');
+  const keys = shells.map((item) => item.pane.key).join('/');
+  if (picker.dataset.keys !== keys) {
+    picker.replaceChildren(...shells.map(({ pane }) => new Option(t('terminalPane', { pane: pane.pane }), pane.key)));
+    picker.dataset.keys = keys;
+  }
+  picker.value = pane.key;
+  startTerminal(pane);
 }
 
 function paintComposer() {
-  if (chatInput.dataset.thread !== activeKey) {
-    chatInput.dataset.thread = activeKey;
-    chatInput.value = drafts.get(activeKey) || '';
+  const key = conversationKey();
+  if (chatInput.dataset.thread !== key) {
+    chatInput.dataset.thread = key;
+    chatInput.value = drafts.get(key) || '';
   }
   const ready = ['idle', 'done'].includes(active.state) && !active.pane.inMode;
   byId('send').disabled = !ready || submitting;
-  byId('chat-status').textContent = t(ready ? 'originalConversation' : active.state === 'blocked' ? 'confirmInTerminal' : 'agentWorking');
+  byId('chat-status').textContent = t(ready ? 'originalConversation' : active.state === 'blocked' ? 'agentBlocked' : 'agentWorking');
 }
 
 async function loadHistory(older = false) {
@@ -350,7 +499,7 @@ function renderHistory(target, older) {
 async function send() {
   if (byId('send').disabled || !chatInput.value.trim() || !active) return;
   const item = active;
-  const key = activeKey;
+  const key = conversationKey();
   const text = chatInput.value;
   submitting = true;
   paintComposer();
@@ -358,15 +507,15 @@ async function send() {
   try {
     await api('/api/prompt', 'POST', { node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text });
     if (drafts.get(key) === text) drafts.delete(key);
-    if (activeKey === key) {
+    if (conversationKey() === key) {
       if (chatInput.value === text) chatInput.value = '';
       loadHistory();
     }
   } catch (error) {
-    if (activeKey === key) status('chat-error', error.message);
+    if (conversationKey() === key) status('chat-error', error.message);
   } finally {
     submitting = false;
-    if (active?.structured && view === 'chat') paintComposer();
+    if (active?.structured && route === 'agents') paintComposer();
   }
 }
 
@@ -383,15 +532,15 @@ function stopTerminal() {
   byId('term-screen').replaceChildren();
 }
 
-function startTerminal() {
-  if (terminal?.key === activeKey) return;
+function startTerminal(pane) {
+  const key = active.node + '/' + pane.key;
+  if (terminal?.key === key) return;
   stopTerminal();
-  const current = { key: activeKey, node: active.node, pane: active.pane, writable: false, ready: false, ctrl: false };
+  const current = { key, node: active.node, pane, writable: false, ready: false, ctrl: false, alt: false };
   terminal = current;
-  byId('term-target').textContent = 'tmux ' + active.pane.pane;
   termInput.value = '';
   const renderer = new window.Terminal({
-    cols: Math.max(1, active.pane.cols), rows: Math.max(1, active.pane.rows), fontSize: 13,
+    cols: Math.max(1, pane.cols), rows: Math.max(1, pane.rows), fontSize: 13,
     cursorBlink: false, scrollback: 2000, theme: { background: '#17243a', foreground: '#e2edff', cursor: '#b3c6ff' },
     disableStdin: true, cursorInactiveStyle: 'outline',
   });
@@ -399,7 +548,7 @@ function startTerminal() {
   current.fit = new window.FitAddon.FitAddon();
   renderer.loadAddon(current.fit);
   renderer.open(byId('term-screen'));
-  renderer.onData((data) => sendTerminal({ type: 'input', data }));
+  renderer.onData((data) => sendKeys(data));
   renderer.attachCustomKeyEventHandler((event) => !(event.ctrlKey && event.shiftKey && /^c$/i.test(event.key)));
   current.observer = new ResizeObserver(() => fitTerminal(current));
   current.observer.observe(byId('term-screen'));
@@ -411,6 +560,7 @@ function connectTerminal(current) {
   current.ready = false;
   current.writable = false;
   current.ctrl = false;
+  current.alt = false;
   terminalControls('connecting');
   const url = new URL(pathWith('/api/terminal', { node: current.node, pane: current.pane.key }), location.href);
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -456,9 +606,11 @@ function terminalControls(message) {
   byId('term-state').replaceChildren(make('span', terminal?.ready ? 'dot' : 'dot off'), t(message));
   byId('control').textContent = t(writable ? 'releaseInput' : 'enableInput');
   byId('control').disabled = !terminal?.ready;
+  byId('control').setAttribute('aria-pressed', String(writable));
   byId('term-form').hidden = !writable;
   for (const item of document.querySelectorAll('[data-key]')) item.disabled = !writable;
   document.querySelector('[data-key="Ctrl"]').setAttribute('aria-pressed', String(Boolean(terminal?.ctrl && writable)));
+  document.querySelector('[data-key="Alt"]').setAttribute('aria-pressed', String(Boolean(terminal?.alt && writable)));
 }
 
 function fitTerminal(current) {
@@ -484,10 +636,34 @@ function sendTerminal(packet) {
   } else terminal.socket.send(JSON.stringify(packet));
 }
 
+function sendKeys(data, submit = false) {
+  if (!terminal?.writable) return;
+  const control = terminal.ctrl && /^[a-z]$/i.test(data);
+  const alt = terminal.alt;
+  if (control) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64);
+  if (alt) data = '\x1b' + data;
+  if (submit && !control && !alt) data += '\r';
+  sendTerminal({ type: 'input', data });
+  terminal.ctrl = terminal.alt = false;
+  terminalControls('inputEnabled');
+}
+
 function choice(label, detail, action) {
   const row = button('', 'sheet-row', action);
   row.append(make('span', 'choice', label), make('small', '', detail));
   return row;
+}
+
+function switchModule() {
+  const rows = Object.entries(labels).map(([name, label]) => {
+    const row = choice(label, '', () => { closeSheet(); navigate(name); });
+    row.prepend(glyph(name));
+    row.setAttribute('aria-current', String(name === route));
+    if (name === route) row.append(glyph('next'));
+    return row;
+  });
+  sheet(t('mainNavigation'), ...rows);
+  overlay.dataset.position = 'start';
 }
 
 function switchMachine() {
@@ -496,6 +672,7 @@ function switchMachine() {
     const row = choice(item.name, nodeStates[item.state] || t('machineCount', { count: machines.length }), () => {
       scope = item.id;
       opened = false;
+      launching = null;
       closeSheet();
       paintWorkspace();
       save('replaceState');
@@ -504,49 +681,92 @@ function switchMachine() {
     if (item.state) row.prepend(make('span', item.state === 'online' ? 'dot' : 'dot off'));
     return row;
   }));
+  overlay.dataset.position = 'end';
 }
 
-function paneSheet(event) {
-  const online = machines.filter(({ state }) => state === 'online');
-  if (!online.length) { toast(t('noOnlineMachines')); return; }
-  const anchor = event.currentTarget.closest('#detail') && active ? active : null;
-  const form = make('form', 'pane-form');
+function newAgentSheet() {
+  const online = machines.filter((item) => item.state === 'online');
+  const form = make('form', 'workspace-form');
   const machine = make('select');
-  const placement = make('select');
+  const session = make('select');
+  const summary = make('p', 'sheet-note');
+  const submit = make('button', 'primary', t('newAgent'));
+  submit.type = 'submit';
   for (const item of online) machine.add(new Option(item.name, item.id));
-  const preferred = anchor?.node || scope;
+  const preferred = scope === 'all' ? active?.node : scope;
+  const eligible = online.find((item) => item.sidebar?.launchTool && item.sessions?.some((entry) => entry.pane));
   if (online.some(({ id }) => id === preferred)) machine.value = preferred;
+  else if (eligible) machine.value = eligible.id;
+  const sessionLabel = make('label', '', t('tmuxSession'));
+  sessionLabel.append(session);
+  const machineLabel = make('label', '', t('machine'));
+  machineLabel.append(machine);
+  form.append(machineLabel, sessionLabel, summary, submit);
   function locations() {
-    placement.replaceChildren(new Option(t('newWindow'), 'window'));
-    if (anchor && anchor.node === machine.value) placement.add(new Option(t('splitCurrentTask'), 'split'));
+    const node = online.find(({ id }) => id === machine.value);
+    const sessions = (node?.sessions || []).filter((item) => item.pane);
+    session.replaceChildren(...sessions.map((item) => new Option(item.title, item.id)));
+    if (machine.value === active?.node && sessions.some(({ id }) => id === active.pane?.session)) session.value = active.pane.session;
+    const tool = node?.sidebar?.launchTool;
+    summary.textContent = !node ? t('noOnlineMachines') : !tool ? t('noAgentLauncher')
+      : !sessions.length ? t('noSessions') : t('launchUsing', { tool: kindNames[tool] || tool });
+    session.disabled = !sessions.length;
+    submit.disabled = !tool || !sessions.length;
   }
   locations();
   machine.addEventListener('change', locations);
-  const machineLabel = make('label', '', t('machine'));
-  machineLabel.append(machine);
-  const locationLabel = make('label', '', t('placement'));
-  locationLabel.append(placement);
-  const submit = make('button', 'primary', t('createShellPane'));
-  submit.type = 'submit';
-  form.append(machineLabel, locationLabel, submit);
-  form.addEventListener('submit', async (input) => {
-    input.preventDefault();
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const node = online.find(({ id }) => id === machine.value);
+    const target = node?.sessions?.find(({ id }) => id === session.value);
+    if (submit.disabled || !target?.pane) return;
+    machine.disabled = session.disabled = true;
     submit.disabled = true;
-    const id = machine.value;
     try {
-      const pane = await api('/api/panes', 'POST', { node: id, split: placement.value === 'split' ? anchor.pane.key : null });
+      const result = await api('/api/agents', 'POST', { node: node.id, session: target.id, pane: target.pane.key });
       closeSheet();
-      route = 'terminals';
-      if (scope !== 'all') scope = id;
-      opened = true;
-      selection.set(route, id + '/' + pane.key + '/' + pane.key + '/');
+      if (route === 'agents' && scope === node.id) {
+        opened = false;
+        paintWorkspace();
+        save('replaceState');
+      } else navigate('agents', node.id);
+      if (result.pane) launching = { node: node.id, pane: result.pane.key, expires: Date.now() + 15_000 };
+      toast(t('agentStarted'));
       await refresh(true);
-      paint();
-      save('pushState');
-      if (active) focus('detail-name');
-    } catch (error) { closeSheet(); toast(error.message); }
+    } catch (error) { summary.textContent = error.message; }
+    finally { machine.disabled = session.disabled = submit.disabled = false; }
   });
-  sheet(t('openPane'), form);
+  sheet(t('newAgent'), form);
+}
+
+function shellSheet() {
+  const item = active;
+  if (route !== 'sessions' || !item?.pane) return;
+  const selected = byId('shells').value;
+  const anchor = sessionShells().find(({ pane }) => pane.key === selected)?.pane || item.pane;
+  const form = make('form', 'workspace-form');
+  const placement = make('select');
+  placement.add(new Option(t('newWindow'), 'window'));
+  placement.add(new Option(t('splitPane'), 'split'));
+  const label = make('label', '', t('placement'));
+  label.append(placement);
+  const submit = make('button', 'primary', t('newTerminal'));
+  submit.type = 'submit';
+  const summary = make('p', 'sheet-note', item.host + ' / ' + item.title);
+  form.append(label, summary, submit);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    try {
+      const pane = await api('/api/panes', 'POST', { node: item.node, session: item.id, anchor: anchor.key, split: placement.value === 'split' });
+      selectedShell.set(item.node + '/' + item.id, pane.key);
+      closeSheet();
+      await refresh(true);
+    } catch (error) { summary.textContent = error.message; }
+    finally { submit.disabled = false; }
+  });
+  sheet(t('newTerminal'), form);
 }
 
 function paintMachines() {
@@ -560,7 +780,9 @@ function paintMachines() {
     icon.append(glyph('machines'));
     const copy = make('span', 'row-copy');
     copy.append(make('b', '', item.name));
-    if (item.state === 'online') copy.append(make('small', '', t('agentCount', { count: item.agents?.length || 0 })));
+    if (item.state === 'online') {
+      copy.append(make('small', '', item.snapshotAvailable ? t('agentCount', { count: item.agents?.length || 0 }) : t('snapshotUnavailable')));
+    }
     const trailing = make('span', 'trailing');
     trailing.append(make('span', item.state === 'online' ? 'dot' : 'dot off'), nodeStates[item.state], glyph('next'));
     row.append(icon, copy, trailing);
@@ -570,10 +792,12 @@ function paintMachines() {
 
 async function refresh(force = false) {
   if (!signedIn || (syncing && !force)) return;
+  const revision = ++refreshing;
   syncing = true;
   try {
-    const result = await api('/api/workspace');
-    if (!signedIn) return;
+    const query = new URLSearchParams([...hiddenStates].map((state) => ['hide', state]));
+    const result = await api('/api/workspace' + (query.size ? '?' + query : ''));
+    if (!signedIn || revision !== refreshing) return;
     const fingerprint = JSON.stringify(result);
     if (fingerprint !== overview || force) {
       machines = result.nodes;
@@ -581,9 +805,15 @@ async function refresh(force = false) {
       if (isWorkspace()) paintWorkspace();
       else if (route === 'machines') paintMachines();
     }
+    if (launching?.expires < Date.now()) launching = null;
+    if (launching && route === 'agents') {
+      const machine = machines.find(({ id }) => id === launching.node);
+      const agent = machine?.agents?.find(({ pane }) => pane.key === launching.pane);
+      if (agent && records(machine).rows.some(({ id }) => id === agent.id)) openRecord(withMachine(agent, machine));
+    }
   } catch (error) {
     if (signedIn && force) toast(error.message);
-  } finally { syncing = false; }
+  } finally { if (revision === refreshing) syncing = false; }
 }
 
 function paintMine() {
@@ -595,6 +825,7 @@ function paintMine() {
 function openMine(page) {
   minePage = page;
   paintMine();
+  paintHeader();
   save('pushState', true);
   focus('mine-heading');
   if (page === 'keys') loadKeys();
@@ -739,6 +970,10 @@ function signedOut() {
   activeKey = '';
   transcript = null;
   selection.clear();
+  selectedShell.clear();
+  hiddenStates.clear();
+  expandedTeams.clear();
+  launching = null;
   drafts.clear();
   byId('messages').replaceChildren();
   byId('groups').replaceChildren();
@@ -755,43 +990,38 @@ function signedOut() {
   save('replaceState');
 }
 
-nav.forEach((item) => item.addEventListener('click', () => navigate(item.dataset.route)));
+byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
+byId('new-agent').addEventListener('click', newAgentSheet);
+byId('new-shell').addEventListener('click', shellSheet);
 byId('back').addEventListener('click', back);
 byId('mine-back').addEventListener('click', back);
-byId('chat-tab').addEventListener('click', () => tab('chat'));
-byId('term-tab').addEventListener('click', () => tab('terminal'));
+byId('shells').addEventListener('change', (event) => {
+  if (!active || route !== 'sessions') return;
+  selectedShell.set(active.node + '/' + active.id, event.target.value);
+  paintDetail();
+});
 byId('older').addEventListener('click', () => loadHistory(true));
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
-chatInput.addEventListener('input', () => drafts.set(activeKey, chatInput.value));
-for (const trigger of document.querySelectorAll('[data-pane]')) trigger.addEventListener('click', paneSheet);
+chatInput.addEventListener('input', () => drafts.set(conversationKey(), chatInput.value));
 byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
 byId('term-form').addEventListener('submit', (event) => {
   event.preventDefault();
   if (!terminal?.writable) return;
-  const text = termInput.value;
-  const control = terminal.ctrl && /^[a-z]$/i.test(text);
-  sendTerminal({ type: 'input', data: control ? String.fromCharCode(text.toUpperCase().charCodeAt(0) - 64) : text + '\r' });
+  sendKeys(termInput.value, true);
   termInput.value = '';
-  terminal.ctrl = false;
-  terminalControls('inputEnabled');
 });
+const terminalKeys = {
+  Esc: '\x1b', Tab: '\t', '↑': '\x1b[A', '↓': '\x1b[B', '←': '\x1b[D', '→': '\x1b[C',
+  Home: '\x1b[H', End: '\x1b[F', PageUp: '\x1b[5~', PageDown: '\x1b[6~',
+};
 for (const item of document.querySelectorAll('[data-key]')) item.addEventListener('click', () => {
   if (!terminal?.writable) return;
   const key = item.dataset.key;
   if (key === 'Ctrl') terminal.ctrl = !terminal.ctrl;
-  else {
-    sendTerminal({ type: 'input', data: { Esc: '\x1b', Tab: '\t', '↑': '\x1b[A', '↓': '\x1b[B', '←': '\x1b[D', '→': '\x1b[C' }[key] });
-    terminal.ctrl = false;
-  }
+  else if (key === 'Alt') terminal.alt = !terminal.alt;
+  else sendKeys(terminalKeys[key]);
   terminalControls('inputEnabled');
-});
-byId('detail-tabs').addEventListener('keydown', (event) => {
-  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-  event.preventDefault();
-  const next = event.key === 'Home' ? 'chat' : event.key === 'End' ? 'terminal' : view === 'chat' ? 'terminal' : 'chat';
-  tab(next);
-  focus(next === 'chat' ? 'chat-tab' : 'term-tab');
 });
 byId('close').addEventListener('click', closeSheet);
 overlay.addEventListener('click', (event) => { if (event.target === overlay) closeSheet(); });
@@ -837,10 +1067,9 @@ window.addEventListener('popstate', (event) => {
   minePage = saved.minePage;
   if (saved.selected) selection.set(route, saved.selected);
   paint();
-  if (isWorkspace() && active && saved.view !== view) { view = saved.view; paintDetail(); }
   if (route === 'mine') { if (minePage === 'keys') loadKeys(); else loadUsage(); }
 });
-mobile.addEventListener('change', () => { if (isWorkspace()) paintDetail(); });
+mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
 window.addEventListener('online', () => { if (signedIn) refresh(true); });
 window.addEventListener('offline', () => toast(t('networkInterrupted')));
 
@@ -862,7 +1091,8 @@ document.addEventListener('focusin', keyboard);
 document.addEventListener('focusout', () => requestAnimationFrame(keyboard));
 for (const [container, field] of [[byId('chat-form'), chatInput], [byId('term-form'), termInput], [byId('term').querySelector('.keys'), termInput]]) {
   container.addEventListener('pointerdown', (event) => {
-    if (document.activeElement === field && event.target.closest('button')) event.preventDefault();
+    const typed = document.activeElement === field || (container.classList.contains('keys') && document.activeElement === terminal?.xterm?.textarea);
+    if (typed && event.target.closest('button')) event.preventDefault();
   });
 }
 
@@ -874,5 +1104,5 @@ api('/api/session').then(({ authenticated }) => {
 setInterval(() => {
   if (document.hidden) return;
   refresh();
-  if (signedIn && view === 'chat' && isWorkspace() && active?.structured && (opened || !mobile.matches)) loadHistory();
+  if (signedIn && route === 'agents' && active?.structured && (opened || !mobile.matches)) loadHistory();
 }, 3000);

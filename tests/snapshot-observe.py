@@ -37,9 +37,9 @@ def main():
             layout = tmux("list-panes", "-a", "-F",
                           "#{session_id}|#{window_id}|#{pane_id}|#{pane_pid}|#{pane_active}|#{window_layout}")
 
-            def observe():
+            def observe(*options):
                 return json.loads(subprocess.check_output(
-                    [core, "snapshot", "--observe", "--json"], env=env, text=True, timeout=15
+                    [core, "snapshot", "--observe", "--json", *options], env=env, text=True, timeout=15
                 ))
 
             snapshots = [observe(), observe()]
@@ -54,6 +54,19 @@ def main():
                 if first_identity is not None:
                     assert identity == first_identity, snapshots
                 first_identity = identity
+
+            window, session = tmux("display-message", "-p", "-t", first,
+                                   "#{window_id} #{session_id}").split()
+            tmux("set-option", "-wt", window, "@agent_focus", "1")
+            tmux("set-option", "-t", session, "@workbench_session_focus", "1")
+            view = observe("--sidebar")
+            assert "_workbench_surface" not in view, view
+            sidebar = view["sidebar"]
+            assert sidebar["sessionRows"] == sidebar["pinnedSessions"] == [session], sidebar
+            assert sidebar["pinnedAgents"][0]["window"] == window, sidebar
+            assert sidebar["agentRows"][0] == {"group": "observe"}, sidebar
+            assert {item["id"] for item in sidebar["agentRows"][1:]} == set(first_identity.values()), sidebar
+            assert sidebar["colors"]["working"] == "#e5c07b", sidebar
 
             assert layout == tmux(
                 "list-panes", "-a", "-F",

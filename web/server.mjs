@@ -125,7 +125,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
     return peer;
   }
 
-  async function workspace() {
+  async function workspace(hidden) {
     const inventory = new Map(store.listNodes().map((record) => [record.id, { id: record.id, name: record.id, state: remote.has(record.id) ? 'online' : record.connected ? 'offline' : 'pending' }]));
     for (const id of store.pendingNodes()) {
       if (!inventory.has(id)) inventory.set(id, { id, name: id, state: 'pending' });
@@ -139,7 +139,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
     ].map(async (info) => {
       if (info.state !== 'online') return info;
       try {
-        return { ...info, ...await node(info.id).request('catalog', {}) };
+        return { ...info, ...await node(info.id).request('catalog', { hidden }) };
       } catch {
         return { ...info, snapshotAvailable: false };
       }
@@ -205,7 +205,9 @@ export async function startServer({ local, localName, store, listen, origin, cer
       auth.throttle(req);
       return json(res, store.issuePasskeyLink(url.origin), 201);
     }
-    if (path === '/api/workspace' && method === 'GET') return json(res, await workspace());
+    if (path === '/api/workspace' && method === 'GET') {
+      return json(res, await workspace(request.searchParams.getAll('hide').slice(0, 4)));
+    }
     if (path === '/api/usage' && (method === 'GET' || method === 'POST')) {
       return json(res, await local.request('usage', { refresh: method === 'POST' }));
     }
@@ -229,7 +231,12 @@ export async function startServer({ local, localName, store, listen, origin, cer
     }
     if (path === '/api/panes' && method === 'POST') {
       const input = await body(req);
-      return json(res, await node(input.node).request('create', { split: input.split }), 201);
+      return json(res, await node(input.node).request('create', { split: input.split, session: input.session, anchor: input.anchor }), 201);
+    }
+    if (method === 'POST' && ['/api/pins', '/api/sidebar-sort', '/api/agents'].includes(path)) {
+      const input = await body(req);
+      const operation = { '/api/pins': 'pin', '/api/sidebar-sort': 'sidebar-sort', '/api/agents': 'launch' }[path];
+      return json(res, await node(input.node).request(operation, input), operation === 'launch' ? 201 : 200);
     }
     throw new Failure(404, 'Page not found.');
   }

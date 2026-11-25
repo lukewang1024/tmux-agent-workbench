@@ -122,6 +122,40 @@ test('gateway requires a loopback listener even with TLS configured', async () =
   await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: 'localhost:7080:443' }), refused);
 });
 
+test('Sidebar pins share tmux options and session shells target the selected session', async (t) => {
+  const socket = join(await scratch(t), 't');
+  const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', timeout: 4000 }).trim();
+  const anchor = tmux('-f', '/dev/null', 'new-session', '-ds', 'fixture', '-PF', '#{pane_id}');
+  const [session, window] = tmux('display-message', '-p', '-t', anchor, '#{session_id} #{window_id}').split(' ');
+  const node = new LocalNode({ socket });
+  node.snapshot = async () => ({
+    agents: [{ instance_id: 'agent', kind: 'codex', target: { pane_id: anchor, session_id: session } }],
+    sessions: [{ session_id: session, session_name: 'fixture', last_active_pane_id: anchor }],
+    sidebar: { pinnedAgents: [], branches: {} },
+  });
+  try {
+    const before = (await node.catalog()).sessions[0].pane;
+    for (const [scope, target, marker] of [['agent', window, '@agent_focus'], ['session', session, '@workbench_session_focus']]) {
+      for (const pinned of [true, true, false, false]) {
+        await node.pin({ scope, target, pane: before.key, pinned });
+        assert.equal(tmux('show-option', scope === 'agent' ? '-wqv' : '-qv', '-t', target, marker), pinned ? '1' : '');
+      }
+    }
+    await assert.rejects(node.create(false, session, 'expired'), { status: 409 });
+    const shell = await node.create(false, session, before.key);
+    assert.equal(shell.session, session);
+    assert.notEqual(shell.window, window);
+    assert.equal(tmux('display-message', '-p', '-t', session, '#{window_id}'), window);
+    const split = await node.create(true, session, shell.key);
+    assert.equal(split.window, shell.window);
+    assert.equal(split.resizable, false);
+    assert.equal((await node.catalog()).terminals.filter(({ kind }) => kind === 'shell').length, 2);
+  } finally {
+    node.close();
+    tmux('kill-server');
+  }
+});
+
 test('locale follows LOCALE, the Workbench override, and system message settings', () => {
   for (const [env, language] of [
     [{}, 'en'],
