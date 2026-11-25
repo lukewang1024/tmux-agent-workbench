@@ -134,7 +134,10 @@
           </div>
           <div class="subpage" id="mine-keys" hidden>
             <div id="key-list"></div>
-            <button class="primary" type="button" id="add-key">{{addPasskey}}</button>
+            <div class="passkey-actions">
+              <button class="primary" type="button" id="invite-device">{{setupAnotherDevice}}</button>
+              <button class="secondary" type="button" id="add-key">{{addPasskey}}</button>
+            </div>
           </div>
           <div class="subpage" id="mine-settings" hidden>
             <button class="profile-row" type="button" id="install"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-download"></use></svg></span><span class="row-copy"><b>{{install}}</b><small>{{openFromHomeScreen}}</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>

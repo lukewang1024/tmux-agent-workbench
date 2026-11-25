@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -34,6 +34,23 @@ test('node invites are scoped to one identity, single-use, and revocable', async
   assert.throws(() => store.enrolled('../example'), { status: 400 });
   assert.equal(store.revokeNode(enrolled.id), true);
   assert.equal(store.enrolled(enrolled.id), null);
+});
+
+test('device links carry a passkey invitation for the configured origin and can only be used once', async (t) => {
+  const store = new Store(await scratch(t));
+  const origin = 'http://localhost:7080';
+  const started = Date.now();
+  const { url, expiresInMinutes } = store.issuePasskeyLink(origin);
+  const link = new URL(url);
+  const invite = new URLSearchParams(link.hash.slice(1)).get('invite');
+  assert.equal(link.origin, origin);
+  assert.equal(link.pathname, '/');
+  assert.equal(expiresInMinutes, 10);
+  assert.throws(() => store.invitation(invite, 'node'), { status: 403 });
+  const { expires } = store.invitation(invite, 'passkey', true);
+  assert.ok(expires >= started + expiresInMinutes * 60_000);
+  assert.ok(expires <= Date.now() + expiresInMinutes * 60_000);
+  assert.throws(() => store.invitation(invite, 'passkey', true), { status: 403 });
 });
 
 test('Codex history is tied to an exact rollout and only returns visible text', async (t) => {
@@ -167,6 +184,12 @@ test('gateway protects data and accepts an outbound node handshake only after en
   try {
     assert.equal(gateway.address.address, '127.0.0.1');
     assert.equal((await fetch(address + '/api/workspace')).status, 401);
+    const invitationEndpoint = address + '/api/passkeys/invitations';
+    for (const [requestOrigin, expected] of [[origin, 401], ['https://untrusted.example', 403]]) {
+      const response = await fetch(invitationEndpoint, { method: 'POST', headers: { Origin: requestOrigin } });
+      assert.equal(response.status, expected);
+    }
+    assert.deepEqual(await readdir(store.invites), []);
     assert.equal((await fetch(address + '/api/auth/login/options', {
       method: 'POST', headers: { Origin: 'https://untrusted.example' },
     })).status, 403);

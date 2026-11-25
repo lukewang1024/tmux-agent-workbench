@@ -653,6 +653,35 @@ async function loadKeys() {
   } catch (error) { if (signedIn) toast(error.message); }
 }
 
+async function inviteDevice(event) {
+  const trigger = event.currentTarget;
+  trigger.disabled = true;
+  try {
+    const { url, expiresInMinutes } = await api('/api/passkeys/invitations', 'POST');
+    if (!signedIn || route !== 'mine' || minePage !== 'keys') return;
+    const panel = make('div', 'pane-form');
+    const label = make('label', '', t('enrollmentLink'));
+    const input = make('input');
+    input.readOnly = true;
+    input.autocomplete = 'off';
+    input.value = url;
+    label.append(input);
+    const copy = button(t('copyLink'), 'primary', async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        copy.textContent = t('linkCopied');
+      } catch {
+        input.focus();
+        input.select();
+      }
+    });
+    panel.append(label, copy);
+    sheet(t('setupAnotherDevice'), make('p', 'sheet-copy', t('deviceInviteHelp', { count: expiresInMinutes })), panel);
+  } catch (error) {
+    if (signedIn) toast(error.message);
+  } finally { trigger.disabled = false; }
+}
+
 async function authenticate(invite = null, label = null) {
   if (!passkeys?.browserSupportsWebAuthn()) throw new Error(t('passkeyBrowser'));
   const registering = Boolean(invite || label);
@@ -770,6 +799,7 @@ byId('mine-passkeys').addEventListener('click', () => openMine('keys'));
 byId('mine-preferences').addEventListener('click', () => openMine('settings'));
 byId('usage-refresh').addEventListener('click', () => loadUsage(true));
 byId('add-key').addEventListener('click', registerSheet);
+byId('invite-device').addEventListener('click', inviteDevice);
 byId('passkey').addEventListener('click', async (event) => {
   event.currentTarget.disabled = true;
   status('login-error');
