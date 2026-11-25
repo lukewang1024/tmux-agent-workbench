@@ -26,6 +26,9 @@
     <symbol id="icon-down" viewBox="0 0 24 24"><path d="m5.5 9.5 6.5 6.5 6.5-6.5"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="icon-select" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
     <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15.5 3 5.5 5.5-4 1.5-3 4v3l-1.5 1.5-7-7L7 10h3l4-3Zm-6 11.5L4 20"/></symbol>
     <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="10" r="4"/><path d="m11.2 12.6 6.3 6.4h2.5v-2.6l-1.6-1.6h-2v-2"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--wash)"/><circle cx="15" cy="17" r="2.5" fill="var(--wash)"/></symbol>
@@ -58,20 +61,33 @@
           <header class="bar detail-bar">
             <button class="plain icon back" id="back" type="button" aria-label="{{backToAgents}}"><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
             <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
+            <div class="chat-actions" id="chat-actions" hidden>
+              <button class="plain icon" type="button" id="copy-selection" hidden>
+                <svg class="glyph" aria-hidden="true"><use href="#icon-copy"></use></svg><span id="selection-count" aria-hidden="true"></span>
+              </button>
+              <button class="plain icon" type="button" id="select-messages" aria-label="{{selectMessages}}" title="{{selectMessages}}" aria-pressed="false">
+                <svg class="glyph" aria-hidden="true"><use href="#icon-select"></use></svg>
+              </button>
+            </div>
             <button class="secondary" id="new-shell" type="button" hidden><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newTerminal}}</button>
           </header>
           <div class="panel" id="chat" aria-label="{{conversation}}" hidden>
-            <div class="history">
-              <button class="plain earlier" id="older" type="button">{{olderMessages}}</button>
+            <div class="history" id="history">
+              <div class="history-progress" id="history-progress" role="status" hidden><span>{{loadingEarlierMessages}}</span></div>
               <div id="messages"></div>
             </div>
             <div class="composer-wrap">
               <div class="composer-inner">
                 <p id="chat-error" class="message-error" role="status" hidden></p>
-                <p class="composer-label"><span class="dot" aria-hidden="true"></span><span id="chat-status"></span></p>
+                <p class="composer-label" id="composer-label" role="status">
+                  <span class="dot" aria-hidden="true"></span><span id="chat-status"></span>
+                  <span class="working-dots" id="working-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
+                </p>
                 <form class="composer" id="chat-form">
                   <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" placeholder="{{continueConversation}}"></textarea>
-                  <button class="primary" type="submit" id="send">{{send}}</button>
+                  <button class="composer-send" type="submit" id="send" aria-label="{{send}}" title="{{send}}">
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-send"></use></svg>
+                  </button>
                 </form>
               </div>
             </div>
@@ -79,7 +95,7 @@
           <div class="panel terminal-panel" id="term" aria-label="{{terminal}}" hidden>
             <div class="terminal">
               <div class="terminal-bar">
-                <select id="shells" aria-label="{{terminal}}"></select><span id="term-state" class="terminal-state">{{connecting}}</span>
+                <select id="terminal-pane" aria-label="{{sessionPanes}}"></select><span id="term-state" class="terminal-state">{{connecting}}</span>
                 <button type="button" class="control" id="control" aria-pressed="false" disabled>{{enableInput}}</button>
               </div>
               <div class="terminal-screen" id="term-screen" aria-label="{{paneOutput}}"></div>
@@ -103,6 +119,7 @@
               <button class="secondary" type="submit">{{enter}}</button>
             </form>
           </div>
+          <div class="session-tree" id="session-tree" hidden></div>
           <div class="detail-empty" id="detail-empty" hidden></div>
         </section>
       </div>
@@ -167,6 +184,13 @@
       </section>
     </dialog>
     <div class="toast" id="toast" role="status" hidden></div>
+    <div class="toast update-toast" id="update-toast" hidden>
+      <span role="status">{{updateReady}}</span>
+      <button type="button" class="update-refresh" id="update-refresh">{{reloadApp}}</button>
+      <button type="button" class="update-dismiss" id="update-dismiss" aria-label="{{dismissUpdate}}" title="{{dismissUpdate}}">
+        <svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg>
+      </button>
+    </div>
   </main>
 
 </body>

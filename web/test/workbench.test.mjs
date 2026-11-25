@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -75,6 +75,48 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
   await assert.rejects(history.page('../wrong'), { status: 409 });
 });
 
+test('Codex without hooks uses the rollout open in the verified live process', {
+  skip: !['darwin', 'linux'].includes(process.platform),
+}, async (t) => {
+  const directory = await scratch(t);
+  const sessions = join(directory, 'sessions');
+  await mkdir(sessions);
+  const primary = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
+  const sibling = 'd5a27de3-936f-446e-9de1-797eaa1cfc00';
+  const createRollout = async (id, metadata = id, folder = sessions) => {
+    const filename = join(folder, 'rollout-date-' + id + '.jsonl');
+    const record = JSON.stringify({ type: 'session_meta', payload: { id: metadata } });
+    await writeFile(filename, record + '\n');
+    return open(filename, 'r');
+  };
+  const current = await createRollout(primary);
+  const unrelated = await createRollout(sibling, sibling, directory);
+  const malformed = await createRollout(sibling, primary);
+  const started = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(process.pid)], {
+    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, encoding: 'utf8',
+  });
+  const time = Date.parse(started.trim() + ' UTC') / 1000;
+  const agent = { instance_id: 'codex', process: { pid: process.pid, started_at_ticks: time } };
+  const history = new History(directory);
+  const identify = (target = agent) => history.activeThreads([target]).then((result) => result.get('codex'));
+  try {
+    assert.equal(await identify(), primary);
+    assert.equal(await identify({ ...agent, process: { ...agent.process, started_at_ticks: time + 1 } }), undefined);
+    assert.equal(await identify({ ...agent, hook_session_id: sibling.slice(0, 30) }), undefined);
+    assert.deepEqual(await history.page(primary), { messages: [], before: null });
+    await malformed.close();
+    const competing = await createRollout(sibling);
+    try {
+      assert.equal(await identify(), undefined);
+      assert.equal(await identify({ ...agent, hook_session_id: primary.slice(0, 30) }), primary);
+    } finally { await competing.close(); }
+  } finally {
+    await current.close();
+    await unrelated.close();
+    await malformed.close();
+  }
+});
+
 test('tmux control mode streams a background Pane and sends input to that exact PTY', async (t) => {
   const directory = await scratch(t);
   const socket = join(directory, 't');
@@ -113,6 +155,35 @@ test('tmux control mode streams a background Pane and sends input to that exact 
   }
 });
 
+test('a working Codex thread accepts a follow-up in the same Pane', async (t) => {
+  const socket = join(await scratch(t), 't');
+  const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', timeout: 4000 }).trim();
+  const pane = tmux('-f', '/dev/null', 'new-session', '-ds', 'fixture', '-PF', '#{pane_id}', 'exec /bin/sh -i');
+  const session = tmux('display-message', '-p', '-t', pane, '#{session_id}');
+  const thread = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
+  let state = 'working';
+  const node = new LocalNode({ socket });
+  node.snapshot = async () => ({
+    sessions: [],
+    agents: [{
+      instance_id: 'agent', kind: 'codex', hook_session_id: thread, display_state: state,
+      target: { pane_id: pane, session_id: session },
+    }],
+  });
+  try {
+    const [entry] = (await node.catalog()).agents;
+    await node.sendPrompt('agent', thread, "printf 'WORKING:%s\\n' received", entry.pane.key);
+    for (let tries = 0; tries < 20 && !tmux('capture-pane', '-pt', pane).split('\n').includes('WORKING:received'); tries++) await delay(30);
+    assert.ok(tmux('capture-pane', '-pt', pane).split('\n').includes('WORKING:received'));
+    state = 'blocked';
+    await assert.rejects(node.sendPrompt('agent', thread, 'ignored', entry.pane.key), { status: 409 });
+    await assert.rejects(node.transcript('agent', null, 'a different thread'), { status: 409 });
+  } finally {
+    node.close();
+    tmux('kill-server');
+  }
+});
+
 test('gateway requires a loopback listener even with TLS configured', async () => {
   const refused = { status: 400, message: 'Use --listen 127.0.0.1:PORT or localhost:PORT.' };
   await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: '0.0.0.0:7080' }), refused);
@@ -135,6 +206,11 @@ test('Sidebar pins share tmux options and session shells target the selected ses
   });
   try {
     const before = (await node.catalog()).sessions[0].pane;
+    const sidebar = tmux('split-window', '-dPF', '#{pane_id}', '-t', anchor);
+    tmux('set-option', '-pt', sidebar, '@pane_role', 'sidebar');
+    const sid = tmux('display-message', '-p', '-t', sidebar, '#{pid}.#{start_time}.#{pane_id}.#{pane_pid}').replace('%', '');
+    assert.equal((await node.pane(before.key)).pane, anchor);
+    await assert.rejects(node.pane(sid), { status: 404 });
     for (const [scope, target, marker] of [['agent', window, '@agent_focus'], ['session', session, '@workbench_session_focus']]) {
       for (const pinned of [true, true, false, false]) {
         await node.pin({ scope, target, pane: before.key, pinned });
@@ -149,7 +225,9 @@ test('Sidebar pins share tmux options and session shells target the selected ses
     const split = await node.create(true, session, shell.key);
     assert.equal(split.window, shell.window);
     assert.equal(split.resizable, false);
-    assert.equal((await node.catalog()).terminals.filter(({ kind }) => kind === 'shell').length, 2);
+    const catalog = await node.catalog();
+    assert.deepEqual(catalog.sessions[0].windows.flatMap(({ panes }) => panes.map(({ pane }) => pane)), [anchor, shell.pane, split.pane]);
+    assert.equal(catalog.terminals.filter(({ kind }) => kind === 'shell').length, 2);
   } finally {
     node.close();
     tmux('kill-server');

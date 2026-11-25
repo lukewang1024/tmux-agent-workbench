@@ -20,6 +20,10 @@ const assets = new Map([
   ['/sw.js', ['public/sw.js', 'text/javascript; charset=utf-8']],
   ['/icon-192.png', ['public/icon-192.png', 'image/png']],
   ['/icon-512.png', ['public/icon-512.png', 'image/png']],
+  ['/providers/chatgpt.svg', ['public/providers/chatgpt.svg', 'image/svg+xml']],
+  ['/providers/claude.svg', ['public/providers/claude.svg', 'image/svg+xml']],
+  ['/providers/opencode.svg', ['public/providers/opencode.svg', 'image/svg+xml']],
+  ['/providers/trae.png', ['public/providers/trae.png', 'image/png']],
   ['/vendor/passkeys.js', ['node_modules/@simplewebauthn/browser/dist/bundle/index.umd.min.js', 'text/javascript; charset=utf-8']],
   ['/vendor/xterm.js', ['node_modules/@xterm/xterm/lib/xterm.js', 'text/javascript; charset=utf-8']],
   ['/vendor/xterm.css', ['node_modules/@xterm/xterm/css/xterm.css', 'text/css; charset=utf-8']],
@@ -75,7 +79,11 @@ async function cachedAssets(locale) {
   manifest.data = Buffer.from(JSON.stringify({ ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description }));
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
-  loaded.get('/sw.js').data = Buffer.from(loaded.get('/sw.js').data.toString().replace('WORKBENCH_CACHE_VERSION', fingerprint.digest('hex').slice(0, 16)));
+  const version = fingerprint.digest('hex').slice(0, 16);
+  for (const path of ['/app.js', '/sw.js']) {
+    const asset = loaded.get(path);
+    asset.data = Buffer.from(asset.data.toString().replace('WORKBENCH_CACHE_VERSION', version));
+  }
   return loaded;
 }
 
@@ -214,7 +222,8 @@ export async function startServer({ local, localName, store, listen, origin, cer
     if (path === '/api/history' && method === 'GET') {
       const machine = node(request.searchParams.get('node') || 'local');
       const before = Number(request.searchParams.get('before'));
-      return json(res, await machine.request('history', { agent: request.searchParams.get('agent'), before }));
+      const [agent, thread] = ['agent', 'thread'].map((key) => request.searchParams.get(key));
+      return json(res, await machine.request('history', { agent, before, thread }));
     }
     if (path === '/api/prompt' && method === 'POST') {
       const input = await body(req);

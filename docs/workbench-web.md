@@ -8,10 +8,21 @@ The Agents and Sessions lists use the Sidebar's grouping, priority, status
 colors and pins. Pinning and sorting update the same state on the target machine
 that its Sidebar reads.
 
-The Agent view opens the original Codex conversation when the Workbench snapshot
-identifies its thread. History comes from the Codex rollout on that machine.
-Chat sends into a live Codex pane when its verified thread is idle or done.
-Respond to permission prompts on the Agent's machine.
+The Agent view opens the original Codex conversation. Workbench thread metadata
+or the rollout open in the verified Codex process identifies the conversation.
+Scroll up to load earlier messages. Messages can be copied individually or
+together through the selection control. Chat sends follow-ups while the Agent
+is idle, working or done. Codex handles submitting the message in the active
+conversation. Respond to permission prompts on the Agent's machine.
+
+The provider marks identify the Agent CLIs in the list and belong to their
+respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],
+the [Anthropic press kit], [OpenCode's brand assets], and the [TRAE website].
+
+[OpenAI mark in Lobe Icons]: https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/openai.svg
+[Anthropic press kit]: https://www.anthropic.com/press-kit
+[OpenCode's brand assets]: https://opencode.ai/brand
+[TRAE website]: https://www.trae.ai/
 
 **New Agent** asks for the target machine and tmux session. It starts the
 Agent in that session using the machine's saved Sidebar launch settings. On a
@@ -77,8 +88,9 @@ localhost as a secure context for Service Workers and WebAuthn.
 Complete Passkey enrollment and choose Add to home screen, then Install in
 Chrome. You can also use the installation control in Profile → Settings. Keep the
 tunnel running whenever you open or use the installed app. The service worker
-caches the app shell. Conversation history and terminal data are fetched on
-demand.
+caches the app shell and provider icons. When an update is ready, choose
+**Refresh** or dismiss the notification. Conversation history and terminal
+data are fetched on demand.
 
 ## Use a browser HTTPS origin
 
@@ -142,8 +154,9 @@ has previously connected shows as offline when its connection is lost.
 
 ## Panes and login
 
-Open a Session and choose **New Terminal** to start a fresh Shell in a new
-window or split Pane. Its terminal starts in watch mode. Enable input to become
+Expand a Session to browse its windows and open a specific Pane. Sidebar
+panes are filtered from the list. Choose **New Terminal** to start a fresh
+Shell in a new window or split Pane. The terminal starts in watch mode. Enable input to become
 the single browser writer for that Pane. Independent Web windows can resize to
 the terminal viewport. Splits follow their tmux geometry. Reconnecting attaches
 to the original Shell while it still exists.

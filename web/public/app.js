@@ -1,6 +1,7 @@
 'use strict';
 
 const { language, messages } = WORKBENCH_LOCALE;
+const appVersion = 'WORKBENCH_CACHE_VERSION';
 const plurals = new Intl.PluralRules(language);
 const percentage = new Intl.NumberFormat(language, { style: 'percent' });
 const byId = (id) => document.getElementById(id);
@@ -15,7 +16,7 @@ const connectionError = t(loopback ? 'sshTunnelUnavailable' : 'gatewayUnavailabl
 const stateNames = { idle: t('idle'), blocked: t('blocked'), working: t('working'), done: t('done'), unknown: t('unknownStatus') };
 const nodeStates = { pending: t('pending'), offline: t('offline'), online: t('online') };
 const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', trae: 'Trae', traex: 'Trae', shell: t('terminal') };
-const marks = { codex: 'Cx', claude: 'Cl', opencode: 'Oc', trae: 'Tr', shell: '>_' };
+const providerMarks = { codex: 'chatgpt.svg', claude: 'claude.svg', opencode: 'opencode.svg', trae: 'trae.png' };
 const labels = { agents: t('agents'), sessions: t('sessions'), machines: t('machines'), mine: t('profile') };
 const states = ['blocked', 'done', 'working', 'idle'];
 
@@ -35,9 +36,10 @@ let launching = null;
 let installPrompt;
 let enrollment = readEnrollment();
 const selection = new Map();
-const selectedShell = new Map();
+const selectedPane = new Map();
 const hiddenStates = new Set();
 const expandedTeams = new Set();
+const expandedSessions = new Set();
 const drafts = new Map();
 let transcript = null;
 let submitting = false;
@@ -271,14 +273,22 @@ function paintStateFilters() {
   }));
 }
 
-function recordRow(item, machine, pinned, focusKey) {
+function recordRow(item, machine, pinned, focusKey, canExpand = true) {
   const session = route === 'sessions';
   const container = make('div', 'record-row' + (item.worker ? ' worker-row' : ''));
   const row = button('', 'agent-row', () => openRecord(item));
   row.dataset.record = recordKey(item);
   if (row.dataset.record === activeKey && (opened || !mobile.matches)) row.setAttribute('aria-current', 'true');
-  const icon = make('span', 'agent-tag ' + (item.kind || 'session'), session ? undefined : marks[item.kind] || '>_');
-  if (session) icon.append(glyph('sessions'));
+  const icon = make('span', 'agent-tag');
+  const provider = Object.hasOwn(providerMarks, item.kind) && providerMarks[item.kind];
+  if (provider) {
+    const mark = make('img', 'provider-mark');
+    mark.alt = '';
+    mark.draggable = false;
+    mark.src = '/providers/' + provider;
+    icon.classList.add('brand');
+    icon.append(mark);
+  } else icon.append(glyph(session ? 'sessions' : 'terminal'));
   icon.setAttribute('aria-hidden', 'true');
   const copy = make('span', 'record-copy');
   const title = item.worker ? item.worker.name : item.title;
@@ -292,6 +302,24 @@ function recordRow(item, machine, pinned, focusKey) {
   row.append(icon, copy, badge);
   container.append(row);
   if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
+  if (session && canExpand && item.windows?.length) {
+    const key = recordKey(item);
+    const expanded = expandedSessions.has(key);
+    const toggle = button('', 'row-action session-toggle', () => {
+      if (expanded) expandedSessions.delete(key);
+      else expandedSessions.add(key);
+      paintWorkspace();
+      for (const trigger of document.querySelectorAll('.session-toggle')) {
+        if (trigger.dataset.session === key) { trigger.focus({ preventScroll: true }); break; }
+      }
+    });
+    toggle.append(glyph('next'));
+    toggle.dataset.session = key;
+    toggle.title = t(expanded ? 'collapseSession' : 'expandSession', { session: item.title });
+    toggle.setAttribute('aria-label', toggle.title);
+    toggle.setAttribute('aria-expanded', String(expanded));
+    container.prepend(toggle);
+  }
   if (item.team) {
     const key = machine.id + '/' + item.id;
     const team = button(String(item.team.workers), 'row-action team-toggle', () => {
@@ -362,7 +390,7 @@ function paintCollection() {
     const pinnedIds = new Set(pinned.map((item) => route === 'sessions' ? item.id : item.pane?.window));
     if (pinned.length) {
       const rack = make('div', 'pinned-records');
-      rack.append(make('h4', 'subheading', t('pinned')), ...pinned.map((item) => recordRow(item, machine, true, focusKey)));
+      rack.append(make('h4', 'subheading', t('pinned')), ...pinned.map((item) => recordRow(item, machine, true, focusKey, false)));
       group.append(rack);
     }
     if (!rows.length && !pinned.length) {
@@ -371,8 +399,11 @@ function paintCollection() {
           : machine.agents?.length ? 'noMatchingAgents' : 'noAgents';
       group.append(make('div', 'empty', t(message)));
     }
-    group.append(...rows.map((item) => item.group !== undefined ? make('h4', 'subheading', item.group)
-      : recordRow(item, machine, pinnedIds.has(route === 'sessions' ? item.id : item.pane?.window), focusKey)));
+    for (const item of rows) {
+      if (item.group !== undefined) { group.append(make('h4', 'subheading', item.group)); continue; }
+      group.append(recordRow(item, machine, pinnedIds.has(route === 'sessions' ? item.id : item.pane?.window), focusKey));
+      if (route === 'sessions' && expandedSessions.has(recordKey(item))) group.append(renderSessionTree(item));
+    }
     groups.append(group);
   }
   if (!machines.length) groups.append(make('div', 'empty', t('loadingWorkspace')));
@@ -394,6 +425,8 @@ function paintDetail() {
   byId('new-shell').hidden = route !== 'sessions' || !opened || !active?.pane;
   const empty = byId('detail-empty');
   byId('chat').hidden = !(route === 'agents' && active?.structured);
+  if (route !== 'sessions' || !active) byId('session-tree').hidden = true;
+  paintMessageSelection();
   if (route !== 'sessions' || !active) byId('term').hidden = true;
   if (!active) {
     empty.hidden = false;
@@ -403,7 +436,7 @@ function paintDetail() {
   byId('detail-name').textContent = active.title;
   byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
   byId('back').setAttribute('aria-label', t(route === 'agents' ? 'backToAgents' : 'backToSessions'));
-  if (route === 'sessions') { paintShells(empty); return; }
+  if (route === 'sessions') { paintSessionPanes(empty); return; }
   stopTerminal();
   empty.hidden = Boolean(active.structured);
   if (!active.structured) { empty.textContent = t('noReadableHistory'); return; }
@@ -411,33 +444,55 @@ function paintDetail() {
   paintComposer();
   const key = conversationKey();
   if (transcript?.key !== key) {
-    transcript = { key, rows: new Map(), before: null, loaded: false, busy: false };
+    transcript = { key, rows: new Map(), before: null, loaded: false, busy: false, selected: null };
     byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
-    byId('older').hidden = true;
+    byId('history-progress').hidden = true;
     loadHistory();
   }
 }
 
-function sessionShells() {
-  return (machines.find(({ id }) => id === active?.node)?.terminals || [])
-    .filter((item) => item.kind === 'shell' && item.pane.owned && item.pane.session === active.id);
+function renderSessionTree(session) {
+  const tree = make('div', 'pane-tree');
+  for (const window of session.windows || []) {
+    const group = make('section', 'window-group');
+    group.append(make('h4', 'subheading', window.index + ': ' + window.title));
+    for (const pane of window.panes) {
+      const row = button(t('sessionPane', { index: pane.index, pane: pane.pane }), 'pane-row', () => {
+        selectedPane.set(recordKey(session), pane.key);
+        if (opened && activeKey === recordKey(session)) paintDetail();
+        else openRecord(session);
+      });
+      row.prepend(glyph('terminal'));
+      group.append(row);
+    }
+    tree.append(group);
+  }
+  return tree;
 }
 
-function paintShells(empty) {
-  const shells = opened ? sessionShells() : [];
-  const selected = selectedShell.get(active.node + '/' + active.id);
-  const pane = (shells.find((item) => item.pane.key === selected) || shells[0])?.pane;
-  empty.hidden = Boolean(pane);
+function paintSessionPanes(empty) {
+  const windows = opened ? active.windows || [] : [];
+  const selected = selectedPane.get(activeKey);
+  const pane = windows.flatMap((window) => window.panes).find((item) => item.key === selected);
+  const tree = byId('session-tree');
+  tree.hidden = Boolean(pane) || !windows.length;
+  if (!tree.hidden) tree.replaceChildren(renderSessionTree(active));
+  empty.hidden = Boolean(pane) || !tree.hidden;
   byId('term').hidden = !pane;
   if (!pane) {
     stopTerminal();
-    empty.textContent = t(!opened ? 'selectSession' : active.pane ? 'noShells' : 'noSessionPane');
+    if (!empty.hidden) empty.textContent = t(!opened ? 'selectSession' : 'noSessionPane');
     return;
   }
-  const picker = byId('shells');
-  const keys = shells.map((item) => item.pane.key).join('/');
+  const picker = byId('terminal-pane');
+  const keys = JSON.stringify(windows.map((window) => [window.title, window.panes.map(({ key, index }) => [key, index])]));
   if (picker.dataset.keys !== keys) {
-    picker.replaceChildren(...shells.map(({ pane }) => new Option(t('terminalPane', { pane: pane.pane }), pane.key)));
+    picker.replaceChildren(...windows.map((window) => {
+      const group = make('optgroup');
+      group.label = window.title;
+      group.append(...window.panes.map((item) => new Option(t('sessionPane', { index: item.index, pane: item.pane }), item.key)));
+      return group;
+    }));
     picker.dataset.keys = keys;
   }
   picker.value = pane.key;
@@ -450,50 +505,118 @@ function paintComposer() {
     chatInput.dataset.thread = key;
     chatInput.value = drafts.get(key) || '';
   }
-  const ready = ['idle', 'done'].includes(active.state) && !active.pane.inMode;
+  const ready = ['idle', 'done', 'working'].includes(active.state) && !active.pane.inMode;
+  const working = active.state === 'working';
   byId('send').disabled = !ready || submitting;
-  byId('chat-status').textContent = t(ready ? 'originalConversation' : active.state === 'blocked' ? 'agentBlocked' : 'agentWorking');
+  const label = t(working ? 'agentWorking' : active.state === 'blocked' ? 'agentBlocked'
+    : ready ? 'originalConversation' : 'agentInputUnavailable');
+  const display = byId('chat-status');
+  if (display.textContent !== label) display.textContent = label;
+  byId('working-dots').hidden = !working;
+  byId('composer-label').dataset.state = active.state;
 }
 
 async function loadHistory(older = false) {
   if (!active || !transcript || transcript.busy || (older && !transcript.before)) return;
   const target = transcript;
   target.busy = true;
-  const query = { node: active.node, agent: active.id };
+  if (older) byId('history-progress').hidden = false;
+  const query = { node: active.node, agent: active.id, thread: active.thread };
   if (older) query.before = target.before;
+  let pageLoaded = false;
   try {
     const { messages, before } = await api(pathWith('/api/history', query));
     if (target !== transcript) return;
-    if (!target.loaded || older) target.before = before;
+    const previous = target.loaded;
+    if (!previous) target.before = before;
+    if (older) target.before = Number.isSafeInteger(before) && before > 0 && before < target.before ? before : null;
     target.loaded = true;
-    for (const message of messages) target.rows.set(message.id, message);
-    if (target.rows.size > 800) target.rows.delete(target.rows.keys().next().value);
-    renderHistory(target, older);
+    const added = messages.filter(({ id }) => !target.rows.has(id));
+    for (const message of added) target.rows.set(message.id, message);
+    if (added.length || !previous) renderHistory(target, added, older);
+    pageLoaded = true;
   } catch (error) {
     if (target !== transcript || !signedIn) return;
     if (!target.loaded) byId('messages').replaceChildren(make('div', 'empty', error.status === 404 ? t('noReadableHistory') : error.message));
-  } finally { target.busy = false; }
+  } finally {
+    target.busy = false;
+    if (target === transcript) {
+      byId('history-progress').hidden = true;
+      if (pageLoaded) requestAnimationFrame(loadEarlierAtTop);
+    }
+  }
 }
 
-function renderHistory(target, older) {
+function loadEarlierAtTop() {
+  const scroller = byId('history');
+  if (route === 'agents' && scroller.clientHeight && scroller.scrollTop < 60) loadHistory(true);
+}
+
+async function copyMessages(rows) {
+  if (!rows.length) return;
+  try {
+    await navigator.clipboard.writeText(rows.map(({ text }) => text).join('\n\n'));
+    toast(t('messagesCopied', { count: rows.length }));
+  } catch { toast(t('copyFailed')); }
+}
+
+function paintMessageSelection() {
+  const count = transcript?.selected?.size || 0;
+  const selecting = Boolean(transcript?.selected);
+  byId('chat-actions').hidden = route !== 'agents' || !active?.structured
+    || transcript?.key !== conversationKey() || !transcript.rows.size;
+  byId('messages').classList.toggle('selecting', selecting);
+  byId('copy-selection').hidden = !selecting;
+  byId('copy-selection').disabled = !count;
+  const copyLabel = t('copySelectedMessages', { count });
+  byId('copy-selection').setAttribute('aria-label', copyLabel);
+  byId('copy-selection').title = copyLabel;
+  byId('selection-count').textContent = String(count);
+  const selectLabel = t(selecting ? 'cancelMessageSelection' : 'selectMessages');
+  byId('select-messages').setAttribute('aria-label', selectLabel);
+  byId('select-messages').setAttribute('aria-pressed', String(selecting));
+  byId('select-messages').title = selectLabel;
+}
+
+function renderHistory(target, added, older) {
   const messages = byId('messages');
-  const scroller = messages.parentElement;
+  const scroller = byId('history');
   const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
   const height = scroller.scrollHeight;
   const top = scroller.scrollTop;
-  byId('older').hidden = !target.before;
+  paintMessageSelection();
   if (!target.rows.size) {
     messages.replaceChildren(make('div', 'empty', t('noMessages')));
     return;
   }
-  messages.replaceChildren(...[...target.rows.values()].sort((a, b) => a.id - b.id).map((row) => {
+  if (target.rows.size === added.length) messages.replaceChildren();
+  const rows = added.map((row) => {
     const human = row.role === 'user';
     const element = make('article', human ? 'message human' : 'message');
-    element.append(make('p', 'message-meta', human ? t('you') : 'Codex'), make('div', human ? 'bubble' : 'messages-text', row.text));
+    const meta = make('div', 'message-meta');
+    const pick = make('input', 'message-pick');
+    pick.type = 'checkbox';
+    pick.setAttribute('aria-label', t('selectMessage'));
+    pick.addEventListener('change', () => {
+      if (pick.checked) target.selected?.add(row.id);
+      else target.selected?.delete(row.id);
+      paintMessageSelection();
+    });
+    const copy = button('', 'message-copy', () => copyMessages([row]));
+    copy.title = t('copyMessage');
+    copy.setAttribute('aria-label', copy.title);
+    copy.append(glyph('copy'));
+    meta.append(pick, make('span', '', human ? t('you') : 'Codex'), copy);
+    element.append(meta, make('div', human ? 'bubble' : 'messages-text', row.text));
     return element;
-  }));
-  if (older) scroller.scrollTop = top + scroller.scrollHeight - height;
-  else if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  });
+  if (older) {
+    messages.prepend(...rows);
+    scroller.scrollTop = top + scroller.scrollHeight - height;
+  } else {
+    messages.append(...rows);
+    if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
 }
 
 async function send() {
@@ -742,8 +865,9 @@ function newAgentSheet() {
 function shellSheet() {
   const item = active;
   if (route !== 'sessions' || !item?.pane) return;
-  const selected = byId('shells').value;
-  const anchor = sessionShells().find(({ pane }) => pane.key === selected)?.pane || item.pane;
+  const key = recordKey(item);
+  const selected = selectedPane.get(key);
+  const anchor = item.windows?.flatMap((window) => window.panes).find((pane) => pane.key === selected) || item.pane;
   const form = make('form', 'workspace-form');
   const placement = make('select');
   placement.add(new Option(t('newWindow'), 'window'));
@@ -760,7 +884,7 @@ function shellSheet() {
     submit.disabled = true;
     try {
       const pane = await api('/api/panes', 'POST', { node: item.node, session: item.id, anchor: anchor.key, split: placement.value === 'split' });
-      selectedShell.set(item.node + '/' + item.id, pane.key);
+      selectedPane.set(key, pane.key);
       closeSheet();
       await refresh(true);
     } catch (error) { summary.textContent = error.message; }
@@ -970,9 +1094,10 @@ function signedOut() {
   activeKey = '';
   transcript = null;
   selection.clear();
-  selectedShell.clear();
+  selectedPane.clear();
   hiddenStates.clear();
   expandedTeams.clear();
+  expandedSessions.clear();
   launching = null;
   drafts.clear();
   byId('messages').replaceChildren();
@@ -996,12 +1121,23 @@ byId('new-agent').addEventListener('click', newAgentSheet);
 byId('new-shell').addEventListener('click', shellSheet);
 byId('back').addEventListener('click', back);
 byId('mine-back').addEventListener('click', back);
-byId('shells').addEventListener('change', (event) => {
+byId('terminal-pane').addEventListener('change', (event) => {
   if (!active || route !== 'sessions') return;
-  selectedShell.set(active.node + '/' + active.id, event.target.value);
+  selectedPane.set(activeKey, event.target.value);
   paintDetail();
 });
-byId('older').addEventListener('click', () => loadHistory(true));
+byId('history').addEventListener('scroll', loadEarlierAtTop, { passive: true });
+byId('select-messages').addEventListener('click', () => {
+  if (!transcript) return;
+  transcript.selected = transcript.selected ? null : new Set();
+  if (!transcript.selected) for (const pick of byId('messages').querySelectorAll('.message-pick')) pick.checked = false;
+  paintMessageSelection();
+});
+byId('copy-selection').addEventListener('click', () => {
+  if (!transcript?.selected) return;
+  const ids = [...transcript.selected].sort((a, b) => a - b);
+  copyMessages(ids.map((id) => transcript.rows.get(id)));
+});
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
 chatInput.addEventListener('input', () => drafts.set(conversationKey(), chatInput.value));
 byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
@@ -1096,7 +1232,40 @@ for (const [container, field] of [[byId('chat-form'), chatInput], [byId('term-fo
   });
 }
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+function watchAppUpdates() {
+  const worker = navigator.serviceWorker;
+  if (!worker) return;
+  const updateToast = byId('update-toast');
+  let dismissed;
+  let available;
+  function checkVersion() { worker.controller?.postMessage('workbench-version'); }
+  worker.addEventListener('message', (event) => {
+    const { type, version } = event.data || {};
+    if (event.source !== worker.controller || type !== 'workbench-version' || typeof version !== 'string') return;
+    available = version;
+    updateToast.hidden = version === appVersion || version === dismissed;
+  });
+  byId('update-dismiss').addEventListener('click', () => {
+    dismissed = available;
+    updateToast.hidden = true;
+  });
+  byId('update-refresh').addEventListener('click', () => window.location.reload());
+  worker.addEventListener('controllerchange', checkVersion);
+  worker.register('/sw.js', { updateViaCache: 'none' }).then((registration) => {
+    checkVersion();
+    let lastCheck = Date.now();
+    function check() {
+      if (document.hidden || !navigator.onLine || Date.now() - lastCheck < 30_000) return;
+      lastCheck = Date.now();
+      registration.update().catch(() => {});
+    }
+    setInterval(check, 60_000);
+    document.addEventListener('visibilitychange', check);
+    window.addEventListener('online', check);
+  }).catch(() => {});
+}
+
+watchAppUpdates();
 api('/api/session').then(({ authenticated }) => {
   if (authenticated) signedOn();
   if (enrollment) registerSheet();

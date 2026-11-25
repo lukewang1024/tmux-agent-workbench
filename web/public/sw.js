@@ -1,7 +1,9 @@
 'use strict';
 
-const cacheName = 'workbench-shell-WORKBENCH_CACHE_VERSION';
+const version = 'WORKBENCH_CACHE_VERSION';
+const cacheName = 'workbench-shell-' + version;
 const files = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
+  '/providers/chatgpt.svg', '/providers/claude.svg', '/providers/opencode.svg', '/providers/trae.png',
   '/vendor/passkeys.js', '/vendor/xterm.js', '/vendor/xterm.css', '/vendor/fit.js'];
 const shell = new Set(files);
 
@@ -13,6 +15,10 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(caches.keys().then((keys) => Promise.all(keys
     .filter((key) => key.startsWith('workbench-shell-') && key !== cacheName)
     .map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data === 'workbench-version') event.source?.postMessage({ type: 'workbench-version', version });
 });
 
 self.addEventListener('fetch', (event) => {

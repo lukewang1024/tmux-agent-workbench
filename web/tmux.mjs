@@ -12,15 +12,17 @@ const webSession = '__workbench_web';
 const paneFormat = [
   'pane_id', 'session_id', 'window_id', 'pane_pid', 'pid', 'start_time',
   'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'pane_dead',
-  '@workbench-web-pane', 'pane_in_mode', '@pane_role',
+  '@workbench-web-pane', 'pane_in_mode', '@pane_role', 'window_index', 'pane_index', 'window_name',
 ].map((field) => '#{' + field + '}').join('|');
 const limitsFile = join(workbenchState, 'usage', 'codex-limits.json');
 const maxBytes = 384 * 1024;
 const ttl = 20_000;
 const sidebarStates = ['blocked', 'done', 'working', 'idle'];
+const promptStates = ['idle', 'done', 'working'];
 
 function paneFrom(line) {
-  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode, role] = line.split('|');
+  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode, role,
+    windowIndex, paneIndex, ...windowName] = line.split('|');
   if (!/^%\d+$/.test(pane) || !/^\$\d+$/.test(session) || !/^@\d+$/.test(window)
       || ![processId, serverId, startTime].every((value) => /^\d+$/.test(value)) || dead === '1') return null;
   return {
@@ -28,6 +30,7 @@ function paneFrom(line) {
     key: [serverId, startTime, pane.slice(1), processId].join('.'),
     owned: ['window', 'split'].includes(tag), resizable: tag === 'window', inMode: mode === '1',
     sidebar: role === 'sidebar',
+    windowIndex: Number(windowIndex), index: Number(paneIndex), windowName: windowName.join('|'),
   };
 }
 
@@ -50,6 +53,7 @@ function terminalBytes(value) {
 export class LocalNode {
   watches = new Map();
   recentSnapshot = null;
+  recentThreads = new WeakMap();
   refreshingUsage = null;
   refreshedUsage = null;
   history = new History();
@@ -125,12 +129,23 @@ export class LocalNode {
     const sidebar = data?.sidebar;
     const byPane = new Map(raw.map((pane) => [pane.pane, pane]));
     const byLocation = new Map(raw.map((pane) => [pane.session + '/' + pane.pane, pane]));
+    const sessionWindows = new Map();
+    for (const pane of raw) {
+      if (!sessionWindows.has(pane.session)) sessionWindows.set(pane.session, new Map());
+      const windows = sessionWindows.get(pane.session);
+      if (!windows.has(pane.window)) windows.set(pane.window, { id: pane.window, index: pane.windowIndex, title: pane.windowName, panes: [] });
+      windows.get(pane.window).panes.push(pane);
+    }
     const agents = [];
+    const missingThreads = [];
     for (const agent of data?.agents || []) {
       if (!agent.target?.pane_id || (!sidebar && (agent.exited || agent.stale))) continue;
       const target = byLocation.get(agent.target.session_id + '/' + agent.target.pane_id)
         || byPane.get(agent.target.pane_id);
       if (!target) continue;
+      if (!agent.exited && !agent.stale && agent.kind === 'codex' && !hasThread(agent.hook_session_id)) {
+        missingThreads.push(agent);
+      }
       agents.push({
         id: agent.instance_id, title: agent.label || agent.target.window_name || agent.kind,
         kind: agent.kind, state: agent.display_state, session: agent.target.session_name, pane: target,
@@ -138,11 +153,25 @@ export class LocalNode {
         structured: !agent.exited && !agent.stale && agent.kind === 'codex' && hasThread(agent.hook_session_id),
       });
     }
+    if (missingThreads.length) {
+      let task = this.recentThreads.get(data);
+      if (!task) {
+        task = this.history.activeThreads(missingThreads).catch(() => new Map());
+        this.recentThreads.set(data, task);
+      }
+      const threads = await task;
+      for (const agent of agents) {
+        if (!threads.has(agent.id)) continue;
+        agent.thread = threads.get(agent.id);
+        agent.structured = true;
+      }
+    }
     const sessions = (data?.sessions || []).map((session) => {
       const id = session.session_id;
       return {
         id, title: session.session_name, state: session.rollup_state, agentCount: session.agent_count,
         attentionCount: session.attention_count, branch: sidebar?.branches?.[session.current_path],
+        windows: [...(sessionWindows.get(id)?.values() || [])],
         pane: byLocation.get(id + '/' + session.last_active_pane_id) || raw.find((pane) => pane.session === id),
       };
     });
@@ -170,10 +199,10 @@ export class LocalNode {
     return catalog;
   }
 
-  async pane(key, fresh = false) {
-    const entry = (await this.catalog(fresh)).terminals.find((item) => item.pane.key === key);
-    if (!entry) throw new Failure(404, 'Pane closed or no longer accessible.');
-    return entry.pane;
+  async pane(key) {
+    const pane = (await this.panes().catch(() => [])).find((item) => item.key === key);
+    if (!pane) throw new Failure(404, 'Pane closed or no longer accessible.');
+    return pane;
   }
 
   async verify(target) {
@@ -236,9 +265,10 @@ export class LocalNode {
     return { pane: created };
   }
 
-  async transcript(agentId, before) {
-    const entry = (await this.catalog()).agents.find((item) => item.id === agentId && item.structured);
+  async transcript(agentId, before, thread) {
+    const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.structured);
     if (!entry) throw new Failure(404, 'No structured history for this running agent.');
+    if (thread && entry.thread !== thread) throw new Failure(409, 'The active thread changed. Reopen the agent.');
     return this.history.page(entry.thread, before);
   }
 
@@ -249,13 +279,13 @@ export class LocalNode {
     }
     const entry = (await this.catalog(true)).agents.find((item) => item.id === agentId && item.structured);
     if (!entry || entry.thread !== thread || entry.pane.key !== paneKey) throw new Failure(409, 'The active thread changed. Reopen the agent.');
-    if (!['idle', 'done'].includes(entry.state) || entry.pane.inMode) {
-      throw new Failure(409, 'The agent is busy or needs attention in the terminal.');
+    if (!promptStates.includes(entry.state) || entry.pane.inMode) {
+      throw new Failure(409, 'The Agent cannot accept input right now.');
     }
     await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), true, async () => {
       const latest = (await this.catalog(true)).agents.find((item) => item.id === agentId);
-      if (latest?.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
-          || !['idle', 'done'].includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
+      if (!latest?.structured || latest.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
+          || !promptStates.includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
     });
     return {};
   }
@@ -285,17 +315,14 @@ export class LocalNode {
   async create(split, session, anchor) {
     let output;
     if (session) {
-      const catalog = await this.catalog(true);
-      const target = catalog.sessions.find((item) => item.id === session)?.pane;
-      const shell = catalog.terminals.find((item) => item.kind === 'shell' && item.pane.session === session && item.pane.key === anchor);
-      const pane = shell?.pane || (target?.key === anchor ? target : null);
+      const pane = (await this.panes()).find((item) => item.session === session && item.key === anchor);
       if (!pane || typeof split !== 'boolean') throw new Failure(409, 'The target changed. Refresh the list and try again.');
       const live = await this.verify(pane);
       if (live.session !== session) throw new Failure(409, 'The target changed. Refresh the list and try again.');
       const placement = split ? ['split-window', '-t', pane.pane] : ['new-window', '-t', session + ':', '-n', 'Shell'];
       output = await this.tmux([...placement, '-d', '-P', '-F', '#{pane_id}', '-c', '#{pane_current_path}']);
     } else if (split) {
-      const target = await this.pane(split, true);
+      const target = await this.pane(split);
       await this.verify(target);
       output = await this.tmux(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.pane, '-c', '#{pane_current_path}']);
     } else {
@@ -451,7 +478,7 @@ export class LocalNode {
       case 'pin': return this.pin(args);
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
-      case 'history': return this.transcript(args.agent, args.before);
+      case 'history': return this.transcript(args.agent, args.before, args.thread);
       case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane);
       case 'create': return this.create(args.split, args.session, args.anchor);
       case 'open': return this.watchOpen(args.pane);
