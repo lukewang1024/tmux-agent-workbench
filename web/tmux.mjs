@@ -19,6 +19,12 @@ const maxBytes = 384 * 1024;
 const ttl = 20_000;
 const sidebarStates = ['blocked', 'done', 'working', 'idle'];
 const promptStates = ['idle', 'done', 'working'];
+const closeStates = ['idle', 'done'];
+
+function closableAgent(agent) {
+  return !agent.exited && !agent.stale && Boolean(agent.process)
+    && agent.base_state === 'idle' && closeStates.includes(agent.display_state);
+}
 
 function paneFrom(line) {
   const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode, role,
@@ -129,8 +135,11 @@ export class LocalNode {
     const sidebar = data?.sidebar;
     const byPane = new Map(raw.map((pane) => [pane.pane, pane]));
     const byLocation = new Map(raw.map((pane) => [pane.session + '/' + pane.pane, pane]));
+    const protectedPanes = new Set((data?.agents || []).filter((agent) => !agent.exited && !closableAgent(agent))
+      .map((agent) => agent.target.pane_id));
     const sessionWindows = new Map();
     for (const pane of raw) {
+      pane.canClose = Boolean(data) && !protectedPanes.has(pane.pane);
       if (!sessionWindows.has(pane.session)) sessionWindows.set(pane.session, new Map());
       const windows = sessionWindows.get(pane.session);
       if (!windows.has(pane.window)) windows.set(pane.window, { id: pane.window, index: pane.windowIndex, title: pane.windowName, panes: [] });
@@ -149,7 +158,7 @@ export class LocalNode {
       agents.push({
         id: agent.instance_id, title: agent.label || agent.target.window_name || agent.kind,
         kind: agent.kind, state: agent.display_state, session: agent.target.session_name, pane: target,
-        exited: agent.exited, stale: agent.stale, thread: agent.hook_session_id,
+        exited: agent.exited, stale: agent.stale, canClose: closableAgent(agent), thread: agent.hook_session_id,
         structured: !agent.exited && !agent.stale && agent.kind === 'codex' && hasThread(agent.hook_session_id),
       });
     }
@@ -182,7 +191,7 @@ export class LocalNode {
       return {
         id: agent?.id || card.window, title: agent?.title || card.title, pane, state: card.state,
         kind: agent?.kind || 'shell', session: sessions.find(({ id }) => id === card.session)?.title,
-        structured: agent?.structured, thread: agent?.thread, assistant: card.assistant,
+        structured: agent?.structured, canClose: agent?.canClose, thread: agent?.thread, assistant: card.assistant,
       };
     });
     const terminals = agents.filter(({ pane }) => !pane.owned)
@@ -214,6 +223,30 @@ export class LocalNode {
     }
     if (current?.key !== target.key || current.sidebar) throw new Failure(409, 'Pane identity changed. Reopen it.');
     return current;
+  }
+
+  async closeTarget({ scope, pane, agent }) {
+    if (typeof pane !== 'string' || !/^\d+(?:\.\d+){3}$/.test(pane) || !['agent', 'pane'].includes(scope)
+        || (scope === 'agent' && (typeof agent !== 'string' || !/^agent-[0-9a-f]{24}$/.test(agent)))) {
+      throw new Failure(400, 'Invalid close request.');
+    }
+    const target = await this.pane(pane);
+    const args = ['close-target', '--pane', target.pane, '--key', target.key];
+    if (scope === 'agent') args.push('--agent', agent);
+    if (this.observeSnapshot) args.push('--observe');
+    try {
+      await this.coreCommand(args);
+    } catch (error) {
+      const reason = (error.stderr || '').trim().replace(/^tmux-agent-workbench: /, '');
+      if (reason === 'Only idle or done agents can be closed.'
+          || reason === 'The close target changed. Refresh the list and try again.') {
+        throw new Failure(409, reason);
+      }
+      throw new Failure(502, 'Could not close the target.');
+    } finally {
+      this.recentSnapshot = null;
+    }
+    return {};
   }
 
   async pin({ scope, target, pane, pinned }) {
@@ -282,16 +315,24 @@ export class LocalNode {
     if (!promptStates.includes(entry.state) || entry.pane.inMode) {
       throw new Failure(409, 'The Agent cannot accept input right now.');
     }
-    await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), true, async () => {
-      const latest = (await this.catalog(true)).agents.find((item) => item.id === agentId);
-      if (!latest?.structured || latest.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
-          || !promptStates.includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
+    await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), {
+      bracketed: true,
+      submit: true,
+      check: async () => {
+        const latest = (await this.catalog(true)).agents.find((item) => item.id === agentId);
+        if (!latest?.structured || latest.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
+            || !promptStates.includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
+      },
     });
     return {};
   }
 
-  async paste(pane, bytes, prompt = false, check = null) {
+  async paste(pane, bytes, { bracketed = false, submit = false, check } = {}) {
     await this.verify(pane);
+    if (!bytes.length && submit) {
+      await this.tmux(['send-keys', '-t', pane.pane, 'Enter']);
+      return;
+    }
     const name = 'workbench-web-' + secret();
     const arguments_ = this.arguments(['load-buffer', '-b', name, '-']);
     const load = spawn('tmux', arguments_, { env: this.env, stdio: ['pipe', 'ignore', 'ignore'] });
@@ -304,7 +345,8 @@ export class LocalNode {
       if (check) await check();
       await this.verify(pane);
       const args = ['paste-buffer', '-r', '-d', '-b', name, '-t', pane.pane];
-      if (prompt) args.push('-p', ';', 'send-keys', '-t', pane.pane, 'Enter');
+      if (bracketed) args.push('-p');
+      if (submit) args.push(';', 'send-keys', '-t', pane.pane, 'Enter');
       await this.tmux(args);
     } finally {
       clearTimeout(timer);
@@ -420,11 +462,11 @@ export class LocalNode {
     return { seq: frames.at(-1).seq, data: Buffer.concat(frames.map((frame) => frame.chunk)).toString('base64') };
   }
 
-  async watchInput(id, data) {
-    if (typeof data !== 'string' || !data.length || Buffer.byteLength(data) > 12_288) {
+  async watchInput(id, data, { bracketed = false, submit = false } = {}) {
+    if (typeof data !== 'string' || (!data.length && !submit) || Buffer.byteLength(data) > 12_288) {
       throw new Failure(400, 'Terminal input exceeds the supported size.');
     }
-    await this.paste(this.watchFor(id).pane, Buffer.from(data));
+    await this.paste(this.watchFor(id).pane, Buffer.from(data), { bracketed: bracketed || submit, submit });
     return {};
   }
 
@@ -476,6 +518,7 @@ export class LocalNode {
     switch (method) {
       case 'catalog': return this.catalog(false, Array.isArray(args.hidden) ? args.hidden : []);
       case 'pin': return this.pin(args);
+      case 'close-target': return this.closeTarget(args);
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before, args.thread);
@@ -483,7 +526,11 @@ export class LocalNode {
       case 'create': return this.create(args.split, args.session, args.anchor);
       case 'open': return this.watchOpen(args.pane);
       case 'read': return this.watchRead(args.watch, args.after);
-      case 'input': return this.watchInput(args.watch, args.data);
+      case 'input': {
+        const submit = args.submit === true && typeof args.data === 'string' && args.data.endsWith('\r');
+        const data = submit ? args.data.slice(0, -1) : args.data;
+        return this.watchInput(args.watch, data, { bracketed: args.bracketed === true, submit });
+      }
       case 'resize': return this.watchResize(args.watch, args.cols, args.rows);
       case 'close': return this.watchClose(args.watch);
       case 'usage': return this.usage(args.refresh);

@@ -242,9 +242,14 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const input = await body(req);
       return json(res, await node(input.node).request('create', { split: input.split, session: input.session, anchor: input.anchor }), 201);
     }
-    if (method === 'POST' && ['/api/pins', '/api/sidebar-sort', '/api/agents'].includes(path)) {
+    const operation = {
+      '/api/pins': 'pin',
+      '/api/sidebar-sort': 'sidebar-sort',
+      '/api/agents': 'launch',
+      '/api/close': 'close-target',
+    }[path];
+    if (method === 'POST' && typeof operation === 'string') {
       const input = await body(req);
-      const operation = { '/api/pins': 'pin', '/api/sidebar-sort': 'sidebar-sort', '/api/agents': 'launch' }[path];
       return json(res, await node(input.node).request(operation, input), operation === 'launch' ? 201 : 200);
     }
     throw new Failure(404, 'Page not found.');
@@ -323,7 +328,15 @@ export async function startServer({ local, localName, store, listen, origin, cer
           send({ writable: false });
         } else if (packet.type === 'input' || packet.type === 'resize') {
           if (leases.get(lease) !== client) throw new Failure(403, 'Enable terminal input first.');
-          await node(machineId).request(packet.type, { watch, data: packet.data, cols: packet.cols, rows: packet.rows });
+          if (packet.type === 'input') {
+            // Older connectors forward data verbatim. Keep the Enter in the
+            // wire bytes and let newer ones deliver it as a separate key.
+            const submit = packet.submit === true && typeof packet.data === 'string';
+            const data = submit ? packet.data + '\r' : packet.data;
+            await node(machineId).request('input', { watch, data, bracketed: packet.bracketed === true, submit });
+          } else {
+            await node(machineId).request('resize', { watch, cols: packet.cols, rows: packet.rows });
+          }
         }
       }).catch(report).finally(() => { queued--; });
     });

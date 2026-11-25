@@ -1,9 +1,11 @@
 """Verify the read-only snapshot against a real, disposable tmux server."""
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -73,9 +75,55 @@ def main():
                 "#{session_id}|#{window_id}|#{pane_id}|#{pane_pid}|#{pane_active}|#{window_layout}",
             )
             assert tmux("show-option", "-pqv", "-t", first, "@workbench_agent_actions") == "before"
+
+            def pane_key(pane):
+                return tmux("display-message", "-p", "-t", pane,
+                            "#{pid}.#{start_time}.#{pane_id}.#{pane_pid}").replace("%", "")
+
+            def close(pane, identity=None, key=None):
+                args = [core, "close-target", "--observe", "--pane", pane,
+                        "--key", key or pane_key(pane)]
+                if identity is not None:
+                    args.extend(["--agent", identity])
+                return subprocess.run(args, env=env, text=True, capture_output=True, timeout=5)
+
+            pane = tmux("split-window", "-dPF", "#{pane_id}", "-t", first, "exec /bin/sh -i")
+            tmux("send-keys", "-t", pane, "-l",
+                 "printf '\\n› Ask Codex to do anything\\n'; " + shlex.quote(agent))
+            tmux("send-keys", "-t", pane, "Enter")
+            for _ in range(40):
+                row = next((item for item in observe()["agents"] if item["target"]["pane_id"] == pane), None)
+                if row and row["display_state"] == "idle":
+                    break
+                time.sleep(.05)
+            assert row and row["display_state"] == "idle", row
+            target = row["instance_id"]
+            assert close(pane, first_identity[first]).returncode != 0
+            assert close(pane, key="1.2.3.4").returncode != 0
+            for title in ("⠋ Working", "Action Required"):
+                tmux("select-pane", "-t", pane, "-T", title)
+                for identity in (target, None):
+                    refused = close(pane, identity)
+                    assert refused.returncode != 0 and "Only idle or done" in refused.stderr, refused
+            tmux("select-pane", "-t", pane, "-T", "Idle")
+            closed = close(pane, target)
+            assert closed.returncode == 0, closed.stderr
+            for _ in range(40):
+                if all(item["target"]["pane_id"] != pane for item in observe()["agents"]):
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("the closed agent remained in the pane")
+            assert tmux("display-message", "-p", "-t", pane, "#{pane_id}") == pane
+            tmux("set-option", "-pt", pane, "@pane_role", "sidebar")
+            assert close(pane).returncode != 0
+            tmux("set-option", "-pu", "-t", pane, "@pane_role")
+            closed = close(pane)
+            assert closed.returncode == 0, closed.stderr
+            assert set(tmux("list-panes", "-aF", "#{pane_id}").splitlines()) == {first, second}
             assert not list(runtime.iterdir()), list(runtime.iterdir())
             assert not (root / "state").exists()
-            print("PASS read-only Workbench snapshot preserves tmux layout, options and Agent identity")
+            print("PASS read-only inventory and guarded close target exact live tmux panes")
         finally:
             subprocess.run(["tmux", "-S", socket, "kill-server"], env=env, check=False,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)

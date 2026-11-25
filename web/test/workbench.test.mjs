@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -184,6 +184,31 @@ test('a working Codex thread accepts a follow-up in the same Pane', async (t) =>
   }
 });
 
+test('terminal composer delivers the pasted text followed by one Enter', async (t) => {
+  const directory = await scratch(t);
+  const socket = join(directory, 't');
+  const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', timeout: 4000 }).trim();
+  const pane = tmux('-f', '/dev/null', 'new-session', '-ds', 'fixture', '-c', directory, '-PF', '#{pane_id}',
+    "stty raw -echo; printf '\\033[?2004h'; dd bs=1 count=15 of=input 2>/dev/null; exec sleep 20");
+  const node = new LocalNode({ socket });
+  try {
+    for (let tries = 0; tries < 30 && tmux('display-message', '-pt', pane, '#{bracket_paste_flag}') !== '1'; tries++) await delay(25);
+    const [target] = await node.panes();
+    const { watch } = await node.watchOpen(target.key);
+    await node.request('input', { watch, data: 'hi\r', bracketed: true, submit: true });
+    let delivered;
+    for (let tries = 0; tries < 30; tries++) {
+      delivered = await readFile(join(directory, 'input')).catch(() => null);
+      if (delivered?.length === 15) break;
+      await delay(25);
+    }
+    assert.deepEqual(delivered, Buffer.from('\x1b[200~hi\x1b[201~\r'));
+  } finally {
+    node.close();
+    tmux('kill-server');
+  }
+});
+
 test('gateway requires a loopback listener even with TLS configured', async () => {
   const refused = { status: 400, message: 'Use --listen 127.0.0.1:PORT or localhost:PORT.' };
   await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: '0.0.0.0:7080' }), refused);
@@ -302,8 +327,10 @@ test('gateway protects data and accepts an outbound node handshake only after en
     assert.equal((await fetch(address + '/api/workspace')).status, 401);
     const invitationEndpoint = address + '/api/passkeys/invitations';
     for (const [requestOrigin, expected] of [[origin, 401], ['https://untrusted.example', 403]]) {
-      const response = await fetch(invitationEndpoint, { method: 'POST', headers: { Origin: requestOrigin } });
-      assert.equal(response.status, expected);
+      for (const endpoint of [invitationEndpoint, address + '/api/close']) {
+        const response = await fetch(endpoint, { method: 'POST', headers: { Origin: requestOrigin } });
+        assert.equal(response.status, expected);
+      }
     }
     assert.deepEqual(await readdir(store.invites), []);
     assert.equal((await fetch(address + '/api/auth/login/options', {

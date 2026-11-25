@@ -1230,7 +1230,7 @@ fn resumed_same_conversation(previous: &Tracked, current: &Tracked) -> bool {
         })
 }
 
-fn instance_id(pane_id: &str, process: &ProcessFingerprint) -> String {
+pub(crate) fn instance_id(pane_id: &str, process: &ProcessFingerprint) -> String {
     let mut hash = Sha256::new();
     hash.update(pane_id.as_bytes());
     hash.update(process.pid.to_le_bytes());

@@ -193,6 +193,52 @@ pub struct ProcessTree {
     system: System,
 }
 
+impl ProcessTree {
+    // Check the full pane subtree before closing it. The normal inventory
+    // publishes only one agent per pane. CLI wrappers and their children
+    // in the same process group represent the same agent here.
+    pub(crate) fn only_agent_in_pane(
+        &self,
+        root: u32,
+        aliases: &HashMap<String, AgentKind>,
+        agent: Option<&AgentProcess>,
+    ) -> bool {
+        let root = Pid::from_u32(root);
+        if self.system.process(root).is_none() {
+            return false;
+        }
+        let roots = HashSet::from([root]);
+        self.system.processes().values().all(|process| {
+            if nearest_root(&self.system, process.pid(), &roots).is_none() {
+                return true;
+            }
+            let Some(kind) = identify(process, aliases) else {
+                return true;
+            };
+            agent.is_some_and(|agent| {
+                let pid = agent.fingerprint.pid;
+                if process.pid().as_u32() == pid {
+                    return true;
+                }
+                if kind != agent.kind
+                    || nearest_root(
+                        &self.system,
+                        process.pid(),
+                        &HashSet::from([Pid::from_u32(pid)]),
+                    )
+                    .is_none()
+                {
+                    return false;
+                }
+                // Both PIDs came from the process table.
+                let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+                group > 0
+                    && group == unsafe { libc::getpgid(process.pid().as_u32() as libc::pid_t) }
+            })
+        })
+    }
+}
+
 impl Default for ProcessTree {
     fn default() -> Self {
         Self {

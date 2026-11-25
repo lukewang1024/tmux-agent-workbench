@@ -25,10 +25,12 @@
     <symbol id="icon-next" viewBox="0 0 24 24"><path d="m9.5 5.5 6.5 6.5-6.5 6.5"/></symbol>
     <symbol id="icon-down" viewBox="0 0 24 24"><path d="m5.5 9.5 6.5 6.5 6.5-6.5"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-more" viewBox="0 0 24 24"><path d="M5 12h.01m6.99 0h.01m6.99 0h.01" stroke-width="2.6"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
     <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
     <symbol id="icon-select" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
+    <symbol id="icon-share" viewBox="0 0 24 24"><path d="M12 15V3m-4 4 4-4 4 4M7 11H5v9h14v-9h-2"/></symbol>
     <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15.5 3 5.5 5.5-4 1.5-3 4v3l-1.5 1.5-7-7L7 10h3l4-3Zm-6 11.5L4 20"/></symbol>
     <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="10" r="4"/><path d="m11.2 12.6 6.3 6.4h2.5v-2.6l-1.6-1.6h-2v-2"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--wash)"/><circle cx="15" cy="17" r="2.5" fill="var(--wash)"/></symbol>
@@ -40,19 +42,20 @@
       <button class="module-trigger" id="modules" type="button" aria-haspopup="dialog" aria-label="{{mainNavigation}}">
         <span class="brand-mark" aria-hidden="true"></span><b id="module-label">{{agents}}</b><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
       </button>
-      <button class="machine-trigger" id="machine" type="button" aria-haspopup="dialog">
-        <svg class="glyph" aria-hidden="true"><use href="#icon-machines"></use></svg><b id="scope"></b>
-        <span class="machine-meta" id="health"></span><svg class="glyph chevron" aria-hidden="true"><use href="#icon-down"></use></svg>
-      </button>
+      <div class="workspace-actions" id="workspace-actions" hidden>
+        <button class="machine-trigger" id="machine" type="button" aria-haspopup="dialog">
+          <b id="scope"></b><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+        </button>
+        <div class="state-filters" id="state-filters" role="group" aria-label="{{agentStates}}"></div>
+        <button class="new-agent" id="new-agent" type="button" aria-label="{{newAgent}}" title="{{newAgent}}" aria-haspopup="dialog">
+          <svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>
+        </button>
+      </div>
     </header>
     <div class="app-body">
       <div class="workspace" id="workspace" data-mobile-view="list" hidden>
         <section class="screen" id="list" aria-labelledby="list-heading">
-          <header class="bar list-top">
-            <h1 class="sr-only" id="list-heading" tabindex="-1">{{agents}}</h1>
-            <div class="state-filters" id="state-filters" role="group" aria-label="{{agentStates}}"></div>
-            <button class="primary" id="new-agent" type="button"><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newAgent}}</button>
-          </header>
+          <h1 class="sr-only" id="list-heading" tabindex="-1">{{agents}}</h1>
           <div class="list-content">
             <div id="groups"></div>
           </div>
@@ -65,8 +68,11 @@
               <button class="plain icon" type="button" id="copy-selection" hidden>
                 <svg class="glyph" aria-hidden="true"><use href="#icon-copy"></use></svg><span id="selection-count" aria-hidden="true"></span>
               </button>
-              <button class="plain icon" type="button" id="select-messages" aria-label="{{selectMessages}}" title="{{selectMessages}}" aria-pressed="false">
-                <svg class="glyph" aria-hidden="true"><use href="#icon-select"></use></svg>
+              <button class="plain icon" type="button" id="share-selection" aria-label="{{shareSelectedMessages}}" title="{{shareSelectedMessages}}" hidden>
+                <svg class="glyph" aria-hidden="true"><use href="#icon-share"></use></svg>
+              </button>
+              <button class="plain icon" type="button" id="exit-selection" aria-label="{{cancelMessageSelection}}" title="{{cancelMessageSelection}}">
+                <svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg>
               </button>
             </div>
             <button class="secondary" id="new-shell" type="button" hidden><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newTerminal}}</button>

@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::close_target;
 use crate::config::{AgentSort, Config};
 use crate::ipc::{ClientError, Request, call};
 use crate::model::{
@@ -1568,6 +1569,28 @@ fn event_loop(
                             _ => false,
                         };
                         if shown {
+                            return Ok(());
+                        }
+                    }
+                    _ if close_target::is_shortcut(key) => {
+                        let selected = match navigation.focused_action() {
+                            Some(action @ Action::Focus(_)) => focus_cards
+                                .iter()
+                                .take(shown_focus)
+                                .find(|card| card.action() == *action)
+                                .and_then(|card| match card {
+                                    PinnedCard::Agent(card) => card.agent.as_ref(),
+                                    PinnedCard::Session(_) => None,
+                                }),
+                            None if navigation.selection_visible => rows
+                                .get(navigation.selected)
+                                .filter(|row| !matches!(row, Row::Conversation(..)))
+                                .and_then(row_agent),
+                            _ => None,
+                        };
+                        if let Some(agent) = selected
+                            && confirm_agent_close(server, agent)?
+                        {
                             return Ok(());
                         }
                     }
@@ -3560,6 +3583,10 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
             "-点击阻塞/完成/进行中/空闲数字 · 筛选智能体",
         ),
         crate::ui_language::text("-m · item menu", "-m · 项目菜单"),
+        crate::ui_language::text(
+            "-Shift+D · close an idle or done agent",
+            "-Shift+D · 关闭空闲或已完成的智能体",
+        ),
         crate::ui_language::text("-N · projects", "-N · 项目"),
         crate::ui_language::text("-i · temporary Git tool", "-i · 临时 Git 工具"),
         crate::ui_language::text("-W · new workspace", "-W · 新建工作区"),
@@ -4293,28 +4320,89 @@ fn show_focus_menu(
     if !safe_target(&card.window.id, '@') {
         return Ok(false);
     }
-    if card.window.assistant {
-        return show_menu(
+    let (title, pin) = if card.window.assistant {
+        (
             crate::ui_language::text("Personal assistant", "个人助理"),
-            anchor,
-            false,
-            &[(
+            (
                 crate::ui_language::text("-Always pinned", "-始终置顶"),
                 "",
                 String::new(),
-            )],
-        );
+            ),
+        )
+    } else {
+        (
+            crate::ui_language::text("Pinned", "置顶"),
+            (
+                crate::ui_language::text("Unpin task", "取消置顶"),
+                "p",
+                format!("set-option -w -u -t {} @agent_focus", card.window.id),
+            ),
+        )
+    };
+    let mut items = vec![pin];
+    if let Some(agent) = &card.agent {
+        items.push(close_menu_item(agent, false)?);
     }
-    show_menu(
-        crate::ui_language::text("Pinned", "置顶"),
-        anchor,
-        false,
-        &[(
-            crate::ui_language::text("Unpin task", "取消置顶"),
-            "p",
-            format!("set-option -w -u -t {} @agent_focus", card.window.id),
-        )],
-    )
+    show_menu(title, anchor, false, &items)
+}
+
+fn confirm_agent_close(
+    server: &ServerIdentity,
+    agent: &AgentSnapshot,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let client = current_client()?;
+    if !close_target::agent_closable(agent) {
+        close_target::report(server, &client, close_target::UNVERIFIED);
+        return Ok(false);
+    }
+    let args = close_target::confirmation_args(
+        server,
+        &agent.target.pane_id,
+        Some(&agent.instance_id),
+        &client,
+    );
+    match args {
+        Ok(args) => run_workbench(&args.iter().map(String::as_str).collect::<Vec<_>>(), true),
+        Err(error) => {
+            close_target::report(server, &client, &error.to_string());
+            Ok(false)
+        }
+    }
+}
+
+fn close_menu_item(
+    agent: &AgentSnapshot,
+    pane: bool,
+) -> Result<(&'static str, &'static str, String), Box<dyn std::error::Error>> {
+    use crate::ui_language::text as tr;
+    let label = if pane {
+        tr("Close pane", "关闭窗格")
+    } else {
+        tr("Close agent", "关闭智能体")
+    };
+    if close_target::agent_closable(agent)
+        && let Ok(args) = close_target::confirmation_args(
+            &ServerIdentity::discover()?,
+            &agent.target.pane_id,
+            (!pane).then_some(agent.instance_id.as_str()),
+            &current_client()?,
+        )
+    {
+        return Ok((
+            label,
+            if pane { "x" } else { "D" },
+            format!(
+                "run-shell -b {}",
+                shell_quote(&close_target::shell_command(&args)?)
+            ),
+        ));
+    }
+    let disabled = if pane {
+        tr("-Close pane", "-关闭窗格")
+    } else {
+        tr("-Close agent", "-关闭智能体")
+    };
+    Ok((disabled, "", String::new()))
 }
 
 fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
@@ -4558,16 +4646,8 @@ fn show_row_menu(
                         "z",
                         format!("resize-pane -Z -t {}", agent.target.pane_id),
                     ),
-                    (
-                        crate::ui_language::text("Close pane", "关闭窗格"),
-                        "x",
-                        format!(
-                            "confirm-before -t {} -p '{}' 'kill-pane -t {}'",
-                            shell_quote(&current_client()?),
-                            crate::ui_language::text("Close pane?", "关闭窗格？"),
-                            agent.target.pane_id
-                        ),
-                    ),
+                    close_menu_item(agent, false)?,
+                    close_menu_item(agent, true)?,
                 ],
             )
         }
@@ -4640,8 +4720,10 @@ where
         if !safe_target(&pane, '%') {
             return Err("invalid sidebar pane id".into());
         }
+        let server = ServerIdentity::discover()?;
         let mut deferred = format!(
-            "TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            "TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            shell_quote(&server.socket_path.to_string_lossy()),
             shell_quote(&pane),
             shell_quote(&client),
             std::process::id(),
@@ -4654,6 +4736,7 @@ where
         // tmux owns this background job, so closing the current popup cannot
         // kill the deferred action with the popup's process group.
         crate::command::new("tmux")
+            .args(server.tmux_args())
             .args(["run-shell", "-b", &deferred])
             .status()?
             .success()
@@ -4675,7 +4758,7 @@ where
     Ok(false)
 }
 
-fn current_client() -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn current_client() -> Result<String, Box<dyn std::error::Error>> {
     if let Ok(client) = std::env::var("WORKBENCH_TARGET_CLIENT")
         && !client.is_empty()
     {
@@ -4804,7 +4887,7 @@ fn safe_target(value: &str, prefix: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

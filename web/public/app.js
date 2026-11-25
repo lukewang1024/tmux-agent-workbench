@@ -44,6 +44,7 @@ const drafts = new Map();
 let transcript = null;
 let submitting = false;
 let terminal = null;
+let suppressHoldClick = false;
 
 function t(key, values = {}) {
   const message = messages[key];
@@ -183,12 +184,12 @@ function paintHeader() {
   byId('home-bar').hidden = !signedIn || (isWorkspace() && opened && mobile.matches)
     || (route === 'mine' && minePage !== 'home');
   byId('module-label').textContent = labels[route] || '';
-  byId('machine').hidden = !isWorkspace();
+  byId('workspace-actions').hidden = !isWorkspace();
   const machine = machines.find(({ id }) => id === scope);
-  byId('scope').textContent = machine?.name || t('allMachines');
-  byId('health').textContent = machine ? nodeStates[machine.state] : t('onlineCount', {
-    count: machines.filter(({ state }) => state === 'online').length,
-  });
+  const scopeName = machine?.name || t('allMachines');
+  byId('scope').textContent = machine?.name || t('allShort');
+  byId('machine').title = scopeName;
+  byId('machine').setAttribute('aria-label', t('switchMachine') + ' · ' + scopeName);
 }
 
 function scopedMachines() {
@@ -266,11 +267,98 @@ function paintStateFilters() {
     chip.title = stateNames[state];
     chip.setAttribute('aria-pressed', String(!hiddenStates.has(state)));
     chip.setAttribute('aria-label', stateNames[state] + ', ' + count);
-    chip.append(stateDot(state, nodes.find((node) => node.sidebar)?.sidebar.colors),
-      make('span', 'filter-label', stateNames[state]), make('b', '', String(count)));
+    chip.append(stateDot(state, nodes.find((node) => node.sidebar)?.sidebar.colors), make('b', '', String(count)));
     if (state === activeFilter) requestAnimationFrame(() => chip.focus({ preventScroll: true }));
     return chip;
   }));
+}
+
+function onHold(row, activate, mouseMenu) {
+  let timer;
+  let start;
+  let held = false;
+  const stop = () => { clearTimeout(timer); start = null; };
+  const run = () => {
+    if (held || !row.isConnected || overlay.open) return;
+    held = true;
+    suppressHoldClick = true;
+    activate();
+  };
+  row.addEventListener('pointerdown', (event) => {
+    stop();
+    held = false;
+    const control = event.target.closest('button, input');
+    if (event.pointerType === 'mouse' || !event.isPrimary
+        || (control && control !== row)) return;
+    start = [event.clientX, event.clientY];
+    timer = setTimeout(run, 480);
+  });
+  row.addEventListener('pointermove', (event) => {
+    if (start && Math.hypot(event.clientX - start[0], event.clientY - start[1]) > 9) stop();
+  });
+  for (const event of ['pointerup', 'pointercancel', 'pointerleave']) row.addEventListener(event, stop);
+  row.addEventListener('contextmenu', (event) => {
+    if (!start && !held) {
+      if (event.pointerType !== 'touch' && !overlay.open) mouseMenu?.(event);
+      return;
+    }
+    event.preventDefault();
+    const show = start;
+    stop();
+    if (show) run();
+  });
+}
+
+function itemMenu(container, row, open) {
+  row.classList.add('has-item-menu');
+  onHold(row, open, (event) => {
+    event.preventDefault();
+    open();
+  });
+  const trigger = button('', 'row-action item-menu', open);
+  trigger.title = t('itemActions');
+  trigger.setAttribute('aria-label', trigger.title);
+  trigger.setAttribute('aria-haspopup', 'dialog');
+  trigger.append(glyph('more'));
+  container.append(trigger);
+}
+
+function confirmClose(title, machine, payload) {
+  const agent = payload.scope === 'agent';
+  const label = t(agent ? 'closeAgent' : 'closePane');
+  const form = make('div', 'confirm-actions');
+  const cancel = button(t('cancel'), 'secondary', closeSheet);
+  const submit = button(label, 'secondary danger', async () => {
+    submit.disabled = true;
+    try {
+      await api('/api/close', 'POST', payload);
+      if (submit.isConnected) closeSheet();
+      if (!agent) {
+        for (const [record, pane] of selectedPane) {
+          if (record.startsWith(payload.node + '/') && pane === payload.pane) selectedPane.delete(record);
+        }
+      }
+      await refresh(true);
+    } catch (error) {
+      if (submit.isConnected) closeSheet();
+      await refresh();
+      toast(error.message);
+    }
+  });
+  form.append(cancel, submit);
+  sheet(label, make('p', 'sheet-target', title + ' · ' + machine),
+    make('p', 'sheet-copy', t(agent ? 'confirmAgentClose' : 'confirmPaneClose')), form);
+  cancel.focus();
+}
+
+function closeChoice(title, machine, payload, allowed, exited = false) {
+  const row = choice(t(payload.scope === 'agent' ? 'closeAgent' : 'closePane'),
+    allowed ? '' : t(exited ? 'agentExited' : 'closeIdleOnly'),
+    () => confirmClose(title, machine, payload));
+  row.prepend(glyph('close'));
+  row.classList.add('danger');
+  row.disabled = !allowed;
+  return row;
 }
 
 function recordRow(item, machine, pinned, focusKey, canExpand = true) {
@@ -332,23 +420,36 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
     team.setAttribute('aria-label', t('teamWorkers', { count: item.team.workers, blocked: item.team.blocked, done: item.team.done }));
     container.append(team);
   }
-  if (machine.sidebar && item.pane && !item.worker) {
-    const target = session ? item.id : item.pane.window;
-    const assistant = !session && machine.pinnedAgents?.some((card) => card.pane?.window === target && card.assistant);
-    const pin = button('', 'row-action pin-button', async () => {
-      pin.disabled = true;
-      try {
-        await api('/api/pins', 'POST', { node: machine.id, scope: session ? 'session' : 'agent', target, pane: item.pane.key, pinned: !pinned });
-        await refresh(true);
-      } catch (error) { toast(error.message); }
-      finally { pin.disabled = Boolean(assistant); }
+  const canPin = machine.sidebar && item.pane && !item.worker;
+  const hasAgent = !session && item.pane && item.kind !== 'shell';
+  if (pinned) {
+    const marker = glyph('pin');
+    marker.classList.add('pin-marker');
+    badge.prepend(marker, make('span', 'sr-only', t('pinned')));
+  }
+  if (canPin || hasAgent) {
+    itemMenu(container, row, () => {
+      const actions = [];
+      if (canPin) {
+        const target = session ? item.id : item.pane.window;
+        const assistant = !session && machine.pinnedAgents?.some((card) => card.pane?.window === target && card.assistant);
+        const pin = choice(t(pinned ? 'unpin' : 'pin'), assistant ? t('assistantPinned') : '', async () => {
+          closeSheet();
+          try {
+            await api('/api/pins', 'POST', { node: machine.id, scope: session ? 'session' : 'agent', target, pane: item.pane.key, pinned: !pinned });
+            await refresh(true);
+          } catch (error) { toast(error.message); }
+        });
+        pin.prepend(glyph('pin'));
+        pin.disabled = Boolean(assistant);
+        actions.push(pin);
+      }
+      if (hasAgent) {
+        const payload = { node: machine.id, scope: 'agent', agent: item.id, pane: item.pane.key };
+        actions.push(closeChoice(title, machine.name, payload, item.canClose, item.exited));
+      }
+      sheet(title, ...actions);
     });
-    pin.append(glyph('pin'));
-    pin.disabled = Boolean(assistant);
-    pin.title = t(assistant ? 'assistantPinned' : pinned ? 'unpin' : 'pin');
-    pin.setAttribute('aria-label', pin.title);
-    pin.setAttribute('aria-pressed', String(pinned));
-    container.append(pin);
   }
   return container;
 }
@@ -457,13 +558,24 @@ function renderSessionTree(session) {
     const group = make('section', 'window-group');
     group.append(make('h4', 'subheading', window.index + ': ' + window.title));
     for (const pane of window.panes) {
-      const row = button(t('sessionPane', { index: pane.index, pane: pane.pane }), 'pane-row', () => {
+      const title = t('sessionPane', { index: pane.index, pane: pane.pane });
+      const container = make('div', 'pane-actions');
+      const open = () => {
+        closeSheet();
         selectedPane.set(recordKey(session), pane.key);
         if (opened && activeKey === recordKey(session)) paintDetail();
         else openRecord(session);
-      });
+      };
+      const row = button(title, 'pane-row', open);
       row.prepend(glyph('terminal'));
-      group.append(row);
+      container.append(row);
+      itemMenu(container, row, () => {
+        const terminal = choice(t('openTerminal'), '', open);
+        terminal.prepend(glyph('terminal'));
+        const payload = { node: session.node, scope: 'pane', pane: pane.key };
+        sheet(title, terminal, closeChoice(title, session.host, payload, pane.canClose));
+      });
+      group.append(container);
     }
     tree.append(group);
   }
@@ -560,22 +672,60 @@ async function copyMessages(rows) {
   } catch { toast(t('copyFailed')); }
 }
 
+function selectedMessages() {
+  if (!transcript?.selected) return [];
+  return [...transcript.selected].sort((a, b) => a - b).map((id) => transcript.rows.get(id));
+}
+
+async function shareMessages() {
+  const rows = selectedMessages();
+  if (!rows.length || typeof navigator.share !== 'function') return;
+  try {
+    await navigator.share({ text: rows.map(({ text }) => text).join('\n\n') });
+  } catch (error) {
+    if (error.name !== 'AbortError') toast(t('shareFailed'));
+  }
+}
+
+function exitMessageSelection() {
+  transcript.selected = null;
+  for (const pick of byId('messages').querySelectorAll('.message-pick:checked')) {
+    pick.checked = false;
+    pick.closest('.message').classList.remove('picked');
+  }
+  paintMessageSelection();
+}
+
+function messageMenu(event, select) {
+  if (transcript.selected || window.getSelection()?.toString()) return;
+  event.preventDefault();
+  const action = choice(t('selectMessages'), '', () => {
+    closeSheet();
+    select();
+  });
+  action.prepend(glyph('select'));
+  sheet(t('messageActions'), action);
+  overlay.dataset.position = 'context';
+  const bounds = overlay.querySelector('.sheet').getBoundingClientRect();
+  overlay.style.setProperty('--menu-x', Math.max(8, Math.min(event.clientX, innerWidth - bounds.width - 8)) + 'px');
+  overlay.style.setProperty('--menu-y', Math.max(8, Math.min(event.clientY, innerHeight - bounds.height - 8)) + 'px');
+  action.focus();
+}
+
 function paintMessageSelection() {
   const count = transcript?.selected?.size || 0;
   const selecting = Boolean(transcript?.selected);
-  byId('chat-actions').hidden = route !== 'agents' || !active?.structured
+  byId('chat-actions').hidden = !selecting || route !== 'agents' || !active?.structured
     || transcript?.key !== conversationKey() || !transcript.rows.size;
   byId('messages').classList.toggle('selecting', selecting);
   byId('copy-selection').hidden = !selecting;
   byId('copy-selection').disabled = !count;
+  byId('share-selection').hidden = !selecting || typeof navigator.share !== 'function';
+  byId('share-selection').disabled = !count;
   const copyLabel = t('copySelectedMessages', { count });
   byId('copy-selection').setAttribute('aria-label', copyLabel);
   byId('copy-selection').title = copyLabel;
   byId('selection-count').textContent = String(count);
-  const selectLabel = t(selecting ? 'cancelMessageSelection' : 'selectMessages');
-  byId('select-messages').setAttribute('aria-label', selectLabel);
-  byId('select-messages').setAttribute('aria-pressed', String(selecting));
-  byId('select-messages').title = selectLabel;
 }
 
 function renderHistory(target, added, older) {
@@ -597,16 +747,27 @@ function renderHistory(target, added, older) {
     const pick = make('input', 'message-pick');
     pick.type = 'checkbox';
     pick.setAttribute('aria-label', t('selectMessage'));
-    pick.addEventListener('change', () => {
-      if (pick.checked) target.selected?.add(row.id);
-      else target.selected?.delete(row.id);
+    const select = (value) => {
+      if (target !== transcript || !target.selected) return;
+      pick.checked = value;
+      element.classList.toggle('picked', value);
+      if (value) target.selected.add(row.id);
+      else target.selected.delete(row.id);
       paintMessageSelection();
+    };
+    pick.addEventListener('change', () => select(pick.checked));
+    const startSelection = () => {
+      if (target !== transcript) return;
+      target.selected ??= new Set();
+      select(true);
+    };
+    onHold(element, startSelection, (event) => {
+      if (target === transcript) messageMenu(event, startSelection);
     });
-    const copy = button('', 'message-copy', () => copyMessages([row]));
-    copy.title = t('copyMessage');
-    copy.setAttribute('aria-label', copy.title);
-    copy.append(glyph('copy'));
-    meta.append(pick, make('span', '', human ? t('you') : 'Codex'), copy);
+    element.addEventListener('click', (event) => {
+      if (!event.target.closest('button, input')) select(!pick.checked);
+    });
+    meta.append(pick, make('span', '', human ? t('you') : 'Codex'));
     element.append(meta, make('div', human ? 'bubble' : 'messages-text', row.text));
     return element;
   });
@@ -632,6 +793,8 @@ async function send() {
     if (drafts.get(key) === text) drafts.delete(key);
     if (conversationKey() === key) {
       if (chatInput.value === text) chatInput.value = '';
+      const scroller = byId('history');
+      scroller.scrollTop = scroller.scrollHeight;
       loadHistory();
     }
   } catch (error) {
@@ -751,10 +914,17 @@ function sendTerminal(packet) {
   if (terminal?.socket?.readyState !== WebSocket.OPEN) return;
   if (!terminal.writable && ['input', 'resize'].includes(packet.type)) return;
   if (packet.type === 'input') {
+    if (packet.submit && !packet.data.length) {
+      terminal.socket.send(JSON.stringify(packet));
+      return;
+    }
     // Split paste into bounded chunks without bisecting Unicode code points.
     const characters = Array.from(packet.data);
     for (let offset = 0; offset < characters.length; offset += 2500) {
-      terminal.socket.send(JSON.stringify({ type: 'input', data: characters.slice(offset, offset + 2500).join('') }));
+      terminal.socket.send(JSON.stringify({
+        type: 'input', data: characters.slice(offset, offset + 2500).join(''),
+        bracketed: packet.submit, submit: packet.submit && offset + 2500 >= characters.length,
+      }));
     }
   } else terminal.socket.send(JSON.stringify(packet));
 }
@@ -765,8 +935,7 @@ function sendKeys(data, submit = false) {
   const alt = terminal.alt;
   if (control) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64);
   if (alt) data = '\x1b' + data;
-  if (submit && !control && !alt) data += '\r';
-  sendTerminal({ type: 'input', data });
+  sendTerminal({ type: 'input', data, submit: submit && !control && !alt });
   terminal.ctrl = terminal.alt = false;
   terminalControls('inputEnabled');
 }
@@ -1119,7 +1288,10 @@ byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
 byId('new-agent').addEventListener('click', newAgentSheet);
 byId('new-shell').addEventListener('click', shellSheet);
-byId('back').addEventListener('click', back);
+byId('back').addEventListener('click', () => {
+  if (route === 'agents' && transcript?.selected) exitMessageSelection();
+  else back();
+});
 byId('mine-back').addEventListener('click', back);
 byId('terminal-pane').addEventListener('change', (event) => {
   if (!active || route !== 'sessions') return;
@@ -1127,16 +1299,22 @@ byId('terminal-pane').addEventListener('change', (event) => {
   paintDetail();
 });
 byId('history').addEventListener('scroll', loadEarlierAtTop, { passive: true });
-byId('select-messages').addEventListener('click', () => {
-  if (!transcript) return;
-  transcript.selected = transcript.selected ? null : new Set();
-  if (!transcript.selected) for (const pick of byId('messages').querySelectorAll('.message-pick')) pick.checked = false;
-  paintMessageSelection();
+byId('exit-selection').addEventListener('click', () => {
+  if (transcript?.selected) exitMessageSelection();
 });
-byId('copy-selection').addEventListener('click', () => {
-  if (!transcript?.selected) return;
-  const ids = [...transcript.selected].sort((a, b) => a - b);
-  copyMessages(ids.map((id) => transcript.rows.get(id)));
+byId('copy-selection').addEventListener('click', () => copyMessages(selectedMessages()));
+byId('share-selection').addEventListener('click', shareMessages);
+document.addEventListener('keydown', (event) => {
+  if (route !== 'agents' || !transcript?.selected || overlay.open) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    exitMessageSelection();
+  } else if (!event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
+      && !event.target.closest?.('input:not([type="checkbox"]),textarea,[contenteditable]')
+      && !window.getSelection()?.toString() && transcript.selected.size) {
+    event.preventDefault();
+    copyMessages(selectedMessages());
+  }
 });
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
 chatInput.addEventListener('input', () => drafts.set(conversationKey(), chatInput.value));
@@ -1161,6 +1339,14 @@ for (const item of document.querySelectorAll('[data-key]')) item.addEventListene
 });
 byId('close').addEventListener('click', closeSheet);
 overlay.addEventListener('click', (event) => { if (event.target === overlay) closeSheet(); });
+document.addEventListener('pointerdown', () => { suppressHoldClick = false; }, true);
+document.addEventListener('click', (event) => {
+  // The release can land on a dialog or a message moved by the selection UI.
+  if (!suppressHoldClick || !event.detail) return;
+  suppressHoldClick = false;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
 byId('mine-passkeys').addEventListener('click', () => openMine('keys'));
 byId('mine-preferences').addEventListener('click', () => openMine('settings'));
 byId('usage-refresh').addEventListener('click', () => loadUsage(true));

@@ -64,6 +64,23 @@ enum Command {
         #[arg(long)]
         session: String,
     },
+    #[command(hide = true)]
+    CloseTarget {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        observe: bool,
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long, requires = "client", conflicts_with = "observe")]
+        confirm: bool,
+        #[arg(long, value_parser = ["en", "zh"])]
+        language: Option<String>,
+    },
     Sidebar {
         #[arg(long, requires_all = ["pane", "client"])]
         popup: bool,
@@ -1608,7 +1625,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("{total} {idle}");
         return Ok(());
     }
-    let paths = if matches!(&cli.command, Command::Snapshot { observe: true, .. }) {
+    let paths = if matches!(
+        &cli.command,
+        Command::Snapshot { observe: true, .. } | Command::CloseTarget { observe: true, .. }
+    ) {
         Paths::discover_read_only()?
     } else {
         Paths::discover()?
@@ -1893,6 +1913,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let pane =
                 tmux_agent_workbench::status_menu::launch_web_agent(&paths, &pane, &session)?;
             println!("{}", serde_json::json!({ "pane": pane }));
+        }
+        Command::CloseTarget {
+            pane,
+            key,
+            agent,
+            observe,
+            client,
+            confirm,
+            language,
+        } => {
+            use tmux_agent_workbench::close_target::{self, Target};
+            close_target::run(
+                Target {
+                    pane: &pane,
+                    key: &key,
+                    agent: agent.as_deref(),
+                },
+                &paths,
+                &ServerIdentity::discover()?,
+                observe,
+                client.as_deref(),
+                confirm,
+                language.as_deref(),
+            )?;
         }
         Command::Sidebar {
             popup,
