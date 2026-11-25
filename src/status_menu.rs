@@ -2721,6 +2721,151 @@ fn launch_argv(options: &MenuOptions) -> Result<Vec<String>> {
     Ok(args)
 }
 
+fn web_launch_options(paths: &Paths) -> Result<Option<MenuOptions>> {
+    if let Some(saved) = LaunchSettings::load(paths)? {
+        return Ok(
+            (executable(saved.tool.name()) && saved.preset.available(saved.tool))
+                .then(|| saved.options(&MenuOptions::default())),
+        );
+    }
+    Ok([Tool::Codex, Tool::Claude, Tool::Traex, Tool::Opencode]
+        .into_iter()
+        .find(|tool| executable(tool.name()))
+        .map(|tool| MenuOptions {
+            tool,
+            ..MenuOptions::default()
+        }))
+}
+
+pub(crate) fn web_launch_tool(paths: &Paths) -> Option<Tool> {
+    web_launch_options(paths)
+        .ok()
+        .flatten()
+        .map(|options| options.tool)
+}
+
+pub fn launch_web_agent(paths: &Paths, pane: &str, session: &str) -> Result<Option<String>> {
+    validate_pane(pane)?;
+    let context = Context::read_launch(pane)?;
+    if context.session != session {
+        return Err("target session changed".into());
+    }
+    let options = web_launch_options(paths)?.ok_or("no available Agent launcher")?;
+    // A bare Workbench installation can use an installed CLI with its own
+    // defaults. Saved Sidebar options always go through agent-team.
+    let args = if executable("agent-team") {
+        launch_argv(&options)?
+    } else {
+        vec![options.tool.name().into()]
+    };
+    start_agent(&context, &options, &args, true)
+}
+
+fn start_agent(
+    context: &Context,
+    options: &MenuOptions,
+    args: &[String],
+    detached: bool,
+) -> Result<Option<String>> {
+    // Codex can refresh its model catalog during startup. Trae exposes a
+    // live catalog, so keep its launch check when using the launcher.
+    if options.tool == Tool::Traex && args[0] == "agent-team" {
+        let output = Command::new(&args[0])
+            .args(&args[1..])
+            .arg("--check")
+            .env_remove("AGENT_TEAM_DIR")
+            .env_remove("AGENT_TEAM_ROLE")
+            .current_dir(&context.cwd)
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string()
+                .into());
+        }
+    }
+    if options.panes && options.preset.is_team() {
+        // agent-team owns creation of the interactive team window.
+        let mut command = Command::new(&args[0]);
+        command
+            .args(&args[1..])
+            .env_remove("AGENT_TEAM_DIR")
+            .env_remove("AGENT_TEAM_ROLE")
+            .env("TMUX_PANE", &context.pane)
+            .current_dir(&context.cwd);
+        if detached {
+            let server = tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &context.pane,
+                "#{socket_path},#{pid}",
+            ])?;
+            command.env("TMUX", format!("{server},{}", &context.session[1..]));
+        }
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string()
+                .into());
+        }
+        // The resulting lead appears in the next snapshot.
+        return Ok(None);
+    }
+    let command = format!(
+        "exec env -u AGENT_TEAM_DIR -u AGENT_TEAM_ROLE {}",
+        args.iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut window = vec![
+        "new-window",
+        "-t",
+        &context.session,
+        "-c",
+        &context.cwd,
+        "-n",
+        options.tool.name(),
+    ];
+    let environment: Vec<_> = if detached {
+        [
+            "PATH",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    if detached {
+        window.extend(["-d", "-P", "-F", "#{pane_id}"]);
+        for value in &environment {
+            window.extend(["-e", value]);
+        }
+    }
+    window.push(&command);
+    let pane = tmux(&window)?;
+    Ok(detached.then_some(pane))
+}
+
 fn execute_action(
     action: &Action,
     context: &Context,
@@ -3025,59 +3170,7 @@ fn execute_action(
         }
         ActionCommand::Launch(settings) => {
             let options = settings.options(options);
-            let args = launch_argv(&options)?;
-            // Codex may refresh a stale model catalog during startup.
-            // Trae exposes a live catalog, so keep its launch check.
-            if options.tool == Tool::Traex {
-                let output = Command::new(&args[0])
-                    .args(&args[1..])
-                    .arg("--check")
-                    .env_remove("AGENT_TEAM_DIR")
-                    .env_remove("AGENT_TEAM_ROLE")
-                    .current_dir(&context.cwd)
-                    .output()?;
-                if !output.status.success() {
-                    return Err(String::from_utf8_lossy(&output.stderr)
-                        .trim()
-                        .to_string()
-                        .into());
-                }
-            }
-            if options.panes && options.preset.is_team() {
-                // agent-team owns creation of its entire interactive team window.
-                // Never create an intermediate launcher pane or mix team modes.
-                let output = Command::new(&args[0])
-                    .args(&args[1..])
-                    .env_remove("AGENT_TEAM_DIR")
-                    .env_remove("AGENT_TEAM_ROLE")
-                    .env("TMUX_PANE", &context.pane)
-                    .current_dir(&context.cwd)
-                    .output()?;
-                if !output.status.success() {
-                    return Err(String::from_utf8_lossy(&output.stderr)
-                        .trim()
-                        .to_string()
-                        .into());
-                }
-            } else {
-                let command = format!(
-                    "exec env -u AGENT_TEAM_DIR -u AGENT_TEAM_ROLE {}",
-                    args.iter()
-                        .map(|a| shell_quote(a))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                tmux(&[
-                    "new-window",
-                    "-t",
-                    &context.session,
-                    "-c",
-                    &context.cwd,
-                    "-n",
-                    options.tool.name(),
-                    &command,
-                ])?;
-            }
+            start_agent(&context, &options, &launch_argv(&options)?, false)?;
             if let Err(error) = (|| settings.save(&Paths::discover()?))() {
                 // The new window already exists. Do not reopen Launch and
                 // encourage an accidental duplicate when only saving failed.

@@ -1903,6 +1903,197 @@ fn sidebar_state(
     })
 }
 
+/// Export the native Sidebar presentation without returning the tmux surface.
+pub fn add_web_view(
+    paths: &Paths,
+    server: &ServerIdentity,
+    value: &mut serde_json::Value,
+    hidden: &[DisplayState],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::json;
+
+    let mut surface = value
+        .as_object_mut()
+        .ok_or("invalid Workbench snapshot")?
+        .remove("_workbench_surface")
+        .and_then(|value| serde_json::from_value::<crate::tmux::SurfaceInventory>(value).ok())
+        .filter(|surface| surface.sidebar.is_some());
+    let snapshot: Snapshot = serde_json::from_value(value.clone())?;
+    // An observer or an older running daemon can supply the snapshot without
+    // the inventory. Read the same tmux surface in the calling process.
+    if surface.is_none() {
+        let probe = crate::tmux::Tmux::new(server.clone()).surface_probe()?;
+        surface = probe.surface.map(|mut surface| {
+            surface.sidebar = shared_sidebar_data(paths, server, &snapshot, &mut None, &surface);
+            surface
+        });
+    }
+    let SidebarFrame { snapshot, data, .. } = sidebar_state(snapshot, surface.as_ref())?;
+    let palette = surface
+        .as_ref()
+        .map(SidebarPalette::from_surface)
+        .unwrap_or_default();
+    let sort = persisted_agent_sort(paths)
+        .or(data.sort)
+        .unwrap_or_else(|| {
+            Config::load(&paths.config_file())
+                .unwrap_or_default()
+                .sidebar
+                .agent_sort
+        });
+    let mut filter = AgentStateFilter::default();
+    for state in FILTERED_AGENT_STATES {
+        if hidden.contains(&state) {
+            filter.toggle(state);
+        }
+    }
+    let expanded: HashSet<_> = data
+        .teams
+        .values()
+        .map(|member| member.key.clone())
+        .collect();
+    let rows =
+        |view, filter| view_rows(&snapshot, false, sort, &data.teams, &expanded, view, filter);
+    let agents: Vec<_> = rows(SidebarView::Agents, filter)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::AgentGroup(name) => Some(json!({ "group": name })),
+            Row::Agent(agent) => Some(json!({ "id": agent.instance_id })),
+            Row::Team(agent, team) => Some(json!({
+                "id": agent.instance_id,
+                "team": { "workers": team.workers, "blocked": team.blocked, "done": team.done },
+            })),
+            Row::TeamWorker(agent, worker) => Some(json!({
+                "id": agent.instance_id, "worker": { "name": worker.name, "title": worker.title },
+            })),
+            _ => None,
+        })
+        .collect();
+    let sessions: Vec<_> = rows(SidebarView::Sessions, AgentStateFilter::default())
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Session(session) => Some(session.session_id),
+            _ => None,
+        })
+        .collect();
+    let pinned: Vec<_> = build_pinned_cards(
+        SidebarView::Agents,
+        false,
+        sort,
+        &data.teams,
+        &expanded,
+        &data.focused,
+        &data.sessions,
+        Some(&snapshot),
+    )
+    .into_iter()
+    .filter_map(|card| match card {
+        PinnedCard::Agent(card) => Some(json!({
+            "window": card.window.id,
+            "session": card.window.session_id,
+            "pane": card.window.pane,
+            "title": card.window.name,
+            "state": card.window.state,
+            "assistant": card.window.assistant,
+            "agent": card.agent.map(|agent| agent.instance_id),
+        })),
+        _ => None,
+    })
+    .collect();
+    let pinned_sessions: Vec<_> = build_pinned_cards(
+        SidebarView::Sessions,
+        false,
+        sort,
+        &data.teams,
+        &expanded,
+        &data.focused,
+        &data.sessions,
+        Some(&snapshot),
+    )
+    .into_iter()
+    .filter_map(|card| match card {
+        PinnedCard::Session(session) => Some(session.session_id),
+        _ => None,
+    })
+    .collect();
+    let stats: Vec<_> = FILTERED_AGENT_STATES
+        .into_iter()
+        .zip(agent_state_counts(Some(&snapshot)))
+        .map(|(state, count)| json!({ "state": state, "count": count }))
+        .collect();
+    let colors = FILTERED_AGENT_STATES
+        .into_iter()
+        .chain([DisplayState::Unknown])
+        .map(|state| {
+            let key = serde_json::to_value(state)?;
+            Ok((
+                key.as_str().unwrap().to_owned(),
+                json!(css_color(
+                    state_color_with_palette(state, palette),
+                    palette.muted
+                )),
+            ))
+        })
+        .collect::<Result<serde_json::Map<String, serde_json::Value>, serde_json::Error>>()?;
+    *value = serde_json::to_value(snapshot)?;
+    value["sidebar"] = json!({
+        "sort": sort,
+        "stats": stats,
+        "colors": colors,
+        "agentRows": agents,
+        "sessionRows": sessions,
+        "pinnedAgents": pinned,
+        "pinnedSessions": pinned_sessions,
+        "branches": data.branches,
+        "launchTool": crate::status_menu::web_launch_tool(paths),
+    });
+    Ok(())
+}
+
+fn css_color(color: Color, muted: Color) -> String {
+    const ANSI: [u32; 16] = [
+        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
+        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+    ];
+    let index = match color {
+        Color::Rgb(red, green, blue) => return format!("#{red:02x}{green:02x}{blue:02x}"),
+        Color::Indexed(index) => index,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset if muted != Color::Reset => return css_color(muted, Color::Reset),
+        Color::Reset => return "#8d95a3".into(),
+    };
+    match index {
+        0..=15 => format!("#{:06x}", ANSI[usize::from(index)]),
+        16..=231 => {
+            let cube = index - 16;
+            let level = [0, 95, 135, 175, 215, 255];
+            let red = level[usize::from(cube / 36)];
+            let green = level[usize::from(cube / 6 % 6)];
+            let blue = level[usize::from(cube % 6)];
+            format!("#{red:02x}{green:02x}{blue:02x}")
+        }
+        _ => {
+            let gray = 8 + (index - 232) * 10;
+            format!("#{gray:02x}{gray:02x}{gray:02x}")
+        }
+    }
+}
+
 fn foreground_pane<'a>(
     surface: &'a crate::tmux::SurfaceInventory,
     source: &str,
@@ -2423,7 +2614,7 @@ fn persisted_sidebar_view(paths: &Paths) -> Option<SidebarView> {
     }
 }
 
-fn persist_agent_sort(paths: &Paths, sort: AgentSort) -> io::Result<()> {
+pub fn persist_agent_sort(paths: &Paths, sort: AgentSort) -> io::Result<()> {
     std::fs::create_dir_all(&paths.state_dir)?;
     std::fs::write(
         paths.state_dir.join("sidebar-agent-sort"),

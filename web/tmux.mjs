@@ -12,20 +12,22 @@ const webSession = '__workbench_web';
 const paneFormat = [
   'pane_id', 'session_id', 'window_id', 'pane_pid', 'pid', 'start_time',
   'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'pane_dead',
-  '@workbench-web-pane', 'pane_in_mode',
+  '@workbench-web-pane', 'pane_in_mode', '@pane_role',
 ].map((field) => '#{' + field + '}').join('|');
 const limitsFile = join(workbenchState, 'usage', 'codex-limits.json');
 const maxBytes = 384 * 1024;
 const ttl = 20_000;
+const sidebarStates = ['blocked', 'done', 'working', 'idle'];
 
 function paneFrom(line) {
-  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode] = line.split('|');
+  const [pane, session, window, processId, serverId, startTime, cols, rows, x, y, dead, tag, mode, role] = line.split('|');
   if (!/^%\d+$/.test(pane) || !/^\$\d+$/.test(session) || !/^@\d+$/.test(window)
       || ![processId, serverId, startTime].every((value) => /^\d+$/.test(value)) || dead === '1') return null;
   return {
     pane, session, window, cols: Number(cols), rows: Number(rows), x: Number(x), y: Number(y),
     key: [serverId, startTime, pane.slice(1), processId].join('.'),
     owned: ['window', 'split'].includes(tag), resizable: tag === 'window', inMode: mode === '1',
+    sidebar: role === 'sidebar',
   };
 }
 
@@ -77,55 +79,95 @@ export class LocalNode {
     return this.socket || (await this.tmux(['display-message', '-p', '#{socket_path}'])).trim();
   }
 
-  async snapshot(fresh = false) {
-    if (!fresh && this.recentSnapshot?.expires > Date.now()) return this.recentSnapshot.task;
-    const task = this.socketPath().then(async (socket) => {
+  async coreCommand(args) {
+    const socket = await this.socketPath();
+    const { stdout } = await run(this.core, args, {
+      env: { ...this.env, TMUX_AGENT_WORKBENCH_TMUX_SOCKET: socket },
+      timeout: 8000, maxBuffer: 4 * 1024 * 1024,
+    });
+    return stdout;
+  }
+
+  snapshot(fresh = false, hidden = []) {
+    const states = sidebarStates.filter((state) => hidden.includes(state));
+    const key = states.join(',');
+    if (!fresh && this.recentSnapshot?.key === key && this.recentSnapshot.expires > Date.now()) return this.recentSnapshot.task;
+    const task = (async () => {
       const args = ['snapshot', '--json'];
       if (this.observeSnapshot) args.push('--observe');
-      const { stdout } = await run(this.core, args, {
-        env: { ...this.env, TMUX_AGENT_WORKBENCH_TMUX_SOCKET: socket },
-        timeout: 8000, maxBuffer: 4 * 1024 * 1024,
-      });
+      let stdout;
+      try {
+        stdout = await this.coreCommand([...args, '--sidebar', ...states.flatMap((state) => ['--hide-state', state])]);
+      } catch (error) {
+        // Older cores still provide the normal agent and session catalog.
+        if (!/(?:unexpected|unknown) argument '--sidebar'/.test(error.stderr || '')) throw error;
+        stdout = await this.coreCommand(args);
+      }
       const data = JSON.parse(stdout);
-      if (data.schema_version !== 1 || !Array.isArray(data.agents)) throw new Error('Unsupported Workbench snapshot.');
-      return data.agents.filter((agent) => !agent.exited && !agent.stale && agent.target?.pane_id);
-    });
-    this.recentSnapshot = { expires: Date.now() + 850, task };
+      if (data.schema_version !== 1 || !Array.isArray(data.agents) || !Array.isArray(data.sessions)) {
+        throw new Error('Unsupported Workbench snapshot.');
+      }
+      return data;
+    })();
+    this.recentSnapshot = { key, expires: Date.now() + 850, task };
     return task;
   }
 
   async panes() {
-    try {
-      const rows = await this.tmux(['list-panes', '-a', '-F', paneFormat]);
-      return rows.split('\n').map(paneFrom).filter(Boolean);
-    } catch {
-      return [];
-    }
+    const rows = await this.tmux(['list-panes', '-a', '-F', paneFormat]);
+    return rows.split('\n').map(paneFrom).filter((pane) => pane && !pane.sidebar);
   }
 
-  async catalog(fresh = false) {
-    const [snapshot, panes] = await Promise.allSettled([this.snapshot(fresh), this.panes()]);
+  async catalog(fresh = false, hidden = []) {
+    const [snapshot, panes] = await Promise.allSettled([this.snapshot(fresh, hidden), this.panes()]);
     const raw = panes.status === 'fulfilled' ? panes.value : [];
+    const data = snapshot.status === 'fulfilled' ? snapshot.value : null;
+    const sidebar = data?.sidebar;
+    const byPane = new Map(raw.map((pane) => [pane.pane, pane]));
+    const byLocation = new Map(raw.map((pane) => [pane.session + '/' + pane.pane, pane]));
     const agents = [];
-    for (const agent of snapshot.status === 'fulfilled' ? snapshot.value : []) {
-      const target = raw.find((pane) => pane.pane === agent.target.pane_id && pane.session === agent.target.session_id)
-        || raw.find((pane) => pane.pane === agent.target.pane_id);
+    for (const agent of data?.agents || []) {
+      if (!agent.target?.pane_id || (!sidebar && (agent.exited || agent.stale))) continue;
+      const target = byLocation.get(agent.target.session_id + '/' + agent.target.pane_id)
+        || byPane.get(agent.target.pane_id);
       if (!target) continue;
       agents.push({
         id: agent.instance_id, title: agent.label || agent.target.window_name || agent.kind,
-        kind: agent.kind, state: agent.display_state, session: agent.target.session_name,
-        pane: target, thread: agent.hook_session_id,
-        structured: agent.kind === 'codex' && hasThread(agent.hook_session_id),
+        kind: agent.kind, state: agent.display_state, session: agent.target.session_name, pane: target,
+        exited: agent.exited, stale: agent.stale, thread: agent.hook_session_id,
+        structured: !agent.exited && !agent.stale && agent.kind === 'codex' && hasThread(agent.hook_session_id),
       });
     }
-    const seen = new Set(agents.map((agent) => agent.pane.key));
-    const terminals = agents.map((agent) => ({ pane: agent.pane, title: agent.title, session: agent.session, kind: agent.kind }));
-    for (const pane of raw) {
-      if (!pane.owned || seen.has(pane.key)) continue;
-      seen.add(pane.key);
-      terminals.push({ pane, title: 'Shell ' + pane.pane, session: pane.resizable ? 'Web Terminals' : 'Split pane', kind: 'shell' });
+    const sessions = (data?.sessions || []).map((session) => {
+      const id = session.session_id;
+      return {
+        id, title: session.session_name, state: session.rollup_state, agentCount: session.agent_count,
+        attentionCount: session.attention_count, branch: sidebar?.branches?.[session.current_path],
+        pane: byLocation.get(id + '/' + session.last_active_pane_id) || raw.find((pane) => pane.session === id),
+      };
+    });
+    const pinnedAgents = (sidebar?.pinnedAgents || []).map((card) => {
+      const agent = agents.find((entry) => entry.id === card.agent);
+      const pane = agent?.pane || byLocation.get(card.session + '/' + card.pane)
+        || raw.find((target) => target.session === card.session && target.window === card.window);
+      return {
+        id: agent?.id || card.window, title: agent?.title || card.title, pane, state: card.state,
+        kind: agent?.kind || 'shell', session: sessions.find(({ id }) => id === card.session)?.title,
+        structured: agent?.structured, thread: agent?.thread, assistant: card.assistant,
+      };
+    });
+    const terminals = agents.filter(({ pane }) => !pane.owned)
+      .map((agent) => ({ pane: agent.pane, title: agent.title, session: agent.session, kind: agent.kind }));
+    terminals.push(...raw.filter(({ owned }) => owned).map((pane) => ({ pane, title: 'Shell ' + pane.pane, kind: 'shell' })));
+    const catalog = {
+      agents, sessions, terminals, pinnedAgents,
+      snapshotAvailable: Boolean(data) && panes.status === 'fulfilled',
+    };
+    if (sidebar) {
+      const { sort, colors, stats, agentRows, sessionRows, pinnedSessions, launchTool } = sidebar;
+      catalog.sidebar = { sort, colors, stats, agentRows, sessionRows, pinnedSessions, launchTool };
     }
-    return { agents, terminals, snapshotAvailable: snapshot.status === 'fulfilled' };
+    return catalog;
   }
 
   async pane(key, fresh = false) {
@@ -141,8 +183,57 @@ export class LocalNode {
     } catch {
       throw new Failure(404, 'Pane closed or no longer accessible.');
     }
-    if (current?.key !== target.key) throw new Failure(409, 'Pane identity changed. Reopen it.');
+    if (current?.key !== target.key || current.sidebar) throw new Failure(409, 'Pane identity changed. Reopen it.');
     return current;
+  }
+
+  async pin({ scope, target, pane, pinned }) {
+    if (!['agent', 'session'].includes(scope) || typeof pinned !== 'boolean') throw new Failure(400, 'Invalid pin request.');
+    const catalog = await this.catalog(true);
+    if (!catalog.sidebar) throw new Failure(503, 'Sidebar state is unavailable on this machine.');
+    const session = scope === 'session';
+    const entry = (session ? catalog.sessions : [...catalog.agents, ...catalog.pinnedAgents])
+      .find((item) => item.pane?.key === pane && (session ? item.id : item.pane.window) === target);
+    if (!entry) throw new Failure(409, 'The target changed. Refresh the list and try again.');
+    if (!session && !pinned && catalog.pinnedAgents.some((item) => item.pane?.window === target && item.assistant)) {
+      throw new Failure(409, 'The personal assistant stays pinned.');
+    }
+    const live = await this.verify(entry.pane);
+    if ((session ? live.session : live.window) !== target) throw new Failure(409, 'The target changed. Refresh the list and try again.');
+    const marker = session ? '@workbench_session_focus' : '@agent_focus';
+    await this.tmux(['set-option', ...(session ? [] : ['-w']), ...(pinned ? [] : ['-qu']),
+      '-t', target, marker, ...(pinned ? ['1'] : [])]);
+    this.recentSnapshot = null;
+    return {};
+  }
+
+  async setSort(sort) {
+    if (!['grouped', 'prioritized'].includes(sort)) throw new Failure(400, 'Invalid Sidebar sort.');
+    await this.coreCommand(['sidebar-sort', '--sort', sort]);
+    this.recentSnapshot = null;
+    return {};
+  }
+
+  async launch({ session, pane }) {
+    const catalog = await this.catalog(true);
+    if (!catalog.sidebar?.launchTool) throw new Failure(503, 'No Agent launcher is available on this machine.');
+    const target = catalog.sessions.find((item) => item.id === session && item.pane?.key === pane);
+    if (!target) throw new Failure(409, 'The target changed. Refresh the list and try again.');
+    const live = await this.verify(target.pane);
+    if (live.session !== session) throw new Failure(409, 'The target changed. Refresh the list and try again.');
+    let result;
+    try {
+      result = JSON.parse(await this.coreCommand(['web-launch-agent', '--pane', live.pane, '--session', live.session]));
+    } catch {
+      throw new Failure(502, 'Could not start the Agent. Check the machine before trying again.');
+    }
+    this.recentSnapshot = null;
+    if (!/^%\d+$/.test(result.pane || '')) return { pane: null };
+    const created = (await this.panes().catch(() => [])).find((item) => item.pane === result.pane && item.session === session);
+    if (!created || created.key.split('.').slice(0, 2).join('.') !== live.key.split('.').slice(0, 2).join('.')) {
+      return { pane: null };
+    }
+    return { pane: created };
   }
 
   async transcript(agentId, before) {
@@ -191,9 +282,19 @@ export class LocalNode {
     }
   }
 
-  async create(split) {
+  async create(split, session, anchor) {
     let output;
-    if (split) {
+    if (session) {
+      const catalog = await this.catalog(true);
+      const target = catalog.sessions.find((item) => item.id === session)?.pane;
+      const shell = catalog.terminals.find((item) => item.kind === 'shell' && item.pane.session === session && item.pane.key === anchor);
+      const pane = shell?.pane || (target?.key === anchor ? target : null);
+      if (!pane || typeof split !== 'boolean') throw new Failure(409, 'The target changed. Refresh the list and try again.');
+      const live = await this.verify(pane);
+      if (live.session !== session) throw new Failure(409, 'The target changed. Refresh the list and try again.');
+      const placement = split ? ['split-window', '-t', pane.pane] : ['new-window', '-t', session + ':', '-n', 'Shell'];
+      output = await this.tmux([...placement, '-d', '-P', '-F', '#{pane_id}', '-c', '#{pane_current_path}']);
+    } else if (split) {
       const target = await this.pane(split, true);
       await this.verify(target);
       output = await this.tmux(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.pane, '-c', '#{pane_current_path}']);
@@ -346,10 +447,13 @@ export class LocalNode {
 
   request(method, args) {
     switch (method) {
-      case 'catalog': return this.catalog();
+      case 'catalog': return this.catalog(false, Array.isArray(args.hidden) ? args.hidden : []);
+      case 'pin': return this.pin(args);
+      case 'sidebar-sort': return this.setSort(args.sort);
+      case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before);
       case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane);
-      case 'create': return this.create(args.split);
+      case 'create': return this.create(args.split, args.session, args.anchor);
       case 'open': return this.watchOpen(args.pane);
       case 'read': return this.watchRead(args.watch, args.after);
       case 'input': return this.watchInput(args.watch, args.data);
