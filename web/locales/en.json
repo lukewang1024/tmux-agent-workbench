@@ -109,7 +109,15 @@
     "deviceExample": "For example, Android phone",
     "createPasskey": "Create passkey",
     "passkeyLabel": "Passkey",
-    "inviteInstructions": "Create a one-time enrollment link on the gateway, then open it on this device.",
+    "inviteInstructions": "Get a one-time link from Profile → Passkeys on a signed-in device. For the first device, create the link on the gateway.",
+    "setupAnotherDevice": "Set up another device",
+    "enrollmentLink": "Enrollment link",
+    "deviceInviteHelp": {
+      "one": "Open this one-time link on the new device. It expires in {count} minute.",
+      "other": "Open this one-time link on the new device. It expires in {count} minutes."
+    },
+    "copyLink": "Copy link",
+    "linkCopied": "Link copied",
     "alreadyInstalled": "Workbench Web is open in its own window.",
     "androidInstallInstructions": "In Chrome for Android, choose Add to home screen, then Install.",
     "networkInterrupted": "Connection lost. Reconnecting when the network is back.",

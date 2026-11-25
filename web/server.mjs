@@ -201,6 +201,10 @@ export async function startServer({ local, localName, store, listen, origin, cer
       for (const client of browserSockets) if (!auth.valid(client.session)) client.socket.close(4001, 'Passkey revoked');
       return json(res, {});
     }
+    if (path === '/api/passkeys/invitations' && method === 'POST') {
+      auth.throttle(req);
+      return json(res, store.issuePasskeyLink(url.origin), 201);
+    }
     if (path === '/api/workspace' && method === 'GET') return json(res, await workspace());
     if (path === '/api/usage' && (method === 'GET' || method === 'POST')) {
       return json(res, await local.request('usage', { refresh: method === 'POST' }));

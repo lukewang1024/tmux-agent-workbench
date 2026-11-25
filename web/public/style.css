@@ -117,7 +117,7 @@ h1, h2, h3, p { margin: 0; }
 .choice { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 650; }
 .pane-form { display: grid; gap: 12px; }
 .pane-form label { display: grid; gap: 5px; font-size: 13px; font-weight: 650; }
-.pane-form select { padding: 8px 9px; border: 1px solid #cbd8e9; border-radius: 8px; min-height: 44px; background: var(--paper); color: var(--ink); }
+.pane-form input, .pane-form select { width: 100%; min-width: 0; min-height: 44px; padding: 8px 9px; border: 1px solid #cbd8e9; border-radius: 8px; background: var(--paper); color: var(--ink); }
 .pane-form .primary { margin-top: 5px; }
 .glyph {
   display: block;
@@ -257,7 +257,7 @@ button { touch-action: manipulation; }
 .metric meter::-moz-meter-bar { background: #4d71cd; border-radius: 8px; }
 .metric .reset { color: var(--muted); font-size: 11px; }
 .subpage { width: min(100%, 540px); }
-.subpage .primary { margin-top: 13px; }
+.passkey-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
 .subpage .profile-row + .profile-row { margin-top: 9px; }
 
 .overlay {
@@ -327,7 +327,7 @@ h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
   }
   .app[data-ime] { height: var(--ime-height, 100dvh); }
   .app[data-ime] .app-nav { display: none; }
-  .composer textarea, .term-entry input, .pane-form select { font-size: 16px; }
+  .composer textarea, .term-entry input, .pane-form input, .pane-form select { font-size: 16px; }
   .composer-wrap, .terminal-panel { padding-bottom: 13px; }
   .app[data-ime] .composer-wrap, .app[data-ime] .terminal-panel { padding-bottom: max(9px, env(safe-area-inset-bottom)); }
   .nav-brand { display: none; }

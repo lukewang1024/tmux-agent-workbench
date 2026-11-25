@@ -9,6 +9,8 @@ export const defaultState = join(workbenchState, 'web');
 export const secret = () => randomBytes(32).toString('base64url');
 export const hash = (value) => createHash('sha256').update(value).digest('hex');
 
+const invitationLifetimeMinutes = 10;
+
 export class Failure extends Error {
   constructor(status, message) {
     super(message);
@@ -87,8 +89,12 @@ export class Store {
       const path = join(this.invites, file);
       if ((readJson(path)?.expires ?? 0) < Date.now()) remove(path);
     }
-    writeJson(join(this.invites, hash(token) + '.json'), { kind, node, expires: Date.now() + 10 * 60_000 });
+    writeJson(join(this.invites, hash(token) + '.json'), { kind, node, expires: Date.now() + invitationLifetimeMinutes * 60_000 });
     return token;
+  }
+
+  issuePasskeyLink(origin) {
+    return { url: origin + '/#invite=' + this.issue('passkey'), expiresInMinutes: invitationLifetimeMinutes };
   }
 
   invitation(token, kind, consume = false) {

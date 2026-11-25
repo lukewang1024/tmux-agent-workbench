@@ -98,7 +98,7 @@ async function main() {
 
   if (verb === 'invite' && positionals.length === 0) {
     const origin = parseOrigin(values.origin || 'http://localhost:7080').origin;
-    process.stdout.write(origin + '/#invite=' + store.issue('passkey') + '\n');
+    process.stdout.write(store.issuePasskeyLink(origin).url + '\n');
     return;
   }
 

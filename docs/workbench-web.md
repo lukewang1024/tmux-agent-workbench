@@ -25,15 +25,19 @@ path with tmux display-message -p '#{socket_path}'.
 
 The gateway listens on IPv4 loopback. The default listener is
 127.0.0.1:7080 and the default browser origin is http://localhost:7080.
-In a separate terminal under the same account, issue an invitation with
-the gateway's state directory and browser origin.
+In a separate terminal under the same account, issue an invitation for
+the first device.
 
-    tmux-agent-workbench web invite --origin http://localhost:7080
+    tmux-agent-workbench web invite
+
+For a custom state directory or browser origin, pass the gateway's --state
+or --origin value to the invite command.
 
 Open the resulting link and create a Passkey using the device's screen lock.
 Invitations expire after ten minutes and are consumed by successful enrollment.
-Treat an unused invitation like a credential. For additional devices, use the
-Passkey page in the PWA or issue another invitation from the gateway account.
+Treat an unused invitation like a credential. For another device, open
+Profile → Passkeys on a signed-in device and choose **Set up another device**.
+Copy the link to the device you want to set up and open it in Chrome.
 
 ## Language
 
