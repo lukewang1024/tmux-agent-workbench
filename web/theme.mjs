@@ -67,11 +67,21 @@ function tmuxColor(value) {
 }
 
 export function tmuxPalette(line) {
-  const [appearance, mode, raw] = line.trimEnd().split('\t', 3);
+  const [appearance, mode, accent, statusStyle, ...fields] = line.trimEnd().split('|');
   if (appearance !== 'light' && appearance !== 'dark') return undefined;
+  const raw = fields.join('|');
   let palette;
-  try { palette = JSON.parse(raw); } catch { return undefined; }
-  if (palette?.version !== 1) return undefined;
+  if (raw) {
+    try { palette = JSON.parse(raw); } catch { return undefined; }
+    if (palette?.version !== 1) return undefined;
+  } else {
+    const style = (statusStyle || '').split(',').map((part) => part.trim());
+    palette = {
+      background: style.find((part) => part.startsWith('bg='))?.slice(3),
+      foreground: style.find((part) => part.startsWith('fg='))?.slice(3),
+      accent,
+    };
+  }
   const roles = {};
   for (const name of tmuxRoles) {
     const color = tmuxColor(palette[name]);

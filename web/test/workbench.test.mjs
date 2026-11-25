@@ -23,15 +23,18 @@ async function scratch(t) {
 }
 
 test('tmux palette preserves indexed and true colors while discarding invalid roles', () => {
-  const line = 'dark\tfull\t' + JSON.stringify({
+  const line = 'dark|full|||' + JSON.stringify({
     version: 1, background: '#282c34', accent: 'colour0', warning: 'color231',
     alert: 'bright-red', info: 'colour256', muted: 'var(--unexpected)', extra: '#ffffff',
   });
   assert.deepEqual(tmuxPalette(line), {
     appearance: 'dark', full: true, roles: { background: '#282c34', accent: 0, warning: 231, alert: 9 },
   });
-  assert.equal(tmuxPalette('light\tlight\t{"version":2}'), undefined);
-  assert.equal(tmuxPalette('light\tlight\tbroken'), undefined);
+  assert.deepEqual(tmuxPalette('light|full|colour5|bg=#fafafa,fg=#383a42,none|'), {
+    appearance: 'light', full: true, roles: { background: '#fafafa', foreground: '#383a42', accent: 5 },
+  });
+  assert.equal(tmuxPalette('light|light|||{"version":2}'), undefined);
+  assert.equal(tmuxPalette('light|light|||broken'), undefined);
 });
 
 test('node invites are scoped to one identity, single-use, and revocable', async (t) => {

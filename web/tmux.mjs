@@ -15,6 +15,9 @@ const paneFormat = [
   'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'pane_dead',
   '@workbench-web-pane', 'pane_in_mode', '@pane_role', 'window_index', 'pane_index', 'window_name',
 ].map((field) => '#{' + field + '}').join('|');
+// Older tmux builds can replace tabs in format output.
+const paletteFormat = ['@adaptive_appearance', '@adaptive_mode', '@adaptive_accent', 'status-style', '@adaptive_palette']
+  .map((field) => '#{' + field + '}').join('|');
 const limitsFile = join(workbenchState, 'usage', 'codex-limits.json');
 const maxBytes = 384 * 1024;
 const ttl = 20_000;
@@ -132,7 +135,7 @@ export class LocalNode {
   async catalog(fresh = false, hidden = []) {
     const [snapshot, panes, palette] = await Promise.allSettled([
       this.snapshot(fresh, hidden), this.panes(),
-      this.tmux(['display-message', '-p', '#{@adaptive_appearance}\t#{@adaptive_mode}\t#{@adaptive_palette}']).then(tmuxPalette),
+      this.tmux(['display-message', '-p', paletteFormat]).then(tmuxPalette),
     ]);
     const raw = panes.status === 'fulfilled' ? panes.value : [];
     const data = snapshot.status === 'fulfilled' ? snapshot.value : null;
