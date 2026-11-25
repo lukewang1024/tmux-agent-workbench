@@ -1278,6 +1278,45 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
              '--view', 'create', '--json'], env=env))
         assert [item['id'] for item in create_model['items'] if item['id'] != 'back'] == [
             'create-agent', 'create-pane', 'create-window', 'new-session']
+        os.write(master, b'\x1b')
+        drain(0.7)
+        # With no editor alternative, selecting Window creates it immediately.
+        # Use a controlled PATH so this also covers machines with VS Code.
+        window_tools = root / 'window-tools'
+        window_tools.mkdir()
+        (window_tools / 'tmux').symlink_to(shutil.which('tmux', path=env['PATH']))
+        window_env = dict(env, PATH=str(window_tools))
+        window_args = [core, 'status-menu', 'menu', '--pane', pane, '--client', client,
+                       '--view', 'create']
+        direct_model = json.loads(subprocess.check_output(
+            [*window_args, '--json'], env=window_env))
+        direct_window = next(item for item in direct_model['items']
+                             if item['id'] == 'create-window')
+        direct_callback = shlex.split(shlex.split(direct_window['command'])[-1])
+        windows_before = set(tmux('list-windows', '-F', '#{window_id}').splitlines())
+        subprocess.run(direct_callback, env=window_env,
+                       check=True, capture_output=True)
+        windows_after = set(tmux('list-windows', '-F', '#{window_id}').splitlines())
+        assert len(windows_after - windows_before) == 1, (windows_before, windows_after)
+        created_window = (windows_after - windows_before).pop()
+        assert tmux('display-message', '-p', '-t', created_window,
+                    '#{pane_current_path}') == str(project)
+        tmux('kill-window', '-t', created_window)
+        # Keep the submenu when a second, useful window action is available.
+        (window_tools / 'code').write_text('#!/bin/sh\nexit 0\n')
+        (window_tools / 'code').chmod(0o755)
+        editor_model = json.loads(subprocess.check_output(
+            [*window_args, '--json'], env=window_env))
+        editor_window = next(item for item in editor_model['items']
+                             if item['id'] == 'create-window')
+        editor_callback = shlex.split(shlex.split(editor_window['command'])[-1])
+        editor_choices = json.loads(subprocess.check_output(
+            [*editor_callback, '--json'], env=window_env))
+        assert [item['id'] for item in editor_choices['items'] if item['id'] != 'back'] == [
+            'new-window', 'editor']
+        print('PASS Create Window acts directly without VS Code and keeps editor choices when available')
+        menu = open_menu(window_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'Agent', b'Pane', b'Window', b'Session')
         # With no saved setup, Quick create advertises the installed-Agent fallback.
         os.write(master, b'a')
         wait_for_text(client_process, b'Quick create', b'Codex', b'Claude Code')
