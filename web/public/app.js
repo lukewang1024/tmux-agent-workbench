@@ -1,4 +1,6 @@
+import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
+import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
 const autoSizeComposer = CSS.supports('field-sizing', 'content');
@@ -14,7 +16,6 @@ const mobile = window.matchMedia('(max-width: 767px)');
 const fullScreenPreview = window.matchMedia('(max-width: 1023px)');
 const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
 const chatInput = byId('chat-input');
-const termInput = byId('term-input');
 const markdown = window.markdownit({ html: false, breaks: true, linkify: true });
 const passkeys = window.SimpleWebAuthnBrowser;
 const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
@@ -27,8 +28,6 @@ const labels = { agents: t('agents'), sessions: t('sessions'), machines: t('mach
 const states = ['blocked', 'done', 'working', 'idle'];
 const stateRoles = { blocked: 'alert', done: 'info', working: 'warning', idle: 'accent', unknown: 'muted' };
 const stateAnsi = { blocked: 1, done: 4, working: 3, idle: 2 };
-const ansiNames = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
-  'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
 
 let signedIn = false;
 let reauthRequired = false;
@@ -55,11 +54,7 @@ const selectedPane = new Map();
 const hiddenStates = new Set();
 const expandedTeams = new Set();
 const expandedSessions = new Set();
-const drafts = new Map();
-const outgoing = new Map();
-const chatModels = new Map();
-const chatPermissions = new Map();
-const nextSettings = new Map();
+const chatState = new ChatState(() => localStorage);
 const suggestionCache = new Map();
 let suggestionIndex = 0;
 let suggestionItems = [];
@@ -68,7 +63,9 @@ let transcript = null;
 let submitting = false;
 let stopping = null;
 let modelEditor = null;
-let terminal = null;
+const terminalView = new TerminalView(byId('term'), {
+  translate: t, mobile, available: () => !disconnected && !reauthRequired, requirePasskey, reportError: toast,
+});
 let suppressHoldClick = false;
 const linkTabs = new Map();
 let activeLink = '';
@@ -177,7 +174,7 @@ function connectionChanged(session) {
     if (enrollment) registerSheet();
   } else if (restored && signedIn && !reauthRequired) {
     refresh(true).then(() => {
-      if (terminal) connectTerminal(terminal);
+      terminalView.resume();
       if (route === 'agents' && supportsChat() && (opened || !mobile.matches)) loadHistory();
     });
   }
@@ -212,105 +209,16 @@ function conversationKey(item = active) {
   return item?.thread ? item.node + '/thread/' + item.thread : recordKey(item);
 }
 
-const draftStorage = 'workbench-chat-v1/draft/';
-const deliveryStorage = 'workbench-chat-v1/delivery/';
-const settingsStorage = 'workbench-chat-v1/settings/';
-
-function cacheChat(key, value) {
-  try {
-    if (value) localStorage.setItem(key, JSON.stringify(value));
-    else localStorage.removeItem(key);
-  } catch {}
-}
-
-function rememberDraft(key, text, retry) {
-  if (text) drafts.set(key, { text, retry });
-  else drafts.delete(key);
-  cacheChat(draftStorage + key, drafts.get(key));
-}
-
-function rememberSettings(key, settings) {
-  if (settings.model || settings.permission) nextSettings.set(key, settings);
-  else nextSettings.delete(key);
-  cacheChat(settingsStorage + key, nextSettings.get(key));
-}
-
-function restoreChats() {
-  try {
-    for (const storageKey of Object.keys(localStorage)) {
-      const isDraft = storageKey.startsWith(draftStorage);
-      const isSettings = storageKey.startsWith(settingsStorage);
-      if (!isDraft && !isSettings && !storageKey.startsWith(deliveryStorage)) continue;
-      let saved;
-      try { saved = JSON.parse(localStorage.getItem(storageKey)); } catch { continue; }
-      if (isSettings) {
-        if (saved?.model || saved?.permission) nextSettings.set(storageKey.slice(settingsStorage.length), saved);
-        continue;
-      }
-      if (typeof saved?.text !== 'string' || !saved.text) continue;
-      if (isDraft) {
-        drafts.set(storageKey.slice(draftStorage.length), saved);
-        continue;
-      }
-      if (storageKey !== deliveryStorage + saved.id || typeof saved.key !== 'string'
-          || !['sending', 'sent', 'failed'].includes(saved.state)) continue;
-      if (saved.state === 'sending') {
-        saved.state = 'failed';
-        saved.error = t('sendUnconfirmed');
-      }
-      const queue = outgoing.get(saved.key) || { entries: [], matched: new Set() };
-      queue.entries.push(saved);
-      outgoing.set(saved.key, queue);
-    }
-    for (const [key, queue] of outgoing) {
-      queue.entries.sort((a, b) => a.startedAt - b.startedAt);
-      const failed = queue.entries.findLast((entry) => entry.state === 'failed');
-      if (failed && !drafts.has(key)) drafts.set(key, { text: failed.text, retry: failed.id });
-    }
-  } catch {}
-}
-
 function promoteChats(nodes) {
   for (const machine of nodes) {
     for (const agent of machine.agents || []) {
       if (!agent.thread) continue;
       const item = withMachine(agent, machine);
-      const previous = conversationKey({ ...item, thread: null });
-      const key = conversationKey(item);
-      const draft = drafts.get(previous);
-      const queue = outgoing.get(previous);
-      if (chatModels.has(previous)) {
-        chatModels.set(key, chatModels.get(previous));
-        chatModels.delete(previous);
-      }
-      if (chatPermissions.has(previous)) {
-        chatPermissions.set(key, chatPermissions.get(previous));
-        chatPermissions.delete(previous);
-      }
-      if (nextSettings.has(previous)) {
-        const pending = nextSettings.get(previous);
-        rememberSettings(key, nextSettings.has(key) ? { ...pending, ...nextSettings.get(key) } : pending);
-        rememberSettings(previous, {});
-      }
-      if (!draft && !queue) continue;
-      if (draft && !drafts.has(key)) rememberDraft(key, draft.text, draft.retry);
-      if (queue) {
-        const current = outgoing.get(key);
-        for (const entry of queue.entries) {
-          entry.key = key;
-          cacheChat(deliveryStorage + entry.id, entry);
-        }
-        if (current) {
-          current.entries.push(...queue.entries);
-          current.entries.sort((a, b) => a.startedAt - b.startedAt);
-          for (const id of queue.matched) current.matched.add(id);
-        } else outgoing.set(key, queue);
-      }
-      if (draft) rememberDraft(previous, '');
-      outgoing.delete(previous);
+      chatState.promote(recordKey(item), conversationKey(item));
     }
   }
 }
+
 function focus(id) { byId(id).focus({ preventScroll: true }); }
 
 function historyView(up) {
@@ -369,7 +277,7 @@ function paint() {
   if (isWorkspace()) paintWorkspace();
   else {
     paintPalette();
-    stopTerminal();
+    terminalView.close();
     if (route === 'machines') paintMachines();
     if (route === 'mine') paintMine();
     paintHeader();
@@ -497,7 +405,7 @@ function paintWorkspace() {
     status('chat-error');
     byId('command-result').hidden = true;
     hideSuggestions();
-    stopTerminal();
+    terminalView.close();
   }
   if (!active || (opened && selection.has(route) && selection.get(route) !== activeKey)) opened = false;
   byId('workspace').dataset.mobileView = opened ? 'detail' : 'list';
@@ -835,7 +743,7 @@ function paintDetail() {
   byId('detail-name').textContent = active.title;
   byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
   if (route === 'sessions') { paintSessionPanes(empty); return; }
-  stopTerminal();
+  terminalView.close();
   empty.hidden = supportsChat();
   if (!supportsChat()) { empty.textContent = t('noReadableHistory'); return; }
   if (!opened && mobile.matches) return;
@@ -893,7 +801,7 @@ function paintSessionPanes(empty) {
   empty.hidden = Boolean(pane) || !tree.hidden;
   byId('term').hidden = !pane;
   if (!pane) {
-    stopTerminal();
+    terminalView.close();
     if (!empty.hidden) empty.textContent = t(!opened ? 'selectSession' : 'noSessionPane');
     return;
   }
@@ -909,14 +817,14 @@ function paintSessionPanes(empty) {
     paintDetail();
     acknowledgeOpened(active, key);
   });
-  startTerminal(pane);
+  terminalView.open(active.node, pane);
 }
 
 function paintComposer() {
   const key = conversationKey();
   if (chatInput.dataset.thread !== key) {
     chatInput.dataset.thread = key;
-    chatInput.value = drafts.get(key)?.text || '';
+    chatInput.value = chatState.draft(key);
   }
   const ready = (active.thread ? ['idle', 'done', 'working'].includes(active.state) : active.state === 'idle') && !active.pane.inMode;
   const working = active.state === 'working';
@@ -942,8 +850,8 @@ function paintComposer() {
   settings.hidden = !active.chat;
   settings.disabled = reauthRequired || disconnected;
   settings.title = t('modelAndThinking');
-  const queued = nextSettings.get(key);
-  const selected = queued?.model ? queued : chatModels.get(key);
+  const { pending: queued, model } = chatState.settings(key);
+  const selected = queued?.model ? queued : model;
   byId('chat-settings-label').textContent = selected?.model
     ? [selected.label, selected.effort && t('effort_' + selected.effort), queued?.model && t('nextTurn')].filter(Boolean).join(' · ')
     : t('modelAndThinking');
@@ -991,7 +899,7 @@ async function showChatSettings() {
   const control = byId('chat-settings');
   if (control.hidden || control.disabled || !active) return;
   const key = conversationKey();
-  const queued = nextSettings.get(key);
+  const { pending: queued } = chatState.settings(key);
   const { node, id: agent, thread, pane: { key: pane } } = active;
   const target = { node, agent, pane, thread };
   const wait = make('p', 'sheet-note', t('loadingModelOptions'));
@@ -1000,7 +908,7 @@ async function showChatSettings() {
     const { models, model, effort } = await api(pathWith('/api/chat-settings', { node, agent, pane, ...(thread ? { thread } : {}) }));
     if (!overlay.open || !wait.isConnected || key !== conversationKey()) return;
     const chosen = models.find(({ id }) => id === model);
-    if (chosen) chatModels.set(key, { model, effort, label: chosen.label });
+    if (chosen) chatState.observeModel(key, { model, effort, label: chosen.label });
     paintComposer();
     const form = make('form', 'workspace-form');
     const modelPicker = make('button', 'picker-button');
@@ -1036,7 +944,7 @@ async function showChatSettings() {
       const selected = models.find(({ id }) => id === modelPicker.value);
       const thinking = effortPicker.value || null;
       if (!settingsReady()) {
-        rememberSettings(key, { ...nextSettings.get(key), model: selected.id, effort: thinking, label: selected.label });
+        chatState.queueSettings(key, { model: selected.id, effort: thinking, label: selected.label });
         closeSheet();
         paintComposer();
         return;
@@ -1048,8 +956,7 @@ async function showChatSettings() {
         const saved = await api('/api/chat-settings', 'POST', { ...target, model: selected.id, effort: thinking });
         if (signedIn && active?.pane?.key === pane && active.node === node && active.id === agent) {
           const current = conversationKey();
-          chatModels.set(current, { ...saved, label: selected.label });
-          rememberSettings(current, { permission: nextSettings.get(current)?.permission });
+          chatState.applySettings(current, { ...saved, label: selected.label });
           paintComposer();
         }
         if (form.isConnected) closeSheet();
@@ -1109,7 +1016,7 @@ function chooseSuggestion(item) {
   if (!token) return;
   const prefix = token.kind === 'commands' ? '/' : '$';
   chatInput.setRangeText(prefix + item.name + ' ', token.start, token.end, 'end');
-  rememberDraft(conversationKey(), chatInput.value);
+  chatState.saveDraft(conversationKey(), chatInput.value);
   hideSuggestions();
   paintComposer();
   chatInput.focus({ preventScroll: true });
@@ -1164,7 +1071,7 @@ async function runSlash(text) {
   const clear = (value = '') => {
     if (conversationKey() !== key || chatInput.value !== text) return;
     chatInput.value = value;
-    rememberDraft(key, value);
+    chatState.saveDraft(key, value);
     paintComposer();
   };
   hideSuggestions();
@@ -1226,15 +1133,16 @@ async function showPermissionSettings() {
       description.hidden = !description.textContent;
       submit.disabled = !picker.value || reauthRequired || conversationKey() !== key;
     };
+    const knownSettings = chatState.settings(key);
     setPicker(picker, t('permission'), [{ value: '', label: t('choosePermission') }, ...options],
-      nextSettings.get(key)?.permission || chatPermissions.get(key), update);
+      knownSettings.pending?.permission || knownSettings.permission, update);
     form.append(picker, description, error, submit);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (submit.disabled) return;
       const permission = picker.value;
       if (!settingsReady()) {
-        rememberSettings(key, { ...nextSettings.get(key), permission });
+        chatState.queueSettings(key, { permission });
         closeSheet();
         paintComposer();
         return;
@@ -1243,8 +1151,7 @@ async function showPermissionSettings() {
       error.hidden = true;
       try {
         await api('/api/chat-permission', 'POST', { ...target, permission });
-        chatPermissions.set(key, permission);
-        rememberSettings(key, { ...nextSettings.get(key), permission: null });
+        chatState.applySettings(key, { permission });
         if (form.isConnected) closeSheet();
         if (conversationKey() === key) paintComposer();
       } catch (failure) {
@@ -1540,38 +1447,18 @@ function messageContent(text, human) {
   return body;
 }
 
-function matchingText(text) {
-  return text.replace(/\r\n?/g, '\n').trim();
-}
-
-function matchOutgoing(queue, messages) {
-  if (!queue?.entries.length) return false;
-  let changed = false;
-  for (const message of messages) {
-    if (message.role !== 'user' || queue.matched.has(message.id)) continue;
-    const text = matchingText(message.text);
-    const index = queue.entries.findIndex((entry) => text === entry.match && (entry.after !== null
-      ? message.id >= entry.after : entry.state !== 'sending' && Date.parse(message.time) >= entry.startedAt));
-    if (index >= 0) {
-      const [entry] = queue.entries.splice(index, 1);
-      cacheChat(deliveryStorage + entry.id, null);
-      if (drafts.get(entry.key)?.retry === entry.id) {
-        rememberDraft(entry.key, '');
-        if (chatInput.dataset.thread === entry.key) {
-          chatInput.value = '';
-          resizeComposer();
-        }
-      }
-      queue.matched.add(message.id);
-      changed = true;
-    }
+function reconcileDeliveries(key, messages) {
+  const { changed, draftCleared } = chatState.reconcile(key, messages);
+  if (draftCleared && chatInput.dataset.thread === key) {
+    chatInput.value = '';
+    resizeComposer();
   }
   return changed;
 }
 
 function paintOutgoing() {
   const container = byId('outgoing-messages');
-  const entries = outgoing.get(conversationKey())?.entries || [];
+  const entries = chatState.deliveries(conversationKey());
   container.hidden = !entries.length;
   byId('messages').toggleAttribute('data-outgoing', Boolean(entries.length));
   status('chat-error', entries.findLast((entry) => entry.state === 'failed')?.error);
@@ -1605,11 +1492,7 @@ function renderHistory(target, added, older) {
   const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
   const height = scroller.scrollHeight;
   const top = scroller.scrollTop;
-  const queue = outgoing.get(target.key);
-  if (!older && matchOutgoing(queue, added)) {
-    if (!queue.entries.length) outgoing.delete(target.key);
-    paintOutgoing();
-  }
+  if (!older && reconcileDeliveries(target.key, added)) paintOutgoing();
   paintMessageSelection();
   if (!target.rows.size) {
     messages.replaceChildren(make('div', 'empty', t('noMessages')));
@@ -1676,25 +1559,18 @@ async function send(text = chatInput.value, retry = null) {
   hideSuggestions();
   const item = active;
   const key = conversationKey();
-  const requestedSettings = nextSettings.get(key);
-  const previous = retry || outgoing.get(key)?.entries.findLast((entry) => entry.state === 'failed' && entry.text === text);
+  const requestedSettings = chatState.settings(key).pending;
+  const previous = retry || chatState.failedDelivery(key, text);
   if (previous && item.thread) await loadHistory();
   if (byId('send').disabled || conversationKey() !== key || route !== 'agents') return;
-  const queue = outgoing.get(key) || { entries: [], matched: new Set() };
-  if (previous && (previous.state !== 'failed' || !queue.entries.includes(previous))) return;
+  const delivery = chatState.beginDelivery(key, {
+    text, previous, after: item.thread && transcript?.loaded ? transcript.latest + 1 : null,
+    replaceDraft: !retry,
+  });
+  if (!delivery) return;
+  const { entry, clearDraft } = delivery;
   exitMessageSelection();
-  const entry = previous || { id: crypto.randomUUID(), key, text, match: matchingText(text) };
-  entry.state = 'sending';
-  entry.startedAt = Date.now();
-  entry.after = item.thread && transcript?.loaded ? transcript.latest + 1 : null;
-  if (previous) queue.entries.splice(queue.entries.indexOf(previous), 1);
-  queue.entries.push(entry);
-  outgoing.set(key, queue);
-  cacheChat(deliveryStorage + entry.id, entry);
-  if (!retry || drafts.get(key)?.retry === retry.id) {
-    rememberDraft(key, '');
-    chatInput.value = '';
-  }
+  if (clearDraft) chatInput.value = '';
   const current = () => signedIn && route === 'agents' && conversationKey() === entry.key;
   submitting = true;
   paintComposer();
@@ -1702,34 +1578,23 @@ async function send(text = chatInput.value, retry = null) {
   const scroller = byId('history');
   scroller.scrollTop = scroller.scrollHeight;
   try {
-    const { after, submittedAt, settingsApplied } = await api('/api/prompt', 'POST', {
+    const receipt = await api('/api/prompt', 'POST', {
       ...chatTarget(item), text, requestId: entry.id, settings: requestedSettings,
     });
-    entry.state = 'sent';
-    if (Number.isSafeInteger(after) && after >= 0) entry.after = after;
-    if (Number.isFinite(submittedAt)) entry.startedAt = submittedAt;
-    if (settingsApplied && requestedSettings && nextSettings.get(entry.key) === requestedSettings) {
-      if (requestedSettings.model) chatModels.set(entry.key, requestedSettings);
-      if (requestedSettings.permission) chatPermissions.set(entry.key, requestedSettings.permission);
-      rememberSettings(entry.key, {});
+    chatState.sent(entry, receipt);
+    if (receipt.settingsApplied && requestedSettings && chatState.settings(entry.key).pending === requestedSettings) {
+      chatState.applySettings(entry.key, requestedSettings);
     }
-    const delivered = outgoing.get(entry.key);
     if (current()) {
-      if (transcript?.key === entry.key) matchOutgoing(delivered, transcript.rows.values());
-      if (delivered && !delivered.entries.length) outgoing.delete(entry.key);
+      if (transcript?.key === entry.key) reconcileDeliveries(entry.key, transcript.rows.values());
       paintOutgoing();
       loadHistory();
     }
-    if (delivered?.entries.includes(entry)) cacheChat(deliveryStorage + entry.id, entry);
   } catch (error) {
-    if (!outgoing.get(entry.key)?.entries.includes(entry)) return;
-    entry.state = 'failed';
-    entry.error = error.message;
-    cacheChat(deliveryStorage + entry.id, entry);
-    if (!drafts.has(entry.key)) rememberDraft(entry.key, text, entry.id);
+    if (!chatState.failed(entry, error.message)) return;
     if (current()) {
       const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
-      chatInput.value = drafts.get(entry.key)?.text || '';
+      chatInput.value = chatState.draft(entry.key);
       resizeComposer();
       paintOutgoing();
       if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -1741,154 +1606,6 @@ async function send(text = chatInput.value, retry = null) {
       paintOutgoing();
     }
   }
-}
-
-function encodeBytes(data) { return Uint8Array.from(atob(data), (character) => character.charCodeAt(0)); }
-
-function stopTerminal() {
-  const current = terminal;
-  if (!current) return;
-  terminal = null;
-  clearTimeout(current.retry);
-  current.observer?.disconnect();
-  current.socket?.close();
-  current.xterm?.dispose();
-  byId('term-screen').replaceChildren();
-}
-
-function terminalTheme() {
-  const colors = getComputedStyle(document.documentElement);
-  const color = (role) => colors.getPropertyValue('--' + role).trim();
-  return {
-    background: color('terminal'), foreground: color('terminal-ink'),
-    cursor: color('terminal-caret'), cursorAccent: color('terminal'),
-    ...Object.fromEntries(ansiNames.map((name, index) => [name, color('terminal-ansi-' + index)])),
-  };
-}
-
-function startTerminal(pane) {
-  const key = active.node + '/' + pane.key;
-  if (terminal?.key === key) return;
-  stopTerminal();
-  const current = { key, node: active.node, pane, writable: false, ready: false, ctrl: false, alt: false };
-  terminal = current;
-  termInput.value = '';
-  const renderer = new window.Terminal({
-    cols: Math.max(1, pane.cols), rows: Math.max(1, pane.rows), fontSize: 13,
-    cursorBlink: false, scrollback: 2000,
-    theme: terminalTheme(),
-    disableStdin: true, cursorInactiveStyle: 'outline',
-  });
-  current.xterm = renderer;
-  current.fit = new window.FitAddon.FitAddon();
-  renderer.loadAddon(current.fit);
-  renderer.open(byId('term-screen'));
-  renderer.onData((data) => sendKeys(data));
-  renderer.attachCustomKeyEventHandler((event) => !(event.ctrlKey && event.shiftKey && /^c$/i.test(event.key)));
-  current.observer = new ResizeObserver(() => fitTerminal(current));
-  current.observer.observe(byId('term-screen'));
-  connectTerminal(current);
-}
-
-function connectTerminal(current) {
-  if (terminal !== current || disconnected || reauthRequired
-      || current.socket?.readyState === WebSocket.OPEN || current.socket?.readyState === WebSocket.CONNECTING) return;
-  clearTimeout(current.retry);
-  current.ready = false;
-  current.writable = false;
-  current.ctrl = false;
-  current.alt = false;
-  terminalControls('connecting');
-  const url = new URL(pathWith('/api/terminal', { node: current.node, pane: current.pane.key }), location.href);
-  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(url);
-  current.socket = socket;
-  socket.addEventListener('message', (event) => {
-    if (terminal !== current || current.socket !== socket) return;
-    const packet = JSON.parse(event.data);
-    if (packet.error) { toast(packet.error); return; }
-    if (packet.initial) {
-      current.ready = true;
-      current.resizable = packet.resizable;
-      current.xterm.resize(Math.max(1, packet.cols), Math.max(1, packet.rows));
-      current.xterm.reset();
-      current.xterm.write(encodeBytes(packet.initial));
-      terminalControls(current.writable ? 'inputEnabled' : 'watching');
-    }
-    if (packet.data) current.xterm.write(encodeBytes(packet.data));
-    if (typeof packet.writable === 'boolean') {
-      current.writable = packet.writable;
-      current.xterm.options.disableStdin = !current.writable;
-      terminalControls(current.writable ? 'inputEnabled' : 'watching');
-      if (current.writable) {
-        fitTerminal(current);
-        if (!mobile.matches) current.xterm.focus();
-      }
-    }
-  });
-  socket.addEventListener('close', (event) => {
-    if (terminal !== current || current.socket !== socket) return;
-    current.writable = false;
-    current.ready = false;
-    current.xterm.options.disableStdin = true;
-    terminalControls('disconnected');
-    if (event.code === 4001) { requirePasskey(); return; }
-    current.retry = setTimeout(() => connectTerminal(current), 2000);
-  });
-  socket.addEventListener('error', () => {});
-}
-
-function terminalControls(message) {
-  const writable = Boolean(terminal?.writable);
-  byId('term-state').replaceChildren(make('span', terminal?.ready ? 'dot' : 'dot off'), t(message));
-  byId('control').textContent = t(writable ? 'releaseInput' : 'enableInput');
-  byId('control').disabled = !terminal?.ready;
-  byId('control').setAttribute('aria-pressed', String(writable));
-  byId('term-form').hidden = !writable;
-  for (const item of document.querySelectorAll('[data-key]')) item.disabled = !writable;
-  document.querySelector('[data-key="Ctrl"]').setAttribute('aria-pressed', String(Boolean(terminal?.ctrl && writable)));
-  document.querySelector('[data-key="Alt"]').setAttribute('aria-pressed', String(Boolean(terminal?.alt && writable)));
-}
-
-function fitTerminal(current) {
-  if (terminal !== current || !current.resizable || !current.writable) return;
-  const dimensions = current.fit.proposeDimensions();
-  if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows)) return;
-  const cols = Math.max(24, Math.min(360, dimensions.cols));
-  const rows = Math.max(6, Math.min(160, dimensions.rows));
-  if (cols === current.xterm.cols && rows === current.xterm.rows) return;
-  current.xterm.resize(cols, rows);
-  sendTerminal({ type: 'resize', cols, rows });
-}
-
-function sendTerminal(packet) {
-  if (disconnected || reauthRequired || terminal?.socket?.readyState !== WebSocket.OPEN) return;
-  if (!terminal.writable && ['input', 'resize'].includes(packet.type)) return;
-  if (packet.type === 'input') {
-    if (packet.submit && !packet.data.length) {
-      terminal.socket.send(JSON.stringify(packet));
-      return;
-    }
-    // Split paste into bounded chunks without bisecting Unicode code points.
-    const characters = Array.from(packet.data);
-    for (let offset = 0; offset < characters.length; offset += 2500) {
-      terminal.socket.send(JSON.stringify({
-        type: 'input', data: characters.slice(offset, offset + 2500).join(''),
-        bracketed: packet.submit, submit: packet.submit && offset + 2500 >= characters.length,
-      }));
-    }
-  } else terminal.socket.send(JSON.stringify(packet));
-}
-
-function sendKeys(data, submit = false) {
-  if (!terminal?.writable) return;
-  const control = terminal.ctrl && /^[a-z]$/i.test(data);
-  const alt = terminal.alt;
-  if (control) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64);
-  if (alt) data = '\x1b' + data;
-  sendTerminal({ type: 'input', data, submit: submit && !control && !alt });
-  terminal.ctrl = terminal.alt = false;
-  terminalControls('inputEnabled');
 }
 
 function choice(label, detail, action) {
@@ -2231,7 +1948,7 @@ function registerSheet() {
 }
 
 function signedOn() {
-  restoreChats();
+  chatState.restore(t('sendUnconfirmed'));
   authGeneration++;
   signedIn = true;
   route = 'agents';
@@ -2260,11 +1977,7 @@ function signedOut() {
   expandedTeams.clear();
   expandedSessions.clear();
   launching = null;
-  drafts.clear();
-  outgoing.clear();
-  chatModels.clear();
-  chatPermissions.clear();
-  nextSettings.clear();
+  chatState.clear();
   suggestionCache.clear();
   stopping = null;
   byId('outgoing-messages').replaceChildren();
@@ -2281,7 +1994,6 @@ function signedOut() {
   byId('detail-context').textContent = '';
   delete chatInput.dataset.thread;
   chatInput.value = '';
-  termInput.value = '';
   closeSheet();
   paint();
   save('replaceState');
@@ -2305,7 +2017,7 @@ byId('reauth').addEventListener('click', async (event) => {
     reauthRequired = false;
     trigger.hidden = true;
     if (route === 'agents' && supportsChat()) paintComposer();
-    if (terminal && terminal.socket?.readyState !== WebSocket.OPEN) connectTerminal(terminal);
+    terminalView.resume();
     refresh(true);
   } catch (error) { toast(error.message); }
   finally { trigger.disabled = false; }
@@ -2385,7 +2097,7 @@ byId('command-open-pane').addEventListener('click', () => {
   openRecord(record);
 });
 chatInput.addEventListener('input', () => {
-  rememberDraft(conversationKey(), chatInput.value);
+  chatState.saveDraft(conversationKey(), chatInput.value);
   if (route === 'agents' && supportsChat()) paintComposer();
   suggestionIndex = 0;
   updateSuggestions();
@@ -2395,7 +2107,7 @@ chatInput.addEventListener('blur', hideSuggestions);
 chatInput.addEventListener('compositionstart', () => { composingPrompt = true; hideSuggestions(); });
 chatInput.addEventListener('compositionend', () => {
   composingPrompt = false;
-  rememberDraft(conversationKey(), chatInput.value);
+  chatState.saveDraft(conversationKey(), chatInput.value);
   updateSuggestions();
 });
 chatInput.addEventListener('keydown', (event) => {
@@ -2414,25 +2126,6 @@ chatInput.addEventListener('keydown', (event) => {
     updateSuggestions();
     byId('suggestion-' + suggestionIndex)?.scrollIntoView({ block: 'nearest' });
   }
-});
-byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
-byId('term-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  if (!terminal?.writable) return;
-  sendKeys(termInput.value, true);
-  termInput.value = '';
-});
-const terminalKeys = {
-  Esc: '\x1b', Tab: '\t', '↑': '\x1b[A', '↓': '\x1b[B', '←': '\x1b[D', '→': '\x1b[C',
-  Home: '\x1b[H', End: '\x1b[F', PageUp: '\x1b[5~', PageDown: '\x1b[6~',
-};
-for (const item of document.querySelectorAll('[data-key]')) item.addEventListener('click', () => {
-  if (!terminal?.writable) return;
-  const key = item.dataset.key;
-  if (key === 'Ctrl') terminal.ctrl = !terminal.ctrl;
-  else if (key === 'Alt') terminal.alt = !terminal.alt;
-  else sendKeys(terminalKeys[key]);
-  terminalControls('inputEnabled');
 });
 byId('close').addEventListener('click', closeSheet);
 overlay.addEventListener('click', (event) => { if (event.target === overlay) closeSheet(); });
@@ -2512,7 +2205,7 @@ window.addEventListener('popstate', (event) => {
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
 darkMode.addEventListener('change', () => {
   paint();
-  if (terminal?.xterm) terminal.xterm.options.theme = terminalTheme();
+  terminalView.updateTheme();
 });
 for (const dialog of [overlay, pickerDialog]) {
   dialog.addEventListener('close', () => { if (disconnected) placeConnectionOverlay(); });
@@ -2532,7 +2225,7 @@ const viewport = window.visualViewport;
 let width = window.innerWidth;
 let fullHeight = viewport?.height ?? window.innerHeight;
 function keyboard() {
-  const editing = [chatInput, termInput, terminal?.xterm?.textarea].includes(document.activeElement);
+  const editing = document.activeElement === chatInput || terminalView.hasInputFocus();
   const height = viewport?.height ?? window.innerHeight;
   if (!editing || width !== window.innerWidth) { width = window.innerWidth; fullHeight = height; }
   const visible = mobile.matches && editing && (viewport?.scale ?? 1) < 1.05 && fullHeight - height > 125;
@@ -2545,12 +2238,9 @@ window.addEventListener('resize', keyboard);
 viewport?.addEventListener('resize', keyboard);
 document.addEventListener('focusin', keyboard);
 document.addEventListener('focusout', () => requestAnimationFrame(keyboard));
-for (const [container, field] of [[byId('chat-form'), chatInput], [byId('term-form'), termInput], [byId('term').querySelector('.keys'), termInput]]) {
-  container.addEventListener('pointerdown', (event) => {
-    const typed = document.activeElement === field || (container.classList.contains('keys') && document.activeElement === terminal?.xterm?.textarea);
-    if (typed && event.target.closest('button')) event.preventDefault();
-  });
-}
+byId('chat-form').addEventListener('pointerdown', (event) => {
+  if (document.activeElement === chatInput && event.target.closest('button')) event.preventDefault();
+});
 
 function watchAppUpdates() {
   const worker = navigator.serviceWorker;

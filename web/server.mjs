@@ -14,10 +14,11 @@ import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
+const browserModules = ['chat-state.js', 'connection.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
-  ['/connection.js', ['public/connection.js', 'text/javascript; charset=utf-8']],
+  ...browserModules.map((name) => ['/' + name, ['public/' + name, 'text/javascript; charset=utf-8']]),
   ['/style.css', ['public/style.css', 'text/css; charset=utf-8']],
   ['/manifest.webmanifest', ['public/manifest.webmanifest', 'application/manifest+json']],
   ['/sw.js', ['public/sw.js', 'text/javascript; charset=utf-8']],
@@ -83,6 +84,9 @@ async function cachedAssets(locale, palettes) {
   styles.data = Buffer.from(styles.data.toString().replace('/* WORKBENCH_PALETTE */', () => paletteStyles(palettes)));
   const script = loaded.get('/app.js');
   script.data = Buffer.from(script.data.toString().replace('WORKBENCH_LOCALE', () => JSON.stringify({ language, messages })));
+  const worker = loaded.get('/sw.js');
+  worker.data = Buffer.from(worker.data.toString().replace('WORKBENCH_BROWSER_MODULES',
+    () => JSON.stringify(browserModules.map((name) => '/' + name))));
   const manifest = loaded.get('/manifest.webmanifest');
   manifest.data = Buffer.from(JSON.stringify({
     ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description,

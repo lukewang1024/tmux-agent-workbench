@@ -13,6 +13,7 @@ import { codexComposer, codexSettings, modelChangeConfirmed } from '../codex.mjs
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
+import { ChatState } from '../public/chat-state.js';
 import { startServer } from '../server.mjs';
 import { hash, readJson, Store } from '../state.mjs';
 import { tmuxPalette } from '../theme.mjs';
@@ -105,6 +106,42 @@ test('browser sessions survive reloads with the same origin and respect expiry a
   auth.sessions.get(otherKey).idle = Date.now() - 1;
   auth.persistSessions();
   assert.equal(new Auth(store, origin).session(otherRequest, false), null);
+});
+
+test('chat state restores a pending delivery and reconciles it after the pane acquires a thread', () => {
+  const storage = {
+    getItem(key) { return this[key]; },
+    setItem(key, value) { this[key] = value; },
+    removeItem(key) { delete this[key]; },
+  };
+  const initial = new ChatState(() => storage);
+  const pane = 'local/agent-1/1.2.3.4';
+  const thread = 'local/thread/c5a27de3-936f-446e-9de1-797eaa1cfc00';
+  const text = 'Original message';
+  const first = initial.beginDelivery(pane, { text, after: null, replaceDraft: true }).entry;
+  initial.queueSettings(pane, { model: 'gpt-6.2-sol', effort: 'high', permission: ':read-only' });
+  const restored = new ChatState(() => storage);
+  restored.restore('Unconfirmed');
+  assert.equal(restored.draft(pane), text);
+  const settings = restored.settings(pane).pending;
+  restored.promote(pane, thread);
+  assert.equal(restored.settings(thread).pending, settings);
+  assert.equal(restored.draft(pane), '');
+  const previous = restored.failedDelivery(thread, text);
+  assert.equal(previous.id, first.id);
+  assert.equal(previous.error, 'Unconfirmed');
+  restored.saveDraft(thread, 'A newer draft');
+  const retry = restored.beginDelivery(thread, { text, previous, after: 12, replaceDraft: false });
+  assert.equal(retry.entry.id, first.id);
+  assert.equal(retry.clearDraft, false);
+  const before = restored.reconcile(thread, [{ id: 11, role: 'user', text }]);
+  assert.equal(before.changed, false);
+  restored.sent(retry.entry, { after: 12 });
+  assert.deepEqual(restored.reconcile(thread, [{ id: 12, role: 'user', text }]), { changed: true, draftCleared: false });
+  assert.deepEqual(restored.deliveries(thread), []);
+  assert.equal(restored.draft(thread), 'A newer draft');
+  restored.applySettings(thread, { model: 'gpt-6.2-sol', effort: 'high' });
+  assert.deepEqual(restored.settings(thread).pending, { permission: ':read-only' });
 });
 
 test('Codex history is tied to an exact rollout and only returns visible text', async (t) => {
@@ -441,7 +478,6 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
       assert.ok(version);
       assert.ok(html.includes('id="connection-overlay"'));
-      assert.equal((await fetch(address + '/connection.js?v=' + version)).status, 200);
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
       const style = await fetch(address + '/style.css?v=' + version).then((response) => response.text());
       assert.match(style, /:root \{ color-scheme: light;\s+--paper: #fafafa;/);
@@ -450,7 +486,6 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.ok(html.includes('src="/vendor/markdown-it.js?v=' + version + '"'));
       assert.equal((await fetch(address + '/vendor/markdown-it.js?v=' + version)).status, 200);
       const script = await fetch(address + '/app.js?v=' + version).then((response) => response.text());
-      assert.ok(script.includes('./connection.js?v=' + version));
       assert.ok(script.includes('"language":"' + lang + '"'));
       assert.ok(script.includes("const appVersion = '" + version + "'"));
       assert.ok(!script.includes('WORKBENCH_LOCALE'));
@@ -458,6 +493,11 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
+      for (const module of ['chat-state.js', 'connection.js', 'terminal.js']) {
+        assert.ok(script.includes('./' + module + '?v=' + version));
+        assert.ok(worker.includes('/' + module));
+        assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);
+      }
       assert.ok(worker.includes('/vendor/markdown-it.js'));
       workers.push(worker);
     } finally {

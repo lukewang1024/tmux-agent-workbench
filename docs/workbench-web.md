@@ -201,6 +201,17 @@ original age and idle limits. A new sign-in prompt leaves the current chat and
 draft in place. Sessions can be revoked, and pairing and login attempts are
 rate limited. Browser terminal connections validate their origin and session.
 
+## Browser code
+
+The PWA uses standard HTML, CSS, and JavaScript modules served by the Node.js
+gateway. It runs directly from the checkout. The gateway versions the browser
+modules and gives the service worker the same asset list for offline startup.
+
+`app.js` coordinates navigation and the active view. `chat-state.js` owns local
+drafts, delivery retries, history reconciliation, and pending settings by
+conversation. `terminal.js` owns the xterm view, socket lifecycle, and PTY input.
+`connection.js` reports gateway reachability and handles recovery probes.
+
 ## Verify a local checkout
 
     npm test --prefix web
