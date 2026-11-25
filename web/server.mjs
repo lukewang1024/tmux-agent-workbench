@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Auth, sameSecret } from './auth.mjs';
 import { RemoteNode, nodeProtocol } from './connector.mjs';
+import { loadLocale, renderDocument } from './i18n.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
 
 const run = promisify(execFile);
@@ -59,14 +60,21 @@ async function body(req) {
   }
 }
 
-async function cachedAssets() {
+async function cachedAssets(locale) {
   const loaded = new Map();
-  const fingerprint = createHash('sha256');
   for (const [path, [file, type]] of assets) {
     const data = await readFile(new URL(file, import.meta.url));
     loaded.set(path, { data, type });
-    fingerprint.update(data);
   }
+  const { language, messages } = locale;
+  const index = loaded.get('/');
+  index.data = Buffer.from(renderDocument(index.data.toString(), locale));
+  const script = loaded.get('/app.js');
+  script.data = Buffer.from(script.data.toString().replace('WORKBENCH_LOCALE', () => JSON.stringify({ language, messages })));
+  const manifest = loaded.get('/manifest.webmanifest');
+  manifest.data = Buffer.from(JSON.stringify({ ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description }));
+  const fingerprint = createHash('sha256');
+  for (const { data } of loaded.values()) fingerprint.update(data);
   loaded.get('/sw.js').data = Buffer.from(loaded.get('/sw.js').data.toString().replace('WORKBENCH_CACHE_VERSION', fingerprint.digest('hex').slice(0, 16)));
   return loaded;
 }
@@ -83,7 +91,8 @@ export async function startServer({ local, localName, store, listen, origin, cer
     throw new Failure(400, 'Provide both TLS files or neither.');
   }
 
-  const staticFiles = await cachedAssets();
+  const locale = await loadLocale();
+  const staticFiles = await cachedAssets(locale);
   const auth = new Auth(store, url);
   const remote = new Map();
   const leases = new Map();
@@ -91,6 +100,12 @@ export async function startServer({ local, localName, store, listen, origin, cer
   const peers = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false });
   const browser = new WebSocketServer({ noServer: true, maxPayload: 48 * 1024, perMessageDeflate: false });
   let fabricCache = { until: 0, task: null };
+
+  function errorMessage(error, fallback) {
+    const message = error instanceof Failure ? error.message : fallback;
+    // English messages also come from connectors running earlier versions.
+    return Object.hasOwn(locale.errors, message) ? locale.errors[message] : message;
+  }
 
   async function fabricStatus() {
     if (!fabric.length) return new Map();
@@ -219,7 +234,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
     if (res.destroyed) return;
     if (res.headersSent) { res.destroy(); return; }
     const status = error instanceof Failure ? error.status : 502;
-    json(res, { error: error instanceof Failure ? error.message : 'Workbench could not complete the operation.' }, status);
+    json(res, { error: errorMessage(error, 'Workbench could not complete the operation.') }, status);
   });
   const server = cert ? httpsServer({ cert: await readFile(cert), key: await readFile(key) }, handler) : httpServer(handler);
   server.requestTimeout = 12_000;
@@ -244,7 +259,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
         else socket.send(JSON.stringify(packet));
       }
     };
-    const report = (error) => send({ error: error instanceof Failure ? error.message : 'Terminal unavailable.' });
+    const report = (error) => send({ error: errorMessage(error, 'Terminal unavailable.') });
     const release = () => { if (leases.get(lease) === client) leases.delete(lease); };
 
     const loop = setInterval(async () => {
