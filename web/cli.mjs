@@ -15,7 +15,8 @@ const usage = 'Usage: tmux-agent-workbench web COMMAND\n\n'
   + '  node run [--socket PATH] [--observe-snapshot]   Run the enrolled host connector\n'
   + '  node list | node revoke NAME    Inspect or revoke paired nodes\n'
   + '  node forget                     Remove this host’s saved connector credential\n\n'
-  + 'Commands accept --state PATH to override the XDG state directory.\n';
+  + 'Commands accept --state PATH to override the XDG state directory.\n'
+  + 'Set WORKBENCH_WEB_TERMINAL_THEME to a JSON file with light and dark terminal palettes.\n';
 
 function configuration(args) {
   return parseArgs({
@@ -89,6 +90,7 @@ async function main() {
     const service = await startServer({
       local: local(values), localName: values.name || hostname(), store,
       listen: values.listen || '127.0.0.1:7080', origin, cert: values.cert, key: values.key, fabric,
+      terminalTheme: process.env.WORKBENCH_WEB_TERMINAL_THEME,
     });
     process.stderr.write('Workbench Web listening on ' + service.address.address + ':' + service.address.port + ' for ' + origin + '\n');
     if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));

@@ -1,14 +1,17 @@
 'use strict';
 
 const { language, messages } = WORKBENCH_LOCALE;
+const autoSizeComposer = CSS.supports('field-sizing', 'content');
 const appVersion = 'WORKBENCH_CACHE_VERSION';
 const plurals = new Intl.PluralRules(language);
 const percentage = new Intl.NumberFormat(language, { style: 'percent' });
 const byId = (id) => document.getElementById(id);
 const app = byId('app');
 const overlay = byId('overlay');
+const pickerDialog = byId('picker-dialog');
 const mobile = window.matchMedia('(max-width: 767px)');
 const fullScreenPreview = window.matchMedia('(max-width: 1023px)');
+const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
 const chatInput = byId('chat-input');
 const termInput = byId('term-input');
 const markdown = window.markdownit({ html: false, breaks: true, linkify: true });
@@ -21,6 +24,10 @@ const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode',
 const providerMarks = { codex: 'chatgpt.svg', claude: 'claude.svg', opencode: 'opencode.svg', trae: 'trae.png' };
 const labels = { agents: t('agents'), sessions: t('sessions'), machines: t('machines'), mine: t('profile') };
 const states = ['blocked', 'done', 'working', 'idle'];
+const stateRoles = { blocked: 'alert', done: 'info', working: 'warning', idle: 'accent', unknown: 'muted' };
+const stateAnsi = { blocked: 1, done: 4, working: 3, idle: 2 };
+const ansiNames = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+  'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
 
 let signedIn = false;
 let route = 'login';
@@ -28,6 +35,7 @@ let scope = 'all';
 let opened = false;
 let minePage = 'home';
 let machines = [];
+let machinePaletteIndexes = new Map();
 let overview = '';
 let active = null;
 let activeKey = '';
@@ -132,6 +140,7 @@ function sheet(title, ...contents) {
 }
 
 function closeSheet() {
+  if (pickerDialog.open) pickerDialog.close();
   if (overlay.open) overlay.close();
 }
 
@@ -199,6 +208,7 @@ function paint() {
   for (const name of ['machines', 'mine', 'login']) byId(name).hidden = name !== route;
   if (isWorkspace()) paintWorkspace();
   else {
+    paintPalette();
     stopTerminal();
     if (route === 'machines') paintMachines();
     if (route === 'mine') paintMine();
@@ -221,6 +231,64 @@ function paintHeader() {
 
 function scopedMachines() {
   return scope === 'all' ? machines : machines.filter(({ id }) => id === scope);
+}
+
+function appearance() { return darkMode.matches ? 'dark' : 'light'; }
+
+function themeColor(value) {
+  if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value;
+  if (!Number.isInteger(value) || value < 0 || value > 255) return '';
+  if (value < 16) return 'var(--terminal-ansi-' + value + ')';
+  const cube = [0, 95, 135, 175, 215, 255];
+  const index = value - 16;
+  const gray = 8 + (value - 232) * 10;
+  const channels = value < 232 ? [cube[Math.floor(index / 36)], cube[Math.floor(index / 6) % 6], cube[index % 6]]
+    : [gray, gray, gray];
+  return '#' + channels.map((channel) => channel.toString(16).padStart(2, '0')).join('');
+}
+
+function stateColor(state, machine) {
+  const palette = machine?.palette;
+  if (!palette) return themeColor(machine?.sidebar?.colors?.[state]);
+  const role = palette.roles?.[stateRoles[state]];
+  if (palette.appearance === appearance() || Number.isInteger(role)) {
+    const color = themeColor(role);
+    if (color) return color;
+  }
+  return palette.full ? themeColor(stateAnsi[state]) : '';
+}
+
+function paintPalette() {
+  const mode = appearance();
+  const machine = machines.find(({ id }) => id === (scope === 'all' ? 'local' : scope)) || machines[0];
+  const palette = machine?.palette;
+  const roles = (palette?.appearance === mode && palette.roles) || {};
+  const colors = {
+    paper: themeColor(roles.background),
+    ink: themeColor(roles.foreground),
+    active: themeColor(roles.selection),
+    muted: themeColor(roles.muted),
+    raised: themeColor(roles.raised),
+  };
+  for (const state of states) colors['state-' + state] = stateColor(state, palette ? machine : null);
+  machinePaletteIndexes = new Map(machines.map(({ id }, index) => [id, index]));
+  for (const node of machines) {
+    const prefix = 'machine-' + machinePaletteIndexes.get(node.id) + '-';
+    for (const state of Object.keys(stateRoles)) colors[prefix + state] = stateColor(state, node);
+  }
+  const css = ':root { ' + Object.entries(colors).filter(([, color]) => color)
+    .map(([role, color]) => '--' + role + ': ' + color + ';').join(' ') + ' }';
+  const overrides = byId('palette-overrides');
+  if (overrides.textContent !== css) overrides.textContent = css;
+  const tab = document.querySelector('meta[name="theme-color"][media="(prefers-color-scheme: ' + mode + ')"]');
+  tab.content = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim();
+}
+
+function stateToken(state, machine) {
+  const fallback = states.includes(state) ? 'var(--state-' + state + ')' : 'var(--muted)';
+  const index = machinePaletteIndexes.get(machine?.id);
+  if (index === undefined || !Object.hasOwn(stateRoles, state)) return fallback;
+  return 'var(--machine-' + index + '-' + state + ', ' + fallback + ')';
 }
 
 function withMachine(item, machine) {
@@ -248,6 +316,7 @@ function records(machine) {
 }
 
 function paintWorkspace() {
+  paintPalette();
   const rows = scopedMachines().flatMap((machine) => {
     const { rows, pinned } = records(machine);
     return [...rows.filter((item) => item.id), ...pinned];
@@ -267,10 +336,9 @@ function paintWorkspace() {
   paintDetail();
 }
 
-function stateDot(state, colors) {
+function stateDot(state, machine) {
   const dot = make('span', 'state-dot');
-  const color = colors?.[state];
-  if (/^#[0-9a-f]{6}$/i.test(color || '')) dot.style.setProperty('--state-color', color);
+  dot.style.setProperty('--state-color', stateToken(state, machine));
   dot.setAttribute('aria-hidden', 'true');
   return dot;
 }
@@ -294,7 +362,7 @@ function paintStateFilters() {
     chip.title = stateNames[state];
     chip.setAttribute('aria-pressed', String(!hiddenStates.has(state)));
     chip.setAttribute('aria-label', stateNames[state] + ', ' + count);
-    chip.append(stateDot(state, nodes.find((node) => node.sidebar)?.sidebar.colors), make('b', '', String(count)));
+    chip.append(stateDot(state, nodes[0]), make('b', '', String(count)));
     if (state === activeFilter) requestAnimationFrame(() => chip.focus({ preventScroll: true }));
     return chip;
   }));
@@ -449,7 +517,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
   if (item.exited) copy.append(make('span', 'agent-meta', t('agentExited')));
   const badge = make('span', 'record-state');
   badge.title = stateNames[item.state] || '';
-  badge.append(stateDot(item.state, machine.sidebar?.colors), make('span', 'sr-only', badge.title));
+  badge.append(stateDot(item.state, machine), make('span', 'sr-only', badge.title));
   row.append(icon, copy, badge);
   container.append(row);
   if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
@@ -514,19 +582,24 @@ function paintCollection() {
       }) : nodeStates[machine.state];
     heading.append(make('span', machine.state === 'online' ? 'dot' : 'dot off'), make('span', 'group-name', machine.name), make('span', 'count', count));
     if (machine.sidebar) {
-      const sort = make('select', 'sort-select');
-      sort.setAttribute('aria-label', t('sortOrder', { machine: machine.name }));
-      sort.add(new Option(t(route === 'agents' ? 'groupBySession' : 'sortByName'), 'grouped'));
-      sort.add(new Option(t('prioritized'), 'prioritized'));
-      sort.value = machine.sidebar.sort;
-      sort.addEventListener('change', async () => {
+      const sort = make('button', 'picker-button sort-picker');
+      const label = t('sortOrder', { machine: machine.name });
+      const options = [
+        { value: 'grouped', label: t(route === 'agents' ? 'groupBySession' : 'sortByName') },
+        { value: 'prioritized', label: t('prioritized') },
+      ];
+      const updateSort = async (value) => {
         sort.disabled = true;
         try {
-          await api('/api/sidebar-sort', 'POST', { node: machine.id, sort: sort.value });
+          await api('/api/sidebar-sort', 'POST', { node: machine.id, sort: value });
           await refresh(true);
-        } catch (error) { sort.value = machine.sidebar.sort; toast(error.message); }
+        } catch (error) {
+          setPicker(sort, label, options, machine.sidebar.sort, updateSort);
+          toast(error.message);
+        }
         finally { sort.disabled = false; }
-      });
+      };
+      setPicker(sort, label, options, machine.sidebar.sort, updateSort);
       heading.append(sort);
     }
     group.append(heading);
@@ -586,9 +659,10 @@ function paintDetail() {
   paintComposer();
   const key = conversationKey();
   if (transcript?.key !== key) {
-    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: false, busy: false, selected: null };
+    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: false, selected: null };
     byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
     byId('history-progress').hidden = true;
+    paintMessageNavigation();
     paintOutgoing();
     loadHistory();
   }
@@ -639,17 +713,16 @@ function paintSessionPanes(empty) {
     return;
   }
   const picker = byId('terminal-pane');
-  const keys = JSON.stringify(windows.map((window) => [window.title, window.panes.map(({ key, index }) => [key, index])]));
-  if (picker.dataset.keys !== keys) {
-    picker.replaceChildren(...windows.map((window) => {
-      const group = make('optgroup');
-      group.label = window.title;
-      group.append(...window.panes.map((item) => new Option(t('sessionPane', { index: item.index, pane: item.pane }), item.key)));
-      return group;
-    }));
-    picker.dataset.keys = keys;
-  }
-  picker.value = pane.key;
+  const session = activeKey;
+  const options = windows.flatMap((window) => window.panes.map((item) => ({
+    value: item.key, label: t('sessionPane', { index: item.index, pane: item.pane }),
+    group: window.index + ': ' + window.title,
+  })));
+  setPicker(picker, t('sessionPanes'), options, pane.key, (key) => {
+    if (route !== 'sessions' || activeKey !== session) return;
+    selectedPane.set(session, key);
+    paintDetail();
+  });
   startTerminal(pane);
 }
 
@@ -667,16 +740,28 @@ function paintComposer() {
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
   byId('working-dots').hidden = !working;
-  byId('composer-label').dataset.state = active.state;
+  byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
+  resizeComposer();
 }
 
-async function loadHistory(older = false) {
-  if (!active || !transcript || transcript.busy || (older && !transcript.before)) return;
+function resizeComposer() {
+  if (autoSizeComposer || !chatInput.clientWidth) return;
+  chatInput.style.height = 'auto';
+  chatInput.style.height = chatInput.scrollHeight + 'px';
+}
+
+function loadHistory(older = false) {
   const target = transcript;
-  target.busy = true;
-  if (older) byId('history-progress').hidden = false;
+  if (!active || !target || (older && !target.before)) return;
+  if (target.loading) return target.loading;
   const query = { node: active.node, agent: active.id, thread: active.thread };
   if (older) query.before = target.before;
+  target.loading = readHistory(target, query, older);
+  return target.loading;
+}
+
+async function readHistory(target, query, older) {
+  if (older) byId('history-progress').hidden = false;
   let pageLoaded = false;
   try {
     const { messages, before } = await api(pathWith('/api/history', query));
@@ -696,17 +781,73 @@ async function loadHistory(older = false) {
     if (target !== transcript || !signedIn) return;
     if (!target.loaded) byId('messages').replaceChildren(make('div', 'empty', error.status === 404 ? t('noReadableHistory') : error.message));
   } finally {
-    target.busy = false;
+    target.loading = null;
     if (target === transcript) {
       byId('history-progress').hidden = true;
+      paintMessageNavigation();
       if (pageLoaded) requestAnimationFrame(loadEarlierAtTop);
     }
   }
+  return pageLoaded;
 }
 
 function loadEarlierAtTop() {
   const scroller = byId('history');
   if (route === 'agents' && scroller.clientHeight && scroller.scrollTop < 60) loadHistory(true);
+}
+
+function userMessageTargets(target, scroller) {
+  const rows = [...scroller.querySelectorAll('.message.human')];
+  const anchor = target.messageAnchor;
+  if (anchor && Math.abs(scroller.scrollTop - anchor.scrollTop) < 1) {
+    const index = rows.indexOf(anchor.row);
+    if (index >= 0) return { previous: rows[index - 1], next: rows[index + 1] };
+  }
+  target.messageAnchor = null;
+  const top = scroller.getBoundingClientRect().top + 8;
+  return {
+    previous: rows.findLast((row) => row.getBoundingClientRect().top < top - 1),
+    next: rows.find((row) => row.getBoundingClientRect().top > top + 1),
+  };
+}
+
+function paintMessageNavigation() {
+  const target = transcript;
+  const scroller = byId('history');
+  const navigation = byId('message-navigation');
+  navigation.hidden = route !== 'agents' || !active?.structured || !target?.loaded
+    || target.key !== conversationKey() || Boolean(target.selected) || !scroller.clientHeight
+    || (!target.before && scroller.scrollHeight <= scroller.clientHeight);
+  if (navigation.hidden) return;
+  const { previous, next } = userMessageTargets(target, scroller);
+  byId('previous-message').disabled = target.jumping || !(previous || target.before);
+  byId('next-message').disabled = target.jumping || !next;
+}
+
+async function jumpToUserMessage(direction) {
+  if (byId(direction + '-message').disabled || byId('message-navigation').hidden) return;
+  const target = transcript;
+  const scroller = byId('history');
+  target.jumping = true;
+  paintMessageNavigation();
+  try {
+    let row = userMessageTargets(target, scroller)[direction];
+    while (!row && direction === 'previous' && target.before) {
+      if (!await loadHistory(true) || target !== transcript || target.selected
+          || route !== 'agents' || !scroller.clientHeight) return;
+      row = userMessageTargets(target, scroller).previous;
+    }
+    if (row) {
+      scroller.scrollTop += row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
+      target.messageAnchor = { row, scrollTop: scroller.scrollTop };
+      if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        row.animate([{ backgroundColor: 'var(--active)' }, { backgroundColor: 'transparent' }], 700);
+      }
+    }
+  } finally {
+    target.jumping = false;
+    if (target === transcript) paintMessageNavigation();
+  }
 }
 
 async function copyMessages(rows) {
@@ -875,6 +1016,7 @@ function paintMessageSelection() {
   byId('copy-selection').setAttribute('aria-label', copyLabel);
   byId('copy-selection').title = copyLabel;
   byId('selection-count').textContent = String(count);
+  paintMessageNavigation();
 }
 
 function messageContent(text, human) {
@@ -986,13 +1128,17 @@ function renderHistory(target, added, older) {
       const link = event.target.closest('a[href]');
       if (link && openLinkPreview(link)) event.preventDefault();
     });
-    meta.append(pick, make('span', '', human ? t('you') : 'Codex'));
+    const sender = make('span', '', human ? t('you') : 'Codex');
+    meta.append(...(human ? [sender, pick] : [pick, sender]));
     element.append(meta, messageContent(row.text, human));
     return element;
   });
   if (older) {
     messages.prepend(...rows);
     scroller.scrollTop = top + scroller.scrollHeight - height;
+    if (target.messageAnchor && Math.abs(top - target.messageAnchor.scrollTop) < 1) {
+      target.messageAnchor.scrollTop = scroller.scrollTop;
+    }
   } else {
     messages.append(...rows);
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -1001,6 +1147,7 @@ function renderHistory(target, added, older) {
 
 async function send() {
   if (byId('send').disabled || !chatInput.value.trim() || !active) return;
+  exitMessageSelection();
   const item = active;
   const key = conversationKey();
   const text = chatInput.value;
@@ -1039,6 +1186,7 @@ async function send() {
     if (current()) {
       const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
       chatInput.value = drafts.get(key);
+      resizeComposer();
       paintOutgoing();
       if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
     }
@@ -1061,6 +1209,16 @@ function stopTerminal() {
   byId('term-screen').replaceChildren();
 }
 
+function terminalTheme() {
+  const colors = getComputedStyle(document.documentElement);
+  const color = (role) => colors.getPropertyValue('--' + role).trim();
+  return {
+    background: color('terminal'), foreground: color('terminal-ink'),
+    cursor: color('terminal-caret'), cursorAccent: color('terminal'),
+    ...Object.fromEntries(ansiNames.map((name, index) => [name, color('terminal-ansi-' + index)])),
+  };
+}
+
 function startTerminal(pane) {
   const key = active.node + '/' + pane.key;
   if (terminal?.key === key) return;
@@ -1068,15 +1226,10 @@ function startTerminal(pane) {
   const current = { key, node: active.node, pane, writable: false, ready: false, ctrl: false, alt: false };
   terminal = current;
   termInput.value = '';
-  const colors = getComputedStyle(document.documentElement);
   const renderer = new window.Terminal({
     cols: Math.max(1, pane.cols), rows: Math.max(1, pane.rows), fontSize: 13,
     cursorBlink: false, scrollback: 2000,
-    theme: {
-      background: colors.getPropertyValue('--terminal').trim(),
-      foreground: colors.getPropertyValue('--terminal-ink').trim(),
-      cursor: colors.getPropertyValue('--terminal-caret').trim(),
-    },
+    theme: terminalTheme(),
     disableStdin: true, cursorInactiveStyle: 'outline',
   });
   current.xterm = renderer;
@@ -1195,6 +1348,40 @@ function choice(label, detail, action) {
   return row;
 }
 
+function setPicker(trigger, label, options, value, update) {
+  const selected = options.find((option) => option.value === value) || options[0];
+  trigger.type = 'button';
+  trigger.value = selected?.value || '';
+  trigger.disabled = !selected;
+  trigger.setAttribute('aria-haspopup', 'dialog');
+  trigger.setAttribute('aria-controls', 'picker-dialog');
+  trigger.setAttribute('aria-label', selected ? label + ' · ' + selected.label : label);
+  if (trigger.textContent !== (selected?.label || label)) {
+    trigger.replaceChildren(make('span', 'picker-value', selected?.label || label), glyph('down'));
+  }
+  trigger.onclick = () => {
+    if (pickerDialog.open) return;
+    byId('picker-title').textContent = label;
+    const list = byId('picker-options');
+    list.replaceChildren();
+    let group;
+    for (const option of options) {
+      if (option.group && option.group !== group) list.append(make('h3', 'subheading', option.group));
+      group = option.group;
+      const row = choice(option.label, '', () => {
+        pickerDialog.close();
+        if (option.value === trigger.value) return;
+        setPicker(trigger, label, options, option.value, update);
+        update?.(option.value);
+      });
+      row.setAttribute('aria-current', String(option.value === trigger.value));
+      list.append(row);
+    }
+    pickerDialog.showModal();
+    list.querySelector('[aria-current="true"]')?.focus();
+  };
+}
+
 function switchModule() {
   const rows = Object.entries(labels).map(([name, label]) => {
     const row = choice(label, '', () => { closeSheet(); navigate(name); });
@@ -1228,16 +1415,14 @@ function switchMachine() {
 function newAgentSheet() {
   const online = machines.filter((item) => item.state === 'online');
   const form = make('form', 'workspace-form');
-  const machine = make('select');
-  const session = make('select');
+  const machine = make('button', 'picker-button');
+  const session = make('button', 'picker-button');
   const summary = make('p', 'sheet-note');
   const submit = make('button', 'primary', t('newAgent'));
   submit.type = 'submit';
-  for (const item of online) machine.add(new Option(item.name, item.id));
   const preferred = scope === 'all' ? active?.node : scope;
   const eligible = online.find((item) => item.sidebar?.launchTool && item.sessions?.some((entry) => entry.pane));
-  if (online.some(({ id }) => id === preferred)) machine.value = preferred;
-  else if (eligible) machine.value = eligible.id;
+  const initialMachine = online.some(({ id }) => id === preferred) ? preferred : eligible?.id;
   const sessionLabel = make('label', '', t('tmuxSession'));
   sessionLabel.append(session);
   const machineLabel = make('label', '', t('machine'));
@@ -1246,16 +1431,15 @@ function newAgentSheet() {
   function locations() {
     const node = online.find(({ id }) => id === machine.value);
     const sessions = (node?.sessions || []).filter((item) => item.pane);
-    session.replaceChildren(...sessions.map((item) => new Option(item.title, item.id)));
-    if (machine.value === active?.node && sessions.some(({ id }) => id === active.pane?.session)) session.value = active.pane.session;
+    const initialSession = machine.value === active?.node ? active.pane?.session : undefined;
+    setPicker(session, t('tmuxSession'), sessions.map((item) => ({ value: item.id, label: item.title })), initialSession);
     const tool = node?.sidebar?.launchTool;
     summary.textContent = !node ? t('noOnlineMachines') : !tool ? t('noAgentLauncher')
       : !sessions.length ? t('noSessions') : t('launchUsing', { tool: kindNames[tool] || tool });
-    session.disabled = !sessions.length;
     submit.disabled = !tool || !sessions.length;
   }
+  setPicker(machine, t('machine'), online.map((item) => ({ value: item.id, label: item.name })), initialMachine, locations);
   locations();
-  machine.addEventListener('change', locations);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const node = online.find(({ id }) => id === machine.value);
@@ -1287,9 +1471,10 @@ function shellSheet() {
   const selected = selectedPane.get(key);
   const anchor = item.windows?.flatMap((window) => window.panes).find((pane) => pane.key === selected) || item.pane;
   const form = make('form', 'workspace-form');
-  const placement = make('select');
-  placement.add(new Option(t('newWindow'), 'window'));
-  placement.add(new Option(t('splitPane'), 'split'));
+  const placement = make('button', 'picker-button');
+  setPicker(placement, t('placement'), [
+    { value: 'window', label: t('newWindow') }, { value: 'split', label: t('splitPane') },
+  ], 'window');
   const label = make('label', '', t('placement'));
   label.append(placement);
   const submit = make('button', 'primary', t('newTerminal'));
@@ -1345,7 +1530,10 @@ async function refresh(force = false) {
       machines = result.nodes;
       overview = fingerprint;
       if (isWorkspace()) paintWorkspace();
-      else if (route === 'machines') paintMachines();
+      else {
+        paintPalette();
+        if (route === 'machines') paintMachines();
+      }
     }
     if (launching?.expires < Date.now()) launching = null;
     if (launching && route === 'agents') {
@@ -1562,19 +1750,31 @@ byId('link-tabs').addEventListener('keydown', (event) => {
   selectLinkTab(keys[index]);
 });
 byId('mine-back').addEventListener('click', back);
-byId('terminal-pane').addEventListener('change', (event) => {
-  if (!active || route !== 'sessions') return;
-  selectedPane.set(activeKey, event.target.value);
-  paintDetail();
+byId('picker-close').addEventListener('click', () => pickerDialog.close());
+pickerDialog.addEventListener('click', (event) => { if (event.target === pickerDialog) pickerDialog.close(); });
+pickerDialog.addEventListener('keydown', (event) => {
+  const options = [...pickerDialog.querySelectorAll('.sheet-row')];
+  const current = options.indexOf(document.activeElement);
+  const index = { ArrowUp: Math.max(0, current - 1), ArrowDown: Math.min(options.length - 1, current + 1),
+    Home: 0, End: options.length - 1 }[event.key];
+  if (!options[index]) return;
+  event.preventDefault();
+  options[index].focus();
 });
-byId('history').addEventListener('scroll', loadEarlierAtTop, { passive: true });
+byId('previous-message').addEventListener('click', () => jumpToUserMessage('previous'));
+byId('next-message').addEventListener('click', () => jumpToUserMessage('next'));
+byId('history').addEventListener('scroll', () => {
+  loadEarlierAtTop();
+  paintMessageNavigation();
+}, { passive: true });
+new ResizeObserver(paintMessageNavigation).observe(byId('history'));
 byId('exit-selection').addEventListener('click', () => {
   if (transcript?.selected) exitMessageSelection();
 });
 byId('copy-selection').addEventListener('click', () => copyMessages(selectedMessages()));
 byId('share-selection').addEventListener('click', shareMessages);
 document.addEventListener('keydown', (event) => {
-  if (route !== 'agents' || overlay.open) return;
+  if (route !== 'agents' || overlay.open || pickerDialog.open) return;
   if (event.key === 'Escape' && (transcript?.selected || activeLink)) {
     event.preventDefault();
     if (!exitMessageSelection()) closeLinkPanel();
@@ -1586,7 +1786,10 @@ document.addEventListener('keydown', (event) => {
   }
 });
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
-chatInput.addEventListener('input', () => drafts.set(conversationKey(), chatInput.value));
+chatInput.addEventListener('input', () => {
+  drafts.set(conversationKey(), chatInput.value);
+  resizeComposer();
+});
 byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
 byId('term-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -1681,6 +1884,10 @@ window.addEventListener('popstate', (event) => {
   if (route === 'mine') { if (minePage === 'keys') loadKeys(); else loadUsage(); }
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
+darkMode.addEventListener('change', () => {
+  paint();
+  if (terminal?.xterm) terminal.xterm.options.theme = terminalTheme();
+});
 window.addEventListener('online', () => { if (signedIn) refresh(true); });
 window.addEventListener('offline', () => toast(t('networkInterrupted')));
 
@@ -1695,6 +1902,7 @@ function keyboard() {
   app.toggleAttribute('data-ime', visible);
   if (visible) app.style.setProperty('--ime-height', height + 'px');
   else app.style.removeProperty('--ime-height');
+  resizeComposer();
 }
 window.addEventListener('resize', keyboard);
 viewport?.addEventListener('resize', keyboard);

@@ -11,6 +11,7 @@ import { RemoteNode, nodeProtocol } from './connector.mjs';
 import { stripGoalContext } from './history.mjs';
 import { loadLocale, renderDocument } from './i18n.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
+import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
 const assets = new Map([
@@ -66,7 +67,7 @@ async function body(req) {
   }
 }
 
-async function cachedAssets(locale) {
+async function cachedAssets(locale, palettes) {
   const loaded = new Map();
   for (const [path, [file, type]] of assets) {
     const data = await readFile(new URL(file, import.meta.url));
@@ -74,11 +75,18 @@ async function cachedAssets(locale) {
   }
   const { language, messages } = locale;
   const index = loaded.get('/');
-  index.data = Buffer.from(renderDocument(index.data.toString(), locale));
+  index.data = Buffer.from(renderDocument(index.data.toString(), locale)
+    .replace('WORKBENCH_THEME_LIGHT', sidebarPalettes.light.paper)
+    .replace('WORKBENCH_THEME_DARK', sidebarPalettes.dark.paper));
+  const styles = loaded.get('/style.css');
+  styles.data = Buffer.from(styles.data.toString().replace('/* WORKBENCH_PALETTE */', () => paletteStyles(palettes)));
   const script = loaded.get('/app.js');
   script.data = Buffer.from(script.data.toString().replace('WORKBENCH_LOCALE', () => JSON.stringify({ language, messages })));
   const manifest = loaded.get('/manifest.webmanifest');
-  manifest.data = Buffer.from(JSON.stringify({ ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description }));
+  manifest.data = Buffer.from(JSON.stringify({
+    ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description,
+    background_color: sidebarPalettes.light.paper, theme_color: sidebarPalettes.light.paper,
+  }));
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
   const version = fingerprint.digest('hex').slice(0, 16);
@@ -89,7 +97,7 @@ async function cachedAssets(locale) {
   return loaded;
 }
 
-export async function startServer({ local, localName, store, listen, origin, cert, key, fabric = [] }) {
+export async function startServer({ local, localName, store, listen, origin, cert, key, fabric = [], terminalTheme }) {
   const url = parseOrigin(origin);
   if (isIP(url.hostname) || !/^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(url.hostname)) throw new Failure(400, 'Use a DNS name for WebAuthn.');
   const binding = /^(?:127\.0\.0\.1|localhost):(\d+)$/.exec(listen);
@@ -102,7 +110,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
   }
 
   const locale = await loadLocale();
-  const staticFiles = await cachedAssets(locale);
+  const staticFiles = await cachedAssets(locale, await terminalPalettes(terminalTheme));
   const auth = new Auth(store, url);
   const remote = new Map();
   const leases = new Map();

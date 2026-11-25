@@ -72,6 +72,21 @@ Chinese. Unset or unsupported locales use English. Restart the gateway after
 changing its locale, then close and reopen Workbench in the browser or installed
 app to load the updated shell. CLI prompts and diagnostics use English.
 
+## Appearance
+
+Workbench Web follows the device's light or dark appearance and uses the native
+Sidebar's One Light and One Dark colors. When a tmux server publishes an
+`@adaptive_palette` for that appearance, the interface uses its background,
+foreground, muted text and selection colors. Colors such as `colour2` from
+tmux-adaptive-theme's full mode use the terminal's corresponding ANSI color.
+
+Set `WORKBENCH_WEB_TERMINAL_THEME` before starting the gateway to use your
+terminal's colors. It points to a JSON file with `light` and `dark` objects.
+Each contains `background`, `foreground` and `cursor` as six-digit hex color
+strings and an `ansi` array of 16 hex colors in terminal palette order (normal
+black through white, then bright black through white). Both the embedded
+terminal and indexed Agent status colors use this palette.
+
 ## Use Android over SSH
 
 Keep the default listener and browser origin on the gateway. In Termux,

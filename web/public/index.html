@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f8faff" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#24272d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="WORKBENCH_THEME_LIGHT" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="WORKBENCH_THEME_DARK" media="(prefers-color-scheme: dark)">
   <title>Workbench Web</title>
   <link rel="manifest" href="/manifest.webmanifest?v=WORKBENCH_CACHE_VERSION">
   <link rel="icon" href="/icon-192.png?v=WORKBENCH_CACHE_VERSION">
   <link rel="stylesheet" href="/style.css?v=WORKBENCH_CACHE_VERSION">
+  <style id="palette-overrides"></style>
   <link rel="stylesheet" href="/vendor/xterm.css?v=WORKBENCH_CACHE_VERSION">
   <script src="/vendor/passkeys.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/xterm.js?v=WORKBENCH_CACHE_VERSION" defer></script>
@@ -68,6 +69,14 @@
           <header class="bar detail-bar">
             <button class="plain icon back" id="back" type="button" aria-label="{{backToAgents}}"><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
             <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
+            <div class="message-navigation" id="message-navigation" role="group" aria-label="{{jumpBetweenMessages}}" hidden>
+              <button class="row-action" id="previous-message" type="button" aria-label="{{previousUserMessage}}" title="{{previousUserMessage}}">
+                <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+              </button>
+              <button class="row-action" id="next-message" type="button" aria-label="{{nextUserMessage}}" title="{{nextUserMessage}}">
+                <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+              </button>
+            </div>
             <button class="row-action" id="chat-menu" type="button" aria-label="{{itemActions}}" title="{{itemActions}}" aria-haspopup="dialog" hidden>
               <svg class="glyph" aria-hidden="true"><use href="#icon-more"></use></svg>
             </button>
@@ -109,7 +118,7 @@
           <div class="panel terminal-panel" id="term" aria-label="{{terminal}}" hidden>
             <div class="terminal">
               <div class="terminal-bar">
-                <select id="terminal-pane" aria-label="{{sessionPanes}}"></select><span id="term-state" class="terminal-state">{{connecting}}</span>
+                <button class="picker-button" id="terminal-pane" type="button" aria-label="{{sessionPanes}}"></button><span id="term-state" class="terminal-state">{{connecting}}</span>
                 <button type="button" class="control" id="control" aria-pressed="false" disabled>{{enableInput}}</button>
               </div>
               <div class="terminal-screen" id="term-screen" aria-label="{{paneOutput}}"></div>
@@ -208,6 +217,15 @@
           <button class="plain icon" type="button" id="close" aria-label="{{close}}" autofocus><svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg></button>
         </header>
         <div id="sheet-body"></div>
+      </section>
+    </dialog>
+    <dialog class="overlay" id="picker-dialog" aria-labelledby="picker-title">
+      <section class="sheet">
+        <header class="sheet-head">
+          <h2 id="picker-title"></h2>
+          <button class="plain icon" type="button" id="picker-close" aria-label="{{close}}"><svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg></button>
+        </header>
+        <div id="picker-options"></div>
       </section>
     </dialog>
     <div class="toast" id="toast" role="status" hidden></div>

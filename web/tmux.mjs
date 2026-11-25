@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { History, hasThread } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
+import { tmuxPalette } from './theme.mjs';
 
 const run = promisify(execFile);
 const webSession = '__workbench_web';
@@ -129,7 +130,10 @@ export class LocalNode {
   }
 
   async catalog(fresh = false, hidden = []) {
-    const [snapshot, panes] = await Promise.allSettled([this.snapshot(fresh, hidden), this.panes()]);
+    const [snapshot, panes, palette] = await Promise.allSettled([
+      this.snapshot(fresh, hidden), this.panes(),
+      this.tmux(['display-message', '-p', '#{@adaptive_appearance}\t#{@adaptive_mode}\t#{@adaptive_palette}']).then(tmuxPalette),
+    ]);
     const raw = panes.status === 'fulfilled' ? panes.value : [];
     const data = snapshot.status === 'fulfilled' ? snapshot.value : null;
     const sidebar = data?.sidebar;
@@ -205,6 +209,7 @@ export class LocalNode {
       const { sort, colors, stats, agentRows, sessionRows, pinnedSessions, launchTool } = sidebar;
       catalog.sidebar = { sort, colors, stats, agentRows, sessionRows, pinnedSessions, launchTool };
     }
+    if (palette.status === 'fulfilled' && palette.value) catalog.palette = palette.value;
     return catalog;
   }
 

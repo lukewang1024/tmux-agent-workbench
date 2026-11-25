@@ -13,6 +13,7 @@ import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
 import { startServer } from '../server.mjs';
 import { hash, readJson, Store } from '../state.mjs';
+import { tmuxPalette } from '../theme.mjs';
 import { LocalNode } from '../tmux.mjs';
 
 async function scratch(t) {
@@ -20,6 +21,18 @@ async function scratch(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('tmux palette preserves indexed and true colors while discarding invalid roles', () => {
+  const line = 'dark\tfull\t' + JSON.stringify({
+    version: 1, background: '#282c34', accent: 'colour0', warning: 'color231',
+    alert: 'bright-red', info: 'colour256', muted: 'var(--unexpected)', extra: '#ffffff',
+  });
+  assert.deepEqual(tmuxPalette(line), {
+    appearance: 'dark', full: true, roles: { background: '#282c34', accent: 0, warning: 231, alert: 9 },
+  });
+  assert.equal(tmuxPalette('light\tlight\t{"version":2}'), undefined);
+  assert.equal(tmuxPalette('light\tlight\tbroken'), undefined);
+});
 
 test('node invites are scoped to one identity, single-use, and revocable', async (t) => {
   const store = new Store(await scratch(t));
@@ -309,9 +322,16 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const manifest = await fetch(address + '/manifest.webmanifest').then((response) => response.json());
       assert.equal(manifest.lang, lang);
       assert.equal(manifest.display, 'standalone');
+      assert.equal(manifest.theme_color, '#fafafa');
+      assert.ok(html.includes('content="#fafafa" media="(prefers-color-scheme: light)"'));
+      assert.ok(html.includes('content="#282c34" media="(prefers-color-scheme: dark)"'));
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
       assert.ok(version);
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
+      const style = await fetch(address + '/style.css?v=' + version).then((response) => response.text());
+      assert.match(style, /:root \{ color-scheme: light;\s+--paper: #fafafa;/);
+      assert.match(style, /:root \{ color-scheme: dark;\s+--paper: #282c34;/);
+      assert.ok(style.includes('--terminal-ansi-15:'));
       assert.ok(html.includes('src="/vendor/markdown-it.js?v=' + version + '"'));
       assert.equal((await fetch(address + '/vendor/markdown-it.js?v=' + version)).status, 200);
       const script = await fetch(address + '/app.js?v=' + version).then((response) => response.text());
