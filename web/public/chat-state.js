@@ -78,6 +78,11 @@ export class ChatState {
 
   observeModel(key, model) { this.#models.set(key, model); }
 
+  observeSettings(key, { model, effort, label, models, permission }) {
+    if (model) this.observeModel(key, { model, effort, label: label || models?.find((item) => item.id === model)?.label || model });
+    if (permission?.mode) this.#permissions.set(key, permission);
+  }
+
   #setPending(key, settings) {
     if (settings.model || settings.permission) this.#pendingSettings.set(key, settings);
     else this.#pendingSettings.delete(key);
@@ -96,10 +101,7 @@ export class ChatState {
       delete pending.effort;
       delete pending.label;
     }
-    if (permission) {
-      this.#permissions.set(key, permission);
-      delete pending.permission;
-    }
+    if (permission) delete pending.permission;
     this.#setPending(key, pending);
   }
 

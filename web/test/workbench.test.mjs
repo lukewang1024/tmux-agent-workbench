@@ -46,11 +46,45 @@ test('Codex settings read the live footer and distinguish the placeholder from t
   const placeholder = '\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m';
   const screen = ['  GPT-6.2-Sol high · earlier command', placeholder, footer].join('\n');
   assert.deepEqual(codexSettings(screen, 1, models), { model: 'gpt-6.1-terra', effort: 'max' });
+  assert.deepEqual(codexSettings(placeholder + '\n  GPT-6.2-Sol default · fixture', 0, models),
+    { model: 'gpt-6.2-sol', effort: 'default' });
+  assert.deepEqual(codexSettings(placeholder + '\n  repo · GPT-6.2-Sol high · fixture', 0, models),
+    { model: 'gpt-6.2-sol', effort: 'high' });
   assert.equal(codexComposer(screen, 1), '');
   assert.equal(codexComposer('› Ask Codex to do anything\n' + footer, 0), 'Ask Codex to do anything');
   assert.equal(codexComposer('› A native draft\n  continued\n' + footer, 1), 'A native draft continued');
   assert.equal(modelChangeConfirmed('• Model changed to gpt-6.2-sol ultra for this session only', 'gpt-6.2-sol', 'ultra'), 1);
   assert.equal(modelChangeConfirmed('• Model changed to gpt-6.2-sol high for this session only', 'gpt-6.2-sol', 'ultra'), 0);
+});
+
+test('current Codex settings follow authenticated thread events without projecting file paths or instructions', async (t) => {
+  const directory = await scratch(t);
+  const id = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
+  const sessions = join(directory, 'sessions');
+  await mkdir(sessions);
+  const file = join(sessions, 'rollout-fixture-' + id + '.jsonl');
+  const rows = [{ type: 'session_meta', payload: { id } }, {
+    type: 'turn_context', payload: {
+      model: 'gpt-6.2-sol', effort: 'medium', sandbox_policy: { type: 'danger-full-access' },
+      approval_policy: 'never', approvals_reviewer: 'user',
+    },
+  }];
+  const write = () => writeFile(file, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+  const history = new History(directory);
+  await write();
+  assert.deepEqual(await history.latestSettings(id),
+    { model: 'gpt-6.2-sol', effort: 'medium', permission: { mode: 'yolo', id: null } });
+  rows.push({
+    type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: id,
+      thread_settings: { model: 'gpt-6.2-astra', reasoning_effort: 'high', approval_policy: 'on-request',
+        approvals_reviewer: 'auto_review', active_permission_profile: { id: ':workspace' },
+        collaboration_mode: { settings: { developer_instructions: 'Fixture instructions' } },
+        cwd: '/workspace/example', runtime_workspace_roots: ['/workspace/example'] },
+    },
+  });
+  await write();
+  assert.deepEqual(await history.latestSettings(id),
+    { model: 'gpt-6.2-astra', effort: 'high', permission: { mode: 'approveForMe', id: ':workspace' } });
 });
 
 test('node invites are scoped to one identity, single-use, and revocable', async (t) => {

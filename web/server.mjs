@@ -254,7 +254,8 @@ export async function startServer({ local, localName, store, listen, origin, cer
       if (operation === 'chat-capabilities' && !['skills', 'permissions'].includes(kind)) {
         throw new Failure(400, 'Invalid Codex capability request.');
       }
-      return json(res, await node(request.searchParams.get('node') || 'local').request(operation, { agent, thread, pane, kind }));
+      const summary = request.searchParams.get('summary') === '1';
+      return json(res, await node(request.searchParams.get('node') || 'local').request(operation, { agent, thread, pane, kind, summary }));
     }
     const chatOperation = {
       '/api/prompt': 'prompt', '/api/interrupt': 'interrupt', '/api/chat-settings': 'change-chat-settings',

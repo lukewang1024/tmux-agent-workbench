@@ -210,13 +210,14 @@ h1, h2, h3, p { margin: 0; }
 .composer-send .glyph { width: 18px; height: 18px; stroke-width: 2; }
 .composer-send:focus-visible { outline-color: var(--focus); }
 .composer-send:disabled { background: var(--quiet); color: var(--muted); opacity: 1; }
-.composer-label { display: flex; align-items: center; gap: 5px; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
+.composer-label, .composer-state, .composer-controls { display: flex; align-items: center; gap: 5px; }
+.composer-label { flex-wrap: wrap; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
+.composer-controls { margin-inline-start: auto; min-width: 0; max-width: 100%; }
 .composer-label .dot { background: var(--state-color, var(--muted)); }
 .stop-agent .glyph { width: 18px; height: 18px; fill: currentColor; }
 .stop-agent.secondary-stop { background: var(--quiet); color: var(--ink); }
-.composer-settings { max-width: 52%; min-height: 25px; margin-inline-start: auto; padding: 0 5px; border-color: var(--line); font-size: 11px; }
-.composer-permission { min-height: 25px; padding: 0 5px; border-color: var(--line); }
-.composer-permission.next-setting { background: var(--active); }
+.composer-controls .picker-button { min-width: 0; min-height: 25px; padding: 0 5px; border-color: var(--line); font-size: 11px; }
+.composer-controls .next-setting { background: var(--active); }
 .suggestions, .command-result { margin-bottom: 5px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .suggestions { max-height: min(215px, 27dvh); overscroll-behavior: contain; }
 .suggestions .sheet-row { min-height: 34px; padding: 4px 8px; }

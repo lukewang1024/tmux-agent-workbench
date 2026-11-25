@@ -55,6 +55,7 @@ const hiddenStates = new Set();
 const expandedTeams = new Set();
 const expandedSessions = new Set();
 const chatState = new ChatState(() => localStorage);
+let chatStatusRead = null;
 const suggestionCache = new Map();
 let suggestionIndex = 0;
 let suggestionItems = [];
@@ -748,6 +749,7 @@ function paintDetail() {
   if (!supportsChat()) { empty.textContent = t('noReadableHistory'); return; }
   if (!opened && mobile.matches) return;
   paintComposer();
+  refreshChatStatus();
   const key = conversationKey();
   if (transcript?.key !== key) {
     transcript = { key, rows: new Map(), before: null, latest: -1, loaded: !active.thread, selected: null };
@@ -849,20 +851,53 @@ function paintComposer() {
   const settings = byId('chat-settings');
   settings.hidden = !active.chat;
   settings.disabled = reauthRequired || disconnected;
-  settings.title = t('modelAndThinking');
-  const { pending: queued, model } = chatState.settings(key);
-  const selected = queued?.model ? queued : model;
-  byId('chat-settings-label').textContent = selected?.model
-    ? [selected.label, selected.effort && t('effort_' + selected.effort), queued?.model && t('nextTurn')].filter(Boolean).join(' · ')
-    : t('modelAndThinking');
+  const { pending: queued, model, permission } = chatState.settings(key);
+  const reading = chatStatusRead?.key !== key || chatStatusRead.loading;
+  const modelText = model ? modelStatusLabel(model) : t(reading ? 'loadingModelStatus' : 'modelStatusUnavailable');
+  byId('chat-settings-label').textContent = modelText;
+  settings.classList.toggle('next-setting', Boolean(queued?.model));
+  settings.title = [modelText, queued?.model && t('queuedSetting', { value: modelStatusLabel(queued) })].filter(Boolean).join('\n');
+  settings.setAttribute('aria-label', t('modelAndThinking') + ' · ' + settings.title.replace('\n', ' · '));
   const permissions = byId('chat-permission');
   permissions.hidden = !active.chat;
   permissions.disabled = reauthRequired || disconnected;
   permissions.classList.toggle('next-setting', Boolean(queued?.permission));
-  permissions.title = queued?.permission ? t('permission') + ' · ' + t('nextTurn') : t('permission');
+  const permissionText = permission ? activePermissionLabel(permission) : t(reading ? 'permission' : 'permissionStatusUnavailable');
+  const permissionStatus = permission?.launch ? t('permissionLaunch', { value: permissionText }) : permissionText;
+  byId('chat-permission-label').textContent = permissionStatus;
+  permissions.title = [
+    permissionStatus,
+    queued?.permission && t('queuedSetting', { value: permissionProfileLabel(queued.permission) }),
+  ].filter(Boolean).join('\n');
+  permissions.setAttribute('aria-label', t('permission') + ' · ' + permissions.title.replace('\n', ' · '));
+  byId('chat-next-turn').hidden = !queued?.model && !queued?.permission;
   byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
   if (overlay.open && modelEditor?.form.isConnected) modelEditor.update();
   resizeComposer();
+}
+
+function modelStatusLabel({ model, label, effort }) {
+  return [label || model, effort && t('effort_' + effort)].filter(Boolean).join(' · ');
+}
+
+function refreshChatStatus(force = false) {
+  if (!signedIn || reauthRequired || disconnected || document.hidden || route !== 'agents' || !active?.chat
+      || (!opened && mobile.matches)) return;
+  const key = conversationKey();
+  const record = activeKey;
+  const same = chatStatusRead?.key === key && chatStatusRead.record === record;
+  if (!force && same && (chatStatusRead.loading || chatStatusRead.until > Date.now())) return;
+  const observed = { key, record, loading: true };
+  chatStatusRead = observed;
+  const current = () => chatStatusRead === observed && activeKey === record && conversationKey() === key && route === 'agents';
+  api(pathWith('/api/chat-settings', { ...chatQuery(chatTarget()), summary: '1' }))
+    .then((settings) => { if (current()) chatState.observeSettings(key, settings); })
+    .catch(() => {})
+    .finally(() => {
+      observed.loading = false;
+      observed.until = Date.now() + 5_000;
+      if (current()) paintComposer();
+    });
 }
 
 function resizeComposer() {
@@ -905,10 +940,10 @@ async function showChatSettings() {
   const wait = make('p', 'sheet-note', t('loadingModelOptions'));
   sheet(t('modelAndThinking'), wait);
   try {
-    const { models, model, effort } = await api(pathWith('/api/chat-settings', { node, agent, pane, ...(thread ? { thread } : {}) }));
+    const status = await api(pathWith('/api/chat-settings', { node, agent, pane, ...(thread ? { thread } : {}) }));
     if (!overlay.open || !wait.isConnected || key !== conversationKey()) return;
-    const chosen = models.find(({ id }) => id === model);
-    if (chosen) chatState.observeModel(key, { model, effort, label: chosen.label });
+    const { models, model, effort } = status;
+    chatState.observeSettings(key, status);
     paintComposer();
     const form = make('form', 'workspace-form');
     const modelPicker = make('button', 'picker-button');
@@ -932,7 +967,8 @@ async function showChatSettings() {
     const updateEfforts = (value, preferred) => {
       const selected = models.find(({ id }) => id === value);
       const options = selected.efforts.map((level) => ({ value: level, label: t('effort_' + level) }));
-      setPicker(effortPicker, t('thinkingLevel'), options, preferred || selected.defaultEffort);
+      const effortValue = selected.efforts.includes(preferred) ? preferred : selected.defaultEffort;
+      setPicker(effortPicker, t('thinkingLevel'), options, effortValue);
       effortLabel.hidden = !options.length;
     };
     setPicker(modelPicker, t('model'), models.map(({ id, label }) => ({ value: id, label })), queued?.model || model, updateEfforts);
@@ -957,6 +993,7 @@ async function showChatSettings() {
         if (signedIn && active?.pane?.key === pane && active.node === node && active.id === agent) {
           const current = conversationKey();
           chatState.applySettings(current, { ...saved, label: selected.label });
+          refreshChatStatus(true);
           paintComposer();
         }
         if (form.isConnected) closeSheet();
@@ -1098,6 +1135,7 @@ async function runSlash(text) {
     byId('command-result-text').textContent = output || t('commandSent');
     byId('command-result').hidden = false;
     refresh(true);
+    if (/^\/(?:model|reasoning|permissions)\b/i.test(command)) refreshChatStatus(true);
   } catch (error) { if (signedIn && conversationKey() === key) toast(error.message); }
   finally {
     submitting = false;
@@ -1107,7 +1145,21 @@ async function runSlash(text) {
 
 const permissionLabels = {
   ':workspace': 'workspacePermission', ':read-only': 'readOnlyPermission', ':danger-full-access': 'fullAccessPermission',
+  ':approve-for-me': 'permission_approveForMe',
 };
+const permissionModeLabels = {
+  yolo: 'permission_yolo', fullAccess: 'fullAccessPermission', approveForMe: 'permission_approveForMe',
+  askForApproval: 'workspacePermission', readOnly: 'readOnlyPermission', noApprovals: 'permission_noApprovals',
+};
+
+function permissionProfileLabel(id) {
+  return Object.hasOwn(permissionLabels, id) ? t(permissionLabels[id]) : id;
+}
+
+function activePermissionLabel({ id, mode }) {
+  if (Object.hasOwn(permissionModeLabels, mode)) return t(permissionModeLabels[mode]);
+  return id ? permissionProfileLabel(id) : t('permissionStatusUnavailable');
+}
 
 async function showPermissionSettings() {
   if (!active?.chat || byId('chat-permission').disabled) return;
@@ -1118,7 +1170,7 @@ async function showPermissionSettings() {
   try {
     const { profiles } = await api(pathWith('/api/chat-capabilities', chatQuery(target, 'permissions')));
     if (!overlay.open || !loading.isConnected || conversationKey() !== key) return;
-    const options = profiles.map(({ id }) => ({ value: id, label: permissionLabels[id] ? t(permissionLabels[id]) : id }));
+    const options = profiles.map(({ id }) => ({ value: id, label: permissionProfileLabel(id) }));
     if (!options.length) { loading.textContent = t('noPermissions'); return; }
     const form = make('form', 'workspace-form');
     const picker = make('button', 'picker-button');
@@ -1135,7 +1187,7 @@ async function showPermissionSettings() {
     };
     const knownSettings = chatState.settings(key);
     setPicker(picker, t('permission'), [{ value: '', label: t('choosePermission') }, ...options],
-      knownSettings.pending?.permission || knownSettings.permission, update);
+      knownSettings.pending?.permission || knownSettings.permission?.id, update);
     form.append(picker, description, error, submit);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -1153,7 +1205,10 @@ async function showPermissionSettings() {
         await api('/api/chat-permission', 'POST', { ...target, permission });
         chatState.applySettings(key, { permission });
         if (form.isConnected) closeSheet();
-        if (conversationKey() === key) paintComposer();
+        if (conversationKey() === key) {
+          refreshChatStatus(true);
+          paintComposer();
+        }
       } catch (failure) {
         error.textContent = failure.message;
         error.hidden = false;
@@ -1584,6 +1639,7 @@ async function send(text = chatInput.value, retry = null) {
     chatState.sent(entry, receipt);
     if (receipt.settingsApplied && requestedSettings && chatState.settings(entry.key).pending === requestedSettings) {
       chatState.applySettings(entry.key, requestedSettings);
+      if (current()) refreshChatStatus(true);
     }
     if (current()) {
       if (transcript?.key === entry.key) reconcileDeliveries(entry.key, transcript.rows.values());
@@ -1978,6 +2034,7 @@ function signedOut() {
   expandedSessions.clear();
   launching = null;
   chatState.clear();
+  chatStatusRead = null;
   suggestionCache.clear();
   stopping = null;
   byId('outgoing-messages').replaceChildren();
@@ -2280,5 +2337,8 @@ const checkConnection = monitorGateway(connectionChanged);
 setInterval(() => {
   if (document.hidden) return;
   refresh();
-  if (signedIn && route === 'agents' && supportsChat() && (opened || !mobile.matches)) loadHistory();
+  if (signedIn && route === 'agents' && supportsChat() && (opened || !mobile.matches)) {
+    loadHistory();
+    refreshChatStatus();
+  }
 }, 3000);

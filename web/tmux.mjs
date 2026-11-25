@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { History, hasThread, sameProcess } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
-import { codexCommands, codexComposer, codexOutput, codexSettings, modelChangeConfirmed, readModels,
+import { codexCommands, codexComposer, codexLaunchPermission, codexOutput, codexSettings, modelChangeConfirmed, readModels,
   readPermissions, readSkills } from './codex.mjs';
 
 const run = promisify(execFile);
@@ -441,10 +441,19 @@ export class LocalNode {
     return false;
   }
 
-  async settings({ agent, thread, pane }) {
+  async settings({ agent, thread, pane, summary }) {
     const entry = await this.chatAgent(agent, thread, pane);
-    const [models, screen] = await Promise.all([this.models(), this.codexScreen(entry.pane)]);
-    return { ...codexSettings(screen.text, screen.cursor, models), models };
+    const [models, screen, recorded] = await Promise.all([
+      summary ? this.models().catch(() => []) : this.models(),
+      this.codexScreen(entry.pane).catch(() => null),
+      entry.thread && this.history.latestSettings(entry.thread).catch(() => null),
+    ]);
+    const footer = screen && codexSettings(screen.text, screen.cursor, models);
+    const model = footer?.model || recorded?.model || null;
+    const effort = footer?.effort ?? (model === recorded?.model ? recorded.effort : null);
+    const label = models.find((candidate) => candidate.id === model)?.label || model;
+    const permission = recorded?.permission || await codexLaunchPermission(this.agentProcesses.get(entry)?.pid);
+    return { model, effort, label, permission, ...(summary ? {} : { models }) };
   }
 
   async changeSettings({ agent, thread, pane, model, effort }) {

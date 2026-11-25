@@ -1,9 +1,13 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
+import { promisify } from 'node:util';
 import { Failure } from './state.mjs';
 
 const modelId = /^[a-z0-9][a-z0-9._:/-]{0,127}$/i;
 const effortId = /^(?:none|minimal|low|medium|high|xhigh|max|ultra)$/;
+const profileId = /^:?[a-z0-9][a-z0-9._-]{0,127}$/i;
+const run = promisify(execFile);
 const plain = (line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 const prompt = /^\s*› ?/u;
 
@@ -78,7 +82,7 @@ export async function readSkills(env, cwd) {
 export async function readPermissions(env, cwd) {
   const { data } = await queryCodex(env, 'permissionProfile/list', { cwd }, 'Could not load Codex permission profiles.');
   return (Array.isArray(data) ? data : []).filter((item) =>
-    item?.allowed && typeof item.id === 'string' && /^:?[a-z0-9][a-z0-9._-]{0,127}$/i.test(item.id)
+    item?.allowed && typeof item.id === 'string' && profileId.test(item.id)
   ).map(({ id, description }) => ({ id, description: String(description || '').slice(0, 180) }));
 }
 
@@ -115,19 +119,62 @@ export function codexSettings(screen, cursorY, models) {
   const normalized = (value) => value.trim().toLowerCase().replace(/[\s-]+/g, '-');
   // The status line below the composer reflects the current session setting.
   for (const line of lines.slice(cursorY + 1).reverse()) {
-    const label = normalized(line.split(/\s+[·•]\s+/)[0]);
-    for (const model of models) {
-      for (const name of [model.id, model.label]) {
-        const prefix = normalized(name);
-        if (label === prefix) return { model: model.id, effort: null };
-        if (label.startsWith(prefix + '-')) {
-          const effort = label.slice(prefix.length + 1);
-          if (effortId.test(effort)) return { model: model.id, effort };
+    for (const segment of line.split(/\s+[·•]\s+/)) {
+      const label = normalized(segment.replace(/\s+(?:⚡.*|ultrafast|fast)$/iu, ''));
+      for (const model of models) {
+        for (const name of [model.id, model.label]) {
+          const prefix = normalized(name);
+          if (label === prefix) return { model: model.id, effort: null };
+          if (label.startsWith(prefix + '-')) {
+            const effort = label.slice(prefix.length + 1);
+            if (effort === 'default' || effortId.test(effort)) return { model: model.id, effort };
+          }
         }
       }
     }
   }
   return { model: null, effort: null };
+}
+
+export function codexRuntimeSettings(settings) {
+  const model = typeof settings.model === 'string' && modelId.test(settings.model) ? settings.model : null;
+  const effort = settings.reasoning_effort ?? settings.effort;
+  const policy = settings.approval_policy;
+  const profile = settings.active_permission_profile?.id;
+  const id = typeof profile === 'string' && profileId.test(profile) ? profile : null;
+  const sandbox = settings.sandbox_policy?.type ?? settings.sandbox_policy;
+  const unrestricted = settings.permission_profile?.type === 'disabled' || sandbox === 'danger-full-access';
+  const fileSystem = settings.permission_profile?.file_system;
+  const readOnly = id === ':read-only' || sandbox === 'read-only'
+    || (fileSystem?.type === 'restricted' && Array.isArray(fileSystem.entries) && fileSystem.entries.length
+      && fileSystem.entries.every((entry) => entry?.access === 'read'));
+  let mode;
+  if (unrestricted) mode = policy === 'never' ? 'yolo' : 'fullAccess';
+  else if (policy && policy !== 'never' && ['auto_review', 'guardian'].includes(settings.approvals_reviewer)) mode = 'approveForMe';
+  else if (readOnly) mode = 'readOnly';
+  else if (id && id !== ':workspace') mode = 'custom';
+  else if (policy === 'never') mode = 'noApprovals';
+  else if (policy) mode = 'askForApproval';
+  return { model, effort: effortId.test(effort) ? effort : null, permission: mode ? { mode, id } : null };
+}
+
+export async function codexLaunchPermission(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  let args;
+  if (process.platform === 'linux') {
+    args = (await readFile('/proc/' + pid + '/cmdline', 'utf8').catch(() => '')).split('\0');
+  } else if (process.platform === 'darwin') {
+    const { stdout } = await run('/bin/ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+      timeout: 1500, maxBuffer: 64 * 1024,
+    }).catch(() => ({ stdout: '' }));
+    args = stdout.trim().split(/\s+/);
+  } else return null;
+  const end = args.indexOf('--');
+  const flags = args.slice(1, end < 0 ? undefined : end);
+  const yolo = flags.includes('--yolo') || flags.includes('--dangerously-bypass-approvals-and-sandbox');
+  const review = flags.includes('--approve-for-me') || flags.includes('--not-so-yolo');
+  if (yolo === review) return null;
+  return { mode: yolo ? 'yolo' : 'approveForMe', id: null, launch: true };
 }
 
 export function modelChangeConfirmed(screen, model, effort) {

@@ -3,6 +3,7 @@ import { open, readdir, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
+import { codexRuntimeSettings } from './codex.mjs';
 import { Failure } from './state.mjs';
 
 const maxRead = 4 * 1024 * 1024;
@@ -112,6 +113,7 @@ function visibleMessage(row) {
 
 export class History {
   filenames = new Map();
+  #settings = new Map();
 
   constructor(codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')) {
     this.root = codexHome;
@@ -179,6 +181,44 @@ export class History {
     } catch (error) {
       if (error.code === 'ENOENT' || error instanceof Failure && error.status === 404) return 0;
       throw error;
+    }
+  }
+
+  async latestSettings(id) {
+    const file = await open(await this.locate(id), 'r');
+    try {
+      const { size, ino, mtimeMs } = await file.stat();
+      const cached = this.#settings.get(id);
+      if (cached?.ino === ino && cached.size === size && cached.mtimeMs === mtimeMs) return cached.value;
+      if (await rolloutId(file) !== id) return null;
+      const start = Math.max(0, size - maxRead);
+      const data = Buffer.alloc(size - start);
+      const { bytesRead } = await file.read(data, 0, data.length, start);
+      const bytes = data.subarray(0, bytesRead);
+      const first = start ? bytes.indexOf(10) + 1 : 0;
+      let value = cached?.ino === ino && cached.size <= size ? cached.value : null;
+      for (let end = bytes.lastIndexOf(10); end >= first;) {
+        const previous = end > 0 ? bytes.lastIndexOf(10, end - 1) : -1;
+        const line = bytes.subarray(previous + 1, end);
+        end = previous;
+        if (previous + 1 < first) break;
+        if (!line.includes('"thread_settings_applied"') && !line.includes('"turn_context"')) continue;
+        const row = decode(line);
+        if (row?.type === 'event_msg' && row.payload?.type === 'thread_settings_applied' && row.payload.thread_id === id
+            && row.payload.thread_settings?.model) {
+          value = codexRuntimeSettings(row.payload.thread_settings);
+          break;
+        }
+        if (row?.type === 'turn_context' && row.payload?.model) {
+          value = codexRuntimeSettings(row.payload);
+          break;
+        }
+      }
+      this.#settings.set(id, { size, ino, mtimeMs, value });
+      if (this.#settings.size > 64) this.#settings.delete(this.#settings.keys().next().value);
+      return value;
+    } finally {
+      await file.close();
     }
   }
 

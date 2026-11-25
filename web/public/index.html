@@ -113,15 +113,21 @@
                 </div>
                 <div class="suggestions" id="chat-suggestions" role="listbox" aria-label="{{chatSuggestions}}" hidden></div>
                 <div class="composer-label" id="composer-label">
-                  <span class="dot" aria-hidden="true"></span><span id="chat-status" role="status"></span>
-                  <span class="working-dots" id="working-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
-                  <button type="button" class="picker-button composer-settings" id="chat-settings" aria-haspopup="dialog" aria-label="{{modelAndThinking}}" hidden>
-                    <span class="picker-value" id="chat-settings-label">{{modelAndThinking}}</span>
-                    <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
-                  </button>
-                  <button type="button" class="picker-button composer-permission" id="chat-permission" aria-haspopup="dialog" aria-label="{{permission}}" hidden>
-                    <svg class="glyph" aria-hidden="true"><use href="#icon-shield"></use></svg>
-                  </button>
+                  <span class="composer-state">
+                    <span class="dot" aria-hidden="true"></span><span id="chat-status" role="status"></span>
+                    <span class="working-dots" id="working-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
+                  </span>
+                  <span class="composer-controls">
+                    <span id="chat-next-turn" hidden>{{nextTurn}}</span>
+                    <button type="button" class="picker-button composer-settings" id="chat-settings" aria-haspopup="dialog" aria-label="{{modelAndThinking}}" hidden>
+                      <span class="picker-value" id="chat-settings-label">{{loadingModelStatus}}</span>
+                      <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+                    </button>
+                    <button type="button" class="picker-button composer-permission" id="chat-permission" aria-haspopup="dialog" aria-label="{{permission}}" hidden>
+                      <svg class="glyph" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                      <span class="picker-value" id="chat-permission-label">{{permission}}</span>
+                    </button>
+                  </span>
                 </div>
                 <form class="composer" id="chat-form">
                   <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" aria-controls="chat-suggestions" placeholder="{{continueConversation}}"></textarea>
