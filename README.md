@@ -727,7 +727,8 @@ pack, so a separate notification hook such as Peon Ping is not required.
 Start the optional responsive PWA with `tmux-agent-workbench web serve` to
 view running Agents, continue Codex sessions, open interactive tmux panes, and
 connect multiple machines. The Web module uses Passkeys and can be installed
-on Android from its HTTPS address. See [Workbench Web setup](docs/workbench-web.md).
+on Android from localhost over an SSH tunnel or from an HTTPS reverse proxy.
+See [Workbench Web setup](docs/workbench-web.md).
 
 ### Client-aware SSH from Termux
 

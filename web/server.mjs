@@ -74,16 +74,13 @@ async function cachedAssets() {
 export async function startServer({ local, localName, store, listen, origin, cert, key, fabric = [] }) {
   const url = parseOrigin(origin);
   if (isIP(url.hostname) || !/^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(url.hostname)) throw new Failure(400, 'Use a DNS name for WebAuthn.');
-  const [host, portString] = listen.split(':');
-  const port = Number(portString);
-  if (!host || !Number.isInteger(port) || port < 0 || port > 65535 || Boolean(cert) !== Boolean(key)) {
-    throw new Failure(400, 'Provide host:port and either both TLS files or neither.');
+  const binding = /^(?:127\.0\.0\.1|localhost):(\d+)$/.exec(listen);
+  const port = Number(binding?.[1]);
+  if (!binding || port > 65535) {
+    throw new Failure(400, 'Use --listen 127.0.0.1:PORT or localhost:PORT.');
   }
-  if (url.protocol === 'http:' && !['127.0.0.1', 'localhost'].includes(host)) {
-    throw new Failure(400, 'Loopback HTTP is available only for local development.');
-  }
-  if (!cert && !['127.0.0.1', 'localhost'].includes(host)) {
-    throw new Failure(400, 'Non-loopback listeners require a TLS certificate and key.');
+  if (Boolean(cert) !== Boolean(key)) {
+    throw new Failure(400, 'Provide both TLS files or neither.');
   }
 
   const staticFiles = await cachedAssets();
@@ -353,7 +350,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, host, resolve);
+    server.listen(port, '127.0.0.1', resolve);
   }).catch((error) => { clearInterval(tick); throw error; });
   return {
     address: server.address(),

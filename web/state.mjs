@@ -52,7 +52,7 @@ export function parseOrigin(value) {
   if (
     (url.protocol !== 'https:' && !(url.protocol === 'http:' && localhost))
     || url.username || url.password || url.pathname !== '/' || url.search || url.hash
-  ) throw new Failure(400, 'Use an HTTPS origin or a loopback HTTP origin for local testing.');
+  ) throw new Failure(400, 'Use an HTTPS origin or a loopback HTTP origin.');
   return url;
 }
 

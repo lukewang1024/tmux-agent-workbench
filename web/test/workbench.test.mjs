@@ -95,15 +95,25 @@ test('tmux control mode streams a background Pane and sends input to that exact 
   }
 });
 
+test('gateway requires a loopback listener even with TLS configured', async () => {
+  const refused = { status: 400, message: 'Use --listen 127.0.0.1:PORT or localhost:PORT.' };
+  await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: '0.0.0.0:7080' }), refused);
+  await assert.rejects(startServer({
+    origin: 'https://workbench.example.net', listen: '0.0.0.0:7080', cert: 'unused', key: 'unused',
+  }), refused);
+  await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: 'localhost:7080:443' }), refused);
+});
+
 test('gateway protects data and accepts an outbound node handshake only after enrollment', async (t) => {
   const store = new Store(await scratch(t));
   const local = { request: () => ({}), cleanup() {}, close() {} };
   const origin = 'http://localhost:7080';
-  const gateway = await startServer({ store, local, localName: 'fixture', origin, listen: '127.0.0.1:0' });
+  const gateway = await startServer({ store, local, localName: 'fixture', origin, listen: 'localhost:0' });
   const address = 'http://127.0.0.1:' + gateway.address.port;
   const controller = new AbortController();
   let connector;
   try {
+    assert.equal(gateway.address.address, '127.0.0.1');
     assert.equal((await fetch(address + '/api/workspace')).status, 401);
     assert.equal((await fetch(address + '/api/auth/login/options', {
       method: 'POST', headers: { Origin: 'https://untrusted.example' },
