@@ -30,6 +30,8 @@ const ansiNames = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan',
   'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
 
 let signedIn = false;
+let reauthRequired = false;
+let authGeneration = 0;
 let route = 'login';
 let scope = 'all';
 let opened = false;
@@ -53,9 +55,16 @@ const expandedSessions = new Set();
 const drafts = new Map();
 const outgoing = new Map();
 const chatModels = new Map();
+const chatPermissions = new Map();
+const nextSettings = new Map();
+const suggestionCache = new Map();
+let suggestionIndex = 0;
+let suggestionItems = [];
+let composingPrompt = false;
 let transcript = null;
 let submitting = false;
 let stopping = null;
+let modelEditor = null;
 let terminal = null;
 let suppressHoldClick = false;
 const linkTabs = new Map();
@@ -112,6 +121,10 @@ function readEnrollment() {
 }
 
 async function api(path, method = 'GET', payload = null) {
+  if (reauthRequired && !path.startsWith('/api/auth/') && path !== '/api/logout') {
+    throw Object.assign(new Error(t('continueWithPasskey')), { status: 401 });
+  }
+  const generation = authGeneration;
   const response = await fetch(path, {
     method,
     headers: method === 'GET' ? undefined : { 'content-type': 'application/json' },
@@ -121,7 +134,7 @@ async function api(path, method = 'GET', payload = null) {
   }).catch(() => { throw new Error(connectionError); });
   const data = await response.json();
   if (!response.ok) {
-    if (response.status === 401 && signedIn) signedOut();
+    if (response.status === 401 && generation === authGeneration) requirePasskey();
     const error = new Error(data.error || t('requestFailed'));
     error.status = response.status;
     throw error;
@@ -160,6 +173,7 @@ function conversationKey(item = active) {
 
 const draftStorage = 'workbench-chat-v1/draft/';
 const deliveryStorage = 'workbench-chat-v1/delivery/';
+const settingsStorage = 'workbench-chat-v1/settings/';
 
 function cacheChat(key, value) {
   try {
@@ -174,13 +188,24 @@ function rememberDraft(key, text, retry) {
   cacheChat(draftStorage + key, drafts.get(key));
 }
 
+function rememberSettings(key, settings) {
+  if (settings.model || settings.permission) nextSettings.set(key, settings);
+  else nextSettings.delete(key);
+  cacheChat(settingsStorage + key, nextSettings.get(key));
+}
+
 function restoreChats() {
   try {
     for (const storageKey of Object.keys(localStorage)) {
       const isDraft = storageKey.startsWith(draftStorage);
-      if (!isDraft && !storageKey.startsWith(deliveryStorage)) continue;
+      const isSettings = storageKey.startsWith(settingsStorage);
+      if (!isDraft && !isSettings && !storageKey.startsWith(deliveryStorage)) continue;
       let saved;
       try { saved = JSON.parse(localStorage.getItem(storageKey)); } catch { continue; }
+      if (isSettings) {
+        if (saved?.model || saved?.permission) nextSettings.set(storageKey.slice(settingsStorage.length), saved);
+        continue;
+      }
       if (typeof saved?.text !== 'string' || !saved.text) continue;
       if (isDraft) {
         drafts.set(storageKey.slice(draftStorage.length), saved);
@@ -216,6 +241,15 @@ function promoteChats(nodes) {
       if (chatModels.has(previous)) {
         chatModels.set(key, chatModels.get(previous));
         chatModels.delete(previous);
+      }
+      if (chatPermissions.has(previous)) {
+        chatPermissions.set(key, chatPermissions.get(previous));
+        chatPermissions.delete(previous);
+      }
+      if (nextSettings.has(previous)) {
+        const pending = nextSettings.get(previous);
+        rememberSettings(key, nextSettings.has(key) ? { ...pending, ...nextSettings.get(key) } : pending);
+        rememberSettings(previous, {});
       }
       if (!draft && !queue) continue;
       if (draft && !drafts.has(key)) rememberDraft(key, draft.text, draft.retry);
@@ -412,6 +446,8 @@ function paintWorkspace() {
   if (previous !== conversationKey()) {
     transcript = null;
     status('chat-error');
+    byId('command-result').hidden = true;
+    hideSuggestions();
     stopTerminal();
   }
   if (!active || (opened && selection.has(route) && selection.get(route) !== activeKey)) opened = false;
@@ -819,8 +855,9 @@ function paintComposer() {
   }
   const ready = (active.thread ? ['idle', 'done', 'working'].includes(active.state) : active.state === 'idle') && !active.pane.inMode;
   const working = active.state === 'working';
-  byId('send').disabled = !ready || submitting;
-  for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = byId('send').disabled;
+  const sendButton = byId('send');
+  sendButton.disabled = !ready || submitting || reauthRequired;
+  for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
   const label = t(working ? 'agentWorking' : active.state === 'blocked' ? 'agentBlocked'
     : ready ? 'originalConversation' : 'agentInputUnavailable');
   const display = byId('chat-status');
@@ -830,17 +867,28 @@ function paintComposer() {
   const pendingStop = stopping?.key === activeKey;
   if (pendingStop && !working) stopping = null;
   stop.hidden = !working || !active.chat || active.pane.inMode;
-  stop.disabled = pendingStop || submitting;
-  stop.querySelector('span').textContent = t(pendingStop ? 'stoppingTurn' : 'stopTurn');
+  stop.disabled = pendingStop || submitting || reauthRequired;
+  const stopLabel = t(pendingStop ? 'stoppingTurn' : 'stopCurrentTurn');
+  stop.setAttribute('aria-label', stopLabel);
+  stop.title = stopLabel;
+  sendButton.hidden = !stop.hidden && !chatInput.value.trim();
+  stop.classList.toggle('secondary-stop', !sendButton.hidden);
   const settings = byId('chat-settings');
   settings.hidden = !active.chat;
-  settings.disabled = submitting || !['idle', 'done'].includes(active.state) || active.pane.inMode;
-  settings.title = t(settings.disabled ? 'changeModelWhenIdle' : 'modelAndThinking');
-  const selected = chatModels.get(conversationKey());
+  settings.disabled = reauthRequired;
+  settings.title = t('modelAndThinking');
+  const queued = nextSettings.get(key);
+  const selected = queued?.model ? queued : chatModels.get(key);
   byId('chat-settings-label').textContent = selected?.model
-    ? [selected.label, selected.effort && t('effort_' + selected.effort)].filter(Boolean).join(' · ')
+    ? [selected.label, selected.effort && t('effort_' + selected.effort), queued?.model && t('nextTurn')].filter(Boolean).join(' · ')
     : t('modelAndThinking');
+  const permissions = byId('chat-permission');
+  permissions.hidden = !active.chat;
+  permissions.disabled = reauthRequired;
+  permissions.classList.toggle('next-setting', Boolean(queued?.permission));
+  permissions.title = queued?.permission ? t('permission') + ' · ' + t('nextTurn') : t('permission');
   byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
+  if (overlay.open && modelEditor?.form.isConnected) modelEditor.update();
   resizeComposer();
 }
 
@@ -878,6 +926,7 @@ async function showChatSettings() {
   const control = byId('chat-settings');
   if (control.hidden || control.disabled || !active) return;
   const key = conversationKey();
+  const queued = nextSettings.get(key);
   const { node, id: agent, thread, pane: { key: pane } } = active;
   const target = { node, agent, pane, thread };
   const wait = make('p', 'sheet-note', t('loadingModelOptions'));
@@ -897,6 +946,12 @@ async function showChatSettings() {
     effortLabel.append(effortPicker);
     const submit = make('button', 'primary', t('applyChatSettings'));
     submit.type = 'submit';
+    const availability = make('p', 'sheet-note', t('settingsNextTurn'));
+    let applying = false;
+    const update = () => {
+      availability.hidden = settingsReady();
+      submit.disabled = applying || reauthRequired || conversationKey() !== key;
+    };
     const error = make('p', 'message-error');
     error.setAttribute('role', 'alert');
     error.hidden = true;
@@ -907,20 +962,29 @@ async function showChatSettings() {
       setPicker(effortPicker, t('thinkingLevel'), options, preferred || selected.defaultEffort);
       effortLabel.hidden = !options.length;
     };
-    setPicker(modelPicker, t('model'), models.map(({ id, label }) => ({ value: id, label })), model, updateEfforts);
-    updateEfforts(modelPicker.value, effort);
-    form.append(modelLabel, effortLabel, error, submit);
+    setPicker(modelPicker, t('model'), models.map(({ id, label }) => ({ value: id, label })), queued?.model || model, updateEfforts);
+    updateEfforts(modelPicker.value, queued?.effort ?? effort);
+    form.append(modelLabel, effortLabel, availability, error, submit);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (submit.disabled) return;
       const selected = models.find(({ id }) => id === modelPicker.value);
       const thinking = effortPicker.value || null;
+      if (!settingsReady()) {
+        rememberSettings(key, { ...nextSettings.get(key), model: selected.id, effort: thinking, label: selected.label });
+        closeSheet();
+        paintComposer();
+        return;
+      }
+      applying = true;
       submit.disabled = modelPicker.disabled = effortPicker.disabled = true;
       error.hidden = true;
       try {
         const saved = await api('/api/chat-settings', 'POST', { ...target, model: selected.id, effort: thinking });
         if (signedIn && active?.pane?.key === pane && active.node === node && active.id === agent) {
-          chatModels.set(conversationKey(), { ...saved, label: selected.label });
+          const current = conversationKey();
+          chatModels.set(current, { ...saved, label: selected.label });
+          rememberSettings(current, { permission: nextSettings.get(current)?.permission });
           paintComposer();
         }
         if (form.isConnected) closeSheet();
@@ -928,20 +992,213 @@ async function showChatSettings() {
         error.textContent = failure.message;
         error.hidden = false;
       } finally {
-        submit.disabled = modelPicker.disabled = false;
+        applying = false;
+        modelPicker.disabled = false;
         effortPicker.disabled = !selected.efforts.length;
+        update();
       }
     });
     byId('sheet-body').replaceChildren(form);
+    modelEditor = { form, update };
+    update();
     modelPicker.focus();
   } catch (error) {
     if (wait.isConnected) wait.textContent = error.message;
   }
 }
 
+function settingsReady() {
+  return ['idle', 'done'].includes(active?.state) && !active.pane.inMode && !submitting;
+}
+
+function chatTarget(item = active) {
+  return { node: item.node, agent: item.id, pane: item.pane.key, thread: item.thread || null };
+}
+
+function chatQuery(target, kind) {
+  const { thread, ...query } = target;
+  return { ...query, ...(thread ? { thread } : {}), ...(kind ? { kind } : {}) };
+}
+
+function suggestionToken() {
+  if (composingPrompt || reauthRequired || route !== 'agents' || !active?.chat
+      || chatInput.selectionStart !== chatInput.selectionEnd) return null;
+  const end = chatInput.selectionStart;
+  const before = chatInput.value.slice(0, end);
+  const command = /^\/([a-z0-9-]*)$/i.exec(before);
+  const skill = /(?:^|\s)\$([a-z][a-z0-9._:/-]*)?$/i.exec(before);
+  if (!command && !skill) return null;
+  const prefix = (command || skill)[1] || '';
+  return { kind: command ? 'commands' : 'skills', prefix, start: end - prefix.length - 1, end };
+}
+
+function hideSuggestions() {
+  byId('chat-suggestions').hidden = true;
+  chatInput.removeAttribute('aria-activedescendant');
+  suggestionItems = [];
+  suggestionIndex = 0;
+}
+
+function chooseSuggestion(item) {
+  const token = suggestionToken();
+  if (!token) return;
+  const prefix = token.kind === 'commands' ? '/' : '$';
+  chatInput.setRangeText(prefix + item.name + ' ', token.start, token.end, 'end');
+  rememberDraft(conversationKey(), chatInput.value);
+  hideSuggestions();
+  paintComposer();
+  chatInput.focus({ preventScroll: true });
+}
+
+function updateSuggestions() {
+  const token = suggestionToken();
+  if (!token) { hideSuggestions(); return; }
+  const list = byId('chat-suggestions');
+  const key = conversationKey() + '/' + token.kind;
+  let data = suggestionCache.get(key);
+  if (!data || data.until <= Date.now()) {
+    const target = chatTarget();
+    data = { until: Infinity };
+    suggestionCache.set(key, data);
+    if (suggestionCache.size > 64) suggestionCache.delete(suggestionCache.keys().next().value);
+    const request = token.kind === 'commands' ? api('/api/chat-commands', 'POST', target)
+      : api(pathWith('/api/chat-capabilities', chatQuery(target, token.kind)));
+    data.job = request.then(({ suggestions }) => { data.options = suggestions; }, (error) => { data.error = error.message; })
+      .finally(() => {
+        data.job = null;
+        data.until = Date.now() + (data.error ? 2000 : 30_000);
+        if (document.activeElement === chatInput && conversationKey() + '/' + suggestionToken()?.kind === key) updateSuggestions();
+      });
+  }
+  const query = token.prefix.toLowerCase();
+  suggestionItems = (data.options || []).filter(({ name, label }) =>
+    !query || name.toLowerCase().includes(query) || label.toLowerCase().includes(query));
+  suggestionIndex = Math.min(suggestionIndex, Math.max(0, suggestionItems.length - 1));
+  list.hidden = false;
+  if (!suggestionItems.length) {
+    chatInput.removeAttribute('aria-activedescendant');
+    list.replaceChildren(make('p', 'sheet-note', data.error || t(data.job ? 'loadingSuggestions' : 'noSuggestions')));
+    return;
+  }
+  list.replaceChildren(...suggestionItems.map((item, index) => {
+    const row = choice(token.kind === 'skills' ? '$' + item.name : item.label, item.description, () => chooseSuggestion(item));
+    row.id = 'suggestion-' + index;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(index === suggestionIndex));
+    row.tabIndex = -1;
+    row.addEventListener('pointerdown', (event) => event.preventDefault());
+    return row;
+  }));
+  chatInput.setAttribute('aria-activedescendant', 'suggestion-' + suggestionIndex);
+}
+
+async function runSlash(text) {
+  const key = conversationKey();
+  const item = active;
+  const command = text.trim();
+  const clear = (value = '') => {
+    if (conversationKey() !== key || chatInput.value !== text) return;
+    chatInput.value = value;
+    rememberDraft(key, value);
+    paintComposer();
+  };
+  hideSuggestions();
+  if (command === '/skills') {
+    clear('$');
+    chatInput.focus({ preventScroll: true });
+    updateSuggestions();
+    return;
+  }
+  if (command === '/model' || command === '/permissions') {
+    clear();
+    if (command === '/model') showChatSettings();
+    else showPermissionSettings();
+    return;
+  }
+  submitting = true;
+  paintComposer();
+  try {
+    await suggestionCache.get(key + '/commands')?.job;
+    if (!signedIn || conversationKey() !== key) return;
+    const { output } = await api('/api/chat-command', 'POST', { ...chatTarget(item), text: command });
+    if (conversationKey() !== key) return;
+    clear();
+    byId('command-result-text').textContent = output || t('commandSent');
+    byId('command-result').hidden = false;
+    refresh(true);
+  } catch (error) { if (signedIn && conversationKey() === key) toast(error.message); }
+  finally {
+    submitting = false;
+    if (route === 'agents' && supportsChat()) paintComposer();
+  }
+}
+
+const permissionLabels = {
+  ':workspace': 'workspacePermission', ':read-only': 'readOnlyPermission', ':danger-full-access': 'fullAccessPermission',
+};
+
+async function showPermissionSettings() {
+  if (!active?.chat || byId('chat-permission').disabled) return;
+  const key = conversationKey();
+  const target = chatTarget();
+  const loading = make('p', 'sheet-note', t('loadingPermissions'));
+  sheet(t('permission'), loading);
+  try {
+    const { profiles } = await api(pathWith('/api/chat-capabilities', chatQuery(target, 'permissions')));
+    if (!overlay.open || !loading.isConnected || conversationKey() !== key) return;
+    const options = profiles.map(({ id }) => ({ value: id, label: permissionLabels[id] ? t(permissionLabels[id]) : id }));
+    if (!options.length) { loading.textContent = t('noPermissions'); return; }
+    const form = make('form', 'workspace-form');
+    const picker = make('button', 'picker-button');
+    const description = make('p', 'sheet-note');
+    const submit = make('button', 'primary', t('applyChatSettings'));
+    const error = make('p', 'message-error');
+    error.hidden = true;
+    submit.type = 'submit';
+    const update = () => {
+      description.textContent = profiles.find(({ id }) => id === picker.value)?.description
+        || (!settingsReady() ? t('settingsNextTurn') : '');
+      description.hidden = !description.textContent;
+      submit.disabled = !picker.value || reauthRequired || conversationKey() !== key;
+    };
+    setPicker(picker, t('permission'), [{ value: '', label: t('choosePermission') }, ...options],
+      nextSettings.get(key)?.permission || chatPermissions.get(key), update);
+    form.append(picker, description, error, submit);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      const permission = picker.value;
+      if (!settingsReady()) {
+        rememberSettings(key, { ...nextSettings.get(key), permission });
+        closeSheet();
+        paintComposer();
+        return;
+      }
+      picker.disabled = submit.disabled = true;
+      error.hidden = true;
+      try {
+        await api('/api/chat-permission', 'POST', { ...target, permission });
+        chatPermissions.set(key, permission);
+        rememberSettings(key, { ...nextSettings.get(key), permission: null });
+        if (form.isConnected) closeSheet();
+        if (conversationKey() === key) paintComposer();
+      } catch (failure) {
+        error.textContent = failure.message;
+        error.hidden = false;
+      } finally {
+        picker.disabled = false;
+        update();
+      }
+    });
+    byId('sheet-body').replaceChildren(form);
+    update();
+    picker.focus();
+  } catch (error) { if (loading.isConnected) loading.textContent = error.message; }
+}
+
 function loadHistory(older = false) {
   const target = transcript;
-  if (!active?.thread || !target || (older && !target.before)) return;
+  if (reauthRequired || !active?.thread || !target || (older && !target.before)) return;
   if (target.loading) return target.loading;
   const query = { node: active.node, agent: active.id, thread: active.thread };
   if (older) query.before = target.before;
@@ -1350,8 +1607,11 @@ function renderHistory(target, added, older) {
 
 async function send(text = chatInput.value, retry = null) {
   if (byId('send').disabled || !text.trim() || !active) return;
+  if (!retry && active.chat && /^\/[a-z][a-z0-9-]*(?: +[^\x00-\x1f\x7f]*)?$/i.test(text.trim())) return runSlash(text);
+  hideSuggestions();
   const item = active;
   const key = conversationKey();
+  const requestedSettings = nextSettings.get(key);
   const previous = retry || outgoing.get(key)?.entries.findLast((entry) => entry.state === 'failed' && entry.text === text);
   if (previous && item.thread) await loadHistory();
   if (byId('send').disabled || conversationKey() !== key || route !== 'agents') return;
@@ -1377,12 +1637,17 @@ async function send(text = chatInput.value, retry = null) {
   const scroller = byId('history');
   scroller.scrollTop = scroller.scrollHeight;
   try {
-    const { after, submittedAt } = await api('/api/prompt', 'POST', {
-      node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text, requestId: entry.id,
+    const { after, submittedAt, settingsApplied } = await api('/api/prompt', 'POST', {
+      ...chatTarget(item), text, requestId: entry.id, settings: requestedSettings,
     });
     entry.state = 'sent';
     if (Number.isSafeInteger(after) && after >= 0) entry.after = after;
     if (Number.isFinite(submittedAt)) entry.startedAt = submittedAt;
+    if (settingsApplied && requestedSettings && nextSettings.get(entry.key) === requestedSettings) {
+      if (requestedSettings.model) chatModels.set(entry.key, requestedSettings);
+      if (requestedSettings.permission) chatPermissions.set(entry.key, requestedSettings.permission);
+      rememberSettings(entry.key, {});
+    }
     const delivered = outgoing.get(entry.key);
     if (current()) {
       if (transcript?.key === entry.key) matchOutgoing(delivered, transcript.rows.values());
@@ -1500,7 +1765,7 @@ function connectTerminal(current) {
     current.ready = false;
     current.xterm.options.disableStdin = true;
     terminalControls('disconnected');
-    if (event.code === 4001) { signedOut(); return; }
+    if (event.code === 4001) { requirePasskey(); return; }
     current.retry = setTimeout(() => connectTerminal(current), 2000);
   });
   socket.addEventListener('error', () => {});
@@ -1735,7 +2000,7 @@ function paintMachines() {
 }
 
 async function refresh(force = false) {
-  if (!signedIn || (syncing && !force)) return;
+  if (!signedIn || reauthRequired || (syncing && !force)) return;
   const revision = ++refreshing;
   syncing = true;
   try {
@@ -1900,6 +2165,7 @@ function registerSheet() {
 
 function signedOn() {
   restoreChats();
+  authGeneration++;
   signedIn = true;
   route = 'agents';
   overview = '';
@@ -1911,6 +2177,9 @@ function signedOn() {
 }
 
 function signedOut() {
+  authGeneration++;
+  reauthRequired = false;
+  byId('reauth').hidden = true;
   signedIn = false;
   route = 'login';
   machines = [];
@@ -1927,6 +2196,9 @@ function signedOut() {
   drafts.clear();
   outgoing.clear();
   chatModels.clear();
+  chatPermissions.clear();
+  nextSettings.clear();
+  suggestionCache.clear();
   stopping = null;
   byId('outgoing-messages').replaceChildren();
   activeLink = '';
@@ -1947,6 +2219,30 @@ function signedOut() {
   paint();
   save('replaceState');
 }
+
+function requirePasskey() {
+  if (!signedIn || reauthRequired) return;
+  reauthRequired = true;
+  byId('reauth').hidden = false;
+  if (route === 'agents' && supportsChat()) paintComposer();
+}
+
+byId('reauth').addEventListener('click', async (event) => {
+  const trigger = event.currentTarget;
+  if (trigger.disabled) return;
+  trigger.disabled = true;
+  try {
+    await authenticate();
+    if (!signedIn) return;
+    authGeneration++;
+    reauthRequired = false;
+    trigger.hidden = true;
+    if (route === 'agents' && supportsChat()) paintComposer();
+    if (terminal && terminal.socket?.readyState !== WebSocket.OPEN) connectTerminal(terminal);
+    refresh(true);
+  } catch (error) { toast(error.message); }
+  finally { trigger.disabled = false; }
+});
 
 byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
@@ -2009,9 +2305,48 @@ document.addEventListener('keydown', (event) => {
 byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
 byId('stop-agent').addEventListener('click', stopAgent);
 byId('chat-settings').addEventListener('click', showChatSettings);
+byId('chat-permission').addEventListener('click', showPermissionSettings);
+byId('command-dismiss').addEventListener('click', () => { byId('command-result').hidden = true; });
+byId('command-open-pane').addEventListener('click', () => {
+  const item = active;
+  const machine = machines.find(({ id }) => id === item?.node);
+  const session = machine?.sessions?.find(({ id }) => id === item.pane.session);
+  if (!session) return;
+  const record = withMachine({ ...session, sessionRecord: true }, machine);
+  navigate('sessions', machine.id);
+  selectedPane.set(recordKey(record), item.pane.key);
+  openRecord(record);
+});
 chatInput.addEventListener('input', () => {
   rememberDraft(conversationKey(), chatInput.value);
-  resizeComposer();
+  if (route === 'agents' && supportsChat()) paintComposer();
+  suggestionIndex = 0;
+  updateSuggestions();
+});
+chatInput.addEventListener('focus', updateSuggestions);
+chatInput.addEventListener('blur', hideSuggestions);
+chatInput.addEventListener('compositionstart', () => { composingPrompt = true; hideSuggestions(); });
+chatInput.addEventListener('compositionend', () => {
+  composingPrompt = false;
+  rememberDraft(conversationKey(), chatInput.value);
+  updateSuggestions();
+});
+chatInput.addEventListener('keydown', (event) => {
+  if (event.isComposing || byId('chat-suggestions').hidden) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    hideSuggestions();
+  } else if (suggestionItems.length && ['Enter', 'Tab'].includes(event.key)) {
+    event.preventDefault();
+    chooseSuggestion(suggestionItems[suggestionIndex]);
+  } else if (suggestionItems.length && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+    event.preventDefault();
+    const step = event.key === 'ArrowUp' ? -1 : 1;
+    suggestionIndex = (suggestionIndex + step + suggestionItems.length) % suggestionItems.length;
+    updateSuggestions();
+    byId('suggestion-' + suggestionIndex)?.scrollIntoView({ block: 'nearest' });
+  }
 });
 byId('control').addEventListener('click', () => sendTerminal({ type: terminal?.writable ? 'release' : 'take' }));
 byId('term-form').addEventListener('submit', (event) => {
@@ -2059,7 +2394,8 @@ byId('enroll').addEventListener('click', () => {
   else sheet(t('firstDevice'), make('p', 'sheet-copy', t('inviteInstructions')));
 });
 byId('signout').addEventListener('click', async () => {
-  try { await api('/api/logout', 'POST'); signedOut(); } catch (error) { if (signedIn) toast(error.message); }
+  try { await api('/api/logout', 'POST'); signedOut(); }
+  catch (error) { if (error.status === 401) signedOut(); else if (signedIn) toast(error.message); }
 });
 byId('install').addEventListener('click', async () => {
   if (installPrompt) { await installPrompt.prompt(); installPrompt = null; }

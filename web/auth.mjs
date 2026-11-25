@@ -22,6 +22,25 @@ export class Auth {
     this.rpID = origin.hostname.startsWith('[') ? 'localhost' : origin.hostname;
     this.secure = origin.protocol === 'https:';
     this.cookie = this.secure ? '__Host-workbench' : 'workbench-local';
+    const credentials = new Set(store.keys().map(({ id }) => id));
+    const records = store.sessions(this.origin);
+    const now = Date.now();
+    if (Array.isArray(records)) {
+      for (const entry of records) {
+        if (!Array.isArray(entry)) continue;
+        const [key, session] = entry;
+        if (typeof key === 'string' && /^[0-9a-f]{64}$/.test(key) && credentials.has(session?.credentialId)
+            && session.until > now && session.idle > now) this.sessions.set(key, session);
+      }
+    }
+  }
+
+  persistSessions() {
+    this.store.writeSessions(this.origin, [...this.sessions]);
+  }
+
+  endSession(key) {
+    if (this.sessions.delete(key)) this.persistSessions();
   }
 
   writeOrigin(request) {
@@ -41,7 +60,9 @@ export class Auth {
   cleanup() {
     const now = Date.now();
     for (const [key, record] of this.pending) if (record.until <= now) this.pending.delete(key);
+    const before = this.sessions.size;
     for (const [key, session] of this.sessions) if (session.until <= now || session.idle <= now) this.sessions.delete(key);
+    if (this.sessions.size !== before) this.persistSessions();
     for (const [key, limit] of this.limits) if (limit.until <= now) this.limits.delete(key);
   }
 
@@ -50,7 +71,10 @@ export class Auth {
     const key = token ? hash(token) : null;
     const session = key ? this.sessions.get(key) : null;
     if (!session || !this.valid(key)) return null;
-    if (touch) session.idle = Math.min(Date.now() + SESSION_IDLE, session.until);
+    if (touch) {
+      session.idle = Math.min(Date.now() + SESSION_IDLE, session.until);
+      this.persistSessions();
+    }
     return key;
   }
 
@@ -68,6 +92,7 @@ export class Auth {
     const token = secret();
     const now = Date.now();
     this.sessions.set(hash(token), { credentialId, idle: now + SESSION_IDLE, until: now + SESSION_AGE });
+    this.persistSessions();
     return this.cookieHeader(token);
   }
 
@@ -181,7 +206,9 @@ export class Auth {
     if (!kept.length) throw new Failure(409, 'Add a backup passkey before removing the last one.');
     if (kept.length === keys.length) throw new Failure(404, 'Passkey not found.');
     this.store.writeKeys(kept);
+    const before = this.sessions.size;
     for (const [key, session] of this.sessions) if (session.credentialId === id) this.sessions.delete(key);
+    if (this.sessions.size !== before) this.persistSessions();
   }
 }
 

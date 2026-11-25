@@ -34,6 +34,7 @@
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
     <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 4-3 7-8 9-5-2-8-5-8-9V6l8-3Zm-3 9 2 2 4-4"/></symbol>
     <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
     <symbol id="icon-select" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
     <symbol id="icon-share" viewBox="0 0 24 24"><path d="M12 15V3m-4 4 4-4 4 4M7 11H5v9h14v-9h-2"/></symbol>
@@ -103,19 +104,30 @@
             <div class="composer-wrap">
               <div class="composer-inner">
                 <p id="chat-error" class="message-error" role="status" hidden></p>
+                <div class="command-result" id="command-result" hidden>
+                  <pre id="command-result-text" role="status"></pre>
+                  <div class="command-result-actions">
+                    <button class="plain" id="command-open-pane" type="button">{{openTerminal}}</button>
+                    <button class="plain" id="command-dismiss" type="button">{{close}}</button>
+                  </div>
+                </div>
+                <div class="suggestions" id="chat-suggestions" role="listbox" aria-label="{{chatSuggestions}}" hidden></div>
                 <div class="composer-label" id="composer-label">
                   <span class="dot" aria-hidden="true"></span><span id="chat-status" role="status"></span>
                   <span class="working-dots" id="working-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
-                  <button type="button" class="stop-agent" id="stop-agent" aria-label="{{stopCurrentTurn}}" title="{{stopCurrentTurn}}" hidden>
-                    <svg class="glyph" aria-hidden="true"><use href="#icon-stop"></use></svg><span>{{stopTurn}}</span>
-                  </button>
                   <button type="button" class="picker-button composer-settings" id="chat-settings" aria-haspopup="dialog" aria-label="{{modelAndThinking}}" hidden>
                     <span class="picker-value" id="chat-settings-label">{{modelAndThinking}}</span>
                     <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
                   </button>
+                  <button type="button" class="picker-button composer-permission" id="chat-permission" aria-haspopup="dialog" aria-label="{{permission}}" hidden>
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                  </button>
                 </div>
                 <form class="composer" id="chat-form">
-                  <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" placeholder="{{continueConversation}}"></textarea>
+                  <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" aria-controls="chat-suggestions" placeholder="{{continueConversation}}"></textarea>
+                  <button type="button" class="composer-send stop-agent" id="stop-agent" aria-label="{{stopCurrentTurn}}" title="{{stopCurrentTurn}}" hidden>
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-stop"></use></svg>
+                  </button>
                   <button class="composer-send" type="submit" id="send" aria-label="{{send}}" title="{{send}}">
                     <svg class="glyph" aria-hidden="true"><use href="#icon-send"></use></svg>
                   </button>
@@ -237,6 +249,7 @@
       </section>
     </dialog>
     <div class="toast" id="toast" role="status" hidden></div>
+    <button class="toast reauth" id="reauth" type="button" hidden>{{continueWithPasskey}}</button>
     <div class="toast update-toast" id="update-toast" hidden>
       <span role="status">{{updateReady}}</span>
       <button type="button" class="update-refresh" id="update-refresh">{{reloadApp}}</button>

@@ -152,4 +152,13 @@ export class Store {
 
   keys() { return readJson(this.credentials, []); }
   writeKeys(keys) { writeJson(this.credentials, keys); }
+
+  sessions(origin) {
+    try { return readJson(join(this.directory, 'browser-sessions-' + hash(origin) + '.json'), []); }
+    catch { return []; }
+  }
+
+  writeSessions(origin, sessions) {
+    writeJson(join(this.directory, 'browser-sessions-' + hash(origin) + '.json'), sessions);
+  }
 }

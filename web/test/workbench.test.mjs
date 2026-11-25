@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { WebSocket } from 'ws';
+import { Auth } from '../auth.mjs';
 import { codexComposer, codexSettings, modelChangeConfirmed } from '../codex.mjs';
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
@@ -81,6 +82,29 @@ test('device links carry a passkey invitation for the configured origin and can 
   assert.ok(expires >= started + expiresInMinutes * 60_000);
   assert.ok(expires <= Date.now() + expiresInMinutes * 60_000);
   assert.throws(() => store.invitation(invite, 'passkey', true), { status: 403 });
+});
+
+test('browser sessions survive reloads with the same origin and respect expiry and revocation', async (t) => {
+  const store = new Store(await scratch(t));
+  const origin = new URL('http://localhost:7080');
+  store.writeKeys([{ id: 'primary' }, { id: 'backup' }]);
+  const auth = new Auth(store, origin);
+  const cookie = auth.issueSession('primary').split(';')[0];
+  const request = { headers: { cookie } };
+  const key = auth.session(request, false);
+  assert.ok(key);
+  assert.equal(key, hash(cookie.split('=')[1]));
+  assert.ok(!JSON.stringify(store.sessions(origin.origin)).includes(cookie.split('=')[1]));
+  assert.equal(new Auth(store, origin).session(request, false), key);
+  assert.equal(new Auth(store, new URL('http://localhost:7081')).session(request, false), null);
+  auth.revoke('primary');
+  assert.equal(new Auth(store, origin).session(request, false), null);
+  const other = auth.issueSession('backup').split(';')[0];
+  const otherRequest = { headers: { cookie: other } };
+  const otherKey = auth.session(otherRequest, false);
+  auth.sessions.get(otherKey).idle = Date.now() - 1;
+  auth.persistSessions();
+  assert.equal(new Auth(store, origin).session(otherRequest, false), null);
 });
 
 test('Codex history is tied to an exact rollout and only returns visible text', async (t) => {

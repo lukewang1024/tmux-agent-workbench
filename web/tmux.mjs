@@ -1,13 +1,14 @@
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { History, hasThread, sameProcess } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
-import { codexComposer, codexSettings, modelChangeConfirmed, readModels } from './codex.mjs';
+import { codexCommands, codexComposer, codexOutput, codexSettings, modelChangeConfirmed, readModels,
+  readPermissions, readSkills } from './codex.mjs';
 
 const run = promisify(execFile);
 const webSession = '__workbench_web';
@@ -68,6 +69,7 @@ export class LocalNode {
   recentModels = null;
   agentProcesses = new WeakMap();
   promptReceipts = new Map();
+  commandLists = new Map();
   refreshingUsage = null;
   refreshedUsage = null;
   history = new History();
@@ -339,7 +341,7 @@ export class LocalNode {
     return entry;
   }
 
-  async sendPrompt(agentId, thread, text, paneKey, requestId) {
+  async sendPrompt(agentId, thread, text, paneKey, requestId, settings) {
     if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 16_384
         || /[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/.test(text)) {
       throw new Failure(400, 'Enter a text message under 16 KB.');
@@ -354,6 +356,12 @@ export class LocalNode {
     const canSend = (entry) => !entry.pane.inMode && (entry.thread ? promptStates.includes(entry.state) : entry.state === 'idle');
     const entry = await this.chatAgent(agentId, thread, paneKey);
     if (!canSend(entry)) throw new Failure(409, 'The Agent cannot accept input right now.');
+    const settingsApplied = settings && closeStates.includes(entry.state) && (settings.model || settings.permission);
+    if (settingsApplied) {
+      const target = { agent: agentId, pane: paneKey, thread };
+      if (settings.model) await this.changeSettings({ ...target, model: settings.model, effort: settings.effort });
+      if (settings.permission) await this.changePermission({ ...target, permission: settings.permission });
+    }
     let after;
     let submittedAt;
     await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), {
@@ -367,6 +375,7 @@ export class LocalNode {
       },
     });
     const response = submittedAt === undefined ? { after } : { submittedAt };
+    if (settingsApplied) response.settingsApplied = true;
     if (receiptKey) {
       this.promptReceipts.set(receiptKey, { text, response });
       if (this.promptReceipts.size > 256) this.promptReceipts.delete(this.promptReceipts.keys().next().value);
@@ -418,13 +427,7 @@ export class LocalNode {
   }
 
   async changeSettings({ agent, thread, pane, model, effort }) {
-    const allowed = (entry) => {
-      if (!closeStates.includes(entry.state) || entry.pane.inMode) {
-        throw new Failure(409, 'Wait for the current turn to finish before changing the model.');
-      }
-    };
     const entry = await this.chatAgent(agent, thread, pane);
-    allowed(entry);
     const models = await this.models();
     const option = models.find((item) => item.id === model);
     if (!option || (option.efforts.length ? !option.efforts.includes(effort) : effort != null)) {
@@ -435,20 +438,7 @@ export class LocalNode {
     const wanted = { model, effort: effort ?? null };
     if (current.model === wanted.model && current.effort === wanted.effort) return wanted;
     const command = '/model ' + model + (effort ? ' --reasoning=' + effort : '');
-    await this.paste(entry.pane, Buffer.from(command), {
-      bracketed: true,
-      check: async () => {
-        allowed(await this.chatAgent(agent, thread, pane));
-        const screen = await this.codexScreen(entry.pane);
-        if (codexComposer(screen.text, screen.cursor) !== '') {
-          throw new Failure(409, 'Clear the draft in the Codex terminal before changing the model.');
-        }
-      },
-    });
-    const entered = await this.waitCodexScreen(entry.pane, (screen) =>
-      codexComposer(screen.text, screen.cursor)?.replaceAll(/\s+/g, '') === command.replaceAll(/\s+/g, ''), 1400);
-    if (!entered) throw new Failure(409, 'Codex did not accept the model command.');
-    await this.tmux(['send-keys', '-t', entry.pane.pane, 'Enter']);
+    await this.submitCodexCommand(entry, command);
     const initial = modelChangeConfirmed(before.text, model, effort);
     const confirmed = await this.waitCodexScreen(entry.pane, (screen) => {
       const updated = codexSettings(screen.text, screen.cursor, models);
@@ -457,6 +447,114 @@ export class LocalNode {
     }, 2800);
     if (!confirmed) throw new Failure(409, 'Codex did not confirm the model change.');
     return wanted;
+  }
+
+  async submitCodexCommand(entry, command) {
+    await this.paste(entry.pane, Buffer.from(command), {
+      bracketed: true,
+      check: async () => {
+        const latest = await this.chatAgent(entry.id, entry.thread, entry.pane.key);
+        if (!closeStates.includes(latest.state) || latest.pane.inMode) {
+          throw new Failure(409, 'Wait for the current turn to finish before running this command.');
+        }
+        const screen = await this.codexScreen(entry.pane);
+        if (codexComposer(screen.text, screen.cursor) !== '') {
+          throw new Failure(409, 'Finish the draft in the Codex terminal before running this command.');
+        }
+      },
+    });
+    const entered = await this.waitCodexScreen(entry.pane, (screen) =>
+      codexComposer(screen.text, screen.cursor)?.replaceAll(/\s+/g, '') === command.replaceAll(/\s+/g, ''), 1400);
+    if (!entered) throw new Failure(409, 'Codex did not accept the command.');
+    await this.tmux(['send-keys', '-t', entry.pane.pane, 'Enter']);
+  }
+
+  async codexDirectory(entry) {
+    const target = await this.verify(entry.pane);
+    const cwd = (await this.tmux(['display-message', '-p', '-t', target.pane, '#{pane_current_path}'])).trimEnd();
+    if (!isAbsolute(cwd)) throw new Failure(409, 'Could not identify the Codex workspace.');
+    return cwd;
+  }
+
+  async capabilities({ agent, thread, pane, kind }) {
+    const entry = await this.chatAgent(agent, thread, pane);
+    if (kind === 'commands') return { suggestions: await this.commands(entry) };
+    const cwd = await this.codexDirectory(entry);
+    if (kind === 'permissions') return { profiles: await readPermissions(this.env, cwd) };
+    return { suggestions: await readSkills(this.env, cwd) };
+  }
+
+  async commands(entry) {
+    const key = entry.pane.key;
+    const cached = this.commandLists.get(key);
+    if (cached && (cached.until > Date.now() || !closeStates.includes(entry.state))) return cached.items;
+    if (!closeStates.includes(entry.state)) throw new Failure(409, 'Wait for the current turn to finish to load slash commands.');
+    const before = await this.codexScreen(entry.pane);
+    if (codexComposer(before.text, before.cursor) !== '') {
+      throw new Failure(409, 'Finish the draft in the Codex terminal before loading slash commands.');
+    }
+    const target = entry.pane.pane;
+    const items = new Map();
+    await this.tmux(['send-keys', '-t', target, '-l', '/']);
+    try {
+      let previous = '';
+      for (let page = 0; page < 12; page++) {
+        let visible;
+        const updated = await this.waitCodexScreen(entry.pane, (screen) => {
+          if (codexComposer(screen.text, screen.cursor) !== '/') return false;
+          visible = codexCommands(screen.text, screen.cursor);
+          return visible.length && visible.find((item) => item.selected)?.name !== previous;
+        }, 360);
+        if (!updated) break;
+        const size = items.size;
+        for (const { selected, ...item } of visible) items.set(item.name, item);
+        if (items.size === size) break;
+        previous = visible.find((item) => item.selected)?.name || '';
+        if (!previous) break;
+        await this.tmux(['send-keys', '-t', target, ...visible.map(() => 'Down')]);
+      }
+    } finally {
+      const screen = await this.codexScreen(entry.pane).catch(() => null);
+      if (screen && codexComposer(screen.text, screen.cursor) === '/') {
+        await this.tmux(['send-keys', '-t', target, 'Escape']);
+        await delay(80);
+        const closed = await this.codexScreen(entry.pane);
+        if (codexComposer(closed.text, closed.cursor) === '/') await this.tmux(['send-keys', '-t', target, 'BSpace']);
+      }
+    }
+    if (!items.size) throw new Failure(502, 'Could not load Codex slash commands.');
+    const list = [...items.values()];
+    this.commandLists.set(key, { items: list, until: Date.now() + 30_000 });
+    if (this.commandLists.size > 64) this.commandLists.delete(this.commandLists.keys().next().value);
+    return list;
+  }
+
+  async changePermission({ agent, thread, pane, permission }) {
+    const entry = await this.chatAgent(agent, thread, pane);
+    const cwd = await this.codexDirectory(entry);
+    if (!(await readPermissions(this.env, cwd)).some(({ id }) => id === permission)) {
+      throw new Failure(400, 'Select a permission profile allowed by Codex.');
+    }
+    const before = await this.codexScreen(entry.pane);
+    const count = (screen) => (screen.match(/Permission selection requested:/g) || []).length;
+    await this.submitCodexCommand(entry, '/permissions ' + permission);
+    const confirmed = await this.waitCodexScreen(entry.pane, ({ text }) =>
+      count(text) > count(before.text) || codexOutput(before.text, text).includes('Permission selection requested:'), 2800);
+    if (!confirmed) throw new Failure(409, 'Codex did not confirm the permission change.');
+    return { permission };
+  }
+
+  async slashCommand({ agent, thread, pane, text }) {
+    if (typeof text !== 'string' || !/^\/[a-z][a-z0-9-]*(?: +[^\x00-\x1f\x7f]*)?$/i.test(text) || text.length > 2048) {
+      throw new Failure(400, 'Enter a single Codex slash command.');
+    }
+    const entry = await this.chatAgent(agent, thread, pane);
+    const before = await this.codexScreen(entry.pane);
+    await this.submitCodexCommand(entry, text);
+    await delay(450);
+    const after = await this.codexScreen(entry.pane).catch(() => null);
+    this.recentSnapshot = null;
+    return { output: after ? codexOutput(before.text, after.text) : '' };
   }
 
   async paste(pane, bytes, { bracketed = false, submit = false, check } = {}) {
@@ -654,10 +752,13 @@ export class LocalNode {
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before, args.thread);
-      case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId);
+      case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId, args.settings);
       case 'interrupt': return this.interrupt(args);
       case 'chat-settings': return this.settings(args);
       case 'change-chat-settings': return this.changeSettings(args);
+      case 'chat-capabilities': return this.capabilities(args);
+      case 'change-chat-permission': return this.changePermission(args);
+      case 'slash-command': return this.slashCommand(args);
       case 'create': return this.create(args.split, args.session, args.anchor);
       case 'open': return this.watchOpen(args.pane);
       case 'read': return this.watchRead(args.watch, args.after);

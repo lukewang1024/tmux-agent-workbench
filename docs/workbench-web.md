@@ -16,11 +16,16 @@ together through the selection control. Chat sends follow-ups while the Agent
 is idle, working or done. Codex handles submitting the message in the active
 conversation. Respond to permission prompts on the Agent's machine.
 
-Open **Model & thinking** beside the composer when the Agent is idle to edit
-the live Codex session. The model list comes from Codex on that machine, and
-the available thinking levels follow the selected model. **Stop** interrupts
-the current turn and keeps the Agent available to continue. Drafts and failed
-sends stay in the browser so you can return to the chat and retry.
+Use the model, thinking and permissions controls beside the composer. Codex
+provides the available models, thinking levels and allowed permission profiles.
+Selections made during an active turn are saved for the next turn started from
+Workbench Web. **Stop** occupies the composer action while the Agent works and
+remains available alongside **Send** when the draft contains text.
+
+Type `/` to list commands from the running Codex client, or `$` to find skills
+available in its workspace. Selecting a suggestion fills in the draft. Send a
+slash command to run it, and open the session Pane for commands that require
+further terminal interaction. Drafts and failed sends stay in the browser.
 
 The provider marks identify the Agent CLIs in the list and belong to their
 respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],
@@ -191,8 +196,10 @@ The gateway runs with the authority of the tmux user on paired machines. A
 signed-in operator can open terminals and send their input. Protect the gateway
 account and the Web state directory. By default the state is stored under
 $XDG_STATE_HOME/tmux-agent-workbench/web and the CLI accepts a --state override.
-Passkey sessions expire and can be revoked. Pairing and login attempts are rate
-limited. Browser terminal connections validate their origin and session.
+Passkey sessions survive gateway restarts and expire according to their
+original age and idle limits. A new sign-in prompt leaves the current chat and
+draft in place. Sessions can be revoked, and pairing and login attempts are
+rate limited. Browser terminal connections validate their origin and session.
 
 ## Verify a local checkout
 

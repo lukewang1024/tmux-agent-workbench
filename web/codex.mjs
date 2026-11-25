@@ -4,25 +4,24 @@ import { Failure } from './state.mjs';
 
 const modelId = /^[a-z0-9][a-z0-9._:/-]{0,127}$/i;
 const effortId = /^(?:none|minimal|low|medium|high|xhigh|max|ultra)$/;
-const modelUnavailable = 'Could not load the Codex model list.';
 const plain = (line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 const prompt = /^\s*› ?/u;
 
-export function readModels(env) {
+function queryCodex(env, method, params, failure) {
   return new Promise((resolve, reject) => {
     const child = spawn('codex', ['app-server'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     let settled = false;
     const timer = setTimeout(() => finish(), 6500);
-    function finish(models) {
+    function finish(result) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       lines.close();
       child.stdin.destroy();
       child.kill();
-      if (models?.length) resolve(models);
-      else reject(new Failure(502, modelUnavailable));
+      if (result) resolve(result);
+      else reject(new Failure(502, failure));
     }
     const write = (message) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
     child.stdin.on('error', () => finish());
@@ -33,26 +32,70 @@ export function readModels(env) {
       try { message = JSON.parse(line); } catch { return; }
       if (message?.id === 1 && message.result) {
         write({ method: 'initialized' });
-        write({ id: 2, method: 'model/list', params: { limit: 64 } });
-      } else if (message?.id === 2) {
-        const data = message.result?.data;
-        if (!Array.isArray(data)) return finish();
-        const models = new Map();
-        for (const item of data) {
-          if (typeof item?.model !== 'string' || !modelId.test(item.model) || item.hidden) continue;
-          const efforts = (Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts : [])
-            .map((option) => option?.reasoningEffort).filter((effort) => effortId.test(effort));
-          models.set(item.model, {
-            id: item.model, label: String(item.displayName || item.model).slice(0, 100),
-            efforts: [...new Set(efforts)], defaultEffort: efforts.includes(item.defaultReasoningEffort)
-              ? item.defaultReasoningEffort : efforts[0] || null,
-          });
-        }
-        finish([...models.values()]);
-      } else if (message?.id === 1) finish();
+        write({ id: 2, method, params });
+      } else if (message?.id === 2) finish(message.result);
+      else if (message?.id === 1) finish();
     });
-    write({ id: 1, method: 'initialize', params: { clientInfo: { name: 'workbench-web', version: '1.0.0' } } });
+    write({ id: 1, method: 'initialize', params: {
+      clientInfo: { name: 'workbench-web', version: '1.0.0' }, capabilities: { experimentalApi: true },
+    } });
   });
+}
+
+export async function readModels(env) {
+  const error = 'Could not load the Codex model list.';
+  const { data } = await queryCodex(env, 'model/list', { limit: 64 }, error);
+  const models = new Map();
+  for (const item of Array.isArray(data) ? data : []) {
+    if (typeof item?.model !== 'string' || !modelId.test(item.model) || item.hidden) continue;
+    const efforts = (Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts : [])
+      .map((option) => option?.reasoningEffort).filter((effort) => effortId.test(effort));
+    models.set(item.model, {
+      id: item.model, label: String(item.displayName || item.model).slice(0, 100),
+      efforts: [...new Set(efforts)], defaultEffort: efforts.includes(item.defaultReasoningEffort)
+        ? item.defaultReasoningEffort : efforts[0] || null,
+    });
+  }
+  if (!models.size) throw new Failure(502, error);
+  return [...models.values()];
+}
+
+export async function readSkills(env, cwd) {
+  const { data } = await queryCodex(env, 'skills/list', { cwds: [cwd], forceReload: true }, 'Could not load Codex skills.');
+  const skills = (Array.isArray(data) ? data : []).flatMap((entry) => Array.isArray(entry.skills) ? entry.skills : []);
+  const enabled = new Map();
+  for (const item of skills) {
+    if (!item?.enabled || typeof item.name !== 'string' || !modelId.test(item.name)) continue;
+    enabled.set(item.name, {
+      name: item.name,
+      label: String(item.interface?.displayName || item.name).slice(0, 100),
+      description: String(item.interface?.shortDescription || item.shortDescription || item.description || '').slice(0, 180),
+    });
+  }
+  return [...enabled.values()];
+}
+
+export async function readPermissions(env, cwd) {
+  const { data } = await queryCodex(env, 'permissionProfile/list', { cwd }, 'Could not load Codex permission profiles.');
+  return (Array.isArray(data) ? data : []).filter((item) =>
+    item?.allowed && typeof item.id === 'string' && /^:?[a-z0-9][a-z0-9._-]{0,127}$/i.test(item.id)
+  ).map(({ id, description }) => ({ id, description: String(description || '').slice(0, 180) }));
+}
+
+export function codexCommands(screen, cursorY) {
+  const items = [];
+  for (const row of screen.split('\n').slice(0, cursorY).map(plain).reverse()) {
+    const match = row.match(/^\s*(›\s*)?\/([a-z][a-z0-9-]*)\s{2,}(\S.+)$/i);
+    if (match) items.unshift({ name: match[2], label: '/' + match[2], description: match[3].trim(), selected: Boolean(match[1]) });
+    else if (items.length && !/^\s{4,}\S/.test(row)) break;
+  }
+  return items;
+}
+
+export function codexOutput(before, after) {
+  const lines = (screen) => screen.split('\n').map((line) => plain(line).trim()).filter(Boolean);
+  const previous = new Set(lines(before));
+  return lines(after).filter((line) => !previous.has(line) && !prompt.test(line)).slice(-18).join('\n').slice(0, 3000);
 }
 
 export function codexComposer(screen, cursorY) {

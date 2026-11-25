@@ -208,7 +208,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
     if (!path.startsWith('/api/')) throw new Failure(404, 'Page not found.');
     const session = authorized(req);
     if (path === '/api/logout' && method === 'POST') {
-      auth.sessions.delete(session);
+      auth.endSession(session);
       res.setHeader('Set-Cookie', auth.cookieHeader('', true));
       for (const client of browserSockets) if (client.session === session) client.socket.close(4001, 'Signed out');
       return json(res, {});
@@ -242,15 +242,23 @@ export async function startServer({ local, localName, store, listen, origin, cer
       });
       return json(res, { ...page, messages });
     }
-    if (path === '/api/chat-settings' && method === 'GET') {
+    if ((path === '/api/chat-settings' || path === '/api/chat-capabilities') && method === 'GET') {
       const [agent, thread, pane] = ['agent', 'thread', 'pane'].map((key) => request.searchParams.get(key));
-      return json(res, await node(request.searchParams.get('node') || 'local').request('chat-settings', { agent, thread, pane }));
+      const kind = request.searchParams.get('kind');
+      const operation = path === '/api/chat-settings' ? 'chat-settings' : 'chat-capabilities';
+      if (operation === 'chat-capabilities' && !['skills', 'permissions'].includes(kind)) {
+        throw new Failure(400, 'Invalid Codex capability request.');
+      }
+      return json(res, await node(request.searchParams.get('node') || 'local').request(operation, { agent, thread, pane, kind }));
     }
     const chatOperation = {
       '/api/prompt': 'prompt', '/api/interrupt': 'interrupt', '/api/chat-settings': 'change-chat-settings',
+      '/api/chat-permission': 'change-chat-permission', '/api/chat-command': 'slash-command',
+      '/api/chat-commands': 'chat-capabilities',
     }[path];
     if (typeof chatOperation === 'string' && method === 'POST') {
       const input = await body(req);
+      if (path === '/api/chat-commands') input.kind = 'commands';
       if (typeof input.pane !== 'string' || !/^\d+(?:\.\d+){3}$/.test(input.pane)) throw new Failure(400, 'Invalid Pane.');
       const lease = input.node + ':' + input.pane;
       if (leases.has(lease)) throw new Failure(409, chatOperation === 'prompt'
