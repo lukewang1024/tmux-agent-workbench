@@ -23,9 +23,10 @@ Run the service as the user who owns the tmux server. To choose a specific
 server, pass its absolute Unix socket to --socket. Inside tmux, get the current
 path with tmux display-message -p '#{socket_path}'.
 
-The default listener is 127.0.0.1:7080 and the local browser origin is
-http://localhost:7080. In a separate terminal under the same account, issue
-an invitation:
+The gateway listens on IPv4 loopback. The default listener is
+127.0.0.1:7080 and the default browser origin is http://localhost:7080.
+In a separate terminal under the same account, issue an invitation with
+the gateway's state directory and browser origin.
 
     tmux-agent-workbench web invite --origin http://localhost:7080
 
@@ -34,13 +35,29 @@ Invitations expire after ten minutes and are consumed by successful enrollment.
 Treat an unused invitation like a credential. For additional devices, use the
 Passkey page in the PWA or issue another invitation from the gateway account.
 
-## Deploy for Android
+## Use Android over SSH
 
-Choose a stable HTTPS origin reachable by the Android browser. Use a certificate
-trusted on the phone. A private network or VPN can limit who reaches the
-endpoint. The origin determines the Passkey relying party and PWA identity.
+Keep the default listener and browser origin on the gateway. In Termux,
+use an existing SSH route to the gateway that permits local TCP forwarding.
+Replace gateway-host with the SSH host or alias used on the phone.
 
-A gateway behind a reverse proxy can listen on loopback:
+    ssh -NT -o ExitOnForwardFailure=yes \
+      -L 127.0.0.1:7080:127.0.0.1:7080 gateway-host
+
+With the tunnel running, open http://localhost:7080 in Chrome on the phone.
+Use that exact origin for the invitation and subsequent visits. Chrome treats
+localhost as a secure context for Service Workers and WebAuthn.
+
+Complete Passkey enrollment and choose Add to home screen, then Install in
+Chrome. You can also use the installation control in 我的 → 设置. Keep the
+tunnel running whenever you open or use the installed app. The service worker
+caches the app shell. Conversation history and terminal data are fetched on
+demand.
+
+## Use a browser HTTPS origin
+
+When deploying behind an HTTPS reverse proxy, choose a stable browser origin
+and a certificate trusted by the browser. Keep the gateway on loopback.
 
     tmux-agent-workbench web serve \
       --listen 127.0.0.1:7080 \
@@ -48,15 +65,8 @@ A gateway behind a reverse proxy can listen on loopback:
       --name my-devbox
 
 Forward HTTP and WebSocket traffic for that origin to the loopback listener.
-For direct TLS, set --cert and --key to the certificate chain and private key,
-and choose an appropriate listener. Issue the Passkey invitation against the
-same HTTPS origin.
-
-Open the HTTPS link in Chrome on Android, complete enrollment, then choose
-Install app from the Chrome menu or use the installation control in
-我的 → 设置. The installed app opens in a standalone window. The service
-worker caches the application shell. Conversation history and terminal data
-are fetched on demand.
+Issue the Passkey invitation against the same HTTPS origin. When the loopback
+hop needs TLS, provide both --cert and --key on the gateway.
 
 ## Pair a remote host
 
@@ -92,11 +102,12 @@ host supports a Mac with its SSH server disabled:
     tmux-agent-workbench web node join --gateway http://127.0.0.1:17080
     tmux-agent-workbench web node run
 
-The public browser origin remains the configured HTTPS address. Node transport
-accepts loopback HTTP within the SSH tunnel. Workbench also supports optional
-Machine Fabric inventory hints. Pass --fabric-node node-a=executor-id to the
-gateway to show the named host as pending before it pairs. Fabric-provisioned
-SSH forwards can carry the connector using the same loopback address.
+The browser uses the address configured with --origin. Node transport uses
+the connector's own loopback HTTP address within the SSH tunnel. Workbench
+also supports optional Machine Fabric inventory hints. Pass
+--fabric-node node-a=executor-id to the gateway to show the named host as
+pending before it pairs. Fabric-provisioned SSH forwards can carry the
+connector using the same loopback address.
 
 Use web node list on the gateway to inspect pairings. Use web node revoke NAME
 to remove a node's authorization. To pair it again, stop the connector, run

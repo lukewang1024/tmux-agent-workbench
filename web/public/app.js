@@ -8,6 +8,10 @@ const chatInput = byId('chat-input');
 const termInput = byId('term-input');
 const nav = [...document.querySelectorAll('.nav-button')];
 const passkeys = window.SimpleWebAuthnBrowser;
+const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
+const connectionError = loopback
+  ? '暂时无法连接工作台，请检查 SSH 隧道。'
+  : '暂时无法连接 Workbench 网关。';
 const stateNames = { idle: '空闲', blocked: '待处理', working: '运行中', done: '已完成', unknown: '状态未知' };
 const nodeStates = { pending: '待接入', offline: '离线', online: '在线' };
 const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', trae: 'Trae', shell: 'Shell' };
@@ -27,8 +31,7 @@ let activeKey = '';
 let toastTimer;
 let syncing = false;
 let installPrompt;
-let enrollment = new URLSearchParams(location.hash.slice(1)).get('invite');
-if (enrollment) history.replaceState(null, '', location.pathname);
+let enrollment = readEnrollment();
 const selection = new Map();
 const drafts = new Map();
 let transcript = null;
@@ -71,6 +74,12 @@ function toast(message) {
   toastTimer = setTimeout(() => status('toast'), 4800);
 }
 
+function readEnrollment() {
+  const invite = new URLSearchParams(location.hash.slice(1)).get('invite');
+  if (invite) history.replaceState(history.state, '', location.pathname + location.search);
+  return invite;
+}
+
 async function api(path, method = 'GET', payload = null) {
   const response = await fetch(path, {
     method,
@@ -78,7 +87,7 @@ async function api(path, method = 'GET', payload = null) {
     body: method === 'GET' ? undefined : JSON.stringify(payload || {}),
     cache: 'no-store',
     signal: AbortSignal.timeout(path === '/api/usage' ? 27_000 : 13_000),
-  });
+  }).catch(() => { throw new Error(connectionError); });
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401 && signedIn) signedOut();
@@ -622,7 +631,7 @@ async function loadKeys() {
 }
 
 async function authenticate(invite = null, label = null) {
-  if (!passkeys?.browserSupportsWebAuthn()) throw new Error('请用支持通行密钥的浏览器打开 HTTPS 入口。');
+  if (!passkeys?.browserSupportsWebAuthn()) throw new Error('请在支持通行密钥的浏览器中打开 localhost 或 HTTPS 地址。');
   const registering = Boolean(invite || label);
   const base = '/api/auth/' + (registering ? 'register' : 'login');
   const { options, ticket } = await api(base + '/options', 'POST', { invite, label });
@@ -755,9 +764,16 @@ byId('signout').addEventListener('click', async () => {
 byId('install').addEventListener('click', async () => {
   if (installPrompt) { await installPrompt.prompt(); installPrompt = null; }
   else sheet('安装到桌面', make('p', 'sheet-copy', window.matchMedia('(display-mode: standalone)').matches
-    ? '当前正在独立窗口中运行。' : '在安卓 Chrome 菜单中选择「安装应用」，之后可从桌面打开 Workbench Web。'));
+    ? '当前正在独立窗口中运行。' : '在安卓 Chrome 菜单中选择「添加到主屏幕」，再点「安装」。'));
 });
 window.addEventListener('beforeinstallprompt', (event) => { event.preventDefault(); installPrompt = event; });
+window.addEventListener('hashchange', () => {
+  const invite = readEnrollment();
+  if (invite) {
+    enrollment = invite;
+    registerSheet();
+  }
+});
 window.addEventListener('popstate', (event) => {
   if (!signedIn || !event.state?.workbench) return;
   closeSheet();
@@ -801,7 +817,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 api('/api/session').then(({ authenticated }) => {
   if (authenticated) signedOn();
   if (enrollment) registerSheet();
-}).catch(() => status('login-error', '暂时无法连接 Workbench 网关。'));
+}).catch(() => status('login-error', connectionError));
 setInterval(() => {
   if (document.hidden) return;
   refresh();

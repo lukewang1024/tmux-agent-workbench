@@ -7,7 +7,7 @@ import { defaultState, Failure, nodeName, parseOrigin, readJson, Store, writeJso
 import { LocalNode } from './tmux.mjs';
 
 const usage = 'Usage: tmux-agent-workbench web COMMAND\n\n'
-  + '  serve [--origin URL] [--listen HOST:PORT] [--name NAME] [--socket PATH]\n'
+  + '  serve [--origin URL] [--listen 127.0.0.1:PORT] [--name NAME] [--socket PATH]\n'
   + '        [--cert PATH --key PATH] [--fabric-node NAME=EXECUTOR] [--observe-snapshot]\n'
   + '  invite --origin URL              Create a one-time Passkey enrollment link\n'
   + '  node invite NAME                Create a one-time node invitation\n'
