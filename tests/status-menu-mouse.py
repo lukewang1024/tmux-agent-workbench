@@ -1294,14 +1294,19 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         direct_window = next(item for item in direct_model['items']
                              if item['id'] == 'create-window')
         direct_callback = shlex.split(shlex.split(direct_window['command'])[-1])
+        source_window = tmux('display-message', '-p', '-t', pane, '#{window_id}')
+        source_cwd = Path(tmux('display-message', '-p', '-t', pane, '#{pane_current_path}')).resolve()
         windows_before = set(tmux('list-windows', '-F', '#{window_id}').splitlines())
         subprocess.run(direct_callback, env=window_env,
                        check=True, capture_output=True)
         windows_after = set(tmux('list-windows', '-F', '#{window_id}').splitlines())
         assert len(windows_after - windows_before) == 1, (windows_before, windows_after)
         created_window = (windows_after - windows_before).pop()
-        assert tmux('display-message', '-p', '-t', created_window,
-                    '#{pane_current_path}') == str(project)
+        wait_for_pane_command(created_window, ('sh', 'bash', 'dash'))
+        created_cwd = Path(tmux('display-message', '-p', '-t', created_window,
+                                '#{pane_current_path}')).resolve()
+        assert created_cwd == source_cwd, (created_cwd, source_cwd)
+        tmux('switch-client', '-c', client, '-t', source_window)
         tmux('kill-window', '-t', created_window)
         # Keep the submenu when a second, useful window action is available.
         (window_tools / 'code').write_text('#!/bin/sh\nexit 0\n')
