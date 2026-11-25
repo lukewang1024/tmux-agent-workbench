@@ -997,11 +997,12 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         os.write(master, f'\x1b[<35;{x};{y}M'.encode())
         drain(0.1)
         os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
-        rendered = wait_for_text(client_process, b'New window')
-        x, y = item_position(rendered, 'New window')
-        os.write(master, f'\x1b[<35;{x};{y}M'.encode())
-        drain(0.1)
-        os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+        if shutil.which('code', path=env['PATH']):
+            rendered = wait_for_text(client_process, b'New window')
+            x, y = item_position(rendered, 'New window')
+            os.write(master, f'\x1b[<35;{x};{y}M'.encode())
+            drain(0.1)
+            os.write(master, f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
         after = before
         for _ in range(40):
             drain(0.05)
