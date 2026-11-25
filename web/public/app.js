@@ -8,8 +8,10 @@ const byId = (id) => document.getElementById(id);
 const app = byId('app');
 const overlay = byId('overlay');
 const mobile = window.matchMedia('(max-width: 767px)');
+const fullScreenPreview = window.matchMedia('(max-width: 1023px)');
 const chatInput = byId('chat-input');
 const termInput = byId('term-input');
+const markdown = window.markdownit({ html: false, breaks: true, linkify: true });
 const passkeys = window.SimpleWebAuthnBrowser;
 const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
 const connectionError = t(loopback ? 'sshTunnelUnavailable' : 'gatewayUnavailable');
@@ -45,6 +47,10 @@ let transcript = null;
 let submitting = false;
 let terminal = null;
 let suppressHoldClick = false;
+const linkTabs = new Map();
+let activeLink = '';
+let linkOpener;
+let nextLinkId = 0;
 
 function t(key, values = {}) {
   const message = messages[key];
@@ -137,8 +143,24 @@ function recordKey(item) {
 function conversationKey() { return activeKey + '/' + (active?.thread || ''); }
 function focus(id) { byId(id).focus({ preventScroll: true }); }
 
+function historyView(up) {
+  return { workbench: true, route, scope, opened, minePage, selected: activeKey, up };
+}
+
 function save(method, up = false) {
-  history[method]({ workbench: true, route, scope, opened, minePage, selected: activeKey, up }, '');
+  if (history.state?.messageSelection || history.state?.linkPreview) {
+    clearMessageSelection();
+    activeLink = '';
+    paintLinkPanel();
+    method = 'replaceState';
+  }
+  history[method](historyView(up), '');
+}
+
+function pushChatLayer(layer) {
+  const view = { ...history.state, ...historyView(Boolean(history.state?.up)) };
+  history.replaceState(view, '');
+  history.pushState({ ...view, ...layer }, '');
 }
 
 function navigate(target, node = scope) {
@@ -159,6 +181,9 @@ function navigate(target, node = scope) {
 }
 
 function back() {
+  if (exitMessageSelection()) return;
+  if (route === 'agents' && activeLink) { closeLinkPanel(); return; }
+  if (history.state?.linkPreview) { history.back(); return; }
   if (history.state?.up) { history.back(); return; }
   opened = false;
   minePage = 'home';
@@ -178,6 +203,7 @@ function paint() {
     if (route === 'mine') paintMine();
     paintHeader();
   }
+  paintLinkPanel();
 }
 
 function paintHeader() {
@@ -287,9 +313,7 @@ function onHold(row, activate, mouseMenu) {
   row.addEventListener('pointerdown', (event) => {
     stop();
     held = false;
-    const control = event.target.closest('button, input');
-    if (event.pointerType === 'mouse' || !event.isPrimary
-        || (control && control !== row)) return;
+    if (event.pointerType === 'mouse' || !event.isPrimary || event.target.closest('input')) return;
     start = [event.clientX, event.clientY];
     timer = setTimeout(run, 480);
   });
@@ -309,16 +333,22 @@ function onHold(row, activate, mouseMenu) {
   });
 }
 
-function itemMenu(container, row, open) {
-  row.classList.add('has-item-menu');
-  onHold(row, open, (event) => {
-    event.preventDefault();
+function itemMenu(container, open) {
+  const show = () => {
     open();
+    trigger.setAttribute('aria-expanded', 'true');
+    overlay.addEventListener('close', () => trigger.setAttribute('aria-expanded', 'false'), { once: true });
+  };
+  container.classList.add('has-item-menu');
+  onHold(container, show, (event) => {
+    event.preventDefault();
+    show();
   });
-  const trigger = button('', 'row-action item-menu', open);
+  const trigger = button('', 'row-action item-menu', show);
   trigger.title = t('itemActions');
   trigger.setAttribute('aria-label', trigger.title);
   trigger.setAttribute('aria-haspopup', 'dialog');
+  trigger.setAttribute('aria-expanded', 'false');
   trigger.append(glyph('more'));
   container.append(trigger);
 }
@@ -361,8 +391,35 @@ function closeChoice(title, machine, payload, allowed, exited = false) {
   return row;
 }
 
+function showRecordMenu(item, machine, pinned) {
+  const session = item.sessionRecord;
+  const title = item.worker?.name || item.title;
+  const actions = [];
+  if (machine.sidebar && item.pane && !item.worker) {
+    const target = session ? item.id : item.pane.window;
+    const assistant = !session && machine.pinnedAgents?.some((card) => card.pane?.window === target && card.assistant);
+    const pin = choice(t(pinned ? 'unpin' : 'pin'), assistant ? t('assistantPinned') : '', async () => {
+      closeSheet();
+      try {
+        await api('/api/pins', 'POST', {
+          node: machine.id, scope: session ? 'session' : 'agent', target, pane: item.pane.key, pinned: !pinned,
+        });
+        await refresh(true);
+      } catch (error) { toast(error.message); }
+    });
+    pin.prepend(glyph('pin'));
+    pin.disabled = Boolean(assistant);
+    actions.push(pin);
+  }
+  if (!session && item.pane && item.kind !== 'shell') {
+    const payload = { node: machine.id, scope: 'agent', agent: item.id, pane: item.pane.key };
+    actions.push(closeChoice(title, machine.name, payload, item.canClose, item.exited));
+  }
+  if (actions.length) sheet(title, ...actions);
+}
+
 function recordRow(item, machine, pinned, focusKey, canExpand = true) {
-  const session = route === 'sessions';
+  const session = item.sessionRecord;
   const container = make('div', 'record-row' + (item.worker ? ' worker-row' : ''));
   const row = button('', 'agent-row', () => openRecord(item));
   row.dataset.record = recordKey(item);
@@ -428,28 +485,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
     badge.prepend(marker, make('span', 'sr-only', t('pinned')));
   }
   if (canPin || hasAgent) {
-    itemMenu(container, row, () => {
-      const actions = [];
-      if (canPin) {
-        const target = session ? item.id : item.pane.window;
-        const assistant = !session && machine.pinnedAgents?.some((card) => card.pane?.window === target && card.assistant);
-        const pin = choice(t(pinned ? 'unpin' : 'pin'), assistant ? t('assistantPinned') : '', async () => {
-          closeSheet();
-          try {
-            await api('/api/pins', 'POST', { node: machine.id, scope: session ? 'session' : 'agent', target, pane: item.pane.key, pinned: !pinned });
-            await refresh(true);
-          } catch (error) { toast(error.message); }
-        });
-        pin.prepend(glyph('pin'));
-        pin.disabled = Boolean(assistant);
-        actions.push(pin);
-      }
-      if (hasAgent) {
-        const payload = { node: machine.id, scope: 'agent', agent: item.id, pane: item.pane.key };
-        actions.push(closeChoice(title, machine.name, payload, item.canClose, item.exited));
-      }
-      sheet(title, ...actions);
-    });
+    itemMenu(container, () => showRecordMenu(item, machine, pinned));
   }
   return container;
 }
@@ -536,7 +572,6 @@ function paintDetail() {
   }
   byId('detail-name').textContent = active.title;
   byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
-  byId('back').setAttribute('aria-label', t(route === 'agents' ? 'backToAgents' : 'backToSessions'));
   if (route === 'sessions') { paintSessionPanes(empty); return; }
   stopTerminal();
   empty.hidden = Boolean(active.structured);
@@ -569,7 +604,7 @@ function renderSessionTree(session) {
       const row = button(title, 'pane-row', open);
       row.prepend(glyph('terminal'));
       container.append(row);
-      itemMenu(container, row, () => {
+      itemMenu(container, () => {
         const terminal = choice(t('openTerminal'), '', open);
         terminal.prepend(glyph('terminal'));
         const payload = { node: session.node, scope: 'pane', pane: pane.key };
@@ -687,13 +722,24 @@ async function shareMessages() {
   }
 }
 
-function exitMessageSelection() {
+function clearMessageSelection() {
+  if (!transcript?.selected) return false;
   transcript.selected = null;
   for (const pick of byId('messages').querySelectorAll('.message-pick:checked')) {
     pick.checked = false;
     pick.closest('.message').classList.remove('picked');
   }
   paintMessageSelection();
+  return true;
+}
+
+function exitMessageSelection() {
+  if (route !== 'agents' || !transcript) return false;
+  const state = history.state;
+  const selectionEntry = state?.messageSelection === transcript.key;
+  const cleared = clearMessageSelection();
+  if (cleared && selectionEntry) history.go(state.linkPreviewDismissed ? -2 : -1);
+  return cleared || selectionEntry;
 }
 
 function messageMenu(event, select) {
@@ -712,11 +758,104 @@ function messageMenu(event, select) {
   action.focus();
 }
 
+function openLinkPreview(link) {
+  const url = new URL(link.href);
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin === location.origin) return false;
+  if (!linkTabs.has(url.href)) {
+    const label = link.textContent.trim() || url.hostname;
+    linkTabs.set(url.href, { id: 'link-preview-' + ++nextLinkId, label, frame: null });
+  }
+  if (!activeLink && !history.state?.linkPreview) pushChatLayer({ linkPreview: true });
+  linkOpener = link;
+  activeLink = url.href;
+  paintLinkPanel();
+  if (fullScreenPreview.matches) focus('close-link-panel');
+  return true;
+}
+
+function closeLinkPanel() {
+  activeLink = '';
+  paintLinkPanel();
+  if (linkOpener?.isConnected) linkOpener.focus({ preventScroll: true });
+  const { linkPreview, messageSelection } = history.state || {};
+  if (linkPreview && messageSelection) {
+    history.replaceState({ ...history.state, linkPreview: false, linkPreviewDismissed: true }, '');
+  } else if (linkPreview) history.back();
+}
+
+function selectLinkTab(url) {
+  activeLink = url;
+  paintLinkPanel();
+  document.getElementById(linkTabs.get(url).id + '-tab').focus();
+}
+
+function closeLinkTab(url) {
+  const keys = [...linkTabs.keys()];
+  const tab = linkTabs.get(url);
+  tab.frame?.remove();
+  linkTabs.delete(url);
+  if (!linkTabs.size) closeLinkPanel();
+  else selectLinkTab(url === activeLink ? keys[keys.indexOf(url) + 1] || keys.at(-2) : activeLink);
+}
+
+function paintLinkPanel() {
+  const panel = byId('link-panel');
+  const visible = route === 'agents' && linkTabs.has(activeLink);
+  panel.hidden = !visible;
+  app.toggleAttribute('data-link-preview', visible);
+  if (!visible) {
+    for (const tab of linkTabs.values()) {
+      tab.frame?.remove();
+      tab.frame = null;
+    }
+    return;
+  }
+  byId('open-link-browser').href = activeLink;
+  const pages = byId('link-pages');
+  const tabs = byId('link-tabs');
+  tabs.replaceChildren(...[...linkTabs].map(([url, tab]) => {
+    const selected = url === activeLink;
+    if (selected && !tab.frame) {
+      const frame = make('iframe', 'link-frame');
+      frame.id = tab.id;
+      frame.title = tab.label;
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
+      frame.referrerPolicy = 'no-referrer';
+      frame.src = url;
+      pages.append(frame);
+      tab.frame = frame;
+    }
+    if (tab.frame) tab.frame.hidden = !selected;
+    const controls = make('div', 'link-tab');
+    controls.setAttribute('role', 'presentation');
+    const title = button(tab.label, 'link-tab-title', () => selectLinkTab(url));
+    title.id = tab.id + '-tab';
+    title.title = url;
+    title.setAttribute('role', 'tab');
+    title.setAttribute('aria-selected', String(selected));
+    title.tabIndex = selected ? 0 : -1;
+    if (tab.frame) title.setAttribute('aria-controls', tab.id);
+    const close = button('', 'link-tab-close', () => closeLinkTab(url));
+    close.title = t('closeLinkTab', { page: tab.label });
+    close.setAttribute('aria-label', close.title);
+    close.append(glyph('close'));
+    controls.append(title, close);
+    return controls;
+  }));
+  const current = tabs.querySelector('[aria-selected="true"]');
+  if (current.offsetLeft < tabs.scrollLeft || current.offsetLeft + current.offsetWidth > tabs.scrollLeft + tabs.clientWidth) {
+    current.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+}
+
 function paintMessageSelection() {
   const count = transcript?.selected?.size || 0;
   const selecting = Boolean(transcript?.selected);
+  byId('chat-menu').hidden = selecting || route !== 'agents' || !active?.structured || !active.pane;
   byId('chat-actions').hidden = !selecting || route !== 'agents' || !active?.structured
     || transcript?.key !== conversationKey() || !transcript.rows.size;
+  byId('back').setAttribute('aria-label', t(selecting ? 'cancelMessageSelection'
+    : route === 'agents' ? 'backToAgents' : 'backToSessions'));
   byId('messages').classList.toggle('selecting', selecting);
   byId('copy-selection').hidden = !selecting;
   byId('copy-selection').disabled = !count;
@@ -758,17 +897,33 @@ function renderHistory(target, added, older) {
     pick.addEventListener('change', () => select(pick.checked));
     const startSelection = () => {
       if (target !== transcript) return;
-      target.selected ??= new Set();
+      if (!target.selected) {
+        pushChatLayer({ messageSelection: target.key });
+        target.selected = new Set();
+      }
       select(true);
     };
     onHold(element, startSelection, (event) => {
       if (target === transcript) messageMenu(event, startSelection);
     });
     element.addEventListener('click', (event) => {
-      if (!event.target.closest('button, input')) select(!pick.checked);
+      if (target.selected && !event.target.closest('input')) {
+        event.preventDefault();
+        select(!pick.checked);
+        return;
+      }
+      if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      const link = event.target.closest('a[href]');
+      if (link && openLinkPreview(link)) event.preventDefault();
     });
     meta.append(pick, make('span', '', human ? t('you') : 'Codex'));
-    element.append(meta, make('div', human ? 'bubble' : 'messages-text', row.text));
+    const body = make('div', human ? 'message-content bubble' : 'message-content');
+    body.innerHTML = markdown.render(row.text);
+    for (const link of body.querySelectorAll('a')) {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    }
+    element.append(meta, body);
     return element;
   });
   if (older) {
@@ -1269,6 +1424,10 @@ function signedOut() {
   expandedSessions.clear();
   launching = null;
   drafts.clear();
+  activeLink = '';
+  byId('link-pages').replaceChildren();
+  linkTabs.clear();
+  linkOpener = null;
   byId('messages').replaceChildren();
   byId('groups').replaceChildren();
   byId('node-list').replaceChildren();
@@ -1288,9 +1447,23 @@ byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
 byId('new-agent').addEventListener('click', newAgentSheet);
 byId('new-shell').addEventListener('click', shellSheet);
-byId('back').addEventListener('click', () => {
-  if (route === 'agents' && transcript?.selected) exitMessageSelection();
-  else back();
+byId('back').addEventListener('click', back);
+byId('chat-menu').addEventListener('click', () => {
+  const machine = machines.find(({ id }) => id === active?.node);
+  if (byId('chat-menu').hidden || !machine) return;
+  const pinned = machine.pinnedAgents?.some((card) => card.pane?.window === active.pane.window);
+  showRecordMenu(active, machine, pinned);
+});
+byId('close-link-panel').addEventListener('click', closeLinkPanel);
+byId('link-tabs').addEventListener('keydown', (event) => {
+  if (event.target.getAttribute('role') !== 'tab') return;
+  const keys = [...linkTabs.keys()];
+  const current = keys.indexOf(activeLink);
+  const index = { ArrowLeft: (current + keys.length - 1) % keys.length,
+    ArrowRight: (current + 1) % keys.length, Home: 0, End: keys.length - 1 }[event.key];
+  if (!Number.isInteger(index)) return;
+  event.preventDefault();
+  selectLinkTab(keys[index]);
 });
 byId('mine-back').addEventListener('click', back);
 byId('terminal-pane').addEventListener('change', (event) => {
@@ -1305,11 +1478,11 @@ byId('exit-selection').addEventListener('click', () => {
 byId('copy-selection').addEventListener('click', () => copyMessages(selectedMessages()));
 byId('share-selection').addEventListener('click', shareMessages);
 document.addEventListener('keydown', (event) => {
-  if (route !== 'agents' || !transcript?.selected || overlay.open) return;
-  if (event.key === 'Escape') {
+  if (route !== 'agents' || overlay.open) return;
+  if (event.key === 'Escape' && (transcript?.selected || activeLink)) {
     event.preventDefault();
-    exitMessageSelection();
-  } else if (!event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
+    if (!exitMessageSelection()) closeLinkPanel();
+  } else if (transcript?.selected && !event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
       && !event.target.closest?.('input:not([type="checkbox"]),textarea,[contenteditable]')
       && !window.getSelection()?.toString() && transcript.selected.size) {
     event.preventDefault();
@@ -1383,12 +1556,32 @@ window.addEventListener('popstate', (event) => {
   if (!signedIn || !event.state?.workbench) return;
   closeSheet();
   const saved = event.state;
-  route = saved.route === 'login' ? 'agents' : saved.route;
-  scope = saved.scope;
-  opened = saved.opened;
-  minePage = saved.minePage;
-  if (saved.selected) selection.set(route, saved.selected);
-  paint();
+  const sameChat = route === 'agents' && saved.route === route && saved.scope === scope
+    && saved.opened === opened && saved.selected === activeKey;
+  // The panel can be closed while the chat's selection entry is still active.
+  if (sameChat && saved.linkPreview && !saved.messageSelection && !activeLink && clearMessageSelection()) {
+    history.back();
+    return;
+  }
+  const previewWasOpen = Boolean(activeLink);
+  activeLink = saved.linkPreview ? activeLink || [...linkTabs.keys()].at(-1) || '' : '';
+  if (!sameChat) {
+    clearMessageSelection();
+    route = saved.route === 'login' ? 'agents' : saved.route;
+    scope = saved.scope;
+    opened = saved.opened;
+    minePage = saved.minePage;
+    if (saved.selected) selection.set(route, saved.selected);
+    paint();
+  }
+  if (route === 'agents' && transcript && saved.messageSelection === transcript.key) {
+    transcript.selected ??= new Set();
+    paintMessageSelection();
+  } else clearMessageSelection();
+  if (sameChat) {
+    paintLinkPanel();
+    if (previewWasOpen && !activeLink && linkOpener?.isConnected) linkOpener.focus({ preventScroll: true });
+  }
   if (route === 'mine') { if (minePage === 'keys') loadKeys(); else loadUsage(); }
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });

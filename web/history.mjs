@@ -9,6 +9,8 @@ const maxRead = 4 * 1024 * 1024;
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const rolloutPattern = /^rollout-.+-([0-9a-f-]{36})\.jsonl$/i;
 const run = promisify(execFile);
+const goalContext = /^\s*<codex_internal_context\s+source="(?:user_goal|goal)"\s*>/;
+const contextEnd = '</codex_internal_context>';
 
 export function hasThread(id) {
   return typeof id === 'string' && idPattern.test(id);
@@ -82,16 +84,26 @@ async function startTimes(pids) {
   return times;
 }
 
+export function stripGoalContext(text) {
+  let visible = text;
+  for (let start; (start = visible.match(goalContext)); ) {
+    const end = visible.indexOf(contextEnd, start[0].length);
+    if (end < 0) break;
+    visible = visible.slice(end + contextEnd.length);
+  }
+  return visible === text ? text : visible.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
 function visibleMessage(row) {
   const content = row?.payload;
   if (row?.type !== 'response_item' || content?.type !== 'message'
       || !['user', 'assistant'].includes(content.role)) return null;
   const text = (Array.isArray(content.content) ? content.content : [])
-    .filter((part) => ['input_text', 'output_text'].includes(part.type) && typeof part.text === 'string')
-    .map((part) => part.text)
+    .filter((part) => ['input_text', 'output_text'].includes(part?.type) && typeof part.text === 'string')
+    .map((part) => content.role === 'user' ? stripGoalContext(part.text) : part.text)
     .filter((part) => !/^# AGENTS\.md instructions\b|^<environment_context>|^<permissions instructions>/.test(part))
-    .join('\n').trim();
-  return text ? { role: content.role, text: text.slice(0, 32_000), time: row.timestamp, phase: content.phase } : null;
+    .join('\n').replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '');
+  return text.trim() ? { role: content.role, text: text.slice(0, 32_000), time: row.timestamp, phase: content.phase } : null;
 }
 
 export class History {

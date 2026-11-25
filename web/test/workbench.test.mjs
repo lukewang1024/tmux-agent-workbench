@@ -59,9 +59,16 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
   const target = join(directory, 'sessions', '2026', '01', '01');
   await mkdir(target, { recursive: true });
   const message = (text, role) => ({ type: 'response_item', payload: { type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] } });
+  const goal = '<codex_internal_context source="goal">\nContinue the active goal.\n</codex_internal_context>';
+  const userGoal = '<codex_internal_context source="user_goal">\nUser set the goal.\n</codex_internal_context>';
   const rows = [{ type: 'session_meta', payload: { id: session } }];
-  rows.push(message('system instructions', 'developer'), message('<environment_context>private</environment_context>', 'user'));
-  for (let index = 0; index < 50; index++) rows.push(message('message ' + index, index % 2 ? 'assistant' : 'user'));
+  rows.push(message('system instructions', 'developer'), message('<environment_context>private</environment_context>', 'user'),
+    message(userGoal + '\n\n' + goal, 'user'));
+  for (let index = 0; index < 50; index++) {
+    const text = index === 0 ? userGoal + '\n\n' + goal + '\n\nmessage 0'
+      : index === 2 ? '    a code block' : index === 4 ? 'Quoted example:\n' + goal : 'message ' + index;
+    rows.push(message(text, index % 2 ? 'assistant' : 'user'));
+  }
   await writeFile(join(target, 'rollout-date-' + session + '.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n{"partial"');
   const history = new History(directory);
   const latest = await history.page(session);
@@ -71,6 +78,8 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
   const earlier = await history.page(session, latest.before);
   assert.equal(earlier.messages.length, 15);
   assert.equal(earlier.messages.at(0).text, 'message 0');
+  assert.equal(earlier.messages.at(2).text, '    a code block');
+  assert.equal(earlier.messages.at(4).text, 'Quoted example:\n' + goal);
   assert.equal(earlier.before, null);
   await assert.rejects(history.page('../wrong'), { status: 409 });
 });
@@ -299,6 +308,8 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
       assert.ok(version);
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
+      assert.ok(html.includes('src="/vendor/markdown-it.js?v=' + version + '"'));
+      assert.equal((await fetch(address + '/vendor/markdown-it.js?v=' + version)).status, 200);
       const script = await fetch(address + '/app.js?v=' + version).then((response) => response.text());
       assert.ok(script.includes('"language":"' + lang + '"'));
       assert.ok(script.includes("const appVersion = '" + version + "'"));
@@ -306,7 +317,9 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const protectedWorkspace = await fetch(address + '/api/workspace');
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
-      workers.push(await fetch(address + '/sw.js').then((response) => response.text()));
+      const worker = await fetch(address + '/sw.js').then((response) => response.text());
+      assert.ok(worker.includes('/vendor/markdown-it.js'));
+      workers.push(worker);
     } finally {
       await gateway.close();
     }

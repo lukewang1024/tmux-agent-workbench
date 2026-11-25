@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Auth, sameSecret } from './auth.mjs';
 import { RemoteNode, nodeProtocol } from './connector.mjs';
+import { stripGoalContext } from './history.mjs';
 import { loadLocale, renderDocument } from './i18n.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
 
@@ -28,6 +29,7 @@ const assets = new Map([
   ['/vendor/xterm.js', ['node_modules/@xterm/xterm/lib/xterm.js', 'text/javascript; charset=utf-8']],
   ['/vendor/xterm.css', ['node_modules/@xterm/xterm/css/xterm.css', 'text/css; charset=utf-8']],
   ['/vendor/fit.js', ['node_modules/@xterm/addon-fit/lib/addon-fit.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/markdown-it.js', ['node_modules/markdown-it/dist/browser/markdown-it.umd.min.js', 'text/javascript; charset=utf-8']],
 ]);
 
 function security(res) {
@@ -36,7 +38,7 @@ function security(res) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
 function json(res, result, status = 200) {
@@ -223,7 +225,14 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const machine = node(request.searchParams.get('node') || 'local');
       const before = Number(request.searchParams.get('before'));
       const [agent, thread] = ['agent', 'thread'].map((key) => request.searchParams.get(key));
-      return json(res, await machine.request('history', { agent, before, thread }));
+      const page = await machine.request('history', { agent, before, thread });
+      // Older connectors can still include goal context in their history pages.
+      const messages = page.messages.flatMap((message) => {
+        if (message.role !== 'user') return [message];
+        const text = stripGoalContext(message.text);
+        return text.trim() ? [{ ...message, text }] : [];
+      });
+      return json(res, { ...page, messages });
     }
     if (path === '/api/prompt' && method === 'POST') {
       const input = await body(req);

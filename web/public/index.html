@@ -12,6 +12,7 @@
   <script src="/vendor/passkeys.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/xterm.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/fit.js?v=WORKBENCH_CACHE_VERSION" defer></script>
+  <script src="/vendor/markdown-it.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/app.js?v=WORKBENCH_CACHE_VERSION" defer></script>
 </head>
 <body>
@@ -26,6 +27,7 @@
     <symbol id="icon-down" viewBox="0 0 24 24"><path d="m5.5 9.5 6.5 6.5 6.5-6.5"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
     <symbol id="icon-more" viewBox="0 0 24 24"><path d="M5 12h.01m6.99 0h.01m6.99 0h.01" stroke-width="2.6"/></symbol>
+    <symbol id="icon-external" viewBox="0 0 24 24"><path d="M13 5h6v6m0-6-9 9m8 0v4H6V6h4"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
     <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
@@ -64,6 +66,9 @@
           <header class="bar detail-bar">
             <button class="plain icon back" id="back" type="button" aria-label="{{backToAgents}}"><svg class="glyph" aria-hidden="true"><use href="#icon-back"></use></svg></button>
             <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
+            <button class="row-action" id="chat-menu" type="button" aria-label="{{itemActions}}" title="{{itemActions}}" aria-haspopup="dialog" hidden>
+              <svg class="glyph" aria-hidden="true"><use href="#icon-more"></use></svg>
+            </button>
             <div class="chat-actions" id="chat-actions" hidden>
               <button class="plain icon" type="button" id="copy-selection" hidden>
                 <svg class="glyph" aria-hidden="true"><use href="#icon-copy"></use></svg><span id="selection-count" aria-hidden="true"></span>
@@ -128,6 +133,19 @@
           <div class="session-tree" id="session-tree" hidden></div>
           <div class="detail-empty" id="detail-empty" hidden></div>
         </section>
+        <aside class="link-panel" id="link-panel" aria-label="{{linkPreview}}" hidden>
+          <header class="link-bar">
+            <button class="row-action link-panel-close" id="close-link-panel" type="button" aria-label="{{closeLinkPreview}}" title="{{closeLinkPreview}}">
+              <svg class="glyph link-close-wide" aria-hidden="true"><use href="#icon-close"></use></svg>
+              <svg class="glyph link-close-narrow" aria-hidden="true"><use href="#icon-back"></use></svg>
+            </button>
+            <div class="link-tabs" id="link-tabs" role="tablist" aria-label="{{linkTabs}}"></div>
+            <a class="row-action" id="open-link-browser" target="_blank" rel="noopener noreferrer" aria-label="{{openInBrowser}}" title="{{openInBrowser}}">
+              <svg class="glyph" aria-hidden="true"><use href="#icon-external"></use></svg>
+            </a>
+          </header>
+          <div class="link-pages" id="link-pages"></div>
+        </aside>
       </div>
       <section class="page" id="machines" aria-labelledby="machines-heading" hidden>
         <div class="page-content">
