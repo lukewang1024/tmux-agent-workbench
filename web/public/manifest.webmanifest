@@ -2,8 +2,6 @@
   "id": "/",
   "name": "Workbench Web",
   "short_name": "Workbench",
-  "description": "Agent 会话、机器与 tmux Pane",
-  "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

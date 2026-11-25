@@ -35,6 +35,21 @@ Invitations expire after ten minutes and are consumed by successful enrollment.
 Treat an unused invitation like a credential. For additional devices, use the
 Passkey page in the PWA or issue another invitation from the gateway account.
 
+## Language
+
+The gateway selects the Web interface language when it starts. Set LOCALE to a
+language tag or a POSIX locale to choose explicitly.
+
+    LOCALE=zh_CN.UTF-8 tmux-agent-workbench web serve
+
+With LOCALE unset or set to auto, the gateway checks
+TMUX_AGENT_WORKBENCH_LANGUAGE, then the system message locale. LC_ALL has
+precedence over LC_MESSAGES and LANG. LANGUAGE can select the display language
+for a locale other than C or POSIX. Chinese locale variants use Simplified
+Chinese. Unset or unsupported locales use English. Restart the gateway after
+changing its locale, then close and reopen Workbench in the browser or installed
+app to load the updated shell. CLI prompts and diagnostics use English.
+
 ## Use Android over SSH
 
 Keep the default listener and browser origin on the gateway. In Termux,
@@ -49,7 +64,7 @@ Use that exact origin for the invitation and subsequent visits. Chrome treats
 localhost as a secure context for Service Workers and WebAuthn.
 
 Complete Passkey enrollment and choose Add to home screen, then Install in
-Chrome. You can also use the installation control in 我的 → 设置. Keep the
+Chrome. You can also use the installation control in Profile → Settings. Keep the
 tunnel running whenever you open or use the installed app. The service worker
 caches the app shell. Conversation history and terminal data are fetched on
 demand.

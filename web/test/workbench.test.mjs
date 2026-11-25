@@ -10,6 +10,7 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
+import { resolveLanguage } from '../i18n.mjs';
 import { startServer } from '../server.mjs';
 import { hash, readJson, Store } from '../state.mjs';
 import { LocalNode } from '../tmux.mjs';
@@ -102,6 +103,57 @@ test('gateway requires a loopback listener even with TLS configured', async () =
     origin: 'https://workbench.example.net', listen: '0.0.0.0:7080', cert: 'unused', key: 'unused',
   }), refused);
   await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: 'localhost:7080:443' }), refused);
+});
+
+test('locale follows LOCALE, the Workbench override, and system message settings', () => {
+  for (const [env, language] of [
+    [{}, 'en'],
+    [{ LOCALE: 'zh_CN.UTF-8', LC_ALL: 'C' }, 'zh-CN'],
+    [{ LOCALE: 'en-GB', TMUX_AGENT_WORKBENCH_LANGUAGE: 'zh' }, 'en'],
+    [{ LOCALE: 'auto', TMUX_AGENT_WORKBENCH_LANGUAGE: 'zh-Hans' }, 'zh-CN'],
+    [{ LC_ALL: 'C.UTF-8', LC_MESSAGES: 'zh', LANG: 'zh', LANGUAGE: 'zh' }, 'en'],
+    [{ LC_MESSAGES: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' }, 'zh-CN'],
+    [{ LANG: 'en_US.UTF-8', LANGUAGE: 'zh:en' }, 'zh-CN'],
+    [{ LOCALE: 'fr-FR', LANG: 'zh_CN.UTF-8' }, 'en'],
+  ]) assert.equal(resolveLanguage(env), language, JSON.stringify(env));
+});
+
+test('gateway serves matching languages for the app shell, manifest, and errors', async (t) => {
+  const store = new Store(await scratch(t));
+  const local = { cleanup() {}, close() {} };
+  const previous = process.env.LOCALE;
+  t.after(() => {
+    if (previous === undefined) delete process.env.LOCALE;
+    else process.env.LOCALE = previous;
+  });
+  const workers = [];
+  for (const [locale, lang, title, error] of [
+    ['en-GB', 'en', 'Sign in to Workbench', 'Sign in to Workbench.'],
+    ['zh_CN.UTF-8', 'zh-CN', '登录工作台', '请登录工作台。'],
+  ]) {
+    process.env.LOCALE = locale;
+    const gateway = await startServer({ store, local, localName: 'fixture', listen: '127.0.0.1:0', origin: 'http://localhost:7080' });
+    const address = 'http://127.0.0.1:' + gateway.address.port;
+    try {
+      const html = await fetch(address).then((response) => response.text());
+      assert.ok(html.includes('<html lang="' + lang + '">'));
+      assert.ok(html.includes(title));
+      assert.ok(!html.includes('{{'));
+      const manifest = await fetch(address + '/manifest.webmanifest').then((response) => response.json());
+      assert.equal(manifest.lang, lang);
+      assert.equal(manifest.display, 'standalone');
+      const script = await fetch(address + '/app.js').then((response) => response.text());
+      assert.ok(script.includes('"language":"' + lang + '"'));
+      assert.ok(!script.includes('WORKBENCH_LOCALE'));
+      const protectedWorkspace = await fetch(address + '/api/workspace');
+      assert.equal(protectedWorkspace.status, 401);
+      assert.deepEqual(await protectedWorkspace.json(), { error });
+      workers.push(await fetch(address + '/sw.js').then((response) => response.text()));
+    } finally {
+      await gateway.close();
+    }
+  }
+  assert.notEqual(...workers);
 });
 
 test('gateway protects data and accepts an outbound node handshake only after enrollment', async (t) => {

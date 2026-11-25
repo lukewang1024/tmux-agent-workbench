@@ -1,5 +1,8 @@
 'use strict';
 
+const { language, messages } = WORKBENCH_LOCALE;
+const plurals = new Intl.PluralRules(language);
+const percentage = new Intl.NumberFormat(language, { style: 'percent' });
 const byId = (id) => document.getElementById(id);
 const app = byId('app');
 const overlay = byId('overlay');
@@ -9,14 +12,12 @@ const termInput = byId('term-input');
 const nav = [...document.querySelectorAll('.nav-button')];
 const passkeys = window.SimpleWebAuthnBrowser;
 const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
-const connectionError = loopback
-  ? '暂时无法连接工作台，请检查 SSH 隧道。'
-  : '暂时无法连接 Workbench 网关。';
-const stateNames = { idle: '空闲', blocked: '待处理', working: '运行中', done: '已完成', unknown: '状态未知' };
-const nodeStates = { pending: '待接入', offline: '离线', online: '在线' };
+const connectionError = t(loopback ? 'sshTunnelUnavailable' : 'gatewayUnavailable');
+const stateNames = { idle: t('idle'), blocked: t('attention'), working: t('working'), done: t('done'), unknown: t('unknownStatus') };
+const nodeStates = { pending: t('pending'), offline: t('offline'), online: t('online') };
 const kindNames = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', trae: 'Trae', shell: 'Shell' };
 const marks = { codex: 'Cx', claude: 'Cl', opencode: 'Oc', trae: 'Tr', shell: '>_' };
-const labels = { agents: 'Agents', terminals: '终端', machines: '机器', mine: '我的' };
+const labels = { agents: t('agents'), terminals: t('terminals') };
 
 let signedIn = false;
 let route = 'login';
@@ -37,6 +38,12 @@ const drafts = new Map();
 let transcript = null;
 let submitting = false;
 let terminal = null;
+
+function t(key, values = {}) {
+  const message = messages[key];
+  const template = typeof message === 'string' ? message : message[plurals.select(values.count)] || message.other;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => values[name]);
+}
 
 function make(tag, className, text) {
   const element = document.createElement(tag);
@@ -91,7 +98,7 @@ async function api(path, method = 'GET', payload = null) {
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401 && signedIn) signedOut();
-    const error = new Error(data.error || '请求未完成。');
+    const error = new Error(data.error || t('requestFailed'));
     error.status = response.status;
     throw error;
   }
@@ -168,7 +175,13 @@ function scopedMachines() {
 
 function entries(machine) {
   const rows = route === 'terminals' ? machine.terminals : machine.agents;
-  return (rows || []).map((item) => ({ ...item, id: item.id || item.pane.key, node: machine.id, host: machine.name }));
+  return (rows || []).map((item) => ({
+    ...item,
+    session: item.kind === 'shell' ? t(item.pane.resizable ? 'webTerminals' : 'splitPane') : item.session,
+    id: item.id || item.pane.key,
+    node: machine.id,
+    host: machine.name,
+  }));
 }
 
 function paintWorkspace() {
@@ -190,8 +203,10 @@ function paintWorkspace() {
 
 function paintCollection() {
   const selected = machines.find(({ id }) => id === scope);
-  byId('scope').textContent = selected?.name || '全部机器';
-  byId('health').textContent = selected ? nodeStates[selected.state] : machines.filter(({ state }) => state === 'online').length + ' 台在线';
+  byId('scope').textContent = selected?.name || t('allMachines');
+  byId('health').textContent = selected ? nodeStates[selected.state] : t('onlineCount', {
+    count: machines.filter(({ state }) => state === 'online').length,
+  });
   byId('list-heading').textContent = labels[route];
   const groups = byId('groups');
   const focusKey = document.activeElement?.dataset.record;
@@ -201,13 +216,14 @@ function paintCollection() {
     const group = make('section', 'group');
     const rows = entries(machine);
     const heading = make('h3');
-    heading.append(make('span', machine.state === 'online' ? 'dot' : 'dot off'), machine.name,
-      make('span', 'count', machine.state === 'online' ? rows.length + (route === 'agents' ? ' 个 Agent' : ' 个 Pane') : nodeStates[machine.state]));
+    const count = machine.state === 'online'
+      ? t(route === 'agents' ? 'agentCount' : 'paneCount', { count: rows.length }) : nodeStates[machine.state];
+    heading.append(make('span', machine.state === 'online' ? 'dot' : 'dot off'), machine.name, make('span', 'count', count));
     group.append(heading);
     if (!rows.length) {
-      const text = machine.state === 'pending' ? '等待节点配对。' : machine.state === 'offline' ? '节点恢复连接后会刷新。'
-        : machine.snapshotAvailable === false && route === 'agents' ? '暂时无法读取 Workbench 快照。' : '目前没有会话。';
-      group.append(make('div', 'empty', text));
+      const message = machine.state === 'pending' ? 'waitingForPairing' : machine.state === 'offline' ? 'nodeReconnect'
+        : machine.snapshotAvailable === false && route === 'agents' ? 'snapshotUnavailable' : 'noSessions';
+      group.append(make('div', 'empty', t(message)));
     }
     for (const item of rows) {
       const row = button('', 'agent-row', () => openRecord(item));
@@ -223,7 +239,7 @@ function paintCollection() {
     }
     groups.append(group);
   }
-  if (!machines.length) groups.append(make('div', 'empty', '正在获取机器和会话…'));
+  if (!machines.length) groups.append(make('div', 'empty', t('loadingWorkspace')));
 }
 
 function openRecord(item) {
@@ -241,7 +257,7 @@ function paintDetail() {
   detail.querySelector('.detail-bar').hidden = !active;
   byId('detail-empty').hidden = Boolean(active);
   if (!active) {
-    byId('detail-empty').textContent = '选择一台机器查看会话。';
+    byId('detail-empty').textContent = t('chooseMachine');
     byId('detail-tabs').hidden = true;
     byId('chat').hidden = true;
     byId('term').hidden = true;
@@ -249,7 +265,7 @@ function paintDetail() {
   }
   byId('detail-name').textContent = active.title;
   byId('detail-context').textContent = active.host + ' / ' + (active.session || kindNames[active.kind] || '');
-  byId('back').setAttribute('aria-label', route === 'agents' ? '返回 Agent 列表' : '返回终端列表');
+  byId('back').setAttribute('aria-label', t(route === 'agents' ? 'backToAgents' : 'backToTerminals'));
   const canChat = route === 'agents' && active.structured;
   byId('detail-tabs').hidden = !canChat;
   if (!canChat) view = 'terminal';
@@ -266,7 +282,7 @@ function paintDetail() {
     paintComposer();
     if (transcript?.key !== activeKey) {
       transcript = { key: activeKey, rows: new Map(), before: null, loaded: false, busy: false };
-      byId('messages').replaceChildren(make('p', 'day', '正在读取历史…'));
+      byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
       byId('older').hidden = true;
       loadHistory();
     }
@@ -287,7 +303,7 @@ function paintComposer() {
   }
   const ready = ['idle', 'done'].includes(active.state) && !active.pane.inMode;
   byId('send').disabled = !ready || submitting;
-  byId('chat-status').textContent = ready ? 'Codex · 原会话' : active.state === 'blocked' ? '请在终端处理确认' : 'Agent 正在工作';
+  byId('chat-status').textContent = t(ready ? 'originalConversation' : active.state === 'blocked' ? 'confirmInTerminal' : 'agentWorking');
 }
 
 async function loadHistory(older = false) {
@@ -306,7 +322,7 @@ async function loadHistory(older = false) {
     renderHistory(target, older);
   } catch (error) {
     if (target !== transcript || !signedIn) return;
-    if (!target.loaded) byId('messages').replaceChildren(make('div', 'empty', error.status === 404 ? '这条会话暂无可读历史。可以打开终端继续。' : error.message));
+    if (!target.loaded) byId('messages').replaceChildren(make('div', 'empty', error.status === 404 ? t('noReadableHistory') : error.message));
   } finally { target.busy = false; }
 }
 
@@ -318,13 +334,13 @@ function renderHistory(target, older) {
   const top = scroller.scrollTop;
   byId('older').hidden = !target.before;
   if (!target.rows.size) {
-    messages.replaceChildren(make('div', 'empty', '暂无消息。'));
+    messages.replaceChildren(make('div', 'empty', t('noMessages')));
     return;
   }
   messages.replaceChildren(...[...target.rows.values()].sort((a, b) => a.id - b.id).map((row) => {
     const human = row.role === 'user';
     const element = make('article', human ? 'message human' : 'message');
-    element.append(make('p', 'message-meta', human ? '你' : 'Codex'), make('div', human ? 'bubble' : 'messages-text', row.text));
+    element.append(make('p', 'message-meta', human ? t('you') : 'Codex'), make('div', human ? 'bubble' : 'messages-text', row.text));
     return element;
   }));
   if (older) scroller.scrollTop = top + scroller.scrollHeight - height;
@@ -395,7 +411,7 @@ function connectTerminal(current) {
   current.ready = false;
   current.writable = false;
   current.ctrl = false;
-  terminalControls('连接中');
+  terminalControls('connecting');
   const url = new URL(pathWith('/api/terminal', { node: current.node, pane: current.pane.key }), location.href);
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(url);
@@ -410,13 +426,13 @@ function connectTerminal(current) {
       current.xterm.resize(Math.max(1, packet.cols), Math.max(1, packet.rows));
       current.xterm.reset();
       current.xterm.write(encodeBytes(packet.initial));
-      terminalControls(current.writable ? '可输入' : '观看中');
+      terminalControls(current.writable ? 'inputEnabled' : 'watching');
     }
     if (packet.data) current.xterm.write(encodeBytes(packet.data));
     if (typeof packet.writable === 'boolean') {
       current.writable = packet.writable;
       current.xterm.options.disableStdin = !current.writable;
-      terminalControls(current.writable ? '可输入' : '观看中');
+      terminalControls(current.writable ? 'inputEnabled' : 'watching');
       if (current.writable) {
         fitTerminal(current);
         if (!mobile.matches) current.xterm.focus();
@@ -428,17 +444,17 @@ function connectTerminal(current) {
     current.writable = false;
     current.ready = false;
     current.xterm.options.disableStdin = true;
-    terminalControls('已断开');
+    terminalControls('disconnected');
     if (event.code === 4001) { signedOut(); return; }
     current.retry = setTimeout(() => connectTerminal(current), 2000);
   });
   socket.addEventListener('error', () => {});
 }
 
-function terminalControls(text) {
+function terminalControls(message) {
   const writable = Boolean(terminal?.writable);
-  byId('term-state').replaceChildren(make('span', terminal?.ready ? 'dot' : 'dot off'), text);
-  byId('control').textContent = writable ? '释放输入' : '启用输入';
+  byId('term-state').replaceChildren(make('span', terminal?.ready ? 'dot' : 'dot off'), t(message));
+  byId('control').textContent = t(writable ? 'releaseInput' : 'enableInput');
   byId('control').disabled = !terminal?.ready;
   byId('term-form').hidden = !writable;
   for (const item of document.querySelectorAll('[data-key]')) item.disabled = !writable;
@@ -475,9 +491,9 @@ function choice(label, detail, action) {
 }
 
 function switchMachine() {
-  const all = { id: 'all', name: '全部机器' };
-  sheet('切换机器', ...[all, ...machines].map((item) => {
-    const row = choice(item.name, nodeStates[item.state] || machines.length + ' 台', () => {
+  const all = { id: 'all', name: t('allMachines') };
+  sheet(t('switchMachine'), ...[all, ...machines].map((item) => {
+    const row = choice(item.name, nodeStates[item.state] || t('machineCount', { count: machines.length }), () => {
       scope = item.id;
       opened = false;
       closeSheet();
@@ -492,7 +508,7 @@ function switchMachine() {
 
 function paneSheet(event) {
   const online = machines.filter(({ state }) => state === 'online');
-  if (!online.length) { toast('当前没有在线机器。'); return; }
+  if (!online.length) { toast(t('noOnlineMachines')); return; }
   const anchor = event.currentTarget.closest('#detail') && active ? active : null;
   const form = make('form', 'pane-form');
   const machine = make('select');
@@ -501,16 +517,16 @@ function paneSheet(event) {
   const preferred = anchor?.node || scope;
   if (online.some(({ id }) => id === preferred)) machine.value = preferred;
   function locations() {
-    placement.replaceChildren(new Option('独立窗口', 'window'));
-    if (anchor && anchor.node === machine.value) placement.add(new Option('当前任务分屏', 'split'));
+    placement.replaceChildren(new Option(t('newWindow'), 'window'));
+    if (anchor && anchor.node === machine.value) placement.add(new Option(t('splitCurrentTask'), 'split'));
   }
   locations();
   machine.addEventListener('change', locations);
-  const machineLabel = make('label', '', '机器');
+  const machineLabel = make('label', '', t('machine'));
   machineLabel.append(machine);
-  const locationLabel = make('label', '', '位置');
+  const locationLabel = make('label', '', t('placement'));
   locationLabel.append(placement);
-  const submit = make('button', 'primary', '创建 Shell Pane');
+  const submit = make('button', 'primary', t('createShellPane'));
   submit.type = 'submit';
   form.append(machineLabel, locationLabel, submit);
   form.addEventListener('submit', async (input) => {
@@ -530,18 +546,21 @@ function paneSheet(event) {
       if (active) focus('detail-name');
     } catch (error) { closeSheet(); toast(error.message); }
   });
-  sheet('开 Pane', form);
+  sheet(t('openPane'), form);
 }
 
 function paintMachines() {
-  byId('machine-summary').textContent = machines.length + ' 台机器，' + machines.filter(({ state }) => state === 'online').length + ' 台在线';
+  byId('machine-summary').textContent = t('machineSummary', {
+    machines: t('machineCount', { count: machines.length }),
+    online: t('onlineCount', { count: machines.filter(({ state }) => state === 'online').length }),
+  });
   byId('node-list').replaceChildren(...machines.map((item) => {
     const row = button('', 'node-button', () => navigate('agents', item.id));
     const icon = make('span', 'row-glyph');
     icon.append(glyph('machines'));
     const copy = make('span', 'row-copy');
     copy.append(make('b', '', item.name));
-    if (item.state === 'online') copy.append(make('small', '', (item.agents?.length || 0) + ' 个 Agent'));
+    if (item.state === 'online') copy.append(make('small', '', t('agentCount', { count: item.agents?.length || 0 })));
     const trailing = make('span', 'trailing');
     trailing.append(make('span', item.state === 'online' ? 'dot' : 'dot off'), nodeStates[item.state], glyph('next'));
     row.append(icon, copy, trailing);
@@ -570,7 +589,7 @@ async function refresh(force = false) {
 function paintMine() {
   for (const section of ['home', 'keys', 'settings']) byId('mine-' + section).hidden = minePage !== section;
   byId('mine-back').hidden = minePage === 'home';
-  byId('mine-heading').textContent = { home: '我的', keys: '通行密钥', settings: '设置' }[minePage];
+  byId('mine-heading').textContent = t({ home: 'profile', keys: 'passkeys', settings: 'settings' }[minePage]);
 }
 
 function openMine(page) {
@@ -590,20 +609,24 @@ async function loadUsage(refreshNow = false) {
     const windows = [limits.primary, limits.secondary, limits.individual_limit].filter(Boolean);
     target.replaceChildren(...windows.map((window) => {
       const remaining = Math.max(0, Math.min(100, Math.round(100 - window.used_percent)));
-      const title = window.window_minutes === 10080 ? '每周窗口'
-        : window.window_minutes % 60 === 0 ? window.window_minutes / 60 + ' 小时窗口' : window.window_minutes + ' 分钟窗口';
+      const minutes = window.window_minutes;
+      const title = minutes === 10080 ? t('weeklyWindow')
+        : minutes % 60 === 0 ? t('hourWindow', { count: minutes / 60 }) : t('minuteWindow', { count: minutes });
       const row = make('div', 'metric');
       const head = make('div', 'metric-head');
-      head.append(make('span', '', title), make('strong', '', '剩余 ' + remaining + '%'));
+      head.append(make('span', '', title), make('strong', '', t('quotaRemaining', { percent: percentage.format(remaining / 100) })));
       const meter = make('meter');
       meter.max = 100;
       meter.value = remaining;
-      meter.setAttribute('aria-label', title + '剩余用量');
+      meter.setAttribute('aria-label', t('quotaMeter', { window: title }));
       row.append(head, meter);
-      if (window.resets_at) row.append(make('p', 'reset', new Date(window.resets_at * 1000).toLocaleString() + ' 重置'));
+      if (window.resets_at) {
+        const date = new Date(window.resets_at * 1000).toLocaleString(language);
+        row.append(make('p', 'reset', t('quotaReset', { date })));
+      }
       return row;
     }));
-    byId('usage-note').textContent = windows.length ? (result.stale ? '上次记录' : '') : '暂时没有用量记录';
+    byId('usage-note').textContent = windows.length ? (result.stale ? t('lastRecordedUsage') : '') : t('noUsage');
   } catch (error) {
     if (signedIn) byId('usage-note').textContent = error.message;
   } finally { byId('usage-refresh').disabled = false; }
@@ -617,11 +640,11 @@ async function loadKeys() {
       const icon = make('span', 'row-glyph');
       icon.append(glyph('key'));
       const copy = make('span', 'row-copy');
-      copy.append(make('b', '', key.label), make('small', '', new Date(key.created).toLocaleDateString()));
+      copy.append(make('b', '', key.label), make('small', '', new Date(key.created).toLocaleDateString(language)));
       row.append(icon, copy);
-      if (keys.length > 1) row.append(button('移除', 'plain', () => sheet('移除通行密钥',
-        make('p', 'sheet-copy', '将退出使用此通行密钥的会话。'),
-        button('移除', 'primary', async () => {
+      if (keys.length > 1) row.append(button(t('remove'), 'plain', () => sheet(t('removePasskey'),
+        make('p', 'sheet-copy', t('removePasskeyConfirmation')),
+        button(t('remove'), 'primary', async () => {
           closeSheet();
           try { await api('/api/passkeys', 'DELETE', { id: key.id }); loadKeys(); } catch (error) { toast(error.message); }
         }))));
@@ -631,7 +654,7 @@ async function loadKeys() {
 }
 
 async function authenticate(invite = null, label = null) {
-  if (!passkeys?.browserSupportsWebAuthn()) throw new Error('请在支持通行密钥的浏览器中打开 localhost 或 HTTPS 地址。');
+  if (!passkeys?.browserSupportsWebAuthn()) throw new Error(t('passkeyBrowser'));
   const registering = Boolean(invite || label);
   const base = '/api/auth/' + (registering ? 'register' : 'login');
   const { options, ticket } = await api(base + '/options', 'POST', { invite, label });
@@ -643,27 +666,27 @@ async function authenticate(invite = null, label = null) {
 
 function registerSheet() {
   const form = make('form', 'pane-form');
-  const label = make('label', '', '设备名称');
+  const label = make('label', '', t('deviceName'));
   const input = make('input');
-  input.placeholder = '例如 Android 手机';
+  input.placeholder = t('deviceExample');
   input.maxLength = 64;
   input.required = true;
   label.append(input);
-  const submit = make('button', 'primary', '创建通行密钥');
+  const submit = make('button', 'primary', t('createPasskey'));
   submit.type = 'submit';
   form.append(label, submit);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     submit.disabled = true;
     try {
-      await authenticate(enrollment, input.value.trim() || 'Passkey');
+      await authenticate(enrollment, input.value.trim() || t('passkeyLabel'));
       enrollment = null;
       closeSheet();
       if (!signedIn) signedOn();
       else loadKeys();
     } catch (error) { closeSheet(); (signedIn ? toast : (value) => status('login-error', value))(error.message); }
   });
-  sheet('添加通行密钥', form);
+  sheet(t('addPasskey'), form);
   input.focus();
 }
 
@@ -722,7 +745,7 @@ byId('term-form').addEventListener('submit', (event) => {
   sendTerminal({ type: 'input', data: control ? String.fromCharCode(text.toUpperCase().charCodeAt(0) - 64) : text + '\r' });
   termInput.value = '';
   terminal.ctrl = false;
-  terminalControls('可输入');
+  terminalControls('inputEnabled');
 });
 for (const item of document.querySelectorAll('[data-key]')) item.addEventListener('click', () => {
   if (!terminal?.writable) return;
@@ -732,7 +755,7 @@ for (const item of document.querySelectorAll('[data-key]')) item.addEventListene
     sendTerminal({ type: 'input', data: { Esc: '\x1b', Tab: '\t', '↑': '\x1b[A', '↓': '\x1b[B', '←': '\x1b[D', '→': '\x1b[C' }[key] });
     terminal.ctrl = false;
   }
-  terminalControls('可输入');
+  terminalControls('inputEnabled');
 });
 byId('detail-tabs').addEventListener('keydown', (event) => {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -756,15 +779,15 @@ byId('passkey').addEventListener('click', async (event) => {
 });
 byId('enroll').addEventListener('click', () => {
   if (enrollment) registerSheet();
-  else sheet('首次绑定设备', make('p', 'sheet-copy', '请在网关上生成一次性绑定链接，用这台设备打开。'));
+  else sheet(t('firstDevice'), make('p', 'sheet-copy', t('inviteInstructions')));
 });
 byId('signout').addEventListener('click', async () => {
   try { await api('/api/logout', 'POST'); signedOut(); } catch (error) { if (signedIn) toast(error.message); }
 });
 byId('install').addEventListener('click', async () => {
   if (installPrompt) { await installPrompt.prompt(); installPrompt = null; }
-  else sheet('安装到桌面', make('p', 'sheet-copy', window.matchMedia('(display-mode: standalone)').matches
-    ? '当前正在独立窗口中运行。' : '在安卓 Chrome 菜单中选择「添加到主屏幕」，再点「安装」。'));
+  else sheet(t('install'), make('p', 'sheet-copy', t(window.matchMedia('(display-mode: standalone)').matches
+    ? 'alreadyInstalled' : 'androidInstallInstructions')));
 });
 window.addEventListener('beforeinstallprompt', (event) => { event.preventDefault(); installPrompt = event; });
 window.addEventListener('hashchange', () => {
@@ -789,7 +812,7 @@ window.addEventListener('popstate', (event) => {
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintDetail(); });
 window.addEventListener('online', () => { if (signedIn) refresh(true); });
-window.addEventListener('offline', () => toast('连接中断。恢复网络后会重新连接。'));
+window.addEventListener('offline', () => toast(t('networkInterrupted')));
 
 const viewport = window.visualViewport;
 let width = window.innerWidth;
