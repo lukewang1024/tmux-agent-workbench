@@ -140,7 +140,8 @@ centered list of plain single-key actions. Optional global bindings are
 
 The Workbench menu groups Create, Switch, Close and Layout. Create first offers
 Agent, Pane, Window and Session; Agent opens Quick create and each installed
-Coding Agent. Window contains new-window and VS Code choices when available.
+Coding Agent. Window creates a window directly, or offers new-window and VS Code
+choices when VS Code is available.
 Switch and Close each list Agent, Window, Pane and Session; Close confirms its
 target. Extract is in the menu and has its own status-bar button beside
 Workbench. Detach, Host / SSH and CPU / resources remain available. The `+`
@@ -485,8 +486,9 @@ changing the order options in a running server.
 
 The Workbench menu opens from the left status-bar control or `m` / `M-t`.
 Create first offers Agent, Pane, Window and Session; Agent opens Quick create
-and each installed Coding Agent. Window contains new-window and VS Code choices
-when available. Switch and Close each list Agent, Window, Pane and Session;
+and each installed Coding Agent. Window creates a window directly, or offers
+new-window and VS Code choices when VS Code is available. Switch and Close each
+list Agent, Window, Pane and Session;
 Close confirms its target. Layout contains pane arrangements. Extract is in the menu and has its
 own status-bar button. Detach, Host / SSH and CPU / resources remain available.
 The `+` shortcut repeats the last successful Agent setup, or opens Create when

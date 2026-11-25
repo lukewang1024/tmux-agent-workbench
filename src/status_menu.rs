@@ -1292,13 +1292,17 @@ fn actions(
                         kind,
                         options.at(View::CreatePane),
                     ),
-                    nav(
-                        "create-window",
-                        tr("Window", "窗口"),
-                        'w',
-                        kind,
-                        options.at(View::CreateWindow),
-                    ),
+                    if executable("code") {
+                        nav(
+                            "create-window",
+                            tr("Window", "窗口"),
+                            'w',
+                            kind,
+                            options.at(View::CreateWindow),
+                        )
+                    } else {
+                        tmux_action("create-window", tr("Window", "窗口"), 'w', &["new-window"])
+                    },
                     Action::new(
                         "new-session",
                         tr("Session", "会话"),
