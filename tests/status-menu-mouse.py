@@ -1310,10 +1310,13 @@ with tempfile.TemporaryDirectory(prefix='wb-menu-mouse-') as root, ExitStack() a
         editor_window = next(item for item in editor_model['items']
                              if item['id'] == 'create-window')
         editor_callback = shlex.split(shlex.split(editor_window['command'])[-1])
-        editor_choices = json.loads(subprocess.check_output(
-            [*editor_callback, '--json'], env=window_env))
-        assert [item['id'] for item in editor_choices['items'] if item['id'] != 'back'] == [
-            'new-window', 'editor']
+        menu = open_menu(editor_callback, env=window_env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for_text(menu, b'New window', b'Open project in VS Code')
+        os.write(master, b'\x1b')
+        menu.wait(timeout=3)
+        drain(0.7)
+        assert set(tmux('list-windows', '-F', '#{window_id}').splitlines()) == windows_before
         print('PASS Create Window acts directly without VS Code and keeps editor choices when available')
         menu = open_menu(window_args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_text(menu, b'Agent', b'Pane', b'Window', b'Session')
