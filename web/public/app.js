@@ -1,4 +1,4 @@
-'use strict';
+import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
 const autoSizeComposer = CSS.supports('field-sizing', 'content');
@@ -9,6 +9,7 @@ const byId = (id) => document.getElementById(id);
 const app = byId('app');
 const overlay = byId('overlay');
 const pickerDialog = byId('picker-dialog');
+const connectionOverlay = byId('connection-overlay');
 const mobile = window.matchMedia('(max-width: 767px)');
 const fullScreenPreview = window.matchMedia('(max-width: 1023px)');
 const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
@@ -31,6 +32,8 @@ const ansiNames = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan',
 
 let signedIn = false;
 let reauthRequired = false;
+let disconnected = false;
+let checkedSession = false;
 let authGeneration = 0;
 let route = 'login';
 let scope = 'all';
@@ -121,6 +124,7 @@ function readEnrollment() {
 }
 
 async function api(path, method = 'GET', payload = null) {
+  if (disconnected) throw new Error(connectionError);
   if (reauthRequired && !path.startsWith('/api/auth/') && path !== '/api/logout') {
     throw Object.assign(new Error(t('continueWithPasskey')), { status: 401 });
   }
@@ -131,8 +135,8 @@ async function api(path, method = 'GET', payload = null) {
     body: method === 'GET' ? undefined : JSON.stringify(payload || {}),
     cache: 'no-store',
     signal: AbortSignal.timeout(path === '/api/usage' ? 27_000 : 13_000),
-  }).catch(() => { throw new Error(connectionError); });
-  const data = await response.json();
+  }).catch(connectionFailed);
+  const data = await response.json().catch(connectionFailed);
   if (!response.ok) {
     if (response.status === 401 && generation === authGeneration) requirePasskey();
     const error = new Error(data.error || t('requestFailed'));
@@ -140,6 +144,43 @@ async function api(path, method = 'GET', payload = null) {
     throw error;
   }
   return data;
+}
+
+function connectionFailed() {
+  checkConnection();
+  throw new Error(connectionError);
+}
+
+function placeConnectionOverlay() {
+  const layer = pickerDialog.open ? pickerDialog : overlay.open ? overlay : document.body;
+  if (connectionOverlay.parentElement !== layer) layer.append(connectionOverlay);
+}
+
+function setDisconnected(value) {
+  if (disconnected === value) return;
+  disconnected = value;
+  if (value) {
+    placeConnectionOverlay();
+    hideSuggestions();
+  }
+  connectionOverlay.hidden = !value;
+  if (route === 'agents' && supportsChat()) paintComposer();
+}
+
+function connectionChanged(session) {
+  const restored = disconnected;
+  setDisconnected(!session);
+  if (!session) return;
+  if (!checkedSession) {
+    checkedSession = true;
+    if (session.authenticated) signedOn();
+    if (enrollment) registerSheet();
+  } else if (restored && signedIn && !reauthRequired) {
+    refresh(true).then(() => {
+      if (terminal) connectTerminal(terminal);
+      if (route === 'agents' && supportsChat() && (opened || !mobile.matches)) loadHistory();
+    });
+  }
 }
 
 function pathWith(path, query) {
@@ -436,12 +477,20 @@ function records(machine) {
 
 function paintWorkspace() {
   paintPalette();
-  const rows = scopedMachines().flatMap((machine) => {
+  const visibleMachines = scopedMachines();
+  const rows = visibleMachines.flatMap((machine) => {
     const { rows, pinned } = records(machine);
     return [...rows.filter((item) => item.id), ...pinned];
   });
   const previous = conversationKey();
-  active = rows.find((item) => recordKey(item) === selection.get(route)) || rows[0] || null;
+  const selected = selection.get(route);
+  let current = rows.find((item) => recordKey(item) === selected);
+  if (!current && opened && route === 'agents') {
+    // A filter can hide a row when its state changes. Keep the opened chat.
+    current = visibleMachines.flatMap((machine) => (machine.agents || []).map((item) => withMachine(item, machine)))
+      .find((item) => recordKey(item) === selected);
+  }
+  active = current || rows[0] || null;
   activeKey = recordKey(active);
   if (previous !== conversationKey()) {
     transcript = null;
@@ -754,6 +803,19 @@ function openRecord(item) {
   paintWorkspace();
   save('pushState', fromList);
   if (mobile.matches) focus('detail-name');
+  acknowledgeOpened(item, selectedPane.get(recordKey(item)) || item.pane?.key);
+}
+
+async function acknowledgeOpened(item, pane) {
+  const machine = machines.find(({ id }) => id === item.node);
+  const agent = item.sessionRecord
+    ? machine?.agents?.find((record) => record.pane.key === pane && record.completion && !record.exited)
+    : item;
+  if (!agent?.completion) return;
+  try {
+    await api('/api/attention', 'POST', { node: item.node, pane: agent.pane.key, agent: agent.id, event: agent.completion });
+    await refresh(true);
+  } catch (error) { if (signedIn && !reauthRequired && !disconnected) toast(error.message); }
 }
 
 function paintDetail() {
@@ -800,8 +862,10 @@ function renderSessionTree(session) {
       const open = () => {
         closeSheet();
         selectedPane.set(recordKey(session), pane.key);
-        if (opened && activeKey === recordKey(session)) paintDetail();
-        else openRecord(session);
+        if (opened && activeKey === recordKey(session)) {
+          paintDetail();
+          acknowledgeOpened(session, pane.key);
+        } else openRecord(session);
       };
       const row = button(title, 'pane-row', open);
       row.prepend(glyph('terminal'));
@@ -843,6 +907,7 @@ function paintSessionPanes(empty) {
     if (route !== 'sessions' || activeKey !== session) return;
     selectedPane.set(session, key);
     paintDetail();
+    acknowledgeOpened(active, key);
   });
   startTerminal(pane);
 }
@@ -856,7 +921,7 @@ function paintComposer() {
   const ready = (active.thread ? ['idle', 'done', 'working'].includes(active.state) : active.state === 'idle') && !active.pane.inMode;
   const working = active.state === 'working';
   const sendButton = byId('send');
-  sendButton.disabled = !ready || submitting || reauthRequired;
+  sendButton.disabled = !ready || submitting || reauthRequired || disconnected;
   for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
   const label = t(working ? 'agentWorking' : active.state === 'blocked' ? 'agentBlocked'
     : ready ? 'originalConversation' : 'agentInputUnavailable');
@@ -867,7 +932,7 @@ function paintComposer() {
   const pendingStop = stopping?.key === activeKey;
   if (pendingStop && !working) stopping = null;
   stop.hidden = !working || !active.chat || active.pane.inMode;
-  stop.disabled = pendingStop || submitting || reauthRequired;
+  stop.disabled = pendingStop || submitting || reauthRequired || disconnected;
   const stopLabel = t(pendingStop ? 'stoppingTurn' : 'stopCurrentTurn');
   stop.setAttribute('aria-label', stopLabel);
   stop.title = stopLabel;
@@ -875,7 +940,7 @@ function paintComposer() {
   stop.classList.toggle('secondary-stop', !sendButton.hidden);
   const settings = byId('chat-settings');
   settings.hidden = !active.chat;
-  settings.disabled = reauthRequired;
+  settings.disabled = reauthRequired || disconnected;
   settings.title = t('modelAndThinking');
   const queued = nextSettings.get(key);
   const selected = queued?.model ? queued : chatModels.get(key);
@@ -884,7 +949,7 @@ function paintComposer() {
     : t('modelAndThinking');
   const permissions = byId('chat-permission');
   permissions.hidden = !active.chat;
-  permissions.disabled = reauthRequired;
+  permissions.disabled = reauthRequired || disconnected;
   permissions.classList.toggle('next-setting', Boolean(queued?.permission));
   permissions.title = queued?.permission ? t('permission') + ' · ' + t('nextTurn') : t('permission');
   byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
@@ -1021,7 +1086,7 @@ function chatQuery(target, kind) {
 }
 
 function suggestionToken() {
-  if (composingPrompt || reauthRequired || route !== 'agents' || !active?.chat
+  if (composingPrompt || reauthRequired || disconnected || route !== 'agents' || !active?.chat
       || chatInput.selectionStart !== chatInput.selectionEnd) return null;
   const end = chatInput.selectionStart;
   const before = chatInput.value.slice(0, end);
@@ -1198,7 +1263,7 @@ async function showPermissionSettings() {
 
 function loadHistory(older = false) {
   const target = transcript;
-  if (reauthRequired || !active?.thread || !target || (older && !target.before)) return;
+  if (reauthRequired || disconnected || !active?.thread || !target || (older && !target.before)) return;
   if (target.loading) return target.loading;
   const query = { node: active.node, agent: active.id, thread: active.thread };
   if (older) query.before = target.before;
@@ -1726,7 +1791,9 @@ function startTerminal(pane) {
 }
 
 function connectTerminal(current) {
-  if (terminal !== current) return;
+  if (terminal !== current || disconnected || reauthRequired
+      || current.socket?.readyState === WebSocket.OPEN || current.socket?.readyState === WebSocket.CONNECTING) return;
+  clearTimeout(current.retry);
   current.ready = false;
   current.writable = false;
   current.ctrl = false;
@@ -1737,7 +1804,7 @@ function connectTerminal(current) {
   const socket = new WebSocket(url);
   current.socket = socket;
   socket.addEventListener('message', (event) => {
-    if (terminal !== current) return;
+    if (terminal !== current || current.socket !== socket) return;
     const packet = JSON.parse(event.data);
     if (packet.error) { toast(packet.error); return; }
     if (packet.initial) {
@@ -1760,7 +1827,7 @@ function connectTerminal(current) {
     }
   });
   socket.addEventListener('close', (event) => {
-    if (terminal !== current) return;
+    if (terminal !== current || current.socket !== socket) return;
     current.writable = false;
     current.ready = false;
     current.xterm.options.disableStdin = true;
@@ -1795,7 +1862,7 @@ function fitTerminal(current) {
 }
 
 function sendTerminal(packet) {
-  if (terminal?.socket?.readyState !== WebSocket.OPEN) return;
+  if (disconnected || reauthRequired || terminal?.socket?.readyState !== WebSocket.OPEN) return;
   if (!terminal.writable && ['input', 'resize'].includes(packet.type)) return;
   if (packet.type === 'input') {
     if (packet.submit && !packet.data.length) {
@@ -2000,7 +2067,7 @@ function paintMachines() {
 }
 
 async function refresh(force = false) {
-  if (!signedIn || reauthRequired || (syncing && !force)) return;
+  if (!signedIn || reauthRequired || disconnected || (syncing && !force)) return;
   const revision = ++refreshing;
   syncing = true;
   try {
@@ -2447,8 +2514,19 @@ darkMode.addEventListener('change', () => {
   paint();
   if (terminal?.xterm) terminal.xterm.options.theme = terminalTheme();
 });
-window.addEventListener('online', () => { if (signedIn) refresh(true); });
-window.addEventListener('offline', () => toast(t('networkInterrupted')));
+for (const dialog of [overlay, pickerDialog]) {
+  dialog.addEventListener('close', () => { if (disconnected) placeConnectionOverlay(); });
+  dialog.addEventListener('cancel', (event) => { if (disconnected) event.preventDefault(); });
+}
+for (const type of ['pointerdown', 'click', 'contextmenu', 'submit', 'keydown']) {
+  document.addEventListener(type, (event) => {
+    if (!disconnected) return;
+    // Keep a focused editor in place so Android IMEs can finish composing into it.
+    if (type === 'keydown' && event.key !== 'Tab' && event.target === chatInput) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+}
 
 const viewport = window.visualViewport;
 let width = window.innerWidth;
@@ -2508,10 +2586,7 @@ function watchAppUpdates() {
 }
 
 watchAppUpdates();
-api('/api/session').then(({ authenticated }) => {
-  if (authenticated) signedOn();
-  if (enrollment) registerSheet();
-}).catch(() => status('login-error', connectionError));
+const checkConnection = monitorGateway(connectionChanged);
 setInterval(() => {
   if (document.hidden) return;
   refresh();

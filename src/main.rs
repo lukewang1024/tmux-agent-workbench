@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use tmux_agent_workbench::config::Config;
 use tmux_agent_workbench::daemon;
-use tmux_agent_workbench::ipc::{Request, call, exchange};
+use tmux_agent_workbench::ipc::{Request, acknowledge_attention, call, exchange};
 use tmux_agent_workbench::manifest::ManifestSet;
 use tmux_agent_workbench::model::{AgentKind, AgentSnapshot, ConversationRole, DisplayState};
 use tmux_agent_workbench::paths::Paths;
@@ -404,6 +404,10 @@ enum PickTarget {
 #[derive(Debug, Subcommand)]
 enum AttentionCommand {
     Next,
+    /// Acknowledge one observed event without changing tmux focus.
+    Ack {
+        event_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2203,6 +2207,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Attention {
             command: AttentionCommand::Next,
         } => attention_next(&paths)?,
+        Command::Attention {
+            command: AttentionCommand::Ack { event_id },
+        } => {
+            let server = ServerIdentity::discover()?;
+            acknowledge_attention(&paths.socket_for_server(&server.key), &event_id)?;
+        }
         Command::Metadata {
             command:
                 MetadataCommand::Report {

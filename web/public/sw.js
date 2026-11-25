@@ -2,7 +2,7 @@
 
 const version = 'WORKBENCH_CACHE_VERSION';
 const cacheName = 'workbench-shell-' + version;
-const files = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
+const files = ['/', '/app.js', '/connection.js', '/style.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
   '/providers/chatgpt.svg', '/providers/claude.svg', '/providers/opencode.svg', '/providers/trae.png',
   '/vendor/passkeys.js', '/vendor/xterm.js', '/vendor/xterm.css', '/vendor/fit.js', '/vendor/markdown-it.js'];
 const shell = new Set(files);

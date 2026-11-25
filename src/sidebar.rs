@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::close_target;
 use crate::config::{AgentSort, Config};
-use crate::ipc::{ClientError, Request, call};
+use crate::ipc::{Request, acknowledge_attention, call};
 use crate::model::{
     AgentSnapshot, ConversationSnapshot, DisplayState, SessionSnapshot, Snapshot, StateSource,
 };
@@ -4011,24 +4011,6 @@ fn selection_key(row: &Row) -> Option<String> {
             agent.instance_id, conversation.id
         )),
         Row::Section(_) | Row::AgentGroup(_) | Row::Detail(_, _) | Row::Spacer => None,
-    }
-}
-
-fn acknowledge_attention(socket: &std::path::Path, event_id: &str) -> Result<(), ClientError> {
-    match call(
-        socket,
-        &Request::new("attention.ack", serde_json::json!({"event_id": event_id})),
-        Duration::from_secs(1),
-    ) {
-        // A rendered row can outlive its event when another client acknowledges
-        // it or the daemon expires it. The desired state is already reached.
-        Err(ClientError::Remote { code, message })
-            if code == "request_failed" && message == "attention event not found" =>
-        {
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(error) => Err(error),
     }
 }
 

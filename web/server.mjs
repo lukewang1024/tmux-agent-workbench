@@ -17,6 +17,7 @@ const run = promisify(execFile);
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
+  ['/connection.js', ['public/connection.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['public/style.css', 'text/css; charset=utf-8']],
   ['/manifest.webmanifest', ['public/manifest.webmanifest', 'application/manifest+json']],
   ['/sw.js', ['public/sw.js', 'text/javascript; charset=utf-8']],
@@ -280,6 +281,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
       '/api/sidebar-sort': 'sidebar-sort',
       '/api/agents': 'launch',
       '/api/close': 'close-target',
+      '/api/attention': 'acknowledge-done',
     }[path];
     if (method === 'POST' && typeof operation === 'string') {
       const input = await body(req);

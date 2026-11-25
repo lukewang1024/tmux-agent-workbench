@@ -337,6 +337,26 @@ test('gateway requires a loopback listener even with TLS configured', async () =
   await assert.rejects(startServer({ origin: 'http://localhost:7080', listen: 'localhost:7080:443' }), refused);
 });
 
+test('acknowledging Done only settles the exact completion shown for that agent and pane', async () => {
+  const node = new LocalNode({});
+  const pane = '1.2.3.4';
+  const agent = 'agent-' + 'a'.repeat(24);
+  const runtime = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
+  const current = { instance_id: agent, target: { pane_id: '%3' }, display_state: 'done',
+    attention: { id: runtime + '.2', kind: 'done', seen: false } };
+  node.pane = async (key) => { assert.equal(key, pane); return { pane: '%3' }; };
+  node.snapshot = async () => ({ agents: [current] });
+  const commands = [];
+  node.coreCommand = async (args) => { commands.push(args); };
+  await node.request('acknowledge-done', { pane, agent, event: runtime + '.1' });
+  await node.request('acknowledge-done', { pane, agent: 'agent-' + 'b'.repeat(24), event: current.attention.id });
+  assert.deepEqual(commands, []);
+  await node.request('acknowledge-done', { pane, agent, event: current.attention.id });
+  current.attention.seen = true;
+  await node.request('acknowledge-done', { pane, agent, event: current.attention.id });
+  assert.deepEqual(commands, [['attention', 'ack', current.attention.id]]);
+});
+
 test('Sidebar pins share tmux options and session shells target the selected session', async (t) => {
   const socket = join(await scratch(t), 't');
   const tmux = (...args) => execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', timeout: 4000 }).trim();
@@ -420,6 +440,8 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.ok(html.includes('content="#282c34" media="(prefers-color-scheme: dark)"'));
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
       assert.ok(version);
+      assert.ok(html.includes('id="connection-overlay"'));
+      assert.equal((await fetch(address + '/connection.js?v=' + version)).status, 200);
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
       const style = await fetch(address + '/style.css?v=' + version).then((response) => response.text());
       assert.match(style, /:root \{ color-scheme: light;\s+--paper: #fafafa;/);
@@ -428,6 +450,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.ok(html.includes('src="/vendor/markdown-it.js?v=' + version + '"'));
       assert.equal((await fetch(address + '/vendor/markdown-it.js?v=' + version)).status, 200);
       const script = await fetch(address + '/app.js?v=' + version).then((response) => response.text());
+      assert.ok(script.includes('./connection.js?v=' + version));
       assert.ok(script.includes('"language":"' + lang + '"'));
       assert.ok(script.includes("const appVersion = '" + version + "'"));
       assert.ok(!script.includes('WORKBENCH_LOCALE'));

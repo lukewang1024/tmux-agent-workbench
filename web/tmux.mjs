@@ -178,6 +178,9 @@ export class LocalNode {
         exited: agent.exited, stale: agent.stale, canClose: closableAgent(agent), thread,
         structured: Boolean(thread), chat: runningCodex && (Boolean(thread) || observedProcess),
       };
+      if (agent.display_state === 'done' && agent.attention?.kind === 'done' && !agent.attention.seen) {
+        record.completion = agent.attention.id;
+      }
       if (observedProcess) this.agentProcesses.set(record, agent.process);
       agents.push(record);
     }
@@ -210,7 +213,8 @@ export class LocalNode {
       return {
         id: agent?.id || card.window, title: agent?.title || card.title, pane, state: card.state,
         kind: agent?.kind || 'shell', session: sessions.find(({ id }) => id === card.session)?.title,
-        structured: agent?.structured, chat: agent?.chat, canClose: agent?.canClose, thread: agent?.thread, assistant: card.assistant,
+        structured: agent?.structured, chat: agent?.chat, canClose: agent?.canClose, thread: agent?.thread,
+        assistant: card.assistant, completion: agent?.completion,
       };
     });
     const terminals = agents.filter(({ pane }) => !pane.owned)
@@ -266,6 +270,23 @@ export class LocalNode {
     } finally {
       this.recentSnapshot = null;
     }
+    return {};
+  }
+
+  async acknowledgeDone({ pane, agent, event }) {
+    if (typeof pane !== 'string' || !/^\d+(?:\.\d+){3}$/.test(pane)
+        || typeof agent !== 'string' || !/^agent-[0-9a-f]{24}$/.test(agent)
+        || typeof event !== 'string' || !/^[0-9a-f-]{36}\.\d{1,20}$/.test(event)) {
+      throw new Failure(400, 'Invalid Agent completion.');
+    }
+    const [target, data] = await Promise.all([this.pane(pane), this.snapshot(true)]);
+    const entry = data.agents.find(({ instance_id, target: location }) => instance_id === agent && location.pane_id === target.pane);
+    if (entry?.display_state !== 'done' || entry.attention?.kind !== 'done' || entry.attention.seen || entry.attention.id !== event) return {};
+    try {
+      await this.coreCommand(['attention', 'ack', event]);
+    } catch {
+      throw new Failure(502, 'Could not acknowledge the Agent completion.');
+    } finally { this.recentSnapshot = null; }
     return {};
   }
 
@@ -748,6 +769,7 @@ export class LocalNode {
     switch (method) {
       case 'catalog': return this.catalog(false, Array.isArray(args.hidden) ? args.hidden : []);
       case 'pin': return this.pin(args);
+      case 'acknowledge-done': return this.acknowledgeDone(args);
       case 'close-target': return this.closeTarget(args);
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);

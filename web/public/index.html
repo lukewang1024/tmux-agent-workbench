@@ -16,7 +16,7 @@
   <script src="/vendor/xterm.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/fit.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/markdown-it.js?v=WORKBENCH_CACHE_VERSION" defer></script>
-  <script src="/app.js?v=WORKBENCH_CACHE_VERSION" defer></script>
+  <script type="module" src="/app.js?v=WORKBENCH_CACHE_VERSION"></script>
 </head>
 <body>
   <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
@@ -258,6 +258,13 @@
       </button>
     </div>
   </main>
+  <section class="connection-overlay" id="connection-overlay" hidden>
+    <div class="connection-notice" role="alert">
+      <span class="connection-progress" aria-hidden="true"></span>
+      <h2>{{connectionLost}}</h2>
+      <p>{{reconnectingWorkbench}}</p>
+    </div>
+  </section>
 
 </body>
 </html>

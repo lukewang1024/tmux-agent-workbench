@@ -539,6 +539,26 @@ h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
 .message-error { color: var(--danger); font-size: 13px; margin-bottom: 8px; }
 .toast { position: fixed; z-index: 6; bottom: max(18px, env(safe-area-inset-bottom)); right: 19px; max-width: min(90%, 410px); padding: 9px 13px; border-radius: 9px; color: var(--light-ink); background: var(--toast-fill); font-size: 13px; overflow-wrap: anywhere; }
 .toast.reauth { inset: max(5px, env(safe-area-inset-top)) 8px auto auto; border: 0; font-weight: 650; }
+.connection-overlay {
+  position: fixed; z-index: 8; inset: 0; display: grid; place-items: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--backdrop); backdrop-filter: blur(4px); overflow: auto; overscroll-behavior: contain;
+}
+.connection-notice {
+  display: grid; justify-items: center; gap: 6px; max-width: 25rem; padding: 20px 24px;
+  border: 1px solid var(--line); border-radius: 16px; background: var(--paper);
+  box-shadow: 0 12px 32px var(--shadow); text-align: center;
+}
+.connection-notice h2 { font-size: 16px; }
+.connection-notice p { color: var(--muted); font-size: 13px; }
+.connection-progress {
+  width: 19px; height: 19px; margin-block-end: 4px; border: 2px solid var(--outline);
+  border-top-color: var(--accent); border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .connection-progress { animation: sending 950ms linear infinite; }
+}
 .toast.update-toast { inset-block-start: calc(53px + env(safe-area-inset-top)); bottom: auto; display: flex; align-items: center; gap: 7px; padding: 5px 6px 5px 10px; background: var(--toast-fill); }
 .update-toast span { flex: 1; }
 .update-toast button { min-height: 31px; padding: 0 7px; border: 0; border-radius: 5px; background: var(--toast-button); color: var(--light-ink); white-space: nowrap; font-size: 12px; }
