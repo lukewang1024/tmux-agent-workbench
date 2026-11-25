@@ -264,15 +264,19 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
     const gateway = await startServer({ store, local, localName: 'fixture', listen: '127.0.0.1:0', origin: 'http://localhost:7080' });
     const address = 'http://127.0.0.1:' + gateway.address.port;
     try {
-      const html = await fetch(address).then((response) => response.text());
+      const html = await fetch(address + '/?refresh=1').then((response) => response.text());
       assert.ok(html.includes('<html lang="' + lang + '">'));
       assert.ok(html.includes(title));
       assert.ok(!html.includes('{{'));
       const manifest = await fetch(address + '/manifest.webmanifest').then((response) => response.json());
       assert.equal(manifest.lang, lang);
       assert.equal(manifest.display, 'standalone');
-      const script = await fetch(address + '/app.js').then((response) => response.text());
+      const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
+      assert.ok(version);
+      assert.ok(html.includes('href="/style.css?v=' + version + '"'));
+      const script = await fetch(address + '/app.js?v=' + version).then((response) => response.text());
       assert.ok(script.includes('"language":"' + lang + '"'));
+      assert.ok(script.includes("const appVersion = '" + version + "'"));
       assert.ok(!script.includes('WORKBENCH_LOCALE'));
       const protectedWorkspace = await fetch(address + '/api/workspace');
       assert.equal(protectedWorkspace.status, 401);

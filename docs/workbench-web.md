@@ -92,6 +92,10 @@ caches the app shell and provider icons. When an update is ready, choose
 **Refresh** or dismiss the notification. Conversation history and terminal
 data are fetched on demand.
 
+If an older installed app still shows its previous interface, open
+http://localhost:7080/?refresh=1 with the tunnel running. This uses the
+current app shell at the same Passkey origin.
+
 ## Use a browser HTTPS origin
 
 When deploying behind an HTTPS reverse proxy, choose a stable browser origin

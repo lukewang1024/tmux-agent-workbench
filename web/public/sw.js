@@ -24,9 +24,19 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== location.origin || url.search || !shell.has(url.pathname)) return;
+  if (request.method !== 'GET' || url.origin !== location.origin || !shell.has(url.pathname)) return;
+  const navigation = request.mode === 'navigate' && url.pathname === '/';
+  if (!navigation && url.search && url.search !== '?v=' + version) return;
   event.respondWith(caches.open(cacheName).then(async (cache) => {
+    if (navigation) {
+      try {
+        const response = await fetch(request, { signal: AbortSignal.timeout(2500) });
+        if (response.ok) return response;
+      } catch {
+        // An installed app can still open its shell while the tunnel is down.
+      }
+    }
     const cached = await cache.match(url.pathname);
-    return cached || fetch(request);
+    return cached || (navigation ? Response.error() : fetch(request));
   }));
 });

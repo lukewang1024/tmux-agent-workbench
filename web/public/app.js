@@ -285,7 +285,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
     const mark = make('img', 'provider-mark');
     mark.alt = '';
     mark.draggable = false;
-    mark.src = '/providers/' + provider;
+    mark.src = '/providers/' + provider + '?v=' + appVersion;
     icon.classList.add('brand');
     icon.append(mark);
   } else icon.append(glyph(session ? 'sessions' : 'terminal'));

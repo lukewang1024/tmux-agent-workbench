@@ -80,9 +80,9 @@ async function cachedAssets(locale) {
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
   const version = fingerprint.digest('hex').slice(0, 16);
-  for (const path of ['/app.js', '/sw.js']) {
+  for (const path of ['/', '/app.js', '/sw.js']) {
     const asset = loaded.get(path);
-    asset.data = Buffer.from(asset.data.toString().replace('WORKBENCH_CACHE_VERSION', version));
+    asset.data = Buffer.from(asset.data.toString().replaceAll('WORKBENCH_CACHE_VERSION', version));
   }
   return loaded;
 }
