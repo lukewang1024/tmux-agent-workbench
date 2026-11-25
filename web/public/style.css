@@ -177,7 +177,7 @@ h1, h2, h3, p { margin: 0; }
 #messages.selecting .message { cursor: pointer; user-select: none; border-radius: 7px; }
 #messages.selecting .message.picked { background: var(--active); box-shadow: 0 0 0 4px var(--active); }
 @media (pointer: coarse) {
-  .message { touch-action: pan-y; user-select: none; -webkit-touch-callout: none; }
+  .message { touch-action: pan-y; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
 }
 .chat-actions { display: flex; gap: 2px; }
 .chat-actions .icon { display: flex; align-items: center; justify-content: center; gap: 4px; min-width: 33px; min-height: 35px; font-size: 12px; }
