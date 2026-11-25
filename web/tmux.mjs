@@ -315,6 +315,7 @@ export class LocalNode {
     if (!promptStates.includes(entry.state) || entry.pane.inMode) {
       throw new Failure(409, 'The Agent cannot accept input right now.');
     }
+    let after;
     await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), {
       bracketed: true,
       submit: true,
@@ -322,9 +323,10 @@ export class LocalNode {
         const latest = (await this.catalog(true)).agents.find((item) => item.id === agentId);
         if (!latest?.structured || latest.thread !== thread || latest.pane.key !== entry.pane.key || latest.pane.inMode
             || !promptStates.includes(latest.state)) throw new Failure(409, 'The agent can no longer accept this message.');
+        after = await this.history.endOffset(thread).catch(() => undefined);
       },
     });
-    return {};
+    return { after };
   }
 
   async paste(pane, bytes, { bracketed = false, submit = false, check } = {}) {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { open, readdir, readlink, realpath } from 'node:fs/promises';
+import { open, readdir, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -167,6 +167,15 @@ export class History {
       this.remember(id, filename);
     }
     return filename;
+  }
+
+  async endOffset(id) {
+    try {
+      return (await stat(await this.locate(id))).size;
+    } catch (error) {
+      if (error.code === 'ENOENT' || error instanceof Failure && error.status === 404) return 0;
+      throw error;
+    }
   }
 
   async page(id, before) {

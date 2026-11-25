@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#f8faff">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f8faff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#24272d" media="(prefers-color-scheme: dark)">
   <title>Workbench Web</title>
   <link rel="manifest" href="/manifest.webmanifest?v=WORKBENCH_CACHE_VERSION">
   <link rel="icon" href="/icon-192.png?v=WORKBENCH_CACHE_VERSION">
@@ -86,6 +88,7 @@
             <div class="history" id="history">
               <div class="history-progress" id="history-progress" role="status" hidden><span>{{loadingEarlierMessages}}</span></div>
               <div id="messages"></div>
+              <div id="outgoing-messages" hidden></div>
             </div>
             <div class="composer-wrap">
               <div class="composer-inner">

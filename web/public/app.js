@@ -43,6 +43,7 @@ const hiddenStates = new Set();
 const expandedTeams = new Set();
 const expandedSessions = new Set();
 const drafts = new Map();
+const outgoing = new Map();
 let transcript = null;
 let submitting = false;
 let terminal = null;
@@ -299,11 +300,15 @@ function paintStateFilters() {
   }));
 }
 
-function onHold(row, activate, mouseMenu) {
+function onHold(row, activate, mouseMenu, setPressed) {
   let timer;
   let start;
   let held = false;
-  const stop = () => { clearTimeout(timer); start = null; };
+  const stop = () => {
+    clearTimeout(timer);
+    if (start) setPressed?.(false);
+    start = null;
+  };
   const run = () => {
     if (held || !row.isConnected || overlay.open) return;
     held = true;
@@ -315,6 +320,7 @@ function onHold(row, activate, mouseMenu) {
     held = false;
     if (event.pointerType === 'mouse' || !event.isPrimary || event.target.closest('input')) return;
     start = [event.clientX, event.clientY];
+    setPressed?.(true);
     timer = setTimeout(run, 480);
   });
   row.addEventListener('pointermove', (event) => {
@@ -343,7 +349,7 @@ function itemMenu(container, open) {
   onHold(container, show, (event) => {
     event.preventDefault();
     show();
-  });
+  }, (pressed) => container.classList.toggle('is-pressed', pressed));
   const trigger = button('', 'row-action item-menu', show);
   trigger.title = t('itemActions');
   trigger.setAttribute('aria-label', trigger.title);
@@ -580,9 +586,10 @@ function paintDetail() {
   paintComposer();
   const key = conversationKey();
   if (transcript?.key !== key) {
-    transcript = { key, rows: new Map(), before: null, loaded: false, busy: false, selected: null };
+    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: false, busy: false, selected: null };
     byId('messages').replaceChildren(make('p', 'day', t('readingHistory')));
     byId('history-progress').hidden = true;
+    paintOutgoing();
     loadHistory();
   }
 }
@@ -679,7 +686,10 @@ async function loadHistory(older = false) {
     if (older) target.before = Number.isSafeInteger(before) && before > 0 && before < target.before ? before : null;
     target.loaded = true;
     const added = messages.filter(({ id }) => !target.rows.has(id));
-    for (const message of added) target.rows.set(message.id, message);
+    for (const message of added) {
+      target.rows.set(message.id, message);
+      if (Number.isSafeInteger(message.id)) target.latest = Math.max(target.latest, message.id);
+    }
     if (added.length || !previous) renderHistory(target, added, older);
     pageLoaded = true;
   } catch (error) {
@@ -867,12 +877,72 @@ function paintMessageSelection() {
   byId('selection-count').textContent = String(count);
 }
 
+function messageContent(text, human) {
+  const body = make('div', human ? 'message-content bubble' : 'message-content');
+  body.innerHTML = markdown.render(text);
+  for (const link of body.querySelectorAll('a')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+  return body;
+}
+
+function matchingText(text) {
+  return text.replace(/\r\n?/g, '\n').trim();
+}
+
+function matchOutgoing(queue, messages) {
+  if (!queue?.entries.length) return false;
+  let changed = false;
+  for (const message of messages) {
+    if (message.role !== 'user' || queue.matched.has(message.id)) continue;
+    const text = matchingText(message.text);
+    const index = queue.entries.findIndex((entry) => text === entry.match && (entry.after !== null
+      ? message.id >= entry.after : entry.state !== 'sending' && Date.parse(message.time) >= entry.startedAt));
+    if (index >= 0) {
+      queue.entries.splice(index, 1);
+      queue.matched.add(message.id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function paintOutgoing() {
+  const container = byId('outgoing-messages');
+  const entries = outgoing.get(conversationKey())?.entries || [];
+  container.hidden = !entries.length;
+  byId('messages').toggleAttribute('data-outgoing', Boolean(entries.length));
+  status('chat-error', entries.findLast((entry) => entry.state === 'failed')?.error);
+  container.replaceChildren(...entries.map((entry) => {
+    const article = make('article', 'message human');
+    const row = make('div', 'outgoing-row');
+    if (entry.state !== 'sent') {
+      const failed = entry.state === 'failed';
+      const indicator = make('span', failed ? 'delivery-failed' : 'delivery-pending');
+      indicator.setAttribute('role', 'img');
+      indicator.setAttribute('aria-label', t(failed ? 'messageSendFailed' : 'messageSending'));
+      indicator.title = failed ? entry.error : t('messageSending');
+      if (failed) indicator.append(glyph('close'));
+      row.append(indicator);
+    }
+    row.append(messageContent(entry.text, true));
+    article.append(make('div', 'message-meta', t('you')), row);
+    return article;
+  }));
+}
+
 function renderHistory(target, added, older) {
   const messages = byId('messages');
   const scroller = byId('history');
   const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
   const height = scroller.scrollHeight;
   const top = scroller.scrollTop;
+  const queue = outgoing.get(target.key);
+  if (!older && matchOutgoing(queue, added)) {
+    if (!queue.entries.length) outgoing.delete(target.key);
+    paintOutgoing();
+  }
   paintMessageSelection();
   if (!target.rows.size) {
     messages.replaceChildren(make('div', 'empty', t('noMessages')));
@@ -917,13 +987,7 @@ function renderHistory(target, added, older) {
       if (link && openLinkPreview(link)) event.preventDefault();
     });
     meta.append(pick, make('span', '', human ? t('you') : 'Codex'));
-    const body = make('div', human ? 'message-content bubble' : 'message-content');
-    body.innerHTML = markdown.render(row.text);
-    for (const link of body.querySelectorAll('a')) {
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-    }
-    element.append(meta, body);
+    element.append(meta, messageContent(row.text, human));
     return element;
   });
   if (older) {
@@ -940,20 +1004,44 @@ async function send() {
   const item = active;
   const key = conversationKey();
   const text = chatInput.value;
+  const queue = outgoing.get(key) || { entries: [], matched: new Set() };
+  const previous = queue.entries.findLast((entry) => entry.state === 'failed' && entry.text === text);
+  const entry = previous || { text, match: matchingText(text) };
+  entry.state = 'sending';
+  entry.startedAt = Date.now();
+  entry.after = transcript?.loaded ? transcript.latest + 1 : null;
+  if (previous) queue.entries.splice(queue.entries.indexOf(previous), 1);
+  queue.entries.push(entry);
+  outgoing.set(key, queue);
+  drafts.delete(key);
+  chatInput.value = '';
+  const current = () => signedIn && route === 'agents' && conversationKey() === key;
   submitting = true;
   paintComposer();
-  status('chat-error');
+  paintOutgoing();
+  const scroller = byId('history');
+  scroller.scrollTop = scroller.scrollHeight;
   try {
-    await api('/api/prompt', 'POST', { node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text });
-    if (drafts.get(key) === text) drafts.delete(key);
-    if (conversationKey() === key) {
-      if (chatInput.value === text) chatInput.value = '';
-      const scroller = byId('history');
-      scroller.scrollTop = scroller.scrollHeight;
+    const { after } = await api('/api/prompt', 'POST', { node: item.node, pane: item.pane.key, agent: item.id, thread: item.thread, text });
+    entry.state = 'sent';
+    if (Number.isSafeInteger(after) && after >= 0) entry.after = Math.max(after, entry.after ?? 0);
+    if (current()) {
+      if (transcript?.key === key) matchOutgoing(queue, transcript.rows.values());
+      if (!queue.entries.length && outgoing.get(key) === queue) outgoing.delete(key);
+      paintOutgoing();
       loadHistory();
     }
   } catch (error) {
-    if (conversationKey() === key) status('chat-error', error.message);
+    if (!queue.entries.includes(entry) || outgoing.get(key) !== queue) return;
+    entry.state = 'failed';
+    entry.error = error.message;
+    if (!drafts.get(key)) drafts.set(key, text);
+    if (current()) {
+      const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
+      chatInput.value = drafts.get(key);
+      paintOutgoing();
+      if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+    }
   } finally {
     submitting = false;
     if (active?.structured && route === 'agents') paintComposer();
@@ -980,9 +1068,15 @@ function startTerminal(pane) {
   const current = { key, node: active.node, pane, writable: false, ready: false, ctrl: false, alt: false };
   terminal = current;
   termInput.value = '';
+  const colors = getComputedStyle(document.documentElement);
   const renderer = new window.Terminal({
     cols: Math.max(1, pane.cols), rows: Math.max(1, pane.rows), fontSize: 13,
-    cursorBlink: false, scrollback: 2000, theme: { background: '#17243a', foreground: '#e2edff', cursor: '#b3c6ff' },
+    cursorBlink: false, scrollback: 2000,
+    theme: {
+      background: colors.getPropertyValue('--terminal').trim(),
+      foreground: colors.getPropertyValue('--terminal-ink').trim(),
+      cursor: colors.getPropertyValue('--terminal-caret').trim(),
+    },
     disableStdin: true, cursorInactiveStyle: 'outline',
   });
   current.xterm = renderer;
@@ -1424,6 +1518,8 @@ function signedOut() {
   expandedSessions.clear();
   launching = null;
   drafts.clear();
+  outgoing.clear();
+  byId('outgoing-messages').replaceChildren();
   activeLink = '';
   byId('link-pages').replaceChildren();
   linkTabs.clear();

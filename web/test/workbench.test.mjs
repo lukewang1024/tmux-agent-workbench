@@ -69,8 +69,10 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
       : index === 2 ? '    a code block' : index === 4 ? 'Quoted example:\n' + goal : 'message ' + index;
     rows.push(message(text, index % 2 ? 'assistant' : 'user'));
   }
-  await writeFile(join(target, 'rollout-date-' + session + '.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n{"partial"');
+  const rollout = rows.map((row) => JSON.stringify(row)).join('\n') + '\n{"partial"';
+  await writeFile(join(target, 'rollout-date-' + session + '.jsonl'), rollout);
   const history = new History(directory);
+  assert.equal(await history.endOffset(session), Buffer.byteLength(rollout));
   const latest = await history.page(session);
   assert.equal(latest.messages.length, 35);
   assert.equal(latest.messages.at(-1).text, 'message 49');
@@ -172,6 +174,7 @@ test('a working Codex thread accepts a follow-up in the same Pane', async (t) =>
   const thread = 'c5a27de3-936f-446e-9de1-797eaa1cfc00';
   let state = 'working';
   const node = new LocalNode({ socket });
+  node.history = new History(await scratch(t));
   node.snapshot = async () => ({
     sessions: [],
     agents: [{
@@ -181,7 +184,8 @@ test('a working Codex thread accepts a follow-up in the same Pane', async (t) =>
   });
   try {
     const [entry] = (await node.catalog()).agents;
-    await node.sendPrompt('agent', thread, "printf 'WORKING:%s\\n' received", entry.pane.key);
+    const receipt = await node.sendPrompt('agent', thread, "printf 'WORKING:%s\\n' received", entry.pane.key);
+    assert.deepEqual(receipt, { after: 0 });
     for (let tries = 0; tries < 20 && !tmux('capture-pane', '-pt', pane).split('\n').includes('WORKING:received'); tries++) await delay(30);
     assert.ok(tmux('capture-pane', '-pt', pane).split('\n').includes('WORKING:received'));
     state = 'blocked';
