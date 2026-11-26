@@ -38,6 +38,7 @@ const assets = new Map([
   ['/vendor/fit.js', ['node_modules/@xterm/addon-fit/lib/addon-fit.js', 'text/javascript; charset=utf-8']],
   ['/vendor/markdown-it.js', ['node_modules/markdown-it/dist/browser/markdown-it.umd.min.js', 'text/javascript; charset=utf-8']],
   ['/vendor/readability.js', ['node_modules/@mozilla/readability/Readability.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/highlight.js', ['node_modules/@highlightjs/cdn-assets/highlight.min.js', 'text/javascript; charset=utf-8']],
 ]);
 
 function security(res) {

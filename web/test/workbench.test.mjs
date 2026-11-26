@@ -625,7 +625,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const panel = await fetch(address + '/link-panel.js?v=' + version).then((response) => response.text());
       assert.ok(panel.includes('./dom.js?v=' + version));
       assert.ok(panel.includes('./link-preview.js?v=' + version));
-      for (const module of ['/link-preview.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js']) {
+      for (const module of ['/link-preview.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js', '/vendor/highlight.js']) {
         assert.ok(worker.includes(module));
         assert.equal((await fetch(address + module + '?v=' + version)).status, 200);
       }

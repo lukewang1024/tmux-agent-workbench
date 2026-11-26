@@ -33,12 +33,14 @@ request file diffs, GitHub Docs, MDN and Android Developers. For allowlisted
 web.dev articles and guides, it shows a Readability reader view in a sandboxed
 iframe. Other web links use the browser, including Android App Links.
 **Always use browser** opens all web links externally. **Always use iframe
-(testing)** attempts to embed every external HTTP(S) link. Sites can still deny
-embedding. Use **Open in browser** in the preview toolbar to follow the source.
+(testing)** attempts to embed external HTTP(S) links. GitHub file diffs use
+Workbench's diff viewer inside the frame. Sites can still deny direct embedding.
+Use **Open in browser** in the preview toolbar to follow the source.
 
 Local file links open in the panel in every mode. The Agent machine reads UTF-8
 text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's
-workspace. A line suffix such as `src/example.js:24` opens the file at that line.
+workspace. Source previews show line numbers and highlight recognized languages.
+A line suffix such as `src/example.js:24` opens and highlights that line.
 Remote file previews require a connector that supports the file preview command.
 
 The provider marks identify the Agent CLIs in the list and belong to their

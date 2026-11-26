@@ -56,6 +56,15 @@ test('web link modes share a strict reader rule and leave native intents outside
     'https://web.dev/articles/%2fevil', 'https://login@web.dev/articles/test']) assert.equal(readerURL(new URL(url)), null);
 });
 
+test('forced iframe uses GitHub file diffs without framing the GitHub page', () => {
+  const diff = new URL('https://github.com/owner/repository/pull/42/files#change');
+  const balanced = linkPreviewSource(diff);
+  assert.equal(balanced.kind, 'diff');
+  assert.deepEqual(linkPreviewSource(diff, 'iframe'), { ...balanced, kind: 'diff-frame' });
+  assert.equal(linkPreviewSource(diff, 'browser'), null);
+  assert.deepEqual(linkPreviewSource(new URL('https://github.com/owner/repository'), 'iframe'), { kind: 'iframe' });
+});
+
 test('file links preserve the path and supported line anchors', () => {
   assert.deepEqual(workspaceLink('file:///tmp/a%20b.md#L21-L23'), { path: '/tmp/a b.md', line: 21 });
   assert.deepEqual(workspaceLink('/workbench/a.js:4:9'), { path: '/workbench/a.js', line: 4 });

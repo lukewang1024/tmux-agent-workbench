@@ -13,22 +13,25 @@ const githubSections = new Set(['apps', 'collections', 'features', 'marketplace'
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
+function githubSource(path) {
+  const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(path);
+  if (!match) return null;
+  const [, owner, repo, pull] = match;
+  if (githubSections.has(owner.toLowerCase())) return null;
+  const endpoint = 'https://api.github.com/repos/' + owner + '/' + repo;
+  if (!pull) return { kind: 'readme', endpoint: endpoint + '/readme' };
+  return { kind: 'diff', label: owner + '/' + repo + ' #' + pull,
+    endpoint: endpoint + '/pulls/' + pull + '/files' };
+}
+
 export function linkPreviewSource(url, mode = 'balanced') {
-  if (mode === 'browser') return null;
-  if (mode === 'iframe') return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? { kind: 'iframe' } : null;
-  if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
+  if (mode === 'browser' || url.username || url.password || !['https:', 'http:'].includes(url.protocol)) return null;
+  const github = url.origin === githubOrigin ? githubSource(url.pathname) : null;
+  if (mode === 'iframe') return github?.kind === 'diff' ? { ...github, kind: 'diff-frame' } : { kind: 'iframe' };
+  if (url.protocol !== 'https:' || url.port) return null;
   const reader = readerURL(url);
   if (reader) return { kind: 'reader', endpoint: '/api/reader-source?' + new URLSearchParams({ url: reader.href }) };
-  if (url.origin === githubOrigin) {
-    const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(url.pathname);
-    if (!match) return null;
-    const [, owner, repo, pull] = match;
-    if (githubSections.has(owner.toLowerCase())) return null;
-    const endpoint = 'https://api.github.com/repos/' + owner + '/' + repo;
-    if (!pull) return { kind: 'readme', endpoint: endpoint + '/readme' };
-    return { kind: 'diff', label: owner + '/' + repo + ' #' + pull,
-      endpoint: endpoint + '/pulls/' + pull + '/files' };
-  }
+  if (url.origin === githubOrigin) return github;
   if (url.origin === docsOrigin) {
     if (!/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/[a-z\d][a-z\d.@_-]*){2,}\/?$/i.test(url.pathname)) return null;
     return { kind: 'article', endpoint: docsOrigin + '/api/article/body?' +
@@ -151,6 +154,27 @@ function renderDiff(page, source, t) {
   loadContent(status, () => read(1), t);
 }
 
+function renderDiffFrame(page, source, { label, t }) {
+  // The parent renders text and owns the interactions. The frame runs no scripts.
+  const frame = linkFrame(label, 'allow-same-origin');
+  frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'self\'; base-uri \'none\'; form-action \'none\'">'
+    + '<main class="link-document"></main>';
+  frame.addEventListener('load', () => {
+    const frameDocument = frame.contentDocument;
+    const content = frameDocument?.querySelector('main');
+    if (!content) return;
+    frameDocument.documentElement.classList.add('workbench-diff-frame');
+    frameDocument.documentElement.lang = document.documentElement.lang;
+    const style = frameDocument.createElement('link');
+    style.rel = 'stylesheet';
+    style.href = new URL('./style.css?v=WORKBENCH_CACHE_VERSION', import.meta.url).href;
+    frameDocument.head.append(style);
+    renderDiff(content, source, t);
+  }, { once: true });
+  page.append(frame);
+}
+
 function articleSections(article) {
   const sections = new Map();
   for (const heading of article.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
@@ -263,12 +287,16 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
 }
 
 export function createLinkPage(url, source, options) {
-  const framed = ['iframe', 'reader'].includes(source.kind);
+  const framed = ['iframe', 'reader', 'diff-frame'].includes(source.kind);
   const page = element('section', framed ? 'link-page link-framed' : 'link-page link-document');
   if (source.kind === 'iframe') {
     const frame = linkFrame(options.label, 'allow-scripts allow-forms');
     frame.src = url.href;
     page.append(frame);
+    return page;
+  }
+  if (source.kind === 'diff-frame') {
+    renderDiffFrame(page, source, options);
     return page;
   }
   if (source.kind === 'reader' || source.kind === 'file') {

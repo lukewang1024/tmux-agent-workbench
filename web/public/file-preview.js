@@ -3,6 +3,33 @@ import { workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
 
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const encodePath = (path) => path.split('/').map(encodeURIComponent).join('/');
+const sourceAliases = { jsonl: 'json', bashrc: 'bash', zshrc: 'bash' };
+
+function renderSourceFile(text, name, line) {
+  const contents = text.replace(/\r\n?/g, '\n');
+  const lineCount = contents.split('\n').length;
+  const view = make('div', 'workspace-file-source');
+  const gutter = make('pre', 'workspace-file-gutter', Array.from({ length: lineCount }, (_, index) => index + 1).join('\n'));
+  gutter.setAttribute('aria-hidden', 'true');
+  const pre = make('pre', 'workspace-file-text');
+  const code = make('code');
+  const extension = name.toLowerCase().split('.').at(-1);
+  const language = Object.hasOwn(sourceAliases, extension) ? sourceAliases[extension] : extension;
+  const highlighter = window.hljs;
+  if (highlighter?.getLanguage(language)) {
+    code.innerHTML = highlighter.highlight(contents, { language, ignoreIllegals: true }).value;
+  } else code.textContent = contents;
+  pre.append(code);
+  view.append(gutter, pre);
+  if (line && line <= lineCount) {
+    const highlight = make('mark', 'workspace-file-line');
+    highlight.setAttribute('aria-hidden', 'true');
+    highlight.style.setProperty('--line-index', line - 1);
+    view.prepend(highlight);
+    requestAnimationFrame(() => highlight.scrollIntoView({ block: 'center', inline: 'nearest' }));
+  }
+  return view;
+}
 
 export function renderWorkspaceFile(file, source, { fileMarkdown, openLink }) {
   if (imageTypes.has(file.mime)) {
@@ -37,17 +64,5 @@ export function renderWorkspaceFile(file, source, { fileMarkdown, openLink }) {
     });
     return article;
   }
-  const pre = make('pre', 'workspace-file-text');
-  const code = make('code');
-  if (source.line) {
-    const rows = text.split('\n');
-    const index = source.line - 1;
-    if (index < rows.length) {
-      const line = make('mark', '', rows[index] || ' ');
-      code.append(index ? rows.slice(0, index).join('\n') + '\n' : '', line, rows.slice(index + 1).map((row) => '\n' + row).join(''));
-      requestAnimationFrame(() => line.scrollIntoView({ block: 'center' }));
-    } else code.textContent = text;
-  } else code.textContent = text;
-  pre.append(code);
-  return pre;
+  return renderSourceFile(text, file.name, source.line);
 }

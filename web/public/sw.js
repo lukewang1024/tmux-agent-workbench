@@ -5,7 +5,8 @@ const cacheName = 'workbench-shell-' + version;
 const files = ['/', '/app.js', ...WORKBENCH_BROWSER_MODULES, '/reset.css', '/style.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png',
   '/manifest-light.webmanifest', '/manifest-dark.webmanifest',
   '/providers/chatgpt.svg', '/providers/claude.svg', '/providers/opencode.svg', '/providers/trae.png',
-  '/vendor/passkeys.js', '/vendor/xterm.js', '/vendor/xterm.css', '/vendor/fit.js', '/vendor/markdown-it.js', '/vendor/readability.js'];
+  '/vendor/passkeys.js', '/vendor/xterm.js', '/vendor/xterm.css', '/vendor/fit.js', '/vendor/markdown-it.js',
+  '/vendor/readability.js', '/vendor/highlight.js'];
 const shell = new Set(files);
 
 self.addEventListener('install', (event) => {
