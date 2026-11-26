@@ -772,7 +772,7 @@ fn sanitize_text(value: &str, max_bytes: usize) -> String {
     result
 }
 
-fn valid_pane_id(value: &str) -> bool {
+pub(crate) fn valid_pane_id(value: &str) -> bool {
     value
         .strip_prefix('%')
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))

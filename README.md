@@ -724,6 +724,14 @@ payloads are inspected only inside the short-lived reporter and are never sent
 to the daemon or persisted. OpenPeon categories are resolved from the active
 pack, so a separate notification hook such as Peon Ping is not required.
 
+### Workbench Web
+
+Start the optional responsive PWA with `tmux-agent-workbench web serve` to
+view running Agents, continue Codex sessions, open interactive tmux panes, and
+connect multiple machines. The Web module uses Passkeys and can be installed
+on Android from localhost over an SSH tunnel or from an HTTPS reverse proxy.
+See [Workbench Web setup](docs/workbench-web.md).
+
 ### Client-aware SSH from Termux
 
 Install the Termux:API Android app from the same signing source as Termux, then

@@ -13,8 +13,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::close_target;
 use crate::config::{AgentSort, Config};
-use crate::ipc::{ClientError, Request, call};
+use crate::ipc::{Request, acknowledge_attention, call};
 use crate::model::{
     AgentSnapshot, ConversationSnapshot, DisplayState, SessionSnapshot, Snapshot, StateSource,
 };
@@ -1571,6 +1572,28 @@ fn event_loop(
                             return Ok(());
                         }
                     }
+                    _ if close_target::is_shortcut(key) => {
+                        let selected = match navigation.focused_action() {
+                            Some(action @ Action::Focus(_)) => focus_cards
+                                .iter()
+                                .take(shown_focus)
+                                .find(|card| card.action() == *action)
+                                .and_then(|card| match card {
+                                    PinnedCard::Agent(card) => card.agent.as_ref(),
+                                    PinnedCard::Session(_) => None,
+                                }),
+                            None if navigation.selection_visible => rows
+                                .get(navigation.selected)
+                                .filter(|row| !matches!(row, Row::Conversation(..)))
+                                .and_then(row_agent),
+                            _ => None,
+                        };
+                        if let Some(agent) = selected
+                            && confirm_agent_close(server, agent)?
+                        {
+                            return Ok(());
+                        }
+                    }
                     KeyCode::Char('d') => {
                         detailed = !detailed;
                         if let Some(snapshot) = &snapshot {
@@ -1901,6 +1924,197 @@ fn sidebar_state(
         foreground_pane: source_pane()
             .and_then(|source| foreground_pane(surface, &source).map(str::to_owned)),
     })
+}
+
+/// Export the native Sidebar presentation without returning the tmux surface.
+pub fn add_web_view(
+    paths: &Paths,
+    server: &ServerIdentity,
+    value: &mut serde_json::Value,
+    hidden: &[DisplayState],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::json;
+
+    let mut surface = value
+        .as_object_mut()
+        .ok_or("invalid Workbench snapshot")?
+        .remove("_workbench_surface")
+        .and_then(|value| serde_json::from_value::<crate::tmux::SurfaceInventory>(value).ok())
+        .filter(|surface| surface.sidebar.is_some());
+    let snapshot: Snapshot = serde_json::from_value(value.clone())?;
+    // An observer or an older running daemon can supply the snapshot without
+    // the inventory. Read the same tmux surface in the calling process.
+    if surface.is_none() {
+        let probe = crate::tmux::Tmux::new(server.clone()).surface_probe()?;
+        surface = probe.surface.map(|mut surface| {
+            surface.sidebar = shared_sidebar_data(paths, server, &snapshot, &mut None, &surface);
+            surface
+        });
+    }
+    let SidebarFrame { snapshot, data, .. } = sidebar_state(snapshot, surface.as_ref())?;
+    let palette = surface
+        .as_ref()
+        .map(SidebarPalette::from_surface)
+        .unwrap_or_default();
+    let sort = persisted_agent_sort(paths)
+        .or(data.sort)
+        .unwrap_or_else(|| {
+            Config::load(&paths.config_file())
+                .unwrap_or_default()
+                .sidebar
+                .agent_sort
+        });
+    let mut filter = AgentStateFilter::default();
+    for state in FILTERED_AGENT_STATES {
+        if hidden.contains(&state) {
+            filter.toggle(state);
+        }
+    }
+    let expanded: HashSet<_> = data
+        .teams
+        .values()
+        .map(|member| member.key.clone())
+        .collect();
+    let rows =
+        |view, filter| view_rows(&snapshot, false, sort, &data.teams, &expanded, view, filter);
+    let agents: Vec<_> = rows(SidebarView::Agents, filter)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::AgentGroup(name) => Some(json!({ "group": name })),
+            Row::Agent(agent) => Some(json!({ "id": agent.instance_id })),
+            Row::Team(agent, team) => Some(json!({
+                "id": agent.instance_id,
+                "team": { "workers": team.workers, "blocked": team.blocked, "done": team.done },
+            })),
+            Row::TeamWorker(agent, worker) => Some(json!({
+                "id": agent.instance_id, "worker": { "name": worker.name, "title": worker.title },
+            })),
+            _ => None,
+        })
+        .collect();
+    let sessions: Vec<_> = rows(SidebarView::Sessions, AgentStateFilter::default())
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Session(session) => Some(session.session_id),
+            _ => None,
+        })
+        .collect();
+    let pinned: Vec<_> = build_pinned_cards(
+        SidebarView::Agents,
+        false,
+        sort,
+        &data.teams,
+        &expanded,
+        &data.focused,
+        &data.sessions,
+        Some(&snapshot),
+    )
+    .into_iter()
+    .filter_map(|card| match card {
+        PinnedCard::Agent(card) => Some(json!({
+            "window": card.window.id,
+            "session": card.window.session_id,
+            "pane": card.window.pane,
+            "title": card.window.name,
+            "state": card.window.state,
+            "assistant": card.window.assistant,
+            "agent": card.agent.map(|agent| agent.instance_id),
+        })),
+        _ => None,
+    })
+    .collect();
+    let pinned_sessions: Vec<_> = build_pinned_cards(
+        SidebarView::Sessions,
+        false,
+        sort,
+        &data.teams,
+        &expanded,
+        &data.focused,
+        &data.sessions,
+        Some(&snapshot),
+    )
+    .into_iter()
+    .filter_map(|card| match card {
+        PinnedCard::Session(session) => Some(session.session_id),
+        _ => None,
+    })
+    .collect();
+    let stats: Vec<_> = FILTERED_AGENT_STATES
+        .into_iter()
+        .zip(agent_state_counts(Some(&snapshot)))
+        .map(|(state, count)| json!({ "state": state, "count": count }))
+        .collect();
+    let colors = FILTERED_AGENT_STATES
+        .into_iter()
+        .chain([DisplayState::Unknown])
+        .map(|state| {
+            let key = serde_json::to_value(state)?;
+            Ok((
+                key.as_str().unwrap().to_owned(),
+                json!(css_color(
+                    state_color_with_palette(state, palette),
+                    palette.muted
+                )),
+            ))
+        })
+        .collect::<Result<serde_json::Map<String, serde_json::Value>, serde_json::Error>>()?;
+    *value = serde_json::to_value(snapshot)?;
+    value["sidebar"] = json!({
+        "sort": sort,
+        "stats": stats,
+        "colors": colors,
+        "agentRows": agents,
+        "sessionRows": sessions,
+        "pinnedAgents": pinned,
+        "pinnedSessions": pinned_sessions,
+        "branches": data.branches,
+        "launchTool": crate::status_menu::web_launch_tool(paths),
+    });
+    Ok(())
+}
+
+fn css_color(color: Color, muted: Color) -> String {
+    const ANSI: [u32; 16] = [
+        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
+        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+    ];
+    let index = match color {
+        Color::Rgb(red, green, blue) => return format!("#{red:02x}{green:02x}{blue:02x}"),
+        Color::Indexed(index) => index,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset if muted != Color::Reset => return css_color(muted, Color::Reset),
+        Color::Reset => return "#8d95a3".into(),
+    };
+    match index {
+        0..=15 => format!("#{:06x}", ANSI[usize::from(index)]),
+        16..=231 => {
+            let cube = index - 16;
+            let level = [0, 95, 135, 175, 215, 255];
+            let red = level[usize::from(cube / 36)];
+            let green = level[usize::from(cube / 6 % 6)];
+            let blue = level[usize::from(cube % 6)];
+            format!("#{red:02x}{green:02x}{blue:02x}")
+        }
+        _ => {
+            let gray = 8 + (index - 232) * 10;
+            format!("#{gray:02x}{gray:02x}{gray:02x}")
+        }
+    }
 }
 
 fn foreground_pane<'a>(
@@ -2423,7 +2637,7 @@ fn persisted_sidebar_view(paths: &Paths) -> Option<SidebarView> {
     }
 }
 
-fn persist_agent_sort(paths: &Paths, sort: AgentSort) -> io::Result<()> {
+pub fn persist_agent_sort(paths: &Paths, sort: AgentSort) -> io::Result<()> {
     std::fs::create_dir_all(&paths.state_dir)?;
     std::fs::write(
         paths.state_dir.join("sidebar-agent-sort"),
@@ -3369,6 +3583,10 @@ fn show_help() -> Result<bool, Box<dyn std::error::Error>> {
             "-点击阻塞/完成/进行中/空闲数字 · 筛选智能体",
         ),
         crate::ui_language::text("-m · item menu", "-m · 项目菜单"),
+        crate::ui_language::text(
+            "-Shift+D · close an idle or done agent",
+            "-Shift+D · 关闭空闲或已完成的智能体",
+        ),
         crate::ui_language::text("-N · projects", "-N · 项目"),
         crate::ui_language::text("-i · temporary Git tool", "-i · 临时 Git 工具"),
         crate::ui_language::text("-W · new workspace", "-W · 新建工作区"),
@@ -3796,24 +4014,6 @@ fn selection_key(row: &Row) -> Option<String> {
     }
 }
 
-fn acknowledge_attention(socket: &std::path::Path, event_id: &str) -> Result<(), ClientError> {
-    match call(
-        socket,
-        &Request::new("attention.ack", serde_json::json!({"event_id": event_id})),
-        Duration::from_secs(1),
-    ) {
-        // A rendered row can outlive its event when another client acknowledges
-        // it or the daemon expires it. The desired state is already reached.
-        Err(ClientError::Remote { code, message })
-            if code == "request_failed" && message == "attention event not found" =>
-        {
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 fn selected_window(rows: &[Row], selected: usize) -> Option<&str> {
     match rows.get(selected)? {
         Row::Agent(agent)
@@ -4102,28 +4302,89 @@ fn show_focus_menu(
     if !safe_target(&card.window.id, '@') {
         return Ok(false);
     }
-    if card.window.assistant {
-        return show_menu(
+    let (title, pin) = if card.window.assistant {
+        (
             crate::ui_language::text("Personal assistant", "个人助理"),
-            anchor,
-            false,
-            &[(
+            (
                 crate::ui_language::text("-Always pinned", "-始终置顶"),
                 "",
                 String::new(),
-            )],
-        );
+            ),
+        )
+    } else {
+        (
+            crate::ui_language::text("Pinned", "置顶"),
+            (
+                crate::ui_language::text("Unpin task", "取消置顶"),
+                "p",
+                format!("set-option -w -u -t {} @agent_focus", card.window.id),
+            ),
+        )
+    };
+    let mut items = vec![pin];
+    if let Some(agent) = &card.agent {
+        items.push(close_menu_item(agent, false)?);
     }
-    show_menu(
-        crate::ui_language::text("Pinned", "置顶"),
-        anchor,
-        false,
-        &[(
-            crate::ui_language::text("Unpin task", "取消置顶"),
-            "p",
-            format!("set-option -w -u -t {} @agent_focus", card.window.id),
-        )],
-    )
+    show_menu(title, anchor, false, &items)
+}
+
+fn confirm_agent_close(
+    server: &ServerIdentity,
+    agent: &AgentSnapshot,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let client = current_client()?;
+    if !close_target::agent_closable(agent) {
+        close_target::report(server, &client, close_target::UNVERIFIED);
+        return Ok(false);
+    }
+    let args = close_target::confirmation_args(
+        server,
+        &agent.target.pane_id,
+        Some(&agent.instance_id),
+        &client,
+    );
+    match args {
+        Ok(args) => run_workbench(&args.iter().map(String::as_str).collect::<Vec<_>>(), true),
+        Err(error) => {
+            close_target::report(server, &client, &error.to_string());
+            Ok(false)
+        }
+    }
+}
+
+fn close_menu_item(
+    agent: &AgentSnapshot,
+    pane: bool,
+) -> Result<(&'static str, &'static str, String), Box<dyn std::error::Error>> {
+    use crate::ui_language::text as tr;
+    let label = if pane {
+        tr("Close pane", "关闭窗格")
+    } else {
+        tr("Close agent", "关闭智能体")
+    };
+    if close_target::agent_closable(agent)
+        && let Ok(args) = close_target::confirmation_args(
+            &ServerIdentity::discover()?,
+            &agent.target.pane_id,
+            (!pane).then_some(agent.instance_id.as_str()),
+            &current_client()?,
+        )
+    {
+        return Ok((
+            label,
+            if pane { "x" } else { "D" },
+            format!(
+                "run-shell -b {}",
+                shell_quote(&close_target::shell_command(&args)?)
+            ),
+        ));
+    }
+    let disabled = if pane {
+        tr("-Close pane", "-关闭窗格")
+    } else {
+        tr("-Close agent", "-关闭智能体")
+    };
+    Ok((disabled, "", String::new()))
 }
 
 fn activate(rows: &[Row], selected: usize) -> Result<bool, Box<dyn std::error::Error>> {
@@ -4367,16 +4628,8 @@ fn show_row_menu(
                         "z",
                         format!("resize-pane -Z -t {}", agent.target.pane_id),
                     ),
-                    (
-                        crate::ui_language::text("Close pane", "关闭窗格"),
-                        "x",
-                        format!(
-                            "confirm-before -t {} -p '{}' 'kill-pane -t {}'",
-                            shell_quote(&current_client()?),
-                            crate::ui_language::text("Close pane?", "关闭窗格？"),
-                            agent.target.pane_id
-                        ),
-                    ),
+                    close_menu_item(agent, false)?,
+                    close_menu_item(agent, true)?,
                 ],
             )
         }
@@ -4449,8 +4702,10 @@ where
         if !safe_target(&pane, '%') {
             return Err("invalid sidebar pane id".into());
         }
+        let server = ServerIdentity::discover()?;
         let mut deferred = format!(
-            "TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            "TMUX_AGENT_WORKBENCH_TMUX_SOCKET={} TMUX_PANE={} WORKBENCH_TARGET_CLIENT={} workbench-popup-action {} {}",
+            shell_quote(&server.socket_path.to_string_lossy()),
             shell_quote(&pane),
             shell_quote(&client),
             std::process::id(),
@@ -4463,6 +4718,7 @@ where
         // tmux owns this background job, so closing the current popup cannot
         // kill the deferred action with the popup's process group.
         crate::command::new("tmux")
+            .args(server.tmux_args())
             .args(["run-shell", "-b", &deferred])
             .status()?
             .success()
@@ -4484,7 +4740,7 @@ where
     Ok(false)
 }
 
-fn current_client() -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn current_client() -> Result<String, Box<dyn std::error::Error>> {
     if let Ok(client) = std::env::var("WORKBENCH_TARGET_CLIENT")
         && !client.is_empty()
     {
@@ -4613,7 +4869,7 @@ fn safe_target(value: &str, prefix: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

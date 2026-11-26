@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use tmux_agent_workbench::config::Config;
 use tmux_agent_workbench::daemon;
-use tmux_agent_workbench::ipc::{Request, call, exchange};
+use tmux_agent_workbench::ipc::{Request, acknowledge_attention, call, exchange};
 use tmux_agent_workbench::manifest::ManifestSet;
 use tmux_agent_workbench::model::{AgentKind, AgentSnapshot, ConversationRole, DisplayState};
 use tmux_agent_workbench::paths::Paths;
@@ -43,6 +43,43 @@ enum Command {
     Snapshot {
         #[arg(long)]
         json: bool,
+        /// Inspect this tmux server without starting a daemon or managing its panes.
+        #[arg(long)]
+        observe: bool,
+        /// Include the shared Sidebar lists, pins and palette.
+        #[arg(long, requires = "json")]
+        sidebar: bool,
+        #[arg(long, requires = "sidebar", value_enum, hide = true)]
+        hide_state: Vec<DisplayState>,
+    },
+    #[command(hide = true)]
+    SidebarSort {
+        #[arg(long, value_enum)]
+        sort: tmux_agent_workbench::config::AgentSort,
+    },
+    #[command(hide = true)]
+    WebLaunchAgent {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        session: String,
+    },
+    #[command(hide = true)]
+    CloseTarget {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        observe: bool,
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long, requires = "client", conflicts_with = "observe")]
+        confirm: bool,
+        #[arg(long, value_parser = ["en", "zh"])]
+        language: Option<String>,
     },
     Sidebar {
         #[arg(long, requires_all = ["pane", "client"])]
@@ -367,6 +404,10 @@ enum PickTarget {
 #[derive(Debug, Subcommand)]
 enum AttentionCommand {
     Next,
+    /// Acknowledge one observed event without changing tmux focus.
+    Ack {
+        event_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1588,7 +1629,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("{total} {idle}");
         return Ok(());
     }
-    let paths = Paths::discover()?;
+    let paths = if matches!(
+        &cli.command,
+        Command::Snapshot { observe: true, .. } | Command::CloseTarget { observe: true, .. }
+    ) {
+        Paths::discover_read_only()?
+    } else {
+        Paths::discover()?
+    };
     match cli.command {
         Command::HostCpuCounters => unreachable!(),
         Command::AutoSplit { command } => match command {
@@ -1818,8 +1866,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ManifestSet::load(&paths.manifests_dir())?;
             println!("configuration valid: {}", paths.config_file().display());
         }
-        Command::Snapshot { json } => {
-            let value = ipc_call(&paths, "snapshot.get", serde_json::Value::Null)?;
+        Command::Snapshot {
+            json,
+            observe,
+            sidebar,
+            hide_state,
+        } => {
+            let mut value = if observe {
+                let server = ServerIdentity::discover()?;
+                let config = Config::load(&paths.config_file())?;
+                let manifests = ManifestSet::load(&paths.manifests_dir())?;
+                serde_json::to_value(tmux_agent_workbench::detection::Detector::observe_snapshot(
+                    server,
+                    &config,
+                    &manifests,
+                    now_ms(),
+                )?)?
+            } else {
+                let data = if sidebar {
+                    serde_json::json!({"include_surface": true, "refresh_surface": true})
+                } else {
+                    serde_json::Value::Null
+                };
+                ipc_call(&paths, "snapshot.get", data)?
+            };
+            if sidebar {
+                tmux_agent_workbench::sidebar::add_web_view(
+                    &paths,
+                    &ServerIdentity::discover()?,
+                    &mut value,
+                    &hide_state,
+                )?;
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
@@ -1831,6 +1909,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     snapshot.generation
                 );
             }
+        }
+        Command::SidebarSort { sort } => {
+            tmux_agent_workbench::sidebar::persist_agent_sort(&paths, sort)?;
+        }
+        Command::WebLaunchAgent { pane, session } => {
+            let pane =
+                tmux_agent_workbench::status_menu::launch_web_agent(&paths, &pane, &session)?;
+            println!("{}", serde_json::json!({ "pane": pane }));
+        }
+        Command::CloseTarget {
+            pane,
+            key,
+            agent,
+            observe,
+            client,
+            confirm,
+            language,
+        } => {
+            use tmux_agent_workbench::close_target::{self, Target};
+            close_target::run(
+                Target {
+                    pane: &pane,
+                    key: &key,
+                    agent: agent.as_deref(),
+                },
+                &paths,
+                &ServerIdentity::discover()?,
+                observe,
+                client.as_deref(),
+                confirm,
+                language.as_deref(),
+            )?;
         }
         Command::Sidebar {
             popup,
@@ -2097,6 +2207,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Attention {
             command: AttentionCommand::Next,
         } => attention_next(&paths)?,
+        Command::Attention {
+            command: AttentionCommand::Ack { event_id },
+        } => {
+            let server = ServerIdentity::discover()?;
+            acknowledge_attention(&paths.socket_for_server(&server.key), &event_id)?;
+        }
         Command::Metadata {
             command:
                 MetadataCommand::Report {

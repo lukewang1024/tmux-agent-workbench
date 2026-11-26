@@ -359,6 +359,25 @@ with tempfile.TemporaryDirectory(prefix='wb-switcher-') as directory, ExitStack(
         print('PASS switch lists share custom navigation, search, identity guards and client isolation', flush=True)
         assert not desktop_calls.exists(), desktop_calls.read_text()
         print('PASS scoped switches stay in their client without desktop terminal activation', flush=True)
+        close_pane = tmux('split-window', '-dPF', '#{pane_id}', '-t', source, '/bin/sh')
+        tmux('select-pane', '-t', close_pane, '-T', 'close-fixture')
+        for answer in (b'n', b'y'):
+            popup = open_list('pane')
+            wait(lambda: any('close-fixture' in row for row in visible_rows()), 'close target did not render')
+            os.write(master, b'\x1b[B')
+            os.write(master, b'D')
+            text('Close pane')
+            assert close_pane in tmux('list-panes', '-F', '#{pane_id}', '-t', source).splitlines()
+            os.write(master, answer)
+            finish_popup(popup)
+            if answer == b'n':
+                drain(.2)
+                assert close_pane in tmux('list-panes', '-F', '#{pane_id}', '-t', source).splitlines()
+            else:
+                wait(lambda: close_pane not in tmux('list-panes', '-F', '#{pane_id}', '-t', source).splitlines(),
+                     'confirmed close did not remove the selected Pane')
+        assert focused(pane=source)
+        print('PASS Shift+D confirms an exact Pane in the native switcher', flush=True)
         # All bounded navigation panels must receive backdrop clicks, including
         # overview Sidebar and every filtered list. A hover/scroll/drag outside
         # cancels a held action; only a complete outside tap dismisses.

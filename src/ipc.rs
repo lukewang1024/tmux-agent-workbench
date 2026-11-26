@@ -107,6 +107,23 @@ pub fn call(socket: &Path, request: &Request, timeout: Duration) -> Result<Value
     Ok(response.result.unwrap_or(Value::Null))
 }
 
+pub fn acknowledge_attention(socket: &Path, event_id: &str) -> Result<(), ClientError> {
+    match call(
+        socket,
+        &Request::new("attention.ack", serde_json::json!({"event_id": event_id})),
+        Duration::from_secs(1),
+    ) {
+        // A displayed event may already have been acknowledged or expired.
+        Err(ClientError::Remote { code, message })
+            if code == "request_failed" && message == "attention event not found" =>
+        {
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn exchange(
     socket: &Path,
     request: &Request,

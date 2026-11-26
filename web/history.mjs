@@ -1,0 +1,312 @@
+import { execFile } from 'node:child_process';
+import { open, readdir, readlink, realpath, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { basename, join, sep } from 'node:path';
+import { promisify } from 'node:util';
+import { codexRuntimeSettings } from './codex.mjs';
+import { imageType } from './file-preview.mjs';
+import { HistoryTools } from './history-tools.mjs';
+import { Failure } from './state.mjs';
+
+const maxRead = 4 * 1024 * 1024;
+const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const rolloutPattern = /^rollout-.+-([0-9a-f-]{36})\.jsonl$/i;
+const run = promisify(execFile);
+const goalContext = /^\s*<codex_internal_context\s+source="(?:user_goal|goal)"\s*>/;
+const contextEnd = '</codex_internal_context>';
+const imageData = /^data:(?:image\/[a-z]+|application\/octet-stream);base64,/i;
+const maxHistoryImage = 1024 * 1024;
+
+export function hasThread(id) {
+  return typeof id === 'string' && idPattern.test(id);
+}
+
+async function findRollout(directory, suffix, depth) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  const entry = entries.find((item) => item.isFile() && item.name.endsWith(suffix));
+  if (entry) return join(directory, entry.name);
+  if (depth) {
+    for (const item of entries.sort((a, b) => b.name.localeCompare(a.name))) {
+      if (!item.isDirectory() || !/^\d{2,4}$/.test(item.name)) continue;
+      const found = await findRollout(join(directory, item.name), suffix, depth - 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function decode(line) {
+  try { return JSON.parse(line.toString('utf8')); } catch { return null; }
+}
+
+async function rolloutId(file) {
+  const head = Buffer.alloc(64 * 1024);
+  const { bytesRead } = await file.read(head, 0, head.length, 0);
+  const newline = head.subarray(0, bytesRead).indexOf(10);
+  const meta = newline < 0 ? null : decode(head.subarray(0, newline));
+  return meta?.type === 'session_meta' ? meta.payload?.id : null;
+}
+
+async function openRollouts(pids) {
+  const files = new Map(pids.map((pid) => [pid, []]));
+  if (process.platform === 'linux') {
+    await Promise.all(pids.map(async (pid) => {
+      const directory = '/proc/' + pid + '/fd';
+      const descriptors = await readdir(directory).catch(() => []);
+      const names = await Promise.all(descriptors.map((fd) => readlink(join(directory, fd)).catch(() => '')));
+      files.set(pid, names.filter((name) => rolloutPattern.test(basename(name)) && name.startsWith(sep)));
+    }));
+  } else if (process.platform === 'darwin') {
+    // macOS has no procfs. Limit lsof to the Workbench-identified processes.
+    const { stdout } = await run('/usr/sbin/lsof', ['-nP', '-a', '-p', pids.join(','), '-Fpn0'], {
+      timeout: 2000, maxBuffer: 2 * 1024 * 1024,
+    }).catch(() => ({ stdout: '' }));
+    let paths;
+    for (const value of stdout.split('\0')) {
+      const field = value.trimStart();
+      if (field.startsWith('p')) paths = files.get(Number(field.slice(1)));
+      if (paths && field.startsWith('n' + sep) && rolloutPattern.test(basename(field.slice(1)))) paths.push(field.slice(1));
+    }
+  }
+  return files;
+}
+
+async function startTimes(pids) {
+  const { stdout } = await run('/bin/ps', ['-o', 'pid=,lstart=', '-p', pids.join(',')], {
+    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 1500,
+  }).catch(() => ({ stdout: '' }));
+  const times = new Map();
+  for (const line of stdout.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (match) times.set(Number(match[1]), Date.parse(match[2] + ' UTC') / 1000);
+  }
+  return times;
+}
+
+export async function sameProcess({ pid, started_at_ticks }) {
+  return (await startTimes([pid])).get(pid) === started_at_ticks;
+}
+
+export function stripGoalContext(text) {
+  let visible = text;
+  for (let start; (start = visible.match(goalContext)); ) {
+    const end = visible.indexOf(contextEnd, start[0].length);
+    if (end < 0) break;
+    visible = visible.slice(end + contextEnd.length);
+  }
+  return visible === text ? text : visible.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+function imageItems(content) {
+  if (content?.role !== 'user' || !Array.isArray(content.content)) return [];
+  return content.content.filter((part) => part?.type === 'input_image' && typeof part.image_url === 'string'
+    && part.image_url.length <= Math.ceil(maxHistoryImage / 3) * 4 + 64 && imageData.test(part.image_url));
+}
+
+function visibleMessage(row) {
+  const content = row?.payload;
+  if (row?.type !== 'response_item' || content?.type !== 'message'
+      || !['user', 'assistant'].includes(content.role)) return null;
+  const images = imageItems(content).length;
+  const text = (Array.isArray(content.content) ? content.content : [])
+    .filter((part) => ['input_text', 'output_text'].includes(part?.type) && typeof part.text === 'string')
+    .map((part) => content.role === 'user' ? stripGoalContext(part.text) : part.text)
+    .filter((part) => !/^# AGENTS\.md instructions\b|^<environment_context>|^<permissions instructions>/.test(part))
+    .filter((part) => !images || !/^(?:<image(?: name=.+)?>|<\/image>)$/.test(part))
+    .join('\n').replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '');
+  return text.trim() || images ? { role: content.role, text: text.slice(0, 32_000), time: row.timestamp,
+    phase: content.phase, ...(images && { images }) } : null;
+}
+
+export class History {
+  filenames = new Map();
+  #settings = new Map();
+
+  constructor(codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')) {
+    this.root = codexHome;
+  }
+
+  remember(id, filename) {
+    this.filenames.set(id, filename);
+    if (this.filenames.size > 100) this.filenames.delete(this.filenames.keys().next().value);
+  }
+
+  async activeThreads(agents) {
+    const candidates = agents.filter(({ process }) => Number.isInteger(process?.pid) && process.pid > 0
+      && Number.isSafeInteger(process.started_at_ticks) && process.started_at_ticks > 0);
+    const threads = new Map();
+    if (!candidates.length) return threads;
+    const pids = [...new Set(candidates.map(({ process }) => process.pid))];
+    const files = await openRollouts(pids);
+    const observed = pids.filter((pid) => files.get(pid).length);
+    if (!observed.length) return threads;
+    // Compare the same start time as the native Unix process fingerprint before
+    // using a descriptor from a snapshot's PID.
+    const times = await startTimes(observed);
+    const roots = await Promise.all(['sessions', 'archived_sessions'].map((name) => realpath(join(this.root, name)).catch(() => null)));
+    for (const agent of candidates) {
+      if (times.get(agent.process.pid) !== agent.process.started_at_ticks) continue;
+      const hint = agent.hook_session_id;
+      const matches = new Map();
+      for (const name of new Set(files.get(agent.process.pid))) {
+        const id = basename(name).match(rolloutPattern)?.[1];
+        if (!hasThread(id) || (hint && (hint.length < 29 || !id.startsWith(hint)))) continue;
+        const filename = await realpath(name).catch(() => null);
+        if (!filename || !roots.some((root) => root && filename.startsWith(root + sep))) continue;
+        const file = await open(filename, 'r').catch(() => null);
+        if (!file) continue;
+        try {
+          if (await rolloutId(file) === id) matches.set(id, filename);
+        } catch {
+          // The process can replace or close the rollout during observation.
+        } finally { await file.close(); }
+      }
+      if (matches.size !== 1) continue;
+      const [[id, filename]] = matches;
+      this.remember(id, filename);
+      threads.set(agent.instance_id, id);
+    }
+    return threads;
+  }
+
+  async locate(id) {
+    if (!hasThread(id)) throw new Failure(409, 'The running agent has no verified Codex thread ID.');
+    let filename = this.filenames.get(id);
+    if (!filename) {
+      const suffix = '-' + id + '.jsonl';
+      filename = await findRollout(join(this.root, 'sessions'), suffix, 3)
+        || await findRollout(join(this.root, 'archived_sessions'), suffix, 0);
+      if (!filename) throw new Failure(404, 'Codex has not written history for this thread.');
+      this.remember(id, filename);
+    }
+    return filename;
+  }
+
+  async endOffset(id) {
+    try {
+      return (await stat(await this.locate(id))).size;
+    } catch (error) {
+      if (error.code === 'ENOENT' || error instanceof Failure && error.status === 404) return 0;
+      throw error;
+    }
+  }
+
+  async latestSettings(id) {
+    const file = await open(await this.locate(id), 'r');
+    try {
+      const { size, ino, mtimeMs } = await file.stat();
+      const cached = this.#settings.get(id);
+      if (cached?.ino === ino && cached.size === size && cached.mtimeMs === mtimeMs) return cached.value;
+      if (await rolloutId(file) !== id) return null;
+      const start = Math.max(0, size - maxRead);
+      const data = Buffer.alloc(size - start);
+      const { bytesRead } = await file.read(data, 0, data.length, start);
+      const bytes = data.subarray(0, bytesRead);
+      const first = start ? bytes.indexOf(10) + 1 : 0;
+      let value = cached?.ino === ino && cached.size <= size ? cached.value : null;
+      for (let end = bytes.lastIndexOf(10); end >= first;) {
+        const previous = end > 0 ? bytes.lastIndexOf(10, end - 1) : -1;
+        const line = bytes.subarray(previous + 1, end);
+        end = previous;
+        if (previous + 1 < first) break;
+        if (!line.includes('"thread_settings_applied"') && !line.includes('"turn_context"')) continue;
+        const row = decode(line);
+        if (row?.type === 'event_msg' && row.payload?.type === 'thread_settings_applied' && row.payload.thread_id === id
+            && row.payload.thread_settings?.model) {
+          value = codexRuntimeSettings(row.payload.thread_settings);
+          break;
+        }
+        if (row?.type === 'turn_context' && row.payload?.model) {
+          value = codexRuntimeSettings(row.payload);
+          break;
+        }
+      }
+      this.#settings.set(id, { size, ino, mtimeMs, value });
+      if (this.#settings.size > 64) this.#settings.delete(this.#settings.keys().next().value);
+      return value;
+    } finally {
+      await file.close();
+    }
+  }
+
+  async page(id, before) {
+    const filename = await this.locate(id);
+    let file;
+    try {
+      file = await open(filename, 'r');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      this.filenames.delete(id);
+      throw new Failure(404, 'Codex history moved. Refresh to reopen it.');
+    }
+    try {
+      if (await rolloutId(file) !== id) {
+        throw new Failure(409, 'Codex history does not match the running thread.');
+      }
+
+      const size = (await file.stat()).size;
+      const end = Number.isSafeInteger(before) && before > 0 ? Math.min(before, size) : size;
+      const start = Math.max(0, end - maxRead);
+      const block = Buffer.alloc(end - start);
+      const { bytesRead } = await file.read(block, 0, block.length, start);
+      const bytes = block.subarray(0, bytesRead);
+      // A rollout may be in the middle of an append. Only parse complete records.
+      let last = bytes.lastIndexOf(10);
+      const first = start ? bytes.indexOf(10) + 1 : 0;
+      const records = [];
+      const tools = new HistoryTools(end === size && !before);
+      while (last >= first) {
+        const previous = last > 0 ? bytes.lastIndexOf(10, last - 1) : -1;
+        const lineStart = previous + 1;
+        if (lineStart < first) break;
+        const row = decode(bytes.subarray(lineStart, last));
+        const message = visibleMessage(row);
+        const pastPage = records.length === 35;
+        if (pastPage && message?.role === 'assistant') break;
+        tools.observe(row, message);
+        if (pastPage && message) break;
+        if (message) records.push(Object.assign(message, { id: start + lineStart }));
+        last = previous;
+      }
+      if (records.length < 35) tools.finish();
+      // Advance even if a block contained only tool data or part of a large record.
+      const blockBoundary = first && start + first < end ? start + first : start;
+      const next = records.length === 35 ? records.at(-1).id : blockBoundary;
+      const runningToolNames = tools.runningNames.reverse();
+      return { messages: records.reverse(), before: next || null,
+        ...(runningToolNames.length && { runningTools: runningToolNames.length, runningToolNames }) };
+    } finally {
+      await file.close();
+    }
+  }
+
+  async image(id, message, index) {
+    const unavailable = () => new Failure(404, 'Image is unavailable.');
+    if (!Number.isSafeInteger(message) || message < 1 || !Number.isSafeInteger(index) || index < 0) throw unavailable();
+    const file = await open(await this.locate(id), 'r');
+    try {
+      if (await rolloutId(file) !== id) throw unavailable();
+      const { size } = await file.stat();
+      if (message >= size) throw unavailable();
+      const block = Buffer.alloc(Math.min(maxRead, size - message + 1));
+      const { bytesRead } = await file.read(block, 0, block.length, message - 1);
+      const end = block.subarray(0, bytesRead).indexOf(10, 1);
+      if (block[0] !== 10 || end < 1) throw unavailable();
+      const row = decode(block.subarray(1, end));
+      if (row?.type !== 'response_item' || row.payload?.type !== 'message') throw unavailable();
+      const data = imageItems(row.payload)[index]?.image_url;
+      if (!data) throw unavailable();
+      const content = data.replace(imageData, '');
+      const bytes = Buffer.from(content, 'base64');
+      const mime = imageType(bytes);
+      if (!mime || bytes.length > maxHistoryImage || bytes.toString('base64') !== content) throw unavailable();
+      return { mime, content };
+    } finally { await file.close(); }
+  }
+}

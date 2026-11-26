@@ -17,7 +17,7 @@ pub(crate) fn agents_are_idle(agents: &[AgentSnapshot]) -> bool {
         .all(|agent| agent.base_state == BaseState::Idle)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayState {
     Working,

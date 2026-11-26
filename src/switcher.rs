@@ -682,6 +682,7 @@ enum Outcome {
     Close,
     Back,
     Focus(TmuxTarget),
+    ConfirmClose(Vec<String>),
 }
 
 fn event_loop(
@@ -782,6 +783,38 @@ fn event_loop(
                         list.search();
                     }
                     KeyCode::Char('q') if !list.searching => return Ok(Outcome::Close),
+                    _ if !list.searching
+                        && matches!(kind, Kind::Agent | Kind::Pane)
+                        && crate::close_target::is_shortcut(key) =>
+                    {
+                        if list.navigation.focused_action().is_none()
+                            && list.navigation.selection_visible
+                            && let Some(entry) = list.selected_entry()
+                        {
+                            if matches!(entry.state, DisplayState::Working | DisplayState::Blocked)
+                                || kind == Kind::Agent && entry.state == DisplayState::Unknown
+                            {
+                                list.error = Some(
+                                    tr(
+                                        "Only idle or done agents can be closed.",
+                                        "只能关闭空闲或已完成的智能体。",
+                                    )
+                                    .into(),
+                                );
+                            } else {
+                                let args = crate::close_target::confirmation_args(
+                                    server,
+                                    &entry.target.pane_id,
+                                    (kind == Kind::Agent).then_some(entry.key.as_str()),
+                                    &crate::sidebar::current_client()?,
+                                );
+                                match args {
+                                    Ok(args) => return Ok(Outcome::ConfirmClose(args)),
+                                    Err(error) => list.error = Some(clean(&error.to_string())),
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Enter => {
                         action = list
                             .navigation
@@ -881,6 +914,13 @@ pub fn run(
     match event_loop(paths, server, kind, &scope)? {
         Outcome::Close => Ok(None),
         Outcome::Focus(target) => Ok(Some(target)),
+        Outcome::ConfirmClose(args) => {
+            crate::sidebar::run_workbench(
+                &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                true,
+            )?;
+            Ok(None)
+        }
         Outcome::Back => {
             if matches!(return_to, ReturnTo::SidebarPane) {
                 return Ok(None);
