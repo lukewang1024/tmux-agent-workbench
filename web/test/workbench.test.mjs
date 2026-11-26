@@ -506,7 +506,11 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const manifest = await fetch(address + '/manifest.webmanifest').then((response) => response.json());
       assert.equal(manifest.lang, lang);
       assert.equal(manifest.display, 'standalone');
-      assert.equal(manifest.theme_color, '#fafafa');
+      assert.equal(manifest.theme_color, undefined);
+      assert.equal(manifest.background_color, undefined);
+      assert.ok(html.includes('id="page-theme-color"'));
+      assert.ok(html.includes(':root { --paper: #fafafa; }'));
+      assert.ok(html.includes('@media (prefers-color-scheme: dark) { :root { --paper: #282c34; } }'));
       assert.ok(html.includes('content="#fafafa" media="(prefers-color-scheme: light)"'));
       assert.ok(html.includes('content="#282c34" media="(prefers-color-scheme: dark)"'));
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];

@@ -350,8 +350,9 @@ function paintPalette() {
     .map(([role, color]) => '--' + role + ': ' + color + ';').join(' ') + ' }';
   const overrides = byId('palette-overrides');
   if (overrides.textContent !== css) overrides.textContent = css;
-  const tab = document.querySelector('meta[name="theme-color"][media="(prefers-color-scheme: ' + mode + ')"]');
-  tab.content = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim();
+  const theme = byId('page-theme-color');
+  const background = getComputedStyle(document.documentElement).backgroundColor;
+  if (theme.content !== background) theme.content = background;
 }
 
 function stateToken(state, machine) {

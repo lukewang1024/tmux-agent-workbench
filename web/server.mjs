@@ -82,8 +82,8 @@ async function cachedAssets(locale, palettes) {
   const { language, messages } = locale;
   const index = loaded.get('/');
   index.data = Buffer.from(renderDocument(index.data.toString(), locale)
-    .replace('WORKBENCH_THEME_LIGHT', sidebarPalettes.light.paper)
-    .replace('WORKBENCH_THEME_DARK', sidebarPalettes.dark.paper));
+    .replaceAll('WORKBENCH_THEME_LIGHT', sidebarPalettes.light.paper)
+    .replaceAll('WORKBENCH_THEME_DARK', sidebarPalettes.dark.paper));
   const styles = loaded.get('/style.css');
   styles.data = Buffer.from(styles.data.toString().replace('/* WORKBENCH_PALETTE */', () => paletteStyles(palettes)));
   const script = loaded.get('/app.js');
@@ -92,9 +92,9 @@ async function cachedAssets(locale, palettes) {
   worker.data = Buffer.from(worker.data.toString().replace('WORKBENCH_BROWSER_MODULES',
     () => JSON.stringify(browserModules.map((name) => '/' + name))));
   const manifest = loaded.get('/manifest.webmanifest');
+  // Keep the installed shell on the platform theme until the document supplies its palette.
   manifest.data = Buffer.from(JSON.stringify({
     ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description,
-    background_color: sidebarPalettes.light.paper, theme_color: sidebarPalettes.light.paper,
   }));
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
