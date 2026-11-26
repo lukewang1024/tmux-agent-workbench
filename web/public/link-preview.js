@@ -12,11 +12,13 @@ export function linkPreviewSource(url) {
   if (!['github.com', 'docs.github.com', 'developer.mozilla.org', 'developer.android.com', 'developer.android.google.cn'].includes(url.hostname)) return undefined;
   if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
   if (url.origin === githubOrigin) {
-    const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})\/pull\/([1-9]\d{0,14})\/files\/?$/i.exec(url.pathname);
+    const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(url.pathname);
     if (!match) return null;
     const [, owner, repo, pull] = match;
+    const endpoint = 'https://api.github.com/repos/' + owner + '/' + repo;
+    if (!pull) return { kind: 'readme', endpoint: endpoint + '/readme' };
     return { kind: 'diff', label: owner + '/' + repo + ' #' + pull,
-      endpoint: 'https://api.github.com/repos/' + owner + '/' + repo + '/pulls/' + pull + '/files' };
+      endpoint: endpoint + '/pulls/' + pull + '/files' };
   }
   if (url.origin === docsOrigin) {
     if (!/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/[a-z\d][a-z\d.@_-]*){2,}\/?$/i.test(url.pathname)) return null;
@@ -174,7 +176,7 @@ function prepareImages(fragment, source, origin) {
     const base = source.mime === 'text/plain' ? source.endpoint : origin;
     try { url = new URL(image.getAttribute('src'), base); } catch { /* Fall back to the image description. */ }
     if (source.android && url?.origin === androidOrigin) url.hostname = 'developer.android.google.cn';
-    if (!url || url.username || url.password || !url.href.startsWith(source.imageRoot)) {
+    if (!source.imageRoot || !url || url.username || url.password || !url.href.startsWith(source.imageRoot)) {
       image.replaceWith(document.createTextNode(image.alt));
       continue;
     }
@@ -185,21 +187,55 @@ function prepareImages(fragment, source, origin) {
   }
 }
 
+let readmeMarkdown;
+
+async function readArticle(source, url, markdown) {
+  if (source.kind !== 'readme') {
+    const response = await publicContent(source.endpoint, source.mime);
+    const raw = await response.text();
+    return { html: markdown.render(source.mime === 'text/plain' ? mdnMarkdown(raw) : raw), base: url };
+  }
+
+  const response = await publicContent(source.endpoint, 'application/vnd.github+json', 'application/json');
+  const { content, encoding, size, name, html_url: htmlURL } = await response.json();
+  if (encoding !== 'base64' || !content || size > 512 * 1024) throw new PreviewError('linkPreviewUnavailable');
+  const raw = new TextDecoder().decode(Uint8Array.from(atob(content), (char) => char.charCodeAt(0)));
+  const repository = url.pathname.replace(/\/$/, '');
+  let base = new URL(repository + '/blob/HEAD/README', githubOrigin);
+  if (typeof htmlURL === 'string' && htmlURL.toLowerCase().startsWith((githubOrigin + repository + '/blob/').toLowerCase())) {
+    base = new URL(htmlURL);
+  }
+  if (!/\.(?:md|markdown|mdown|mkdn|mkd|mdwn)$/i.test(name)) return { plain: raw, base };
+  if (!readmeMarkdown) {
+    // Parse GitHub's inline HTML syntax, but omit raw HTML from the preview.
+    readmeMarkdown = window.markdownit({ html: true, linkify: true });
+    readmeMarkdown.renderer.rules.html_block = () => '';
+    readmeMarkdown.renderer.rules.html_inline = () => '';
+  }
+  return { html: readmeMarkdown.render(raw), base };
+}
+
 function renderArticle(page, source, url, { t, markdown, openLink }) {
   const status = statusBlock();
   page.append(status);
   loadContent(status, async () => {
-    const response = await publicContent(source.endpoint, source.mime);
-    const raw = await response.text();
-    const template = element('template');
-    template.innerHTML = markdown.render(source.mime === 'text/plain' ? mdnMarkdown(raw) : raw);
-    prepareImages(template.content, source, url);
+    const { html, plain, base } = await readArticle(source, url, markdown);
     const article = element('article', 'message-content');
+    if (plain !== undefined) {
+      const pre = element('pre');
+      pre.append(element('code', '', plain));
+      article.append(pre);
+      return [article];
+    }
+    const template = element('template');
+    template.innerHTML = html;
+    prepareImages(template.content, source, base);
     article.append(template.content);
     const jump = articleSections(article);
     for (const link of article.querySelectorAll('a[href]')) {
+      const href = link.getAttribute('href');
       let target;
-      try { target = new URL(link.getAttribute('href'), url); } catch { continue; }
+      try { target = new URL(href, href.startsWith('#') ? url : base); } catch { continue; }
       if (target.protocol !== 'https:' && target.protocol !== 'http:') continue;
       link.href = target.href;
       link.target = '_blank';

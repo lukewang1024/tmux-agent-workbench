@@ -16,7 +16,12 @@ test('GitHub links resolve only to the public preview endpoints', () => {
   assert.equal(new URL(article.endpoint).pathname, '/api/article/body');
   assert.equal(new URL(article.endpoint).searchParams.get('pathname'),
     '/zh/enterprise-cloud@latest/get-started/using-github-docs/github-docs-api');
-  assert.equal(source('https://github.com/owner/repository'), null);
+  assert.deepEqual(source('https://github.com/owner/repository/?tab=readme-ov-file#usage'), {
+    kind: 'readme', endpoint: 'https://api.github.com/repos/owner/repository/readme',
+  });
+  assert.equal(source('https://github.com/sindresorhus/modern-normalize').endpoint,
+    'https://api.github.com/repos/sindresorhus/modern-normalize/readme');
+  assert.equal(source('https://github.com/owner/repository/issues'), null);
   assert.equal(source('https://github.com:8080/owner/repository/pull/42/files'), null);
   assert.equal(source('https://secret@github.com/owner/repository/pull/42/files'), null);
   assert.equal(source('https://docs.github.com/api/article/body'), null);
