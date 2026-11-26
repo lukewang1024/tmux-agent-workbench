@@ -332,6 +332,7 @@ button { touch-action: manipulation; }
 .machine-trigger { flex: 0 1 auto; max-width: 210px; min-width: 42px; min-height: 29px; border: 1px solid var(--line); background: var(--paper); font-size: 12px; }
 .machine-trigger b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .machine-trigger .glyph { flex: none; width: 12px; height: 12px; }
+.machine-trigger .machine-mark { display: none; }
 .new-agent { display: inline-grid; place-items: center; flex: none; width: 31px; height: 31px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--accent); }
 .new-agent .glyph { width: 17px; height: 17px; }
 .done-trigger { position: relative; flex: none; }
@@ -542,6 +543,11 @@ h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
   .module-trigger .brand-mark { width: 19px; height: 19px; }
   .module-trigger .glyph { width: 12px; height: 12px; }
   .workspace-actions { gap: 4px; }
+  .machine-trigger { min-width: 29px; padding-inline: 6px; }
+  .machine-trigger b, .machine-trigger .machine-caret { display: none; }
+  .machine-trigger .machine-mark { display: block; width: 15px; height: 15px; }
+  .state-filters { flex-wrap: nowrap; gap: 2px; }
+  .filter-chip { min-width: 24px; padding-inline: 2px; }
 }
 @media (max-height: 390px) {
   .terminal-panel { padding-block: 3px; }
