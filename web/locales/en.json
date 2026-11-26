@@ -112,6 +112,8 @@
     "permissionStatusUnavailable": "Permissions unavailable",
     "permissionLaunch": "{value} at launch",
     "permission_yolo": "YOLO",
+    "yoloScope": "Codex can access files and the network without approval in this session.",
+    "applyYolo": "Enable YOLO",
     "permission_approveForMe": "Approve for me",
     "permission_noApprovals": "No approvals",
     "queuedSetting": "Next turn · {value}",

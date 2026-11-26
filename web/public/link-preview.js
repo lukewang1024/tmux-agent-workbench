@@ -2,12 +2,14 @@ const githubOrigin = 'https://github.com';
 const docsOrigin = 'https://docs.github.com';
 const mdnOrigin = 'https://developer.mozilla.org';
 const rawOrigin = 'https://raw.githubusercontent.com';
+const androidOrigin = 'https://developer.android.com';
+const androidMirror = 'https://developer.android.google.cn';
 const githubImages = docsOrigin + '/assets/images/';
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
 export function linkPreviewSource(url) {
-  if (!['github.com', 'docs.github.com', 'developer.mozilla.org'].includes(url.hostname)) return undefined;
+  if (!['github.com', 'docs.github.com', 'developer.mozilla.org', 'developer.android.com', 'developer.android.google.cn'].includes(url.hostname)) return undefined;
   if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
   if (url.origin === githubOrigin) {
     const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})\/pull\/([1-9]\d{0,14})\/files\/?$/i.exec(url.pathname);
@@ -21,6 +23,10 @@ export function linkPreviewSource(url) {
     return { kind: 'article', endpoint: docsOrigin + '/api/article/body?' +
       new URLSearchParams({ pathname: url.pathname.replace(/\/$/, '') }),
     mime: 'text/markdown', imageRoot: githubImages };
+  }
+  if (url.origin === androidOrigin || url.origin === androidMirror) {
+    const endpoint = '/api/android-doc?' + new URLSearchParams({ path: url.pathname });
+    return { kind: 'article', endpoint, mime: 'text/markdown', imageRoot: androidMirror + '/static/', android: true };
   }
   if (url.origin !== mdnOrigin) return null;
   const match = /^\/([a-z]{2}(?:-[a-z]{2})?)\/docs\/([a-z\d_-]+(?:\/[a-z\d_.-]+)*)\/?$/i.exec(url.pathname);
@@ -55,7 +61,7 @@ class PreviewError extends Error {
 
 async function publicContent(endpoint, accept, mime = accept) {
   const response = await fetch(endpoint, {
-    credentials: 'omit',
+    credentials: typeof endpoint === 'string' && endpoint.startsWith('/api/') ? 'same-origin' : 'omit',
     redirect: 'error',
     referrerPolicy: 'no-referrer',
     headers: { accept },
@@ -167,6 +173,7 @@ function prepareImages(fragment, source, origin) {
     let url;
     const base = source.mime === 'text/plain' ? source.endpoint : origin;
     try { url = new URL(image.getAttribute('src'), base); } catch { /* Fall back to the image description. */ }
+    if (source.android && url?.origin === androidOrigin) url.hostname = 'developer.android.google.cn';
     if (!url || url.username || url.password || !url.href.startsWith(source.imageRoot)) {
       image.replaceWith(document.createTextNode(image.alt));
       continue;

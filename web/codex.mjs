@@ -86,6 +86,34 @@ export async function readPermissions(env, cwd) {
   ).map(({ id, description }) => ({ id, description: String(description || '').slice(0, 180) }));
 }
 
+const permissionPresets = [
+  { id: 'mode:ask', mode: 'askForApproval', profile: ':workspace', sandbox: 'workspace-write', policy: 'on-request', reviewer: 'user' },
+  { id: 'mode:approve', mode: 'approveForMe', profile: ':workspace', sandbox: 'workspace-write', policy: 'on-request', reviewer: 'auto_review' },
+  { id: 'mode:yolo', mode: 'yolo', profile: ':danger-full-access', sandbox: 'danger-full-access', policy: 'never', reviewer: 'user' },
+];
+
+export function permissionChoices(profiles, requirements) {
+  const allowed = (values, value) => values == null || values.includes(value);
+  const presets = permissionPresets.filter(({ profile, sandbox, policy, reviewer }) =>
+    profiles.some(({ id }) => id === profile)
+    && allowed(requirements?.allowedSandboxModes, sandbox)
+    && allowed(requirements?.allowedApprovalPolicies, policy)
+    && allowed(requirements?.allowedApprovalsReviewers, reviewer)
+  ).map(({ id, mode, profile, policy, reviewer }) => ({
+    id, mode, arguments: profile + ' --approval-policy=' + policy + ' --reviewer=' + reviewer,
+  }));
+  if (!presets.length) return profiles.map((profile) => ({ ...profile, arguments: profile.id }));
+  return [...presets, ...profiles.filter(({ id }) => !id.startsWith(':')).map((profile) => ({ ...profile, arguments: profile.id }))];
+}
+
+export async function readPermissionChoices(env, cwd) {
+  const [profiles, config] = await Promise.all([
+    readPermissions(env, cwd),
+    queryCodex(env, 'configRequirements/read', {}, 'Could not load Codex permission requirements.').catch(() => null),
+  ]);
+  return config ? permissionChoices(profiles, config.requirements) : profiles.map((profile) => ({ ...profile, arguments: profile.id }));
+}
+
 export function codexCommands(screen, cursorY) {
   const items = [];
   for (const row of screen.split('\n').slice(0, cursorY).map(plain).reverse()) {
@@ -100,6 +128,13 @@ export function codexOutput(before, after) {
   const lines = (screen) => screen.split('\n').map((line) => plain(line).trim()).filter(Boolean);
   const previous = new Set(lines(before));
   return lines(after).filter((line) => !previous.has(line) && !prompt.test(line)).slice(-18).join('\n').slice(0, 3000);
+}
+
+export function codexFullAccessConfirmation(screen) {
+  const text = plain(screen);
+  return /^\s*›\s*1\. Yes, continue anyway\s+Apply full access for this session\s*$/m.test(text)
+    && /^\s*2\. Cancel\s+Go back without enabling full access\s*$/m.test(text)
+    && /enter select\s*·\s*esc back\s*$/m.test(text);
 }
 
 export function codexComposer(screen, cursorY) {

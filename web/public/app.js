@@ -305,6 +305,10 @@ function scopedMachines() {
 
 function appearance() { return darkMode.matches ? 'dark' : 'light'; }
 
+function syncInstallTheme() {
+  byId('app-manifest').href = '/manifest-' + appearance() + '.webmanifest';
+}
+
 function themeColor(value) {
   if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value;
   if (!Number.isInteger(value) || value < 0 || value > 255) return '';
@@ -1148,6 +1152,7 @@ async function runSlash(text) {
 const permissionLabels = {
   ':workspace': 'workspacePermission', ':read-only': 'readOnlyPermission', ':danger-full-access': 'fullAccessPermission',
   ':approve-for-me': 'permission_approveForMe',
+  'mode:ask': 'workspacePermission', 'mode:approve': 'permission_approveForMe', 'mode:yolo': 'permission_yolo',
 };
 const permissionModeLabels = {
   yolo: 'permission_yolo', fullAccess: 'fullAccessPermission', approveForMe: 'permission_approveForMe',
@@ -1182,14 +1187,19 @@ async function showPermissionSettings() {
     error.hidden = true;
     submit.type = 'submit';
     const update = () => {
-      description.textContent = profiles.find(({ id }) => id === picker.value)?.description
-        || (!settingsReady() ? t('settingsNextTurn') : '');
+      const yolo = picker.value === 'mode:yolo';
+      description.textContent = [
+        yolo ? t('yoloScope') : profiles.find(({ id }) => id === picker.value)?.description,
+        !settingsReady() && t('settingsNextTurn'),
+      ].filter(Boolean).join(' ');
       description.hidden = !description.textContent;
+      submit.textContent = t(yolo ? 'applyYolo' : 'applyChatSettings');
       submit.disabled = !picker.value || reauthRequired || conversationKey() !== key;
     };
     const knownSettings = chatState.settings(key);
+    const currentChoice = profiles.find(({ mode }) => mode && mode === knownSettings.permission?.mode)?.id;
     setPicker(picker, t('permission'), [{ value: '', label: t('choosePermission') }, ...options],
-      knownSettings.pending?.permission || knownSettings.permission?.id, update);
+      knownSettings.pending?.permission || currentChoice || knownSettings.permission?.id, update);
     form.append(picker, description, error, submit);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -2262,9 +2272,11 @@ window.addEventListener('popstate', (event) => {
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
 darkMode.addEventListener('change', () => {
+  syncInstallTheme();
   paint();
   terminalView.updateTheme();
 });
+syncInstallTheme();
 for (const dialog of [overlay, pickerDialog]) {
   dialog.addEventListener('close', () => { if (disconnected) placeConnectionOverlay(); });
   dialog.addEventListener('cancel', (event) => { if (disconnected) event.preventDefault(); });

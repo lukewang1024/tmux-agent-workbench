@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import { Auth } from '../auth.mjs';
-import { codexComposer, codexSettings, modelChangeConfirmed } from '../codex.mjs';
+import { codexComposer, codexFullAccessConfirmation, codexSettings, modelChangeConfirmed, permissionChoices } from '../codex.mjs';
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
@@ -24,6 +24,21 @@ async function scratch(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('Codex permission choices use distinct reviewers and respect host constraints', () => {
+  const profiles = [':read-only', ':workspace', ':danger-full-access'].map((id) => ({ id }));
+  assert.deepEqual(permissionChoices(profiles, null).map(({ mode, arguments: args }) => [mode, args]), [
+    ['askForApproval', ':workspace --approval-policy=on-request --reviewer=user'],
+    ['approveForMe', ':workspace --approval-policy=on-request --reviewer=auto_review'],
+    ['yolo', ':danger-full-access --approval-policy=never --reviewer=user'],
+  ]);
+  assert.deepEqual(permissionChoices(profiles, { allowedApprovalsReviewers: ['user'], allowedApprovalPolicies: ['on-request'] })
+    .map(({ mode }) => mode), ['askForApproval']);
+  const confirmation = '› 1. Yes, continue anyway  Apply full access for this session\n'
+    + '  2. Cancel                Go back without enabling full access\n\n  enter select · esc back';
+  assert.equal(codexFullAccessConfirmation(confirmation), true);
+  assert.equal(codexFullAccessConfirmation(confirmation.replace('› 1.', '  1.')), false);
+});
 
 test('tmux palette preserves indexed and true colors while discarding invalid roles', () => {
   const line = 'dark|full|||' + JSON.stringify({
@@ -508,6 +523,10 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(manifest.display, 'standalone');
       assert.equal(manifest.theme_color, undefined);
       assert.equal(manifest.background_color, undefined);
+      for (const [mode, color] of [['light', '#fafafa'], ['dark', '#282c34']]) {
+        const themed = await fetch(address + '/manifest-' + mode + '.webmanifest').then((response) => response.json());
+        assert.deepEqual(themed, { ...manifest, theme_color: color, background_color: color });
+      }
       assert.ok(html.includes('id="page-theme-color"'));
       assert.ok(html.includes(':root { --paper: #fafafa; }'));
       assert.ok(html.includes('@media (prefers-color-scheme: dark) { :root { --paper: #282c34; } }'));
@@ -517,6 +536,11 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.ok(version);
       assert.ok(html.includes('id="connection-overlay"'));
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
+      const resetHref = '/reset.css?v=' + version;
+      assert.ok(html.indexOf(resetHref) > 0 && html.indexOf(resetHref) < html.indexOf('/style.css?v=' + version));
+      const reset = await fetch(address + resetHref).then((response) => response.text());
+      assert.match(reset, /modern-normalize v3\.0\.1/);
+      assert.match(reset, /-webkit-tap-highlight-color: transparent/);
       const style = await fetch(address + '/style.css?v=' + version).then((response) => response.text());
       assert.match(style, /:root \{ color-scheme: light;\s+--paper: #fafafa;/);
       assert.match(style, /:root \{ color-scheme: dark;\s+--paper: #282c34;/);
@@ -537,6 +561,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);
       }
       assert.ok(worker.includes('/vendor/markdown-it.js'));
+      assert.ok(worker.includes('/reset.css'));
       workers.push(worker);
     } finally {
       await gateway.close();

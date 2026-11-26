@@ -8,7 +8,7 @@ import { History, hasThread, sameProcess } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
 import { codexCommands, codexComposer, codexLaunchPermission, codexOutput, codexSettings, modelChangeConfirmed, readModels,
-  readPermissions, readSkills } from './codex.mjs';
+  codexFullAccessConfirmation, readPermissionChoices, readPermissions, readSkills } from './codex.mjs';
 
 const run = promisify(execFile);
 const webSession = '__workbench_web';
@@ -510,7 +510,10 @@ export class LocalNode {
     const entry = await this.chatAgent(agent, thread, pane);
     if (kind === 'commands') return { suggestions: await this.commands(entry) };
     const cwd = await this.codexDirectory(entry);
-    if (kind === 'permissions') return { profiles: await readPermissions(this.env, cwd) };
+    if (kind === 'permissions') {
+      const profiles = await readPermissionChoices(this.env, cwd);
+      return { profiles: profiles.map(({ id, mode, description }) => ({ id, mode, description })) };
+    }
     return { suggestions: await readSkills(this.env, cwd) };
   }
 
@@ -562,14 +565,26 @@ export class LocalNode {
   async changePermission({ agent, thread, pane, permission }) {
     const entry = await this.chatAgent(agent, thread, pane);
     const cwd = await this.codexDirectory(entry);
-    if (!(await readPermissions(this.env, cwd)).some(({ id }) => id === permission)) {
+    const option = typeof permission === 'string' && permission.startsWith('mode:')
+      ? (await readPermissionChoices(this.env, cwd)).find(({ id }) => id === permission)?.arguments
+      : (await readPermissions(this.env, cwd)).find(({ id }) => id === permission)?.id;
+    if (!option) {
       throw new Failure(400, 'Select a permission profile allowed by Codex.');
     }
     const before = await this.codexScreen(entry.pane);
     const count = (screen) => (screen.match(/Permission selection requested:/g) || []).length;
-    await this.submitCodexCommand(entry, '/permissions ' + permission);
-    const confirmed = await this.waitCodexScreen(entry.pane, ({ text }) =>
-      count(text) > count(before.text) || codexOutput(before.text, text).includes('Permission selection requested:'), 2800);
+    await this.submitCodexCommand(entry, '/permissions ' + option);
+    const confirmedChange = ({ text }) =>
+      count(text) > count(before.text) || codexOutput(before.text, text).includes('Permission selection requested:');
+    if (permission === 'mode:yolo') {
+      const hasConfirmation = ({ text }) => codexFullAccessConfirmation(text);
+      await this.waitCodexScreen(entry.pane, (screen) => confirmedChange(screen) || hasConfirmation(screen), 2800);
+      const latest = await this.chatAgent(agent, thread, pane);
+      if (hasConfirmation(await this.codexScreen(latest.pane))) {
+        await this.tmux(['send-keys', '-t', latest.pane.pane, 'Enter']);
+      }
+    }
+    const confirmed = await this.waitCodexScreen(entry.pane, confirmedChange, 2800);
     if (!confirmed) throw new Failure(409, 'Codex did not confirm the permission change.');
     return { permission };
   }

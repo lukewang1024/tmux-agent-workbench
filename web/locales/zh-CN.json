@@ -109,6 +109,8 @@
     "permissionStatusUnavailable": "权限状态暂不可用",
     "permissionLaunch": "启动时为 {value}",
     "permission_yolo": "YOLO",
+    "yoloScope": "这次会话中，Codex 可直接访问文件和网络，无需审批。",
+    "applyYolo": "启用 YOLO",
     "permission_approveForMe": "由代理审批",
     "permission_noApprovals": "无需审批",
     "queuedSetting": "下一轮 · {value}",

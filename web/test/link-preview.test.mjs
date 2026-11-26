@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { linkPreviewSource } from '../public/link-preview.js';
+import { androidDocURL } from '../android-docs.mjs';
 
 const source = (url) => linkPreviewSource(new URL(url));
 
@@ -31,4 +32,14 @@ test('MDN documentation links map to the corresponding public Markdown source', 
     raw + 'translated-content/main/files/zh-cn/web/http/reference/headers/x-frame-options/index.md');
   assert.equal(source(mdn + '/en-US/blog/'), null);
   assert.equal(source(mdn + '/en-US/docs/Web/%2fdata'), null);
+});
+
+test('Android documentation previews fetch only paths on the official mirror', () => {
+  const path = '/design/ui/mobile/guides/foundations/system-bars';
+  const preview = source('https://developer.android.com' + path + '?hl=en#gesture-navigation');
+  assert.equal(new URL(preview.endpoint, 'http://localhost:7080').searchParams.get('path'), path);
+  assert.equal(androidDocURL(path).href, 'https://developer.android.google.cn' + path + '?hl=en');
+  for (const invalid of ['//example.com/secret', 'https://example.com', '/%2e%2e/secret', '/file?url=example']) {
+    assert.throws(() => androidDocURL(invalid), /Invalid Android documentation path/);
+  }
 });

@@ -1,0 +1,5 @@
+:root { -webkit-tap-highlight-color: transparent; }
+
+button, textarea, select, input { font: inherit; }
+h1, h2, h3, p { margin: 0; }
+[hidden] { display: none !important; }

@@ -1,7 +1,6 @@
 /* WORKBENCH_PALETTE */
 
 :root {
-  -webkit-tap-highlight-color: transparent;
   --primary-fill: var(--ink);
   --primary-hover: color-mix(in srgb, var(--primary-fill), black 24%);
   --surface: var(--paper);
@@ -54,14 +53,10 @@
     --shadow: #0b0c1066;
   }
 }
-*, *::after, *::before { box-sizing: border-box; }
-body { margin: 0; color: var(--ink); overflow: hidden; overscroll-behavior: none; }
-button, textarea, select, input { font: inherit; }
+body { color: var(--ink); overflow: hidden; overscroll-behavior: none; }
 button { color: inherit; cursor: pointer; }
 button:disabled { opacity: .51; cursor: default; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-[hidden] { display: none !important; }
-h1, h2, h3, p { margin: 0; }
 
 .screen { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 730; letter-spacing: -.025em; }

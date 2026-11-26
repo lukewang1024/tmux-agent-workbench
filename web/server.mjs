@@ -6,6 +6,7 @@ import { createServer as httpsServer } from 'node:https';
 import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
+import { readAndroidDoc } from './android-docs.mjs';
 import { Auth, sameSecret } from './auth.mjs';
 import { RemoteNode, nodeProtocol } from './connector.mjs';
 import { stripGoalContext } from './history.mjs';
@@ -19,6 +20,7 @@ const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
   ...browserModules.map((name) => ['/' + name, ['public/' + name, 'text/javascript; charset=utf-8']]),
+  ['/reset.css', ['public/reset.css', 'text/css; charset=utf-8']],
   ['/style.css', ['public/style.css', 'text/css; charset=utf-8']],
   ['/manifest.webmanifest', ['public/manifest.webmanifest', 'application/manifest+json']],
   ['/sw.js', ['public/sw.js', 'text/javascript; charset=utf-8']],
@@ -43,7 +45,7 @@ function security(res) {
   res.setHeader('X-Frame-Options', 'DENY');
   const mdnContent = 'https://raw.githubusercontent.com/mdn/content/main/files/ https://raw.githubusercontent.com/mdn/translated-content/main/files/';
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    + "img-src 'self' data: https://docs.github.com/assets/images/ " + mdnContent + "; "
+    + "img-src 'self' data: https://docs.github.com/assets/images/ https://developer.android.google.cn/static/ " + mdnContent + "; "
     + "connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body " + mdnContent + "; "
     + "frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
@@ -84,6 +86,9 @@ async function cachedAssets(locale, palettes) {
   index.data = Buffer.from(renderDocument(index.data.toString(), locale)
     .replaceAll('WORKBENCH_THEME_LIGHT', sidebarPalettes.light.paper)
     .replaceAll('WORKBENCH_THEME_DARK', sidebarPalettes.dark.paper));
+  const reset = loaded.get('/reset.css');
+  const normalize = await readFile(new URL('node_modules/modern-normalize/modern-normalize.css', import.meta.url));
+  reset.data = Buffer.concat([normalize, Buffer.from('\n'), reset.data]);
   const styles = loaded.get('/style.css');
   styles.data = Buffer.from(styles.data.toString().replace('/* WORKBENCH_PALETTE */', () => paletteStyles(palettes)));
   const script = loaded.get('/app.js');
@@ -93,9 +98,16 @@ async function cachedAssets(locale, palettes) {
     () => JSON.stringify(browserModules.map((name) => '/' + name))));
   const manifest = loaded.get('/manifest.webmanifest');
   // Keep the installed shell on the platform theme until the document supplies its palette.
-  manifest.data = Buffer.from(JSON.stringify({
+  const manifestData = {
     ...JSON.parse(manifest.data.toString()), lang: language, description: messages.description,
-  }));
+  };
+  manifest.data = Buffer.from(JSON.stringify(manifestData));
+  for (const [mode, { paper }] of Object.entries(sidebarPalettes)) {
+    loaded.set('/manifest-' + mode + '.webmanifest', {
+      type: manifest.type,
+      data: Buffer.from(JSON.stringify({ ...manifestData, theme_color: paper, background_color: paper })),
+    });
+  }
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
   const version = fingerprint.digest('hex').slice(0, 16);
@@ -216,6 +228,11 @@ export async function startServer({ local, localName, store, listen, origin, cer
 
     if (!path.startsWith('/api/')) throw new Failure(404, 'Page not found.');
     const session = authorized(req);
+    if (path === '/api/android-doc' && method === 'GET') {
+      const article = await readAndroidDoc(request.searchParams.get('path'));
+      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+      return res.end(article);
+    }
     if (path === '/api/logout' && method === 'POST') {
       auth.endSession(session);
       res.setHeader('Set-Cookie', auth.cookieHeader('', true));
