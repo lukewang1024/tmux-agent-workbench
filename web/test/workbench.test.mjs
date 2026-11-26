@@ -655,10 +655,12 @@ test('gateway serves matching languages for the app shell, manifest, assistant t
       assert.ok(panel.includes('./dom.js?v=' + version));
       assert.ok(panel.includes('./link-preview.js?v=' + version));
       assert.ok(panel.includes('./link-tabs.js?v=' + version));
-      for (const module of ['/link-preview.js', '/link-tabs.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js', '/vendor/highlight.js']) {
+      for (const module of ['/link-preview.js', '/link-tabs.js', '/reader-preview.js', '/file-preview.js', '/diagram-viewer.js',
+        '/vendor/markdown-it.js', '/vendor/readability.js', '/vendor/highlight.js', '/vendor/panzoom.js']) {
         assert.ok(worker.includes(module));
         assert.equal((await fetch(address + module + '?v=' + version)).status, 200);
       }
+      assert.ok(html.includes('src="/vendor/panzoom.js?v=' + version + '"'));
       const diagram = await fetch(address + '/mermaid-renderer.html?v=' + version);
       assert.match(diagram.headers.get('content-security-policy'), /^sandbox allow-scripts; default-src 'none';/);
       assert.match(diagram.headers.get('content-security-policy'), /frame-ancestors 'self'/);

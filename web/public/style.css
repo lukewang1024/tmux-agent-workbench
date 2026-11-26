@@ -418,8 +418,27 @@ button { touch-action: manipulation; }
 .diagram-trigger { min-height: 29px; padding-inline: 8px; font-size: 12px; }
 .mermaid-renderer { position: fixed; inset: 0 auto auto 0; width: 960px; height: 640px; border: 0; visibility: hidden; pointer-events: none; }
 .mermaid-figure { margin-inline: 0; margin-block: .55em; min-inline-size: 0; }
-.diagram-image { overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 8px; overscroll-behavior-inline: contain; }
-.diagram-image img { display: block; max-inline-size: none; height: auto; margin-inline: auto; }
+.diagram-image { position: relative; display: grid; place-items: center; inline-size: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.diagram-image img { display: block; max-inline-size: 100%; max-block-size: min(50dvh, 410px); height: auto; object-fit: contain; }
+.diagram-expand { position: absolute; inset: 5px 5px auto auto; display: grid; place-items: center; inline-size: 27px; block-size: 27px; border-radius: 6px; background: var(--surface); color: var(--accent); }
+.diagram-expand .glyph { width: 15px; height: 15px; }
+.diagram-viewer { box-sizing: border-box; inline-size: min(1100px, calc(100% - 32px)); block-size: min(810px, calc(100dvh - 32px)); max-width: none; max-height: none; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); }
+.diagram-viewer[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.diagram-viewer::backdrop { background: var(--backdrop); }
+.diagram-toolbar { display: flex; align-items: center; gap: 4px; min-inline-size: 0; padding-inline: 5px 8px; background: var(--surface); }
+.diagram-title { flex: 1; min-inline-size: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.diagram-controls { display: flex; flex: none; align-items: center; gap: 2px; color: var(--accent); }
+.diagram-controls .row-action { inline-size: 31px; min-block-size: 31px; color: var(--accent); }
+.diagram-controls .glyph { inline-size: 16px; block-size: 16px; }
+.diagram-scale { min-inline-size: 40px; color: var(--muted); font: 11px var(--mono); text-align: center; }
+.diagram-actual { color: var(--accent); font: 11px var(--mono); }
+.diagram-viewport { position: relative; overflow: hidden; background: var(--canvas); }
+.diagram-viewport:focus-visible { outline-offset: -2px; }
+.diagram-plane { position: absolute; top: 0; left: 0; max-inline-size: none; user-select: none; object-fit: contain; }
+@media (max-width: 767px) {
+  .diagram-viewer { inline-size: 100%; block-size: 100dvh; padding-block-end: env(safe-area-inset-bottom); border: 0; border-radius: 0; }
+  .diagram-toolbar { --toolbar-inset: env(safe-area-inset-top); }
+}
 .diagram-source { margin-block-start: 4px; color: var(--muted); }
 .diagram-source summary { width: fit-content; cursor: pointer; }
 .diagram-source pre { margin: 4px 0 0; padding: 8px; overflow: auto; border-radius: 7px; background: var(--quiet); color: var(--ink); }

@@ -18,7 +18,7 @@ import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
+const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'diagram-viewer.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
   'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'mermaid-preview.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
 const diagramRenderer = '/mermaid-renderer.html';
 const diagramScript = '/mermaid-renderer.js';
@@ -44,6 +44,7 @@ const assets = new Map([
   ['/vendor/markdown-it.js', ['node_modules/markdown-it/dist/browser/markdown-it.umd.min.js', 'text/javascript; charset=utf-8']],
   ['/vendor/readability.js', ['node_modules/@mozilla/readability/Readability.js', 'text/javascript; charset=utf-8']],
   ['/vendor/highlight.js', ['node_modules/@highlightjs/cdn-assets/highlight.min.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/panzoom.js', ['node_modules/@panzoom/panzoom/dist/panzoom.min.js', 'text/javascript; charset=utf-8']],
   [diagramRenderer, ['public/mermaid-renderer.html', 'text/html; charset=utf-8']],
   [diagramScript, ['public/mermaid-renderer.js', 'text/javascript; charset=utf-8']],
   [diagramLibrary, ['node_modules/mermaid/dist/mermaid.min.js', 'text/javascript; charset=utf-8']],

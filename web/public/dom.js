@@ -12,11 +12,17 @@ export function button(text, className, action) {
   return element;
 }
 
-export function glyph(name) {
+export function glyph(name, { inline = false } = {}) {
   const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  const use = document.createElementNS(icon.namespaceURI, 'use');
   icon.setAttribute('class', 'glyph');
   icon.setAttribute('aria-hidden', 'true');
+  if (inline) {
+    const symbol = document.getElementById('icon-' + name);
+    icon.setAttribute('viewBox', symbol.getAttribute('viewBox'));
+    icon.append(...Array.from(symbol.children, (child) => child.cloneNode(true)));
+    return icon;
+  }
+  const use = document.createElementNS(icon.namespaceURI, 'use');
   use.setAttribute('href', '#icon-' + name);
   icon.append(use);
   return icon;

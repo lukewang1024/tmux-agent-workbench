@@ -1,4 +1,5 @@
-import { button, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { openDiagramViewer } from './diagram-viewer.js?v=WORKBENCH_CACHE_VERSION';
+import { button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 
 const maxSource = 24_000;
 const maxInlineDiagrams = 16;
@@ -32,7 +33,10 @@ function loadRenderer() {
 async function requestDiagram(text) {
   if (!text.trim() || text.length > maxSource) throw new Error('Diagram size is unsupported');
   const frame = await loadRenderer();
-  const theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default';
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const style = getComputedStyle(document.documentElement);
+  const palette = Object.fromEntries(['paper', 'ink', 'muted', 'active', 'raised'].map((role) =>
+    [role, style.getPropertyValue('--' + role).trim()]));
   return new Promise((resolve, reject) => {
     const { port1, port2 } = new MessageChannel();
     const timeout = setTimeout(() => {
@@ -48,7 +52,7 @@ async function requestDiagram(text) {
       else reject(new Error('Could not render the diagram'));
     };
     // The script-enabled renderer has an opaque origin. Only this port receives its result.
-    frame.contentWindow.postMessage({ text, theme }, '*', [port2]);
+    frame.contentWindow.postMessage({ text, dark, palette }, '*', [port2]);
   });
 }
 
@@ -64,13 +68,25 @@ export function diagramFigure(text, t) {
 
   const result = queue.then(() => requestDiagram(text));
   queue = result.catch(() => {});
-  result.then(({ svg, width }) => {
+  result.then(({ svg, width, height }) => {
+    if (!(width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height))) {
+      throw new Error('Invalid diagram dimensions');
+    }
+    const factor = Math.min(1, 8192 / Math.max(width, height));
+    const size = { width: Math.max(1, Math.round(width * factor)), height: Math.max(1, Math.round(height * factor)) };
     const image = make('img');
     image.alt = t('mermaidDiagram');
-    if (Number.isFinite(width) && width > 0) image.width = Math.min(4096, Math.ceil(width));
-    const imageView = make('div', 'diagram-image');
+    image.width = size.width;
+    image.height = size.height;
+    const label = t('openDiagram');
+    const imageView = button('', 'diagram-image', () => openDiagramViewer(image, { ...size, t, opener: imageView }));
+    imageView.title = label;
+    imageView.setAttribute('aria-label', label);
+    imageView.setAttribute('aria-haspopup', 'dialog');
+    const expand = make('span', 'diagram-expand');
+    expand.append(glyph('expand-diagram', { inline: true }));
     image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-    imageView.append(image);
+    imageView.append(image, expand);
     status.replaceWith(imageView);
   }).catch(() => {
     status.textContent = t('diagramFailed');
