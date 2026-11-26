@@ -122,16 +122,15 @@ button:disabled { opacity: .51; cursor: default; }
 
 .detail-bar { justify-content: flex-start; gap: 6px; min-height: 70px; padding: 0 11px; }
 .back { font-size: 32px; }
-.detail-provider { display: inline-flex; align-items: center; flex: none; gap: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.detail-provider { flex: none; }
 .detail-provider .agent-tag { width: 22px; height: 22px; }
 .detail-provider .provider-mark { width: 16px; height: 16px; }
 .detail-heading { min-width: 0; flex: 1; }
 .detail-heading h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 730; line-height: 1.35; }
 .detail-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
-.message-navigation { display: flex; flex: none; border-radius: 7px; background: var(--quiet); }
-.message-navigation .row-action { min-width: 34px; min-height: 36px; }
+.message-navigation { display: flex; flex: none; }
 .preview-toggle { flex: none; }
-.preview-toggle[aria-expanded="true"] { color: var(--accent); background: var(--active); }
+.preview-toggle[aria-expanded="true"] { color: var(--accent); }
 #previous-message .glyph { transform: rotate(180deg); }
 .panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .history { overflow: auto; flex: 1; padding: 8px 12px; }

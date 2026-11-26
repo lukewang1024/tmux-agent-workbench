@@ -731,7 +731,9 @@ function paintDetail() {
   provider.hidden = !kind;
   if (kind && provider.dataset.kind !== kind) {
     provider.dataset.kind = kind;
-    provider.replaceChildren(agentTag(kind), kindNames[kind]);
+    provider.title = kindNames[kind];
+    provider.setAttribute('aria-label', provider.title);
+    provider.replaceChildren(agentTag(kind));
   }
   byId('detail-context').textContent = [active.host, active.session || active.branch].filter(Boolean).join(' / ');
   if (route === 'sessions') { paintSessionPanes(empty); return; }
