@@ -5,7 +5,7 @@ import { bindBackButton, button, glyph, make, restoreFocusOnFrame } from './dom.
 import { mountDoneNotifications } from './done-notifications.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { linkModes, linkPreference, saveLinkPreference, workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
-import { paintMessageTools } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
+import { mountRunningTools, paintMessageTools, runningToolActivity } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
@@ -84,6 +84,7 @@ const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), 
 });
 const setDetailBackLabel = bindBackButton(byId('back'), back);
 const doneNotifications = mountDoneNotifications(app, { t, openAgent: openCompletedAgent });
+const updateRunningTools = mountRunningTools(byId('running-tools'), { t, sheet });
 const invalidateComposerFocus = bindComposerFocus(chatInput, {
   canEdit: () => route === 'agents' && !disconnected && !overlay.open && !pickerDialog.open,
   isComposing: () => composingPrompt,
@@ -846,6 +847,12 @@ function paintSessionPanes(empty) {
   terminalView.open(active.node, pane);
 }
 
+function paintRunningTools() {
+  const toolActivity = active?.state === 'working' && transcript?.key === conversationKey()
+    ? transcript.toolActivity : undefined;
+  updateRunningTools(toolActivity);
+}
+
 function paintComposer() {
   const key = conversationKey();
   if (chatInput.dataset.thread !== key) {
@@ -857,11 +864,10 @@ function paintComposer() {
   const sendButton = byId('send');
   sendButton.disabled = !ready || submitting || reauthRequired || disconnected;
   for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
-  const toolCount = working && transcript?.key === key && transcript.runningTools;
-  const label = [stateNames[active.state] || stateNames.unknown,
-    toolCount && t('runningToolCount', { count: toolCount })].filter(Boolean).join(' · ');
+  const label = stateNames[active.state] || stateNames.unknown;
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
+  paintRunningTools();
   display.title = active.state === 'blocked' ? t('agentBlocked') : ready ? '' : t('agentInputUnavailable');
   const stop = byId('stop-agent');
   const pendingStop = stopping?.key === activeKey;
@@ -1271,12 +1277,12 @@ async function readHistory(target, query, older) {
   if (older) byId('history-progress').hidden = false;
   let pageLoaded = false;
   try {
-    const { messages, before, runningTools } = await api(pathWith('/api/history', query));
+    const page = await api(pathWith('/api/history', query));
     if (target !== transcript) return;
-    const activeTools = Number.isSafeInteger(runningTools) && runningTools > 0 ? runningTools : 0;
-    if (!older && target.runningTools !== activeTools) {
-      target.runningTools = activeTools;
-      if (route === 'agents' && supportsChat()) paintComposer();
+    const { messages, before } = page;
+    if (!older) {
+      target.toolActivity = runningToolActivity(page);
+      if (route === 'agents' && supportsChat()) paintRunningTools();
     }
     const previous = target.loaded;
     if (!previous) target.before = before;

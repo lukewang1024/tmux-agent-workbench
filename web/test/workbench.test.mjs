@@ -276,6 +276,7 @@ test('Codex history groups tool metadata by message and counts unfinished calls 
   const history = new History(directory);
   let page = await history.page(id);
   assert.equal(page.runningTools, 2);
+  assert.deepEqual(page.runningToolNames, ['read', 'inspect']);
   assert.deepEqual(page.messages[1].tools, [{ name: 'old_tool', state: 'unconfirmed' }]);
   assert.deepEqual(page.messages[3].tools, [
     { name: 'search', state: 'finished', elapsed: 1000 }, { name: 'read', state: 'running' }, { name: 'inspect', state: 'running' },
@@ -283,9 +284,19 @@ test('Codex history groups tool metadata by message and counts unfinished calls 
   await appendFile(filename, encode([output('third'), output('second'), message('assistant', 'Done', 'final_answer'), event('task_complete')]));
   page = await history.page(id);
   assert.equal(page.runningTools, undefined);
+  assert.equal(page.runningToolNames, undefined);
   assert.equal(page.messages[3].tools.every(({ state }) => state === 'finished'), true);
   assert.equal(page.messages[4].tools, undefined);
   assert.doesNotMatch(JSON.stringify(page), /private|call_id/);
+  await appendFile(filename, encode([
+    event('task_started'), message('user', 'Next turn'),
+    call('read', 'fourth'), call('read', 'fifth'),
+  ]));
+  page = await history.page(id);
+  assert.equal(page.runningTools, 2);
+  assert.deepEqual(page.runningToolNames, ['read', 'read']);
+  assert.equal(page.messages.at(-1).tools, undefined);
+  assert.equal(page.messages.flatMap(({ tools = [] }) => tools).some(({ state }) => state === 'running'), false);
 });
 
 test('Codex without hooks uses the rollout open in the verified live process', {

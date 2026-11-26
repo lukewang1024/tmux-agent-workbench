@@ -228,6 +228,12 @@ button:disabled { opacity: .51; cursor: default; }
 .composer-label { flex: none; flex-wrap: wrap; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
 .composer-controls { margin-inline-start: auto; min-width: 0; max-width: 100%; }
 .composer-label .dot { background: var(--state-color, var(--muted)); }
+.working-dots { display: none; flex: none; align-items: center; gap: 3px; }
+.composer-label[data-working] .working-dots { display: inline-flex; }
+.working-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+.running-tools-trigger { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; padding: 0 4px; border: 1px solid var(--line); border-radius: 6px; background: transparent; white-space: nowrap; }
+.running-tools-trigger .glyph { width: 12px; height: 12px; }
+.running-tool-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
 .stop-agent .glyph { width: 18px; height: 18px; fill: currentColor; }
 .stop-agent.secondary-stop { background: var(--quiet); color: var(--ink); }
 .composer-controls .picker-button { min-width: 0; min-height: 25px; padding: 0 5px; border-color: var(--line); font-size: 11px; }
@@ -242,8 +248,10 @@ button:disabled { opacity: .51; cursor: default; }
 .command-result-actions { display: flex; justify-content: flex-end; gap: 5px; }
 .command-result-actions .plain { min-height: 28px; font-size: 11px; }
 @media (prefers-reduced-motion: no-preference) {
-  .composer-label[data-working] .dot { animation: working-dot 1.35s ease-in-out infinite alternate; }
-  @keyframes working-dot { from { opacity: .5; } to { opacity: 1; } }
+  .working-dots i { animation: working-dot 1.15s ease-in-out infinite; }
+  .working-dots i:nth-child(2) { animation-delay: .15s; }
+  .working-dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes working-dot { 0%, 60%, 100% { opacity: .35; } 30% { opacity: 1; transform: translateY(-1px); } }
 }
 
 .terminal-panel { padding: 6px 7px max(7px, env(safe-area-inset-bottom)); gap: 4px; }

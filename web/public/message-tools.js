@@ -2,6 +2,34 @@ import { glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 
 const states = { running: 'toolRunning', finished: 'toolFinished', unconfirmed: 'toolUnconfirmed' };
 
+export function runningToolActivity({ messages, runningTools, runningToolNames }) {
+  if (!Number.isSafeInteger(runningTools) || runningTools <= 0) return undefined;
+  // Older connectors may only attach tool names to individual messages.
+  const names = Array.isArray(runningToolNames) ? runningToolNames : messages.flatMap(({ tools = [] }) =>
+    tools.filter(({ state }) => state === 'running').map(({ name }) => name));
+  return { count: runningTools, names };
+}
+
+export function mountRunningTools(trigger, { t, sheet }) {
+  const label = trigger.querySelector('span');
+  const list = make('ul', 'running-tool-list');
+  const note = make('p', 'sheet-note');
+  let revision;
+
+  trigger.addEventListener('click', () => sheet(t('runningTools'), list, note));
+  return ({ count = 0, names = [] } = {}) => {
+    const next = JSON.stringify([count, names]);
+    if (revision === next) return;
+    revision = next;
+    trigger.hidden = !count;
+    label.textContent = count ? t('runningToolCount', { count }) : '';
+    list.hidden = !count || !names.length;
+    list.replaceChildren(...names.map((name) => make('li', 'tool-name', name)));
+    note.hidden = count > 0 && names.length >= count;
+    if (!note.hidden) note.textContent = t(count ? 'runningToolNamesUnavailable' : 'noRunningTools');
+  };
+}
+
 export function paintMessageTools(message, tools, t, language) {
   if (!Array.isArray(tools) || !tools.length) return;
   let disclosure = message.querySelector('.message-tools');

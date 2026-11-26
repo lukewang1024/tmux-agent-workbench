@@ -266,7 +266,9 @@ export class History {
       // Advance even if a block contained only tool data or part of a large record.
       const blockBoundary = first && start + first < end ? start + first : start;
       const next = records.length === 35 ? records.at(-1).id : blockBoundary;
-      return { messages: records.reverse(), before: next || null, ...(tools.running && { runningTools: tools.running }) };
+      const runningToolNames = tools.runningNames.reverse();
+      return { messages: records.reverse(), before: next || null,
+        ...(runningToolNames.length && { runningTools: runningToolNames.length, runningToolNames }) };
     } finally {
       await file.close();
     }

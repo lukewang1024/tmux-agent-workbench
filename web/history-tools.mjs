@@ -9,7 +9,7 @@ export class HistoryTools {
   #outputs = new Map();
   #following;
   #currentTurn;
-  running = 0;
+  runningNames = [];
 
   constructor(latest) { this.#currentTurn = latest; }
 
@@ -43,7 +43,7 @@ export class HistoryTools {
     const elapsed = this.#outputs.get(item.call_id) - Date.parse(row.timestamp);
     const state = finished ? 'finished' : this.#currentTurn ? 'running' : 'unconfirmed';
     this.#outputs.delete(item.call_id);
-    if (state === 'running') this.running++;
+    if (state === 'running') this.runningNames.push(item.name);
     this.#calls.push({ name: item.name, state, ...(elapsed >= 0 && { elapsed }) });
   }
 
