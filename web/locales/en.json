@@ -120,7 +120,6 @@
     "workspacePermission": "Ask for approval",
     "readOnlyPermission": "Read only",
     "fullAccessPermission": "Full access",
-    "choosePermission": "Choose a profile",
     "loadingPermissions": "Loading Codex permissions…",
     "noPermissions": "No selectable profiles are available.",
     "chatSuggestions": "Codex suggestions",

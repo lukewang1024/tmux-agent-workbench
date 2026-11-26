@@ -1198,8 +1198,8 @@ async function showPermissionSettings() {
     };
     const knownSettings = chatState.settings(key);
     const currentChoice = profiles.find(({ mode }) => mode && mode === knownSettings.permission?.mode)?.id;
-    setPicker(picker, t('permission'), [{ value: '', label: t('choosePermission') }, ...options],
-      knownSettings.pending?.permission || currentChoice || knownSettings.permission?.id, update);
+    setPicker(picker, t('permission'), options,
+      knownSettings.pending?.permission || currentChoice || knownSettings.permission?.id, update, { selectFirst: false });
     form.append(picker, description, error, submit);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -1681,11 +1681,11 @@ function choice(label, detail, action) {
   return row;
 }
 
-function setPicker(trigger, label, options, value, update) {
-  const selected = options.find((option) => option.value === value) || options[0];
+function setPicker(trigger, label, options, value, update, { selectFirst = true } = {}) {
+  const selected = options.find((option) => option.value === value) ?? (selectFirst ? options[0] : undefined);
   trigger.type = 'button';
   trigger.value = selected?.value || '';
-  trigger.disabled = !selected;
+  trigger.disabled = !options.length;
   trigger.setAttribute('aria-haspopup', 'dialog');
   trigger.setAttribute('aria-controls', 'picker-dialog');
   trigger.setAttribute('aria-label', selected ? label + ' · ' + selected.label : label);
@@ -1704,14 +1704,14 @@ function setPicker(trigger, label, options, value, update) {
       const row = choice(option.label, '', () => {
         pickerDialog.close();
         if (option.value === trigger.value) return;
-        setPicker(trigger, label, options, option.value, update);
+        setPicker(trigger, label, options, option.value, update, { selectFirst });
         update?.(option.value);
       });
       row.setAttribute('aria-current', String(option.value === trigger.value));
       list.append(row);
     }
     pickerDialog.showModal();
-    list.querySelector('[aria-current="true"]')?.focus();
+    (list.querySelector('[aria-current="true"]') || list.firstElementChild)?.focus();
   };
 }
 

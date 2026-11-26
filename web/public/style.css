@@ -335,7 +335,7 @@ button { touch-action: manipulation; }
   min-width: 0;
   min-height: 0;
 }
-.link-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-inline-start: 1px solid var(--line); background: var(--paper); }
+.link-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding-block-end: env(safe-area-inset-bottom); border-inline-start: 1px solid var(--line); background: var(--paper); }
 .link-bar { display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 49px; padding-inline: 5px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .link-bar > .row-action { flex: none; }
 .link-close-narrow { display: none; }
@@ -348,7 +348,7 @@ button { touch-action: manipulation; }
 .link-tab-close .glyph { width: 13px; height: 13px; }
 .link-pages { display: grid; grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; background: var(--paper); }
 .link-page { min-width: 0; min-height: 0; }
-.link-document { overflow: auto; overscroll-behavior: contain; padding: 12px 12px max(12px, env(safe-area-inset-bottom)); font-size: 13px; }
+.link-document { overflow: auto; overscroll-behavior: contain; padding: 12px; font-size: 13px; }
 .link-document :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 12px; }
 .link-preview-status { color: var(--muted); }
 .link-preview-status p + button { margin-top: 8px; }
