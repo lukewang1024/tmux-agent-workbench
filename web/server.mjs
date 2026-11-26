@@ -15,7 +15,7 @@ import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'connection.js', 'link-preview.js', 'terminal.js'];
+const browserModules = ['chat-state.js', 'connection.js', 'dom.js', 'link-panel.js', 'link-preview.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
@@ -111,7 +111,7 @@ async function cachedAssets(locale, palettes) {
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
   const version = fingerprint.digest('hex').slice(0, 16);
-  for (const path of ['/', '/app.js', '/sw.js']) {
+  for (const path of ['/', '/app.js', '/sw.js', ...browserModules.map((name) => '/' + name)]) {
     const asset = loaded.get(path);
     asset.data = Buffer.from(asset.data.toString().replaceAll('WORKBENCH_CACHE_VERSION', version));
   }

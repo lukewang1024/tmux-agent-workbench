@@ -130,6 +130,8 @@ button:disabled { opacity: .51; cursor: default; }
 .detail-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
 .message-navigation { display: flex; flex: none; border-radius: 7px; background: var(--quiet); }
 .message-navigation .row-action { min-width: 34px; min-height: 36px; }
+.preview-toggle { flex: none; }
+.preview-toggle[aria-expanded="true"] { color: var(--accent); background: var(--active); }
 #previous-message .glyph { transform: rotate(180deg); }
 .panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .history { overflow: auto; flex: 1; padding: 8px 12px; }
@@ -373,10 +375,10 @@ button { touch-action: manipulation; }
 .link-frame { display: block; width: 100%; height: 100%; border: 0; }
 #open-link-browser { text-decoration: none; }
 @media (min-width: 1024px) {
-  .app[data-link-preview] .workspace { grid-template-columns: clamp(230px, 21vw, 332px) minmax(0, 1fr) clamp(322px, 34vw, 590px); }
+  .workspace:has(> .link-panel:not([hidden])) { grid-template-columns: clamp(230px, 21vw, 332px) minmax(0, 1fr) clamp(322px, 34vw, 590px); }
 }
 @media (max-width: 1023px) {
-  .app[data-link-preview] :is(#home-bar, #list, #detail) { visibility: hidden; }
+  .app:has(.link-panel:not([hidden])) :is(#home-bar, #list, #detail) { visibility: hidden; }
   .link-panel { position: fixed; z-index: 4; inset: 0; border-inline-start: 0; }
   .link-bar { min-height: calc(43px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
   .link-close-wide { display: none; }

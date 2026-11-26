@@ -1,6 +1,7 @@
 import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
-import { createLinkPage } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
+import { button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
@@ -14,7 +15,6 @@ const overlay = byId('overlay');
 const pickerDialog = byId('picker-dialog');
 const connectionOverlay = byId('connection-overlay');
 const mobile = window.matchMedia('(max-width: 767px)');
-const fullScreenPreview = window.matchMedia('(max-width: 1023px)');
 const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
 const chatInput = byId('chat-input');
 const markdown = window.markdownit({ html: false, breaks: true, linkify: true });
@@ -69,39 +69,14 @@ const terminalView = new TerminalView(byId('term'), {
   translate: t, mobile, available: () => !disconnected && !reauthRequired, requirePasskey, reportError: toast,
 });
 let suppressHoldClick = false;
-const linkTabs = new Map();
-let activeLink = '';
-let linkOpener;
-let nextLinkId = 0;
+const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), {
+  t, markdown, onVisibilityChange: updateLinkHistory,
+});
 
 function t(key, values = {}) {
   const message = messages[key];
   const template = typeof message === 'string' ? message : message[plurals.select(values.count)] || message.other;
   return template.replace(/\{(\w+)\}/g, (_match, name) => values[name]);
-}
-
-function make(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
-}
-
-function button(text, className, action) {
-  const element = make('button', className, text);
-  element.type = 'button';
-  element.addEventListener('click', action);
-  return element;
-}
-
-function glyph(name) {
-  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  const use = document.createElementNS(icon.namespaceURI, 'use');
-  icon.setAttribute('class', 'glyph');
-  icon.setAttribute('aria-hidden', 'true');
-  use.setAttribute('href', '#icon-' + name);
-  icon.append(use);
-  return icon;
 }
 
 function status(id, message = '') {
@@ -230,8 +205,7 @@ function historyView(up) {
 function save(method, up = false) {
   if (history.state?.messageSelection || history.state?.linkPreview) {
     clearMessageSelection();
-    activeLink = '';
-    paintLinkPanel();
+    linkPanel.restore(false);
     method = 'replaceState';
   }
   history[method](historyView(up), '');
@@ -262,7 +236,7 @@ function navigate(target, node = scope) {
 
 function back() {
   if (exitMessageSelection()) return;
-  if (route === 'agents' && activeLink) { closeLinkPanel(); return; }
+  if (route === 'agents' && linkPanel.isOpen) { linkPanel.close(); return; }
   if (history.state?.linkPreview) { history.back(); return; }
   if (history.state?.up) { history.back(); return; }
   opened = false;
@@ -284,7 +258,6 @@ function paint() {
     if (route === 'mine') paintMine();
     paintHeader();
   }
-  paintLinkPanel();
 }
 
 function paintHeader() {
@@ -741,6 +714,7 @@ function paintDetail() {
   byId('detail').hidden = false;
   byId('detail').querySelector('.detail-bar').hidden = !active;
   byId('new-shell').hidden = route !== 'sessions' || !opened || !active?.pane;
+  byId('toggle-link-panel').hidden = route !== 'agents' || !active;
   const empty = byId('detail-empty');
   byId('chat').hidden = !(route === 'agents' && supportsChat());
   if (route !== 'sessions' || !active) byId('session-tree').hidden = true;
@@ -1406,93 +1380,13 @@ function messageMenu(event, select) {
   action.focus();
 }
 
-function openLinkPreview(link) {
-  const url = new URL(link.href);
-  if (!['http:', 'https:'].includes(url.protocol) || url.origin === location.origin) return false;
-  if (!linkTabs.has(url.href)) {
-    const label = link.textContent.trim() || url.hostname;
-    linkTabs.set(url.href, { id: 'link-preview-' + ++nextLinkId, label, page: null });
-  }
-  if (!activeLink && !history.state?.linkPreview) pushChatLayer({ linkPreview: true });
-  linkOpener = link;
-  activeLink = url.href;
-  paintLinkPanel();
-  if (fullScreenPreview.matches) focus('close-link-panel');
-  return true;
-}
-
-function closeLinkPanel() {
-  activeLink = '';
-  paintLinkPanel();
-  if (linkOpener?.isConnected) linkOpener.focus({ preventScroll: true });
+function updateLinkHistory(visible) {
   const { linkPreview, messageSelection } = history.state || {};
-  if (linkPreview && messageSelection) {
+  if (visible) {
+    if (!linkPreview) pushChatLayer({ linkPreview: true });
+  } else if (linkPreview && messageSelection) {
     history.replaceState({ ...history.state, linkPreview: false, linkPreviewDismissed: true }, '');
   } else if (linkPreview) history.back();
-}
-
-function selectLinkTab(url) {
-  activeLink = url;
-  paintLinkPanel();
-  document.getElementById(linkTabs.get(url).id + '-tab').focus();
-}
-
-function closeLinkTab(url) {
-  const keys = [...linkTabs.keys()];
-  const tab = linkTabs.get(url);
-  tab.page?.remove();
-  linkTabs.delete(url);
-  if (!linkTabs.size) closeLinkPanel();
-  else selectLinkTab(url === activeLink ? keys[keys.indexOf(url) + 1] || keys.at(-2) : activeLink);
-}
-
-function paintLinkPanel() {
-  const panel = byId('link-panel');
-  const visible = route === 'agents' && linkTabs.has(activeLink);
-  panel.hidden = !visible;
-  app.toggleAttribute('data-link-preview', visible);
-  if (!visible) {
-    for (const tab of linkTabs.values()) {
-      tab.page?.remove();
-      tab.page = null;
-    }
-    return;
-  }
-  byId('open-link-browser').href = activeLink;
-  const pages = byId('link-pages');
-  const tabs = byId('link-tabs');
-  tabs.replaceChildren(...[...linkTabs].map(([url, tab]) => {
-    const selected = url === activeLink;
-    if (selected && !tab.page) {
-      const page = createLinkPage(new URL(url), tab.label, { t, markdown, openLink: openLinkPreview });
-      page.id = tab.id;
-      page.setAttribute('role', 'tabpanel');
-      page.setAttribute('aria-labelledby', tab.id + '-tab');
-      page.tabIndex = 0;
-      pages.append(page);
-      tab.page = page;
-    }
-    if (tab.page) tab.page.hidden = !selected;
-    const controls = make('div', 'link-tab');
-    controls.setAttribute('role', 'presentation');
-    const title = button(tab.label, 'link-tab-title', () => selectLinkTab(url));
-    title.id = tab.id + '-tab';
-    title.title = url;
-    title.setAttribute('role', 'tab');
-    title.setAttribute('aria-selected', String(selected));
-    title.tabIndex = selected ? 0 : -1;
-    if (tab.page) title.setAttribute('aria-controls', tab.id);
-    const close = button('', 'link-tab-close', () => closeLinkTab(url));
-    close.title = t('closeLinkTab', { page: tab.label });
-    close.setAttribute('aria-label', close.title);
-    close.append(glyph('close'));
-    controls.append(title, close);
-    return controls;
-  }));
-  const current = tabs.querySelector('[aria-selected="true"]');
-  if (current.offsetLeft < tabs.scrollLeft || current.offsetLeft + current.offsetWidth > tabs.scrollLeft + tabs.clientWidth) {
-    current.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }
 }
 
 function paintMessageSelection() {
@@ -1612,7 +1506,7 @@ function renderHistory(target, added, older) {
       }
       if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       const link = event.target.closest('a[href]');
-      if (link && openLinkPreview(link)) event.preventDefault();
+      if (link && linkPanel.openLink(link)) event.preventDefault();
     });
     const sender = make('span', '', human ? t('you') : 'Codex');
     meta.append(...(human ? [sender, pick] : [pick, sender]));
@@ -2061,10 +1955,7 @@ function signedOut() {
   suggestionCache.clear();
   stopping = null;
   byId('outgoing-messages').replaceChildren();
-  activeLink = '';
-  byId('link-pages').replaceChildren();
-  linkTabs.clear();
-  linkOpener = null;
+  linkPanel.reset();
   byId('messages').replaceChildren();
   byId('groups').replaceChildren();
   byId('node-list').replaceChildren();
@@ -2114,17 +2005,6 @@ byId('chat-menu').addEventListener('click', () => {
   const pinned = machine.pinnedAgents?.some((card) => card.pane?.window === active.pane.window);
   showRecordMenu(active, machine, pinned);
 });
-byId('close-link-panel').addEventListener('click', closeLinkPanel);
-byId('link-tabs').addEventListener('keydown', (event) => {
-  if (event.target.getAttribute('role') !== 'tab') return;
-  const keys = [...linkTabs.keys()];
-  const current = keys.indexOf(activeLink);
-  const index = { ArrowLeft: (current + keys.length - 1) % keys.length,
-    ArrowRight: (current + 1) % keys.length, Home: 0, End: keys.length - 1 }[event.key];
-  if (!Number.isInteger(index)) return;
-  event.preventDefault();
-  selectLinkTab(keys[index]);
-});
 byId('mine-back').addEventListener('click', back);
 byId('picker-close').addEventListener('click', () => pickerDialog.close());
 pickerDialog.addEventListener('click', (event) => { if (event.target === pickerDialog) pickerDialog.close(); });
@@ -2151,9 +2031,9 @@ byId('copy-selection').addEventListener('click', () => copyMessages(selectedMess
 byId('share-selection').addEventListener('click', shareMessages);
 document.addEventListener('keydown', (event) => {
   if (route !== 'agents' || overlay.open || pickerDialog.open) return;
-  if (event.key === 'Escape' && (transcript?.selected || activeLink)) {
+  if (event.key === 'Escape' && (transcript?.selected || linkPanel.isOpen)) {
     event.preventDefault();
-    if (!exitMessageSelection()) closeLinkPanel();
+    if (!exitMessageSelection()) linkPanel.close();
   } else if (transcript?.selected && !event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
       && !event.target.closest?.('input:not([type="checkbox"]),textarea,[contenteditable]')
       && !window.getSelection()?.toString() && transcript.selected.size) {
@@ -2257,12 +2137,10 @@ window.addEventListener('popstate', (event) => {
   const sameChat = route === 'agents' && saved.route === route && saved.scope === scope
     && saved.opened === opened && saved.selected === activeKey;
   // The panel can be closed while the chat's selection entry is still active.
-  if (sameChat && saved.linkPreview && !saved.messageSelection && !activeLink && clearMessageSelection()) {
+  if (sameChat && saved.linkPreview && !saved.messageSelection && !linkPanel.isOpen && clearMessageSelection()) {
     history.back();
     return;
   }
-  const previewWasOpen = Boolean(activeLink);
-  activeLink = saved.linkPreview ? activeLink || [...linkTabs.keys()].at(-1) || '' : '';
   if (!sameChat) {
     clearMessageSelection();
     route = saved.route === 'login' ? 'agents' : saved.route;
@@ -2276,10 +2154,7 @@ window.addEventListener('popstate', (event) => {
     transcript.selected ??= new Set();
     paintMessageSelection();
   } else clearMessageSelection();
-  if (sameChat) {
-    paintLinkPanel();
-    if (previewWasOpen && !activeLink && linkOpener?.isConnected) linkOpener.focus({ preventScroll: true });
-  }
+  linkPanel.restore(route === 'agents' && Boolean(saved.linkPreview), sameChat);
   if (route === 'mine') { if (minePage === 'keys') loadKeys(); else loadUsage(); }
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
