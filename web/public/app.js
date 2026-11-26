@@ -828,7 +828,6 @@ function paintComposer() {
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
   display.title = active.state === 'blocked' ? t('agentBlocked') : ready ? '' : t('agentInputUnavailable');
-  byId('working-dots').hidden = !working;
   const stop = byId('stop-agent');
   const pendingStop = stopping?.key === activeKey;
   if (pendingStop && !working) stopping = null;
@@ -862,7 +861,9 @@ function paintComposer() {
   ].filter(Boolean).join('\n');
   permissions.setAttribute('aria-label', t('permission') + ' · ' + permissions.title.replace('\n', ' · '));
   byId('chat-next-turn').hidden = !queued?.model && !queued?.permission;
-  byId('composer-label').style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
+  const composerLabel = byId('composer-label');
+  composerLabel.style.setProperty('--state-color', stateToken(active.state, { id: active.node }));
+  composerLabel.toggleAttribute('data-working', working);
   if (overlay.open && modelEditor?.form.isConnected) modelEditor.update();
   resizeComposer();
 }
