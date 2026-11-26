@@ -404,7 +404,11 @@ button { touch-action: manipulation; }
 .link-preview-status p + button { margin-top: 8px; }
 .link-load-button { min-height: 34px; padding-inline: 10px; font-size: 12px; }
 .link-diff-heading { margin: 0 0 10px; overflow-wrap: anywhere; font-size: 14px; }
-.workbench-link-frame body { margin: 0; overflow: auto; background: var(--paper); }
+/* Keep the frame viewport fixed and scroll the document inside it. */
+.workbench-link-frame, .workbench-link-frame body { block-size: 100%; overflow: clip; }
+.workbench-link-frame body { margin: 0; background: var(--paper); }
+.workbench-link-frame .link-document { box-sizing: border-box; block-size: 100%; }
+.workbench-link-frame .link-document:focus-visible { outline-offset: -2px; }
 .link-diff-file { margin-block-end: 5px; border: 1px solid var(--line); border-radius: 6px; }
 .link-diff-file summary { padding: 7px 9px; cursor: pointer; background: var(--quiet); overflow-wrap: anywhere; }
 .link-diff-path { font-size: 12px; font-weight: 620; }

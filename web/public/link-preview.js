@@ -168,7 +168,7 @@ function renderContentFrame(page, source, { label, onEscape }, render) {
   // The parent builds the preview and owns its interactions. The frame runs no scripts.
   const frame = linkFrame(label, 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<main class="link-document"></main>';
+    + '<main class="link-document" tabindex="0"></main>';
   frame.addEventListener('load', () => {
     const frameDocument = frame.contentDocument;
     const content = frameDocument?.querySelector('main');
