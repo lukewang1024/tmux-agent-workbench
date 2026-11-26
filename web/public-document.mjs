@@ -2,6 +2,7 @@ import { Agent, get } from 'node:https';
 import { Failure } from './state.mjs';
 
 const agent = new Agent({ proxyEnv: process.env });
+const upstreamStatuses = new Set([403, 404, 408, 410, 429, 500, 502, 503, 504]);
 
 // Callers supply only URLs admitted by their own host and path rules.
 export async function readPublicDocument(url, { mime, limit, timeout = 8_000 }) {
@@ -12,7 +13,8 @@ export async function readPublicDocument(url, { mime, limit, timeout = 8_000 }) 
     });
     if (response.statusCode !== 200 || response.headers['content-type']?.split(';', 1)[0] !== mime) {
       response.destroy();
-      throw new Failure(response.statusCode === 404 ? 404 : 502, 'Could not load the document preview.');
+      const status = upstreamStatuses.has(response.statusCode) ? response.statusCode : 415;
+      throw new Failure(status, 'Could not load the document preview.');
     }
     const chunks = [];
     let size = 0;
@@ -24,6 +26,7 @@ export async function readPublicDocument(url, { mime, limit, timeout = 8_000 }) 
     return Buffer.concat(chunks);
   } catch (error) {
     if (error instanceof Failure) throw error;
-    throw new Failure(502, 'Could not load the document preview.');
+    const status = error.name === 'AbortError' || error.code === 'ETIMEDOUT' ? 504 : 424;
+    throw new Failure(status, 'Could not load the document preview.');
   }
 }

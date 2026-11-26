@@ -13,12 +13,17 @@ const githubImages = docsOrigin + '/assets/images/';
 const githubSections = new Set(['apps', 'collections', 'features', 'marketplace', 'orgs', 'settings', 'topics']);
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
+const temporaryStatuses = new Set([408, 500, 502, 503, 504]);
+
+function githubMarkdownEndpoint(path) {
+  return '/api/github-markdown?' + new URLSearchParams({ path });
+}
 
 function githubSource(path) {
   const raw = githubMarkdownURL(path);
   if (raw) {
     const repository = raw.pathname.split('/').slice(1, 3).join('/');
-    return { kind: 'article', endpoint: '/api/github-markdown?' + new URLSearchParams({ path }),
+    return { kind: 'article', endpoint: githubMarkdownEndpoint(path),
       mime: 'text/plain', imageRoot: raw.origin + '/' + repository + '/', raw: raw.href };
   }
   const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(path);
@@ -75,39 +80,57 @@ function action(label, click) {
   return button;
 }
 
-class PreviewError extends Error {
-  constructor(message, retryable = false) {
-    super(message);
-    this.retryable = retryable;
+class PreviewError extends Error {}
+
+export function previewResponseError(response, mime, endpoint) {
+  if (response.ok && response.headers.get('content-type')?.split(';', 1)[0] === mime) return null;
+  const github = String(endpoint).startsWith('https://api.github.com/');
+  if (response.status === 429 || (github && response.status === 403
+      && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')))) {
+    return 'linkPreviewRateLimit';
   }
+  if (temporaryStatuses.has(response.status)) return 'linkPreviewTemporary';
+  return 'linkPreviewUnavailable';
 }
 
 async function publicContent(endpoint, accept, mime = accept) {
-  const response = await fetch(endpoint, {
-    credentials: typeof endpoint === 'string' && endpoint.startsWith('/api/') ? 'same-origin' : 'omit',
-    redirect: 'error',
-    referrerPolicy: 'no-referrer',
-    headers: { accept },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (response.ok && response.headers.get('content-type')?.split(';', 1)[0] === mime) {
-    return response;
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      credentials: typeof endpoint === 'string' && endpoint.startsWith('/api/') ? 'same-origin' : 'omit',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+      headers: { accept },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    throw new PreviewError(error.name === 'TimeoutError' ? 'linkPreviewTemporary' : 'linkPreviewUnavailable');
   }
-  if (response.status === 404) throw new PreviewError('linkPreviewUnavailable');
-  if (response.status === 429 || response.headers.get('x-ratelimit-remaining') === '0') {
-    throw new PreviewError('linkPreviewRateLimit', true);
-  }
-  throw new PreviewError('linkPreviewFailed', true);
+  const error = previewResponseError(response, mime, endpoint);
+  if (error) throw new PreviewError(error);
+  return response;
 }
 
-async function loadContent(status, read, t) {
+async function loadContent(status, read, t, url) {
   status.textContent = t('loadingLinkPreview');
   try {
     status.replaceWith(...await read());
   } catch (error) {
     const known = error instanceof PreviewError;
-    status.replaceChildren(element('p', '', t(known ? error.message : 'linkPreviewFailed')));
-    if (!known || error.retryable) status.append(action(t('retryLinkPreview'), () => loadContent(status, read, t)));
+    const message = known ? error.message : url ? 'linkPreviewUnavailable' : 'linkPreviewFailed';
+    status.replaceChildren(element('p', '', t(message)));
+    const actions = element('div', 'link-preview-actions');
+    if (url) {
+      const original = element('a', 'secondary link-load-button', t('openInBrowser'));
+      original.href = url.href;
+      original.target = '_blank';
+      original.rel = 'noopener noreferrer';
+      actions.append(original);
+    }
+    if (message === 'linkPreviewTemporary' || (!known && !url)) {
+      actions.append(action(t('retryLinkPreview'), () => loadContent(status, read, t, url)));
+    }
+    if (actions.childElementCount) status.append(actions);
   }
 }
 
@@ -142,7 +165,7 @@ function diffFile(file, t) {
   return details;
 }
 
-function renderDiff(page, source, t) {
+function renderDiff(page, source, url, t) {
   const status = statusBlock();
   page.append(element('h2', 'link-diff-heading', source.label), status);
   async function read(number) {
@@ -154,13 +177,13 @@ function renderDiff(page, source, t) {
     if (!entries.length && number === 1) entries.push(element('p', 'link-preview-status', t('githubNoChanges')));
     if (number < maxDiffPages && /;\s*rel="next"/.test(response.headers.get('link') || '')) {
       const more = statusBlock();
-      const loadMore = action(t('githubLoadFiles'), () => loadContent(more, () => read(number + 1), t));
+      const loadMore = action(t('githubLoadFiles'), () => loadContent(more, () => read(number + 1), t, url));
       more.append(loadMore);
       entries.push(more);
     }
     return entries;
   }
-  loadContent(status, () => read(1), t);
+  loadContent(status, () => read(1), t, url);
 }
 
 function linkFrame(label, sandbox) {
@@ -245,23 +268,7 @@ function prepareImages(fragment, source, origin) {
 
 let readmeMarkdown;
 
-async function readArticle(source, url, markdown) {
-  if (source.kind !== 'readme') {
-    const response = await publicContent(source.endpoint, source.mime);
-    const raw = await response.text();
-    return { html: markdown.render(source.mdn ? mdnMarkdown(raw) : raw), base: url };
-  }
-
-  const response = await publicContent(source.endpoint, 'application/vnd.github+json', 'application/json');
-  const { content, encoding, size, name, html_url: htmlURL } = await response.json();
-  if (encoding !== 'base64' || !content || size > 512 * 1024) throw new PreviewError('linkPreviewUnavailable');
-  const raw = new TextDecoder().decode(Uint8Array.from(atob(content), (char) => char.charCodeAt(0)));
-  const repository = url.pathname.replace(/\/$/, '');
-  let base = new URL(repository + '/blob/HEAD/README', githubOrigin);
-  if (typeof htmlURL === 'string' && htmlURL.toLowerCase().startsWith((githubOrigin + repository + '/blob/').toLowerCase())) {
-    base = new URL(htmlURL);
-  }
-  if (!/\.(?:md|markdown|mdown|mkdn|mkd|mdwn)$/i.test(name)) return { plain: raw, base };
+function renderReadme(raw, base) {
   if (!readmeMarkdown) {
     // Parse GitHub's inline HTML syntax, but omit raw HTML from the preview.
     readmeMarkdown = window.markdownit({ html: true, linkify: true });
@@ -269,6 +276,35 @@ async function readArticle(source, url, markdown) {
     readmeMarkdown.renderer.rules.html_inline = () => '';
   }
   return { html: readmeMarkdown.render(raw), base };
+}
+
+async function readGitHubReadme(source, url) {
+  const repository = url.pathname.replace(/\/$/, '');
+  const path = repository + '/blob/HEAD/README.md';
+  const base = new URL(path, githubOrigin);
+  try {
+    const response = await publicContent(source.endpoint, 'application/vnd.github+json', 'application/json');
+    const { content, encoding, size, name, html_url: htmlURL } = await response.json();
+    if (encoding !== 'base64' || !content || size > 512 * 1024) throw new PreviewError('linkPreviewUnavailable');
+    const raw = new TextDecoder().decode(Uint8Array.from(atob(content), (char) => char.charCodeAt(0)));
+    const documentURL = typeof htmlURL === 'string' && htmlURL.toLowerCase().startsWith((githubOrigin + repository + '/blob/').toLowerCase())
+      ? new URL(htmlURL) : base;
+    if (!/\.(?:md|markdown|mdown|mkdn|mkd|mdwn)$/i.test(name)) return { plain: raw, base: documentURL };
+    return renderReadme(raw, documentURL);
+  } catch (error) {
+    // Public root READMEs can also be fetched without the REST API's anonymous quota.
+    try {
+      const response = await publicContent(githubMarkdownEndpoint(path), 'text/plain');
+      return renderReadme(await response.text(), base);
+    } catch { throw error; }
+  }
+}
+
+async function readArticle(source, url, markdown) {
+  if (source.kind === 'readme') return readGitHubReadme(source, url);
+  const response = await publicContent(source.endpoint, source.mime);
+  const raw = await response.text();
+  return { html: markdown.render(source.mdn ? mdnMarkdown(raw) : raw), base: url };
 }
 
 function bindArticleLinks(article, url, base, openLink) {
@@ -318,7 +354,7 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
     article.append(template.content);
     bindArticleLinks(article, url, base, openLink);
     return [article];
-  }, t);
+  }, t, url);
 }
 
 export function createLinkPage(url, source, options) {
@@ -351,7 +387,7 @@ export function createLinkPage(url, source, options) {
     return page;
   }
   renderContentFrame(page, source, options, (content) => {
-    if (source.kind === 'diff') renderDiff(content, source, options.t);
+    if (source.kind === 'diff') renderDiff(content, source, url, options.t);
     else renderArticle(content, source, url, options);
   });
   return page;

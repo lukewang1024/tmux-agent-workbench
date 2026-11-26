@@ -10,7 +10,7 @@ export async function readReaderSource(value) {
   const limits = { mime: 'text/html', limit: 2 * 1024 * 1024 };
   if (source.hostname !== webDevMirror) {
     try { return await readPublicDocument(source, { ...limits, timeout: 3_000 }); }
-    catch (error) { if (error.status !== 502) throw error; }
+    catch (error) { if (error.status === 404 || error.status === 413) throw error; }
     source.hostname = webDevMirror;
   }
   return readPublicDocument(source, { ...limits, timeout: 5_000 });

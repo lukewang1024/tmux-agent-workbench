@@ -34,8 +34,10 @@ preview iframe. Allowlisted web.dev articles and guides use Readability in the
 same viewer. Smart preview sends other web links to the browser, including
 Android App Links. **Always use iframe (testing)** uses the same previews and
 attempts to embed other external HTTP(S) links directly. Sites can deny direct
-embedding. **Always use browser** opens all web links externally. Use **Open in
-browser** in the preview toolbar to follow the source.
+embedding. **Always use browser** opens all web links externally. Failed web
+previews offer **Open in browser**. A retry is available for temporary service
+failures. If the GitHub README API is unavailable, Workbench can load a public
+`README.md` from the repository root.
 
 Local file links open in the panel in every mode. The Agent machine reads UTF-8
 text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's

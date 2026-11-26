@@ -5,10 +5,26 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { readWorkspaceFile } from '../file-preview.mjs';
 import { githubMarkdownURL, readerURL, workspaceLink } from '../public/link-policy.js';
-import { linkPreviewSource } from '../public/link-preview.js';
+import { linkPreviewSource, previewResponseError } from '../public/link-preview.js';
 import { androidDocURL } from '../android-docs.mjs';
 
 const source = (url) => linkPreviewSource(new URL(url));
+
+test('web preview failures distinguish rate limits, temporary service errors, and unavailable content', () => {
+  const github = 'https://api.github.com/repos/owner/project/readme';
+  const markdown = '/api/github-markdown';
+  const error = (status, headers, endpoint = github) =>
+    previewResponseError(new Response(null, { status, headers }), 'application/json', endpoint);
+  assert.equal(error(200, { 'content-type': 'application/json; charset=utf-8', 'x-ratelimit-remaining': '0' }), null);
+  assert.equal(error(200, { 'content-type': 'text/html', 'x-ratelimit-remaining': '0' }), 'linkPreviewUnavailable');
+  assert.equal(error(403), 'linkPreviewUnavailable');
+  assert.equal(error(403, { 'x-ratelimit-remaining': '0' }), 'linkPreviewRateLimit');
+  assert.equal(error(403, { 'retry-after': '60' }), 'linkPreviewRateLimit');
+  assert.equal(error(403, { 'x-ratelimit-remaining': '0' }, markdown), 'linkPreviewUnavailable');
+  assert.equal(error(429, {}, markdown), 'linkPreviewRateLimit');
+  assert.equal(error(503), 'linkPreviewTemporary');
+  for (const status of [401, 404, 410, 413, 415, 424, 501]) assert.equal(error(status), 'linkPreviewUnavailable');
+});
 
 test('GitHub links resolve only to the public preview endpoints', () => {
   assert.deepEqual(source('https://github.com/owner/repository/pull/42/files?ignored=1#fragment'), {
