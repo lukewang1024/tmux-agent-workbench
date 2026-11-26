@@ -1,7 +1,8 @@
-import { button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
-import { createLinkPage } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
+import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { createLinkPage, linkPreviewSource } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
 
 export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange }) {
+  const backButton = panel.querySelector('#back-link-panel');
   const closeButton = panel.querySelector('#close-link-panel');
   const openInBrowser = panel.querySelector('#open-link-browser');
   const tabList = panel.querySelector('#link-tabs');
@@ -21,7 +22,7 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
     tabList.replaceChildren(...Array.from(tabs, ([url, tab]) => {
       const current = url === selected;
       if (current && !tab.page) {
-        const page = createLinkPage(new URL(url), tab.label, { t, markdown, openLink });
+        const page = createLinkPage(new URL(url), tab.source, { t, markdown, openLink });
         page.id = tab.id;
         page.setAttribute('role', 'tabpanel');
         page.setAttribute('aria-labelledby', tab.id + '-tab');
@@ -62,7 +63,7 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
     toggle.setAttribute('aria-label', toggle.title);
     if (visible) {
       renderTabs();
-      if (!wasVisible && fullScreen.matches) closeButton.focus({ preventScroll: true });
+      if (!wasVisible && fullScreen.matches) backButton.focus({ preventScroll: true });
     } else if (wasVisible && returnFocus) {
       (opener?.isConnected ? opener : toggle).focus({ preventScroll: true });
     }
@@ -81,10 +82,11 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
 
   function openLink(link) {
     const url = new URL(link.href);
-    if (!['http:', 'https:'].includes(url.protocol) || url.origin === location.origin) return false;
+    const source = linkPreviewSource(url);
+    if (!source || url.origin === location.origin) return false;
     if (!tabs.has(url.href)) {
       const label = link.textContent.trim() || url.hostname;
-      tabs.set(url.href, { id: 'link-preview-' + ++nextId, label, page: null });
+      tabs.set(url.href, { id: 'link-preview-' + ++nextId, label, source, page: null });
     }
     if (!panel.contains(link)) opener = link;
     selected = url.href;
@@ -113,6 +115,7 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
     if (visible) close();
     else show();
   });
+  bindBackButton(backButton, close);
   closeButton.addEventListener('click', close);
   tabList.addEventListener('keydown', (event) => {
     if (event.target.getAttribute('role') !== 'tab') return;

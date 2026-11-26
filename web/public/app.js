@@ -1,6 +1,6 @@
 import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
-import { button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
@@ -72,6 +72,7 @@ let suppressHoldClick = false;
 const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), {
   t, markdown, onVisibilityChange: updateLinkHistory,
 });
+const setDetailBackLabel = bindBackButton(byId('back'), back);
 
 function t(key, values = {}) {
   const message = messages[key];
@@ -1398,7 +1399,7 @@ function paintMessageSelection() {
   byId('chat-menu').hidden = selecting || route !== 'agents' || !supportsChat() || !active.pane;
   byId('chat-actions').hidden = !selecting || route !== 'agents' || !supportsChat()
     || transcript?.key !== conversationKey() || !transcript.rows.size;
-  byId('back').setAttribute('aria-label', t(selecting ? 'cancelMessageSelection'
+  setDetailBackLabel(t(selecting ? 'cancelMessageSelection'
     : route === 'agents' ? 'backToAgents' : 'backToSessions'));
   byId('messages').classList.toggle('selecting', selecting);
   byId('copy-selection').hidden = !selecting;
@@ -2001,14 +2002,13 @@ byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
 byId('new-agent').addEventListener('click', newAgentSheet);
 byId('new-shell').addEventListener('click', shellSheet);
-byId('back').addEventListener('click', back);
 byId('chat-menu').addEventListener('click', () => {
   const machine = machines.find(({ id }) => id === active?.node);
   if (byId('chat-menu').hidden || !machine) return;
   const pinned = machine.pinnedAgents?.some((card) => card.pane?.window === active.pane.window);
   showRecordMenu(active, machine, pinned);
 });
-byId('mine-back').addEventListener('click', back);
+bindBackButton(byId('mine-back'), back);
 byId('picker-close').addEventListener('click', () => pickerDialog.close());
 pickerDialog.addEventListener('click', (event) => { if (event.target === pickerDialog) pickerDialog.close(); });
 pickerDialog.addEventListener('keydown', (event) => {

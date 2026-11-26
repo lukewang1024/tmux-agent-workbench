@@ -25,7 +25,16 @@ test('GitHub links resolve only to the public preview endpoints', () => {
   assert.equal(source('https://github.com:8080/owner/repository/pull/42/files'), null);
   assert.equal(source('https://secret@github.com/owner/repository/pull/42/files'), null);
   assert.equal(source('https://docs.github.com/api/article/body'), null);
-  assert.equal(source('https://example.com/owner/repository/pull/42/files'), undefined);
+  assert.equal(source('https://example.com/owner/repository/pull/42/files'), null);
+});
+
+test('unrecognized HTTPS links and Android app intents are left to the browser', () => {
+  assert.equal(source('https://maps.app.goo.gl/example'), null);
+  assert.equal(source('https://play.google.com/store/apps/details?id=example.app'), null);
+  assert.equal(source('https://github.com/apps/example'), null);
+  assert.equal(source('https://github.com/owner/repository/pull/42'), null);
+  assert.equal(source('intent://example/#Intent;scheme=https;end'), null);
+  assert.equal(source('http://github.com/owner/repository'), null);
 });
 
 test('MDN documentation links map to the corresponding public Markdown source', () => {

@@ -21,3 +21,15 @@ export function glyph(name) {
   icon.append(use);
   return icon;
 }
+
+export function bindBackButton(element, onBack) {
+  function setLabel(label) {
+    element.setAttribute('aria-label', label);
+    element.title = label;
+  }
+  element.classList.add('back-button');
+  element.replaceChildren(glyph('back'));
+  element.addEventListener('click', onBack);
+  setLabel(element.getAttribute('aria-label'));
+  return setLabel;
+}

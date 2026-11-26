@@ -15,6 +15,7 @@
     "linkTabs": "Link tabs",
     "openLinkPreview": "Open link preview",
     "closeLinkPreview": "Close link preview",
+    "backToConversation": "Back to conversation",
     "noPreviewTabs": "No links open yet.",
     "closeLinkTab": "Close {page}",
     "openInBrowser": "Open in browser",

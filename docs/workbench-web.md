@@ -27,6 +27,12 @@ available in its workspace. Selecting a suggestion fills in the draft. Send a
 slash command to run it, and open the session Pane for commands that require
 further terminal interaction. Drafts and failed sends stay in the browser.
 
+Links to public GitHub repository READMEs, GitHub pull request file diffs, and
+documentation from GitHub Docs, MDN and Android Developers open in the preview
+panel. These previews use the site's public content source. Other links open
+through the browser so Android can route verified App Links to installed apps.
+Use **Open in browser** in the preview toolbar to follow the original link.
+
 The provider marks identify the Agent CLIs in the list and belong to their
 respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],
 the [Anthropic press kit], [OpenCode's brand assets], and the [TRAE website].

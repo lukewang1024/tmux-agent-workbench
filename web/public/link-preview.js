@@ -5,16 +5,17 @@ const rawOrigin = 'https://raw.githubusercontent.com';
 const androidOrigin = 'https://developer.android.com';
 const androidMirror = 'https://developer.android.google.cn';
 const githubImages = docsOrigin + '/assets/images/';
+const githubSections = new Set(['apps', 'collections', 'features', 'marketplace', 'orgs', 'settings', 'topics']);
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
 export function linkPreviewSource(url) {
-  if (!['github.com', 'docs.github.com', 'developer.mozilla.org', 'developer.android.com', 'developer.android.google.cn'].includes(url.hostname)) return undefined;
   if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
   if (url.origin === githubOrigin) {
     const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(url.pathname);
     if (!match) return null;
     const [, owner, repo, pull] = match;
+    if (githubSections.has(owner.toLowerCase())) return null;
     const endpoint = 'https://api.github.com/repos/' + owner + '/' + repo;
     if (!pull) return { kind: 'readme', endpoint: endpoint + '/readme' };
     return { kind: 'diff', label: owner + '/' + repo + ' #' + pull,
@@ -236,7 +237,6 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
       const href = link.getAttribute('href');
       let target;
       try { target = new URL(href, href.startsWith('#') ? url : base); } catch { continue; }
-      if (target.protocol !== 'https:' && target.protocol !== 'http:') continue;
       link.href = target.href;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
@@ -254,19 +254,9 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
   }, t);
 }
 
-export function createLinkPage(url, label, options) {
-  const source = linkPreviewSource(url);
-  const page = element('section', source === undefined ? 'link-page' : 'link-page link-document');
-  if (source === undefined) {
-    const frame = element('iframe', 'link-frame');
-    frame.title = label;
-    frame.setAttribute('sandbox', 'allow-scripts allow-forms');
-    frame.referrerPolicy = 'no-referrer';
-    frame.src = url.href;
-    page.append(frame);
-  } else if (!source) {
-    page.append(element('p', 'link-preview-status', options.t('linkPreviewUnavailable')));
-  } else if (source.kind === 'diff') {
+export function createLinkPage(url, source, options) {
+  const page = element('section', 'link-page link-document');
+  if (source.kind === 'diff') {
     renderDiff(page, source, options.t);
   } else {
     renderArticle(page, source, url, options);

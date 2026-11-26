@@ -15,6 +15,7 @@
     "linkTabs": "链接标签页",
     "openLinkPreview": "展开链接预览",
     "closeLinkPreview": "关闭链接预览",
+    "backToConversation": "返回对话",
     "noPreviewTabs": "还没有打开链接。",
     "closeLinkTab": "关闭 {page}",
     "openInBrowser": "在浏览器中打开",
