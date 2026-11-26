@@ -50,10 +50,6 @@ export class TerminalView {
     });
   }
 
-  hasInputFocus() {
-    return document.activeElement === this.#input || document.activeElement === this.#current?.xterm.textarea;
-  }
-
   updateTheme() {
     if (this.#current) this.#current.xterm.options.theme = terminalTheme();
   }

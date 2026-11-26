@@ -41,7 +41,11 @@ function security(res) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body; frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  const mdnContent = 'https://raw.githubusercontent.com/mdn/content/main/files/ https://raw.githubusercontent.com/mdn/translated-content/main/files/';
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    + "img-src 'self' data: https://docs.github.com/assets/images/ " + mdnContent + "; "
+    + "connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body " + mdnContent + "; "
+    + "frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
 function json(res, result, status = 200) {

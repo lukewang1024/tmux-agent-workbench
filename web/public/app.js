@@ -2279,22 +2279,20 @@ for (const type of ['pointerdown', 'click', 'contextmenu', 'submit', 'keydown'])
 }
 
 const viewport = window.visualViewport;
-let width = window.innerWidth;
-let fullHeight = viewport?.height ?? window.innerHeight;
-function keyboard() {
-  const editing = document.activeElement === chatInput || terminalView.hasInputFocus();
-  const height = viewport?.height ?? window.innerHeight;
-  if (!editing || width !== window.innerWidth) { width = window.innerWidth; fullHeight = height; }
-  const visible = mobile.matches && editing && (viewport?.scale ?? 1) < 1.05 && fullHeight - height > 125;
-  app.toggleAttribute('data-ime', visible);
-  if (visible) app.style.setProperty('--ime-height', height + 'px');
+function fitViewport() {
+  const height = viewport?.height || 0;
+  // Focus can leave the editor before the keyboard restores the visual viewport.
+  const reduced = mobile.matches && height > 0 && viewport.scale < 1.05 && window.innerHeight - height > 1;
+  app.toggleAttribute('data-ime', reduced);
+  if (reduced) app.style.setProperty('--ime-height', height + 'px');
   else app.style.removeProperty('--ime-height');
   resizeComposer();
 }
-window.addEventListener('resize', keyboard);
-viewport?.addEventListener('resize', keyboard);
-document.addEventListener('focusin', keyboard);
-document.addEventListener('focusout', () => requestAnimationFrame(keyboard));
+window.addEventListener('resize', fitViewport);
+window.addEventListener('pageshow', fitViewport);
+viewport?.addEventListener('resize', fitViewport);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) fitViewport(); });
+fitViewport();
 byId('chat-form').addEventListener('pointerdown', (event) => {
   if (document.activeElement === chatInput && event.target.closest('button')) event.preventDefault();
 });

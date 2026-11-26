@@ -1,11 +1,14 @@
 const githubOrigin = 'https://github.com';
 const docsOrigin = 'https://docs.github.com';
+const mdnOrigin = 'https://developer.mozilla.org';
+const rawOrigin = 'https://raw.githubusercontent.com';
+const githubImages = docsOrigin + '/assets/images/';
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
-export function githubPreviewSource(url) {
-  if (url.hostname !== 'github.com' && url.hostname !== 'docs.github.com') return undefined;
-  if (url.username || url.password) return null;
+export function linkPreviewSource(url) {
+  if (!['github.com', 'docs.github.com', 'developer.mozilla.org'].includes(url.hostname)) return undefined;
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
   if (url.origin === githubOrigin) {
     const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})\/pull\/([1-9]\d{0,14})\/files\/?$/i.exec(url.pathname);
     if (!match) return null;
@@ -13,9 +16,20 @@ export function githubPreviewSource(url) {
     return { kind: 'diff', label: owner + '/' + repo + ' #' + pull,
       endpoint: 'https://api.github.com/repos/' + owner + '/' + repo + '/pulls/' + pull + '/files' };
   }
-  if (url.origin !== docsOrigin || !/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/[a-z\d][a-z\d.@_-]*){2,}\/?$/i.test(url.pathname)) return null;
-  return { kind: 'article', endpoint: docsOrigin + '/api/article/body?' +
-    new URLSearchParams({ pathname: url.pathname.replace(/\/$/, '') }) };
+  if (url.origin === docsOrigin) {
+    if (!/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/[a-z\d][a-z\d.@_-]*){2,}\/?$/i.test(url.pathname)) return null;
+    return { kind: 'article', endpoint: docsOrigin + '/api/article/body?' +
+      new URLSearchParams({ pathname: url.pathname.replace(/\/$/, '') }),
+    mime: 'text/markdown', imageRoot: githubImages };
+  }
+  if (url.origin !== mdnOrigin) return null;
+  const match = /^\/([a-z]{2}(?:-[a-z]{2})?)\/docs\/([a-z\d_-]+(?:\/[a-z\d_.-]+)*)\/?$/i.exec(url.pathname);
+  if (!match) return null;
+  const [, language, slug] = match.map((part) => part.toLowerCase());
+  const repo = language === 'en-us' ? 'content' : 'translated-content';
+  const imageRoot = rawOrigin + '/mdn/' + repo + '/main/files/';
+  return { kind: 'article', endpoint: imageRoot + language + '/' + slug + '/index.md',
+    mime: 'text/plain', imageRoot };
 }
 
 function element(tag, className, text) {
@@ -39,7 +53,7 @@ class PreviewError extends Error {
   }
 }
 
-async function publicContent(endpoint, accept) {
+async function publicContent(endpoint, accept, mime = accept) {
   const response = await fetch(endpoint, {
     credentials: 'omit',
     redirect: 'error',
@@ -47,14 +61,14 @@ async function publicContent(endpoint, accept) {
     headers: { accept },
     signal: AbortSignal.timeout(10_000),
   });
-  if (response.ok && response.headers.get('content-type')?.includes(accept.includes('json') ? 'application/json' : 'text/markdown')) {
+  if (response.ok && response.headers.get('content-type')?.split(';', 1)[0] === mime) {
     return response;
   }
-  if (response.status === 404) throw new PreviewError('githubPreviewUnavailable');
+  if (response.status === 404) throw new PreviewError('linkPreviewUnavailable');
   if (response.status === 429 || response.headers.get('x-ratelimit-remaining') === '0') {
-    throw new PreviewError('githubPreviewRateLimit', true);
+    throw new PreviewError('linkPreviewRateLimit', true);
   }
-  throw new PreviewError('githubPreviewFailed', true);
+  throw new PreviewError('linkPreviewFailed', true);
 }
 
 async function loadContent(status, read, t) {
@@ -63,7 +77,7 @@ async function loadContent(status, read, t) {
     status.replaceWith(...await read());
   } catch (error) {
     const known = error instanceof PreviewError;
-    status.replaceChildren(element('p', '', t(known ? error.message : 'githubPreviewFailed')));
+    status.replaceChildren(element('p', '', t(known ? error.message : 'linkPreviewFailed')));
     if (!known || error.retryable) status.append(action(t('retryLinkPreview'), () => loadContent(status, read, t)));
   }
 }
@@ -105,7 +119,7 @@ function renderDiff(page, source, t) {
   async function read(number) {
     const endpoint = new URL(source.endpoint);
     endpoint.search = new URLSearchParams({ per_page: filesPerPage, page: number });
-    const response = await publicContent(endpoint, 'application/vnd.github+json');
+    const response = await publicContent(endpoint, 'application/vnd.github+json', 'application/json');
     const files = await response.json();
     const entries = files.map((file) => diffFile(file, t));
     if (!entries.length && number === 1) entries.push(element('p', 'link-preview-status', t('githubNoChanges')));
@@ -138,13 +152,43 @@ function articleSections(article) {
   };
 }
 
+function mdnMarkdown(raw) {
+  const frontMatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(raw);
+  const title = /^title:[ \t]*([^\r\n]+)/m.exec(frontMatter?.[1] || '')?.[1].trim().replace(/^(['"])(.*)\1$/, '$2');
+  const body = raw.slice(frontMatter?.[0].length || 0).replace(/{{\s*[\w]+(?:\(([^{}\r\n]*)\))?\s*}}/g, (_macro, args = '') => {
+    const labels = [...args.matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+    return labels[1] || labels[0] || '';
+  });
+  return title ? '# ' + title + '\n\n' + body : body;
+}
+
+function prepareImages(fragment, source, origin) {
+  for (const image of fragment.querySelectorAll('img[src]')) {
+    let url;
+    const base = source.mime === 'text/plain' ? source.endpoint : origin;
+    try { url = new URL(image.getAttribute('src'), base); } catch { /* Fall back to the image description. */ }
+    if (!url || url.username || url.password || !url.href.startsWith(source.imageRoot)) {
+      image.replaceWith(document.createTextNode(image.alt));
+      continue;
+    }
+    image.src = url.href;
+    image.referrerPolicy = 'no-referrer';
+    image.loading = 'lazy';
+    image.decoding = 'async';
+  }
+}
+
 function renderArticle(page, source, url, { t, markdown, openLink }) {
   const status = statusBlock();
   page.append(status);
   loadContent(status, async () => {
-    const response = await publicContent(source.endpoint, 'text/markdown');
+    const response = await publicContent(source.endpoint, source.mime);
+    const raw = await response.text();
+    const template = element('template');
+    template.innerHTML = markdown.render(source.mime === 'text/plain' ? mdnMarkdown(raw) : raw);
+    prepareImages(template.content, source, url);
     const article = element('article', 'message-content');
-    article.innerHTML = markdown.render(await response.text());
+    article.append(template.content);
     const jump = articleSections(article);
     for (const link of article.querySelectorAll('a[href]')) {
       let target;
@@ -168,7 +212,7 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
 }
 
 export function createLinkPage(url, label, options) {
-  const source = githubPreviewSource(url);
+  const source = linkPreviewSource(url);
   const page = element('section', source === undefined ? 'link-page' : 'link-page link-document');
   if (source === undefined) {
     const frame = element('iframe', 'link-frame');
@@ -178,7 +222,7 @@ export function createLinkPage(url, label, options) {
     frame.src = url.href;
     page.append(frame);
   } else if (!source) {
-    page.append(element('p', 'link-preview-status', options.t('githubPreviewUnavailable')));
+    page.append(element('p', 'link-preview-status', options.t('linkPreviewUnavailable')));
   } else if (source.kind === 'diff') {
     renderDiff(page, source, options.t);
   } else {

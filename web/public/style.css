@@ -185,14 +185,15 @@ h1, h2, h3, p { margin: 0; }
 .bubble { padding: 7px 10px; border-radius: 10px 10px 4px 10px; background: var(--wash); }
 .message code { font: 12px/1.4 var(--mono); background: var(--quiet); border-radius: 3px; padding: 2px 4px; }
 .notice { padding: 9px 12px; border-radius: 8px; background: var(--notice); color: var(--warn); font-size: 13px; }
-.composer-wrap { flex: none; padding: 5px 12px max(7px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
-.composer { display: flex; align-items: flex-end; gap: 6px; padding: 4px 5px 4px 11px; border: 1px solid var(--composer-line); border-radius: 16px; background: var(--composer-fill); box-shadow: 0 1px 3px var(--composer-shadow); }
+.composer-wrap { display: flex; flex: 0 1 auto; min-height: 0; padding: 5px 12px max(7px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+.composer-inner { display: flex; flex-direction: column; min-height: 0; }
+.composer { display: flex; flex: none; align-items: flex-end; gap: 6px; padding: 4px 5px 4px 11px; border: 1px solid var(--composer-line); border-radius: 16px; background: var(--composer-fill); box-shadow: 0 1px 3px var(--composer-shadow); }
 .composer:focus-within { border-color: var(--composer-focus); box-shadow: 0 0 0 1px var(--composer-glow); }
 .composer textarea {
   flex: 1;
   min-width: 0;
   min-height: 35px;
-  max-height: min(calc(9lh + 11px), 42dvh);
+  max-height: min(calc(9lh + 11px), calc(var(--ime-height, 100dvh) * .42));
   field-sizing: content;
   resize: none;
   overflow-y: auto;
@@ -211,7 +212,7 @@ h1, h2, h3, p { margin: 0; }
 .composer-send:focus-visible { outline-color: var(--focus); }
 .composer-send:disabled { background: var(--quiet); color: var(--muted); opacity: 1; }
 .composer-label, .composer-state, .composer-controls { display: flex; align-items: center; gap: 5px; }
-.composer-label { flex-wrap: wrap; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
+.composer-label { flex: none; flex-wrap: wrap; margin: 0 0 4px 3px; color: var(--muted); font-size: 11px; }
 .composer-controls { margin-inline-start: auto; min-width: 0; max-width: 100%; }
 .composer-label .dot { background: var(--state-color, var(--muted)); }
 .stop-agent .glyph { width: 18px; height: 18px; fill: currentColor; }
@@ -219,7 +220,7 @@ h1, h2, h3, p { margin: 0; }
 .composer-controls .picker-button { min-width: 0; min-height: 25px; padding: 0 5px; border-color: var(--line); font-size: 11px; }
 .composer-controls .next-setting { background: var(--active); }
 .suggestions, .command-result { margin-bottom: 5px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
-.suggestions { max-height: min(215px, 27dvh); overscroll-behavior: contain; }
+.suggestions { max-height: min(215px, calc(var(--ime-height, 100dvh) * .27)); overscroll-behavior: contain; }
 .suggestions .sheet-row { min-height: 34px; padding: 4px 8px; }
 .suggestions .sheet-row[aria-selected="true"] { background: var(--active); }
 .suggestions .choice { font-size: 12px; }
@@ -503,7 +504,6 @@ h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
 }
 @media (max-width: 767px) {
   .app[data-ime] { height: var(--ime-height, 100dvh); }
-  .app[data-ime] .composer textarea { max-height: min(calc(9lh + 11px), calc(var(--ime-height, 100dvh) * .42)); }
   .composer textarea, .term-entry input, .pane-form input { font-size: 16px; }
   .workspace { grid-template-columns: minmax(0, 1fr); }
   #list { border-right: 0; background: var(--paper); }
