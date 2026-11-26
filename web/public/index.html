@@ -23,6 +23,7 @@
   <script src="/vendor/xterm.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/fit.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script src="/vendor/markdown-it.js?v=WORKBENCH_CACHE_VERSION" defer></script>
+  <script src="/vendor/readability.js?v=WORKBENCH_CACHE_VERSION" defer></script>
   <script type="module" src="/app.js?v=WORKBENCH_CACHE_VERSION"></script>
 </head>
 <body>
@@ -239,6 +240,10 @@
             </div>
           </div>
           <div class="subpage" id="mine-settings" hidden>
+            <div class="link-preference">
+              <span>{{openLinks}}</span>
+              <button class="picker-button" type="button" id="link-preference"></button>
+            </div>
             <button class="profile-row" type="button" id="install"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-download"></use></svg></span><span class="row-copy"><b>{{install}}</b><small>{{openFromHomeScreen}}</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
             <button class="profile-row" type="button" id="signout"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-logout"></use></svg></span><span class="row-copy"><b>{{signOut}}</b><small>{{endBrowserSession}}</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
           </div>

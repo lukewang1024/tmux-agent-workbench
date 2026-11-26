@@ -27,11 +27,19 @@ available in its workspace. Selecting a suggestion fills in the draft. Send a
 slash command to run it, and open the session Pane for commands that require
 further terminal interaction. Drafts and failed sends stay in the browser.
 
-Links to public GitHub repository READMEs, GitHub pull request file diffs, and
-documentation from GitHub Docs, MDN and Android Developers open in the preview
-panel. These previews use the site's public content source. Other links open
-through the browser so Android can route verified App Links to installed apps.
-Use **Open in browser** in the preview toolbar to follow the original link.
+Choose a web link preference in **Profile → Settings**. **Smart preview** is
+the default. The panel uses public content sources for GitHub READMEs, pull
+request file diffs, GitHub Docs, MDN and Android Developers. For allowlisted
+web.dev articles and guides, it shows a Readability reader view in a sandboxed
+iframe. Other web links use the browser, including Android App Links.
+**Always use browser** opens all web links externally. **Always use iframe
+(testing)** attempts to embed every external HTTP(S) link. Sites can still deny
+embedding. Use **Open in browser** in the preview toolbar to follow the source.
+
+Local file links open in the panel in every mode. The Agent machine reads UTF-8
+text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's
+workspace. A line suffix such as `src/example.js:24` opens the file at that line.
+Remote file previews require a connector that supports the file preview command.
 
 The provider marks identify the Agent CLIs in the list and belong to their
 respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],

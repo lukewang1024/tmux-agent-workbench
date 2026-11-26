@@ -372,7 +372,12 @@ button { touch-action: manipulation; }
 .link-tab-close .glyph { width: 13px; height: 13px; }
 .link-pages { display: grid; grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; background: var(--paper); }
 .link-page { min-width: 0; min-height: 0; }
+.link-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--paper); }
+.link-framed > .link-preview-status { padding: 12px; }
 .link-document { overflow: auto; overscroll-behavior: contain; padding: 12px; font-size: 13px; }
+.workspace-file-text { margin: 0; tab-size: 4; font: 12px/1.6 var(--mono); }
+.workspace-file-text mark { background: var(--active); color: inherit; }
+.workspace-file-image { display: block; max-width: 100%; max-height: 100%; margin-inline: auto; object-fit: contain; }
 .link-document :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 12px; }
 .link-preview-status { color: var(--muted); }
 .link-preview-status p + button { margin-top: 8px; }
@@ -473,6 +478,7 @@ button { touch-action: manipulation; }
 .metric meter::-moz-meter-bar { background: var(--meter-fill); border-radius: 8px; }
 .metric .reset { color: var(--muted); font-size: 11px; }
 .subpage { width: min(100%, 540px); }
+.link-preference { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-block-end: 9px; padding: 5px 8px; border: 1px solid var(--outline); border-radius: 12px; background: var(--paper); font-size: 13px; }
 .passkey-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
 .subpage .profile-row + .profile-row { margin-top: 9px; }
 

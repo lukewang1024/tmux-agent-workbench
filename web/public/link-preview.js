@@ -1,3 +1,7 @@
+import { renderWorkspaceFile } from './file-preview.js?v=WORKBENCH_CACHE_VERSION';
+import { readerURL } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
+import { linkFrame, readerFrame } from './reader-preview.js?v=WORKBENCH_CACHE_VERSION';
+
 const githubOrigin = 'https://github.com';
 const docsOrigin = 'https://docs.github.com';
 const mdnOrigin = 'https://developer.mozilla.org';
@@ -9,8 +13,12 @@ const githubSections = new Set(['apps', 'collections', 'features', 'marketplace'
 const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
-export function linkPreviewSource(url) {
+export function linkPreviewSource(url, mode = 'balanced') {
+  if (mode === 'browser') return null;
+  if (mode === 'iframe') return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? { kind: 'iframe' } : null;
   if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
+  const reader = readerURL(url);
+  if (reader) return { kind: 'reader', endpoint: '/api/reader-source?' + new URLSearchParams({ url: reader.href }) };
   if (url.origin === githubOrigin) {
     const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(url.pathname);
     if (!match) return null;
@@ -255,7 +263,36 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
 }
 
 export function createLinkPage(url, source, options) {
-  const page = element('section', 'link-page link-document');
+  const framed = ['iframe', 'reader'].includes(source.kind);
+  const page = element('section', framed ? 'link-page link-framed' : 'link-page link-document');
+  if (source.kind === 'iframe') {
+    const frame = linkFrame(options.label, 'allow-scripts allow-forms');
+    frame.src = url.href;
+    page.append(frame);
+    return page;
+  }
+  if (source.kind === 'reader' || source.kind === 'file') {
+    const status = statusBlock();
+    page.append(status);
+    loadContent(status, async () => {
+      if (source.kind === 'file') {
+        try {
+          const file = await options.readFile(source.target, source.path);
+          return [renderWorkspaceFile(file, source, options)];
+        } catch (error) {
+          const key = error.message === 'Unknown node operation.' ? 'filePreviewUpdateNode'
+            : { 403: 'filePreviewOutside', 404: 'filePreviewMissing', 413: 'filePreviewTooLarge', 415: 'filePreviewUnsupported' }[error.status];
+          if (key) throw new PreviewError(key);
+          throw error;
+        }
+      }
+      const response = await publicContent(source.endpoint, 'text/plain');
+      const frame = readerFrame(await response.text(), url, options.label);
+      if (!frame) throw new PreviewError('linkPreviewUnavailable');
+      return [frame];
+    }, options.t);
+    return page;
+  }
   if (source.kind === 'diff') {
     renderDiff(page, source, options.t);
   } else {

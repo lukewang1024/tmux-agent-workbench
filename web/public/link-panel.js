@@ -1,7 +1,8 @@
 import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
 import { createLinkPage, linkPreviewSource } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
 
-export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange }) {
+export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMode, readFile, onVisibilityChange }) {
   const backButton = panel.querySelector('#back-link-panel');
   const closeButton = panel.querySelector('#close-link-panel');
   const openInBrowser = panel.querySelector('#open-link-browser');
@@ -17,12 +18,14 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
 
   function renderTabs() {
     empty.hidden = tabs.size !== 0;
-    openInBrowser.hidden = !selected;
-    if (selected) openInBrowser.href = selected;
-    tabList.replaceChildren(...Array.from(tabs, ([url, tab]) => {
-      const current = url === selected;
+    const selectedTab = tabs.get(selected);
+    openInBrowser.hidden = !selectedTab?.url;
+    if (selectedTab?.url) openInBrowser.href = selectedTab.url.href;
+    else openInBrowser.removeAttribute('href');
+    tabList.replaceChildren(...Array.from(tabs, ([key, tab]) => {
+      const current = key === selected;
       if (current && !tab.page) {
-        const page = createLinkPage(new URL(url), tab.source, { t, markdown, openLink });
+        const page = createLinkPage(tab.url, tab.source, { t, markdown, fileMarkdown, readFile, openLink, label: tab.label });
         page.id = tab.id;
         page.setAttribute('role', 'tabpanel');
         page.setAttribute('aria-labelledby', tab.id + '-tab');
@@ -33,14 +36,14 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
       if (tab.page) tab.page.hidden = !current;
       const controls = make('div', 'link-tab');
       controls.setAttribute('role', 'presentation');
-      const title = button(tab.label, 'link-tab-title', () => selectTab(url));
+      const title = button(tab.label, 'link-tab-title', () => selectTab(key));
       title.id = tab.id + '-tab';
-      title.title = url;
+      title.title = tab.url?.href || tab.source.path;
       title.setAttribute('role', 'tab');
       title.setAttribute('aria-selected', String(current));
       title.tabIndex = current ? 0 : -1;
       if (tab.page) title.setAttribute('aria-controls', tab.id);
-      const closeTabButton = button('', 'link-tab-close', () => closeTab(url));
+      const closeTabButton = button('', 'link-tab-close', () => closeTab(key));
       closeTabButton.title = t('closeLinkTab', { page: tab.label });
       closeTabButton.setAttribute('aria-label', closeTabButton.title);
       closeTabButton.append(glyph('close'));
@@ -80,16 +83,24 @@ export function mountLinkPanel(panel, toggle, { t, markdown, onVisibilityChange 
     onVisibilityChange(false);
   }
 
-  function openLink(link) {
-    const url = new URL(link.href);
-    const source = linkPreviewSource(url);
-    if (!source || url.origin === location.origin) return false;
-    if (!tabs.has(url.href)) {
-      const label = link.textContent.trim() || url.hostname;
-      tabs.set(url.href, { id: 'link-preview-' + ++nextId, label, source, page: null });
+  function openLink(link, target) {
+    const local = target && workspaceLink(link.getAttribute('href'));
+    let source, url, key;
+    if (local) {
+      source = { kind: 'file', target, ...local };
+      key = JSON.stringify([target.node, target.pane, target.thread, local.path, local.line]);
+    } else {
+      try { url = new URL(link.href); } catch { return false; }
+      source = linkPreviewSource(url, getMode());
+      if (!source || url.origin === location.origin) return false;
+      key = source.kind + ':' + url.href;
+    }
+    if (!tabs.has(key)) {
+      const label = link.textContent.trim() || local?.path.split('/').at(-1) || url?.hostname;
+      tabs.set(key, { id: 'link-preview-' + ++nextId, label, url, source, page: null });
     }
     if (!panel.contains(link)) opener = link;
-    selected = url.href;
+    selected = key;
     show();
     return true;
   }

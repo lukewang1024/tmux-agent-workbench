@@ -11,11 +11,13 @@ import { Auth, sameSecret } from './auth.mjs';
 import { RemoteNode, nodeProtocol } from './connector.mjs';
 import { stripGoalContext } from './history.mjs';
 import { loadLocale, renderDocument } from './i18n.mjs';
+import { readReaderSource } from './reader-source.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-preview.js', 'message-tools.js', 'terminal.js'];
+const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
+  'link-panel.js', 'link-policy.js', 'link-preview.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
@@ -35,6 +37,7 @@ const assets = new Map([
   ['/vendor/xterm.css', ['node_modules/@xterm/xterm/css/xterm.css', 'text/css; charset=utf-8']],
   ['/vendor/fit.js', ['node_modules/@xterm/addon-fit/lib/addon-fit.js', 'text/javascript; charset=utf-8']],
   ['/vendor/markdown-it.js', ['node_modules/markdown-it/dist/browser/markdown-it.umd.min.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/readability.js', ['node_modules/@mozilla/readability/Readability.js', 'text/javascript; charset=utf-8']],
 ]);
 
 function security(res) {
@@ -47,7 +50,7 @@ function security(res) {
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     + "img-src 'self' data: https://docs.github.com/assets/images/ https://developer.android.google.cn/static/ " + mdnContent + "; "
     + "connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body " + mdnContent + "; "
-    + "frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    + "frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
 function json(res, result, status = 200) {
@@ -232,6 +235,17 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const article = await readAndroidDoc(request.searchParams.get('path'));
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(article);
+    }
+    if (path === '/api/reader-source' && method === 'GET') {
+      const page = await readReaderSource(request.searchParams.get('url'));
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end(page);
+    }
+    if (path === '/api/file-preview' && method === 'POST') {
+      const input = await body(req);
+      return json(res, await node(input.node).request('file-preview', {
+        agent: input.agent, thread: input.thread, pane: input.pane, path: input.path,
+      }));
     }
     if (path === '/api/logout' && method === 'POST') {
       auth.endSession(session);

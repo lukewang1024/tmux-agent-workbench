@@ -617,7 +617,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
-      for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'message-tools.js', 'terminal.js']) {
+      for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-policy.js', 'message-tools.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
         assert.ok(worker.includes('/' + module));
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);
@@ -625,9 +625,10 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const panel = await fetch(address + '/link-panel.js?v=' + version).then((response) => response.text());
       assert.ok(panel.includes('./dom.js?v=' + version));
       assert.ok(panel.includes('./link-preview.js?v=' + version));
-      assert.ok(worker.includes('/link-preview.js'));
-      assert.equal((await fetch(address + '/link-preview.js?v=' + version)).status, 200);
-      assert.ok(worker.includes('/vendor/markdown-it.js'));
+      for (const module of ['/link-preview.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js']) {
+        assert.ok(worker.includes(module));
+        assert.equal((await fetch(address + module + '?v=' + version)).status, 200);
+      }
       assert.ok(worker.includes('/reset.css'));
       workers.push(worker);
     } finally {
@@ -641,6 +642,8 @@ test('gateway protects data and accepts an outbound node handshake only after en
   const store = new Store(await scratch(t));
   const local = { request: () => ({}), cleanup() {}, close() {} };
   const origin = 'http://localhost:7080';
+  store.writeKeys([{ id: 'fixture-browser' }]);
+  const cookie = new Auth(store, new URL(origin)).issueSession('fixture-browser').split(';')[0];
   const gateway = await startServer({ store, local, localName: 'fixture', origin, listen: 'localhost:0' });
   const address = 'http://127.0.0.1:' + gateway.address.port;
   const controller = new AbortController();
@@ -650,7 +653,7 @@ test('gateway protects data and accepts an outbound node handshake only after en
     assert.equal((await fetch(address + '/api/workspace')).status, 401);
     const invitationEndpoint = address + '/api/passkeys/invitations';
     for (const [requestOrigin, expected] of [[origin, 401], ['https://untrusted.example', 403]]) {
-      for (const endpoint of [invitationEndpoint, address + '/api/close']) {
+      for (const endpoint of [invitationEndpoint, address + '/api/close', address + '/api/file-preview']) {
         const response = await fetch(endpoint, { method: 'POST', headers: { Origin: requestOrigin } });
         assert.equal(response.status, expected);
       }
@@ -670,6 +673,10 @@ test('gateway protects data and accepts an outbound node handshake only after en
       socket.on('error', () => {});
     });
     assert.equal(crossOrigin, 403);
+    const rejectedReader = new URL('/api/reader-source', address);
+    rejectedReader.searchParams.set('url', 'https://web.dev.example/articles/manifest-updates');
+    assert.equal((await fetch(rejectedReader)).status, 401);
+    assert.equal((await fetch(rejectedReader, { headers: { Cookie: cookie } })).status, 400);
     const invite = store.issue('node', 'remote');
     const connectorState = join(store.directory, 'fixture-connector');
     const joiner = spawn(process.execPath, [fileURLToPath(new URL('../cli.mjs', import.meta.url)),
@@ -681,11 +688,24 @@ test('gateway protects data and accepts an outbound node handshake only after en
     assert.equal((await exited)[0], 0);
     const config = readJson(join(connectorState, 'connector.json'));
     await assert.rejects(enrollNode(address, invite), { status: 403 });
+    const fileReply = { path: '/fixture/example.md', name: 'example.md', mime: 'text/markdown', content: 'IyBFeGFtcGxl' };
+    const fileRequest = { node: 'remote', agent: 'fixture', pane: '1.2.3.4', thread: 'fixture-thread', path: 'example.md' };
+    const requests = [];
     const connected = new Promise((resolve) => {
-      connector = runConnector(config, { ...local, close: resolve }, controller.signal);
+      connector = runConnector(config, { ...local, close: resolve, request(method, args) {
+        requests.push({ method, args });
+        return fileReply;
+      } }, controller.signal);
     });
     await delay(130);
     assert.equal(store.enrolled(config.id).id, 'remote');
+    const preview = await fetch(address + '/api/file-preview', {
+      method: 'POST', headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(fileRequest),
+    });
+    assert.equal(preview.status, 200);
+    assert.deepEqual(await preview.json(), fileReply);
+    const { node, ...expectedArgs } = fileRequest;
+    assert.deepEqual(requests, [{ method: 'file-preview', args: expectedArgs }]);
     controller.abort();
     await connected;
   } finally {

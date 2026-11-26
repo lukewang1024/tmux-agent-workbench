@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { readWorkspaceFile } from './file-preview.mjs';
 import { History, hasThread, sameProcess } from './history.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
@@ -506,6 +507,15 @@ export class LocalNode {
     return cwd;
   }
 
+  async previewFile({ agent, thread, pane, path }) {
+    const entry = await this.chatAgent(agent, thread, pane);
+    const cwd = await this.codexDirectory(entry);
+    const repository = await run('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+      env: this.env, timeout: 2000, maxBuffer: 16 * 1024,
+    }).then(({ stdout }) => stdout.trimEnd()).catch(() => cwd);
+    return readWorkspaceFile(path, cwd, isAbsolute(repository) ? repository : cwd);
+  }
+
   async capabilities({ agent, thread, pane, kind }) {
     const entry = await this.chatAgent(agent, thread, pane);
     if (kind === 'commands') return { suggestions: await this.commands(entry) };
@@ -798,6 +808,7 @@ export class LocalNode {
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before, args.thread);
+      case 'file-preview': return this.previewFile(args);
       case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId, args.settings);
       case 'interrupt': return this.interrupt(args);
       case 'chat-settings': return this.settings(args);

@@ -4,6 +4,7 @@ import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
 import { bindBackButton, button, glyph, make, restoreFocusOnFrame } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { mountDoneNotifications } from './done-notifications.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
+import { linkModes, linkPreference, saveLinkPreference, workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
 import { paintMessageTools } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
@@ -20,7 +21,11 @@ const connectionOverlay = byId('connection-overlay');
 const mobile = window.matchMedia('(max-width: 767px)');
 const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
 const chatInput = byId('chat-input');
-const markdown = window.markdownit({ html: false, breaks: true, linkify: true });
+const markdownOptions = { html: false, breaks: true, linkify: true };
+const markdown = window.markdownit(markdownOptions);
+const fileMarkdown = window.markdownit(markdownOptions);
+fileMarkdown.validateLink = (href) => markdown.validateLink(href) || (/^file:/i.test(href) && Boolean(workspaceLink(href)));
+let linkMode = linkPreference();
 const passkeys = window.SimpleWebAuthnBrowser;
 const loopback = location.protocol === 'http:' && location.hostname === 'localhost';
 const connectionError = t(loopback ? 'sshTunnelUnavailable' : 'gatewayUnavailable');
@@ -73,7 +78,8 @@ const terminalView = new TerminalView(byId('term'), {
 });
 let suppressHoldClick = false;
 const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), {
-  t, markdown, onVisibilityChange: updateLinkHistory,
+  t, markdown, fileMarkdown, getMode: () => linkMode, onVisibilityChange: updateLinkHistory,
+  readFile: (target, path) => api('/api/file-preview', 'POST', { ...target, path }),
 });
 const setDetailBackLabel = bindBackButton(byId('back'), back);
 const doneNotifications = mountDoneNotifications(app, { t, openAgent: openCompletedAgent });
@@ -1449,12 +1455,18 @@ function paintMessageSelection() {
 
 function messageContent(text, human) {
   const body = make('div', human ? 'message-content bubble' : 'message-content');
-  body.innerHTML = markdown.render(text);
+  body.innerHTML = fileMarkdown.render(text);
   for (const link of body.querySelectorAll('a')) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
   }
   return body;
+}
+
+function followChatLink(event) {
+  if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  const link = event.target.closest('a[href]');
+  if (link && linkPanel.openLink(link, chatTarget())) event.preventDefault();
 }
 
 function reconcileDeliveries(key, messages) {
@@ -1491,6 +1503,7 @@ function paintOutgoing() {
       row.append(indicator);
     }
     row.append(messageContent(entry.text, true));
+    row.addEventListener('click', followChatLink);
     article.append(make('div', 'message-meta', t('you')), row);
     return article;
   }));
@@ -1543,9 +1556,7 @@ function renderHistory(target, added, older) {
         select(!pick.checked);
         return;
       }
-      if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-      const link = event.target.closest('a[href]');
-      if (link && linkPanel.openLink(link)) event.preventDefault();
+      followChatLink(event);
     });
     const sender = make('span', '', human ? t('you') : 'Codex');
     meta.append(...(human ? [sender, pick] : [pick, sender]));
@@ -1831,6 +1842,13 @@ function paintMine() {
   for (const section of ['home', 'keys', 'settings']) byId('mine-' + section).hidden = minePage !== section;
   byId('mine-back').hidden = minePage === 'home';
   byId('mine-heading').textContent = t({ home: 'profile', keys: 'passkeys', settings: 'settings' }[minePage]);
+  if (minePage === 'settings') {
+    const choices = linkModes.map((value) => ({ value, label: t('linkMode_' + value) }));
+    setPicker(byId('link-preference'), t('openLinks'), choices, linkMode, (mode) => {
+      linkMode = mode;
+      saveLinkPreference(mode);
+    });
+  }
 }
 
 function openMine(page) {

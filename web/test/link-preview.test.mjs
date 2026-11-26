@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { readWorkspaceFile } from '../file-preview.mjs';
+import { readerURL, workspaceLink } from '../public/link-policy.js';
 import { linkPreviewSource } from '../public/link-preview.js';
 import { androidDocURL } from '../android-docs.mjs';
 
@@ -35,6 +40,55 @@ test('unrecognized HTTPS links and Android app intents are left to the browser',
   assert.equal(source('https://github.com/owner/repository/pull/42'), null);
   assert.equal(source('intent://example/#Intent;scheme=https;end'), null);
   assert.equal(source('http://github.com/owner/repository'), null);
+});
+
+test('web link modes share a strict reader rule and leave native intents outside iframes', () => {
+  const guide = new URL('https://web.dev/articles/manifest-updates?hl=zh-cn&unrelated=1#android');
+  const preview = linkPreviewSource(guide);
+  assert.equal(preview.kind, 'reader');
+  assert.equal(new URL(preview.endpoint, 'http://localhost').searchParams.get('url'),
+    'https://web.dev/articles/manifest-updates?hl=zh-cn');
+  assert.equal(linkPreviewSource(guide, 'browser'), null);
+  assert.deepEqual(linkPreviewSource(guide, 'iframe'), { kind: 'iframe' });
+  assert.deepEqual(linkPreviewSource(new URL('http://example.com/'), 'iframe'), { kind: 'iframe' });
+  assert.equal(linkPreviewSource(new URL('intent://maps/#Intent;end'), 'iframe'), null);
+  for (const url of ['https://web.dev/', 'https://web.dev.evil.example/articles/test', 'https://web.dev:8001/articles/test',
+    'https://web.dev/articles/%2fevil', 'https://login@web.dev/articles/test']) assert.equal(readerURL(new URL(url)), null);
+});
+
+test('file links preserve the path and supported line anchors', () => {
+  assert.deepEqual(workspaceLink('file:///tmp/a%20b.md#L21-L23'), { path: '/tmp/a b.md', line: 21 });
+  assert.deepEqual(workspaceLink('/workbench/a.js:4:9'), { path: '/workbench/a.js', line: 4 });
+  assert.deepEqual(workspaceLink('src/a.js'), { path: 'src/a.js', line: null });
+  assert.deepEqual(workspaceLink('README:5'), { path: 'README', line: 5 });
+  for (const href of ['file://a-machine/share/a', 'https://example.com/a', '//example.com/a', '#heading', '/x%00', '/x%zz']) {
+    assert.equal(workspaceLink(href), null);
+  }
+});
+
+test('file previews read bounded content from the selected workspace and reject escapes', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'workbench-file-preview-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workspace = join(directory, 'workspace');
+  const cwd = join(workspace, 'child');
+  await mkdir(cwd, { recursive: true });
+  const text = join(workspace, 'read me.md');
+  const outside = join(directory, 'outside.txt');
+  await writeFile(text, '# 预览\n');
+  await writeFile(outside, 'external contents');
+  await symlink(outside, join(cwd, 'escape'));
+  await writeFile(join(cwd, 'large.txt'), Buffer.alloc(768 * 1024 + 1, 32));
+  await writeFile(join(cwd, 'binary'), Buffer.from([0, 1]));
+  for (const path of [text, '../read me.md']) {
+    const file = await readWorkspaceFile(path, cwd, workspace);
+    assert.equal(file.mime, 'text/markdown');
+    assert.equal(Buffer.from(file.content, 'base64').toString(), '# 预览\n');
+  }
+  await assert.rejects(readWorkspaceFile(outside, cwd, workspace), { status: 403 });
+  await assert.rejects(readWorkspaceFile('escape', cwd, workspace), { status: 403 });
+  await assert.rejects(readWorkspaceFile('large.txt', cwd, workspace), { status: 413 });
+  await assert.rejects(readWorkspaceFile('binary', cwd, workspace), { status: 415 });
+  await assert.rejects(readWorkspaceFile('missing.txt', cwd, workspace), { status: 404 });
 });
 
 test('MDN documentation links map to the corresponding public Markdown source', () => {
