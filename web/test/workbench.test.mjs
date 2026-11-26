@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -224,6 +224,45 @@ test('Codex history is tied to an exact rollout and only returns visible text', 
   assert.equal(earlier.messages.at(4).text, 'Quoted example:\n' + goal);
   assert.equal(earlier.before, null);
   await assert.rejects(history.page('../wrong'), { status: 409 });
+});
+
+test('Codex history groups tool metadata by message and counts unfinished calls in the current turn', async (t) => {
+  const directory = await scratch(t);
+  const id = 'a3f18f9d-b84f-4362-b2d1-e0c06bfa2d0d';
+  const sessionDirectory = join(directory, 'sessions');
+  await mkdir(sessionDirectory);
+  const filename = join(sessionDirectory, 'rollout-fixture-' + id + '.jsonl');
+  const item = (payload, timestamp) => ({ type: 'response_item', payload, timestamp });
+  const event = (type) => ({ type: 'event_msg', payload: { type } });
+  const message = (role, text, phase) => item({ type: 'message', role, phase,
+    content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] });
+  const call = (name, call_id, timestamp, type = 'function_call') => item({
+    type, name, call_id, arguments: 'private arguments', input: 'private input',
+  }, timestamp);
+  const output = (call_id, timestamp, type = 'function_call_output') => item({ type, call_id, output: 'private output' }, timestamp);
+  const encode = (rows) => rows.map((row) => JSON.stringify(row) + '\n').join('');
+  await writeFile(filename, encode([
+    { type: 'session_meta', payload: { id } },
+    event('task_started'), message('user', 'Old turn'), message('assistant', 'Old status', 'commentary'),
+    call('old_tool', 'old'), event('turn_aborted'),
+    event('task_started'), message('user', 'Current turn'),
+    call('search', 'first', '2026-01-01T00:00:01Z', 'custom_tool_call'),
+    output('first', '2026-01-01T00:00:02Z', 'custom_tool_call_output'),
+    message('assistant', 'Checking changes', 'commentary'), call('read', 'second'), call('inspect', 'third'),
+  ]));
+  const history = new History(directory);
+  let page = await history.page(id);
+  assert.equal(page.runningTools, 2);
+  assert.deepEqual(page.messages[1].tools, [{ name: 'old_tool', state: 'unconfirmed' }]);
+  assert.deepEqual(page.messages[3].tools, [
+    { name: 'search', state: 'finished', elapsed: 1000 }, { name: 'read', state: 'running' }, { name: 'inspect', state: 'running' },
+  ]);
+  await appendFile(filename, encode([output('third'), output('second'), message('assistant', 'Done', 'final_answer'), event('task_complete')]));
+  page = await history.page(id);
+  assert.equal(page.runningTools, undefined);
+  assert.equal(page.messages[3].tools.every(({ state }) => state === 'finished'), true);
+  assert.equal(page.messages[4].tools, undefined);
+  assert.doesNotMatch(JSON.stringify(page), /private|call_id/);
 });
 
 test('Codex without hooks uses the rollout open in the verified live process', {
@@ -555,7 +594,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
-      for (const module of ['chat-state.js', 'connection.js', 'dom.js', 'link-panel.js', 'terminal.js']) {
+      for (const module of ['chat-state.js', 'connection.js', 'dom.js', 'link-panel.js', 'message-tools.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
         assert.ok(worker.includes('/' + module));
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);

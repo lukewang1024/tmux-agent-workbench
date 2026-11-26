@@ -2,6 +2,7 @@ import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
 import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
+import { paintMessageTools } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
@@ -746,7 +747,7 @@ function paintDetail() {
   refreshChatStatus();
   const key = conversationKey();
   if (transcript?.key !== key) {
-    transcript = { key, rows: new Map(), before: null, latest: -1, loaded: !active.thread, selected: null };
+    transcript = { key, rows: new Map(), elements: new Map(), before: null, latest: -1, loaded: !active.thread, selected: null };
     byId('messages').replaceChildren(make('p', active.thread ? 'day' : 'empty', t(active.thread ? 'readingHistory' : 'noMessages')));
     byId('history-progress').hidden = true;
     paintMessageNavigation();
@@ -827,7 +828,9 @@ function paintComposer() {
   const sendButton = byId('send');
   sendButton.disabled = !ready || submitting || reauthRequired || disconnected;
   for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
-  const label = stateNames[active.state] || stateNames.unknown;
+  const toolCount = working && transcript?.key === key && transcript.runningTools;
+  const label = [stateNames[active.state] || stateNames.unknown,
+    toolCount && t('runningToolCount', { count: toolCount })].filter(Boolean).join(' · ');
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
   display.title = active.state === 'blocked' ? t('agentBlocked') : ready ? '' : t('agentInputUnavailable');
@@ -1239,13 +1242,22 @@ async function readHistory(target, query, older) {
   if (older) byId('history-progress').hidden = false;
   let pageLoaded = false;
   try {
-    const { messages, before } = await api(pathWith('/api/history', query));
+    const { messages, before, runningTools } = await api(pathWith('/api/history', query));
     if (target !== transcript) return;
+    const activeTools = Number.isSafeInteger(runningTools) && runningTools > 0 ? runningTools : 0;
+    if (!older && target.runningTools !== activeTools) {
+      target.runningTools = activeTools;
+      if (route === 'agents' && supportsChat()) paintComposer();
+    }
     const previous = target.loaded;
     if (!previous) target.before = before;
     if (older) target.before = Number.isSafeInteger(before) && before > 0 && before < target.before ? before : null;
     target.loaded = true;
     const added = messages.filter(({ id }) => !target.rows.has(id));
+    for (const { id, tools } of messages) {
+      const element = target.elements.get(id);
+      if (element) paintMessageTools(element, tools, t, language);
+    }
     for (const message of added) {
       target.rows.set(message.id, message);
       if (Number.isSafeInteger(message.id)) target.latest = Math.max(target.latest, message.id);
@@ -1478,6 +1490,7 @@ function renderHistory(target, added, older) {
   const rows = added.map((row) => {
     const human = row.role === 'user';
     const element = make('article', human ? 'message human' : 'message');
+    target.elements.set(row.id, element);
     const meta = make('div', 'message-meta');
     const pick = make('input', 'message-pick');
     pick.type = 'checkbox';
@@ -1515,6 +1528,7 @@ function renderHistory(target, added, older) {
     const sender = make('span', '', human ? t('you') : 'Codex');
     meta.append(...(human ? [sender, pick] : [pick, sender]));
     element.append(meta, messageContent(row.text, human));
+    if (!human) paintMessageTools(element, row.tools, t, language);
     return element;
   });
   if (older) {

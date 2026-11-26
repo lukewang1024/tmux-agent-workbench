@@ -53,7 +53,7 @@
     <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M11 4H5v16h6m2-8h8m-4-4 4 4-4 4"/></symbol>
   </svg>
   <main class="app" id="app" data-route="login">
-    <header class="home-bar" id="home-bar" hidden>
+    <header class="toolbar home-bar" id="home-bar" hidden>
       <button class="module-trigger" id="modules" type="button" aria-haspopup="dialog" aria-label="{{mainNavigation}}">
         <span class="brand-mark" aria-hidden="true"></span><b id="module-label">{{agents}}</b><svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
       </button>
@@ -76,7 +76,7 @@
           </div>
         </section>
         <section class="screen" id="detail" hidden>
-          <header class="bar detail-bar">
+          <header class="toolbar bar detail-bar">
             <button id="back" type="button" aria-label="{{backToAgents}}"></button>
             <span class="detail-provider" id="detail-provider" role="img" hidden></span>
             <div class="detail-heading"><h2 id="detail-name" tabindex="-1"></h2><p id="detail-context"></p></div>
@@ -183,7 +183,7 @@
           <div class="detail-empty" id="detail-empty" hidden></div>
         </section>
         <aside class="link-panel" id="link-panel" aria-label="{{linkPreview}}" hidden>
-          <header class="link-bar">
+          <header class="toolbar link-bar">
             <button id="back-link-panel" type="button" aria-label="{{backToConversation}}"></button>
             <button class="row-action link-panel-close" id="close-link-panel" type="button" aria-label="{{closeLinkPreview}}" title="{{closeLinkPreview}}">
               <svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg>
@@ -205,11 +205,11 @@
         </div>
       </section>
       <section class="page" id="mine" aria-labelledby="mine-heading" hidden>
+        <header class="toolbar page-head profile-header">
+          <button id="mine-back" type="button" aria-label="{{backToProfile}}" hidden></button>
+          <h1 id="mine-heading" tabindex="-1">{{profile}}</h1>
+        </header>
         <div class="page-content">
-          <header class="page-head">
-            <button id="mine-back" type="button" aria-label="{{backToProfile}}" hidden></button>
-            <h1 id="mine-heading" tabindex="-1">{{profile}}</h1>
-          </header>
           <div class="mine-grid" id="mine-home">
             <section class="usage" aria-labelledby="usage-heading">
               <div class="usage-head"><h2 id="usage-heading">{{usage}}</h2><span class="usage-provider">Codex</span></div>

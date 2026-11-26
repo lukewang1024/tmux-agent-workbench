@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { codexRuntimeSettings } from './codex.mjs';
+import { HistoryTools } from './history-tools.mjs';
 import { Failure } from './state.mjs';
 
 const maxRead = 4 * 1024 * 1024;
@@ -247,20 +248,25 @@ export class History {
       let last = bytes.lastIndexOf(10);
       const first = start ? bytes.indexOf(10) + 1 : 0;
       const records = [];
-      let cursor = start;
-      while (last >= first && records.length < 35) {
+      const tools = new HistoryTools(end === size && !before);
+      while (last >= first) {
         const previous = last > 0 ? bytes.lastIndexOf(10, last - 1) : -1;
         const lineStart = previous + 1;
         if (lineStart < first) break;
-        cursor = start + lineStart;
-        const message = visibleMessage(decode(bytes.subarray(lineStart, last)));
-        if (message) records.push({ ...message, id: cursor });
+        const row = decode(bytes.subarray(lineStart, last));
+        const message = visibleMessage(row);
+        const pastPage = records.length === 35;
+        if (pastPage && message?.role === 'assistant') break;
+        tools.observe(row, message);
+        if (pastPage && message) break;
+        if (message) records.push(Object.assign(message, { id: start + lineStart }));
         last = previous;
       }
+      if (records.length < 35) tools.finish();
       // Advance even if a block contained only tool data or part of a large record.
       const blockBoundary = first && start + first < end ? start + first : start;
-      const next = last >= first && cursor > 0 ? cursor : blockBoundary;
-      return { messages: records.reverse(), before: next || null };
+      const next = records.length === 35 ? records.at(-1).id : blockBoundary;
+      return { messages: records.reverse(), before: next || null, ...(tools.running && { runningTools: tools.running }) };
     } finally {
       await file.close();
     }
