@@ -577,14 +577,9 @@ function showRecordMenu(item, machine, pinned) {
   if (actions.length) sheet(title, ...actions);
 }
 
-function recordRow(item, machine, pinned, focusKey, canExpand = true) {
-  const session = item.sessionRecord;
-  const container = make('div', 'record-row' + (item.worker ? ' worker-row' : ''));
-  const row = button('', 'agent-row', () => openRecord(item));
-  row.dataset.record = recordKey(item);
-  if (row.dataset.record === activeKey && (opened || !mobile.matches)) row.setAttribute('aria-current', 'true');
+function agentTag(kind, fallback = 'terminal') {
   const icon = make('span', 'agent-tag');
-  const provider = Object.hasOwn(providerMarks, item.kind) && providerMarks[item.kind];
+  const provider = Object.hasOwn(providerMarks, kind) && providerMarks[kind];
   if (provider) {
     const mark = make('img', 'provider-mark');
     mark.alt = '';
@@ -592,8 +587,17 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
     mark.src = '/providers/' + provider + '?v=' + appVersion;
     icon.classList.add('brand');
     icon.append(mark);
-  } else icon.append(glyph(session ? 'sessions' : 'terminal'));
+  } else icon.append(glyph(fallback));
   icon.setAttribute('aria-hidden', 'true');
+  return icon;
+}
+
+function recordRow(item, machine, pinned, focusKey, canExpand = true) {
+  const session = item.sessionRecord;
+  const container = make('div', 'record-row' + (item.worker ? ' worker-row' : ''));
+  const row = button('', 'agent-row', () => openRecord(item));
+  row.dataset.record = recordKey(item);
+  if (row.dataset.record === activeKey && (opened || !mobile.matches)) row.setAttribute('aria-current', 'true');
   const copy = make('span', 'record-copy');
   const title = item.worker ? item.worker.name : item.title;
   const subtype = session ? [t('agentCount', { count: item.agentCount }), item.branch].filter(Boolean).join(' · ')
@@ -603,7 +607,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
   const badge = make('span', 'record-state');
   badge.title = stateNames[item.state] || '';
   badge.append(stateDot(item.state, machine), make('span', 'sr-only', badge.title));
-  row.append(icon, copy, badge);
+  row.append(agentTag(item.kind, session ? 'sessions' : 'terminal'), copy, badge);
   container.append(row);
   if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
   if (session && canExpand && item.windows?.length) {
@@ -748,7 +752,14 @@ function paintDetail() {
     return;
   }
   byId('detail-name').textContent = active.title;
-  byId('detail-context').textContent = [active.host, active.session || active.branch || kindNames[active.kind]].filter(Boolean).join(' / ');
+  const provider = byId('detail-provider');
+  const kind = route === 'agents' && active.kind !== 'shell' && Object.hasOwn(kindNames, active.kind) ? active.kind : '';
+  provider.hidden = !kind;
+  if (kind && provider.dataset.kind !== kind) {
+    provider.dataset.kind = kind;
+    provider.replaceChildren(agentTag(kind), kindNames[kind]);
+  }
+  byId('detail-context').textContent = [active.host, active.session || active.branch].filter(Boolean).join(' / ');
   if (route === 'sessions') { paintSessionPanes(empty); return; }
   terminalView.close();
   empty.hidden = supportsChat();
@@ -839,10 +850,10 @@ function paintComposer() {
   const sendButton = byId('send');
   sendButton.disabled = !ready || submitting || reauthRequired || disconnected;
   for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
-  const label = t(working ? 'agentWorking' : active.state === 'blocked' ? 'agentBlocked'
-    : ready ? 'originalConversation' : 'agentInputUnavailable');
+  const label = stateNames[active.state] || stateNames.unknown;
   const display = byId('chat-status');
   if (display.textContent !== label) display.textContent = label;
+  display.title = active.state === 'blocked' ? t('agentBlocked') : ready ? '' : t('agentInputUnavailable');
   byId('working-dots').hidden = !working;
   const stop = byId('stop-agent');
   const pendingStop = stopping?.key === activeKey;
@@ -869,10 +880,10 @@ function paintComposer() {
   permissions.disabled = reauthRequired || disconnected;
   permissions.classList.toggle('next-setting', Boolean(queued?.permission));
   const permissionText = permission ? activePermissionLabel(permission) : t(reading ? 'permission' : 'permissionStatusUnavailable');
-  const permissionStatus = permission?.launch ? t('permissionLaunch', { value: permissionText }) : permissionText;
-  byId('chat-permission-label').textContent = permissionStatus;
+  const shortPermission = permissionShortLabels[permission?.mode];
+  byId('chat-permission-label').textContent = shortPermission ? t(shortPermission) : permissionText;
   permissions.title = [
-    permissionStatus,
+    permissionText,
     queued?.permission && t('queuedSetting', { value: permissionProfileLabel(queued.permission) }),
   ].filter(Boolean).join('\n');
   permissions.setAttribute('aria-label', t('permission') + ' · ' + permissions.title.replace('\n', ' · '));
@@ -1158,6 +1169,7 @@ const permissionModeLabels = {
   yolo: 'permission_yolo', fullAccess: 'fullAccessPermission', approveForMe: 'permission_approveForMe',
   askForApproval: 'workspacePermission', readOnly: 'readOnlyPermission', noApprovals: 'permission_noApprovals',
 };
+const permissionShortLabels = { approveForMe: 'permission_autoShort', askForApproval: 'permission_askShort' };
 
 function permissionProfileLabel(id) {
   return Object.hasOwn(permissionLabels, id) ? t(permissionLabels[id]) : id;
