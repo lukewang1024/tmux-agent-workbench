@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { codexRuntimeSettings } from './codex.mjs';
+import { imageType } from './file-preview.mjs';
 import { HistoryTools } from './history-tools.mjs';
 import { Failure } from './state.mjs';
 
@@ -13,6 +14,8 @@ const rolloutPattern = /^rollout-.+-([0-9a-f-]{36})\.jsonl$/i;
 const run = promisify(execFile);
 const goalContext = /^\s*<codex_internal_context\s+source="(?:user_goal|goal)"\s*>/;
 const contextEnd = '</codex_internal_context>';
+const imageData = /^data:(?:image\/[a-z]+|application\/octet-stream);base64,/i;
+const maxHistoryImage = 1024 * 1024;
 
 export function hasThread(id) {
   return typeof id === 'string' && idPattern.test(id);
@@ -100,16 +103,25 @@ export function stripGoalContext(text) {
   return visible === text ? text : visible.replace(/^(?:[ \t]*\r?\n)+/, '');
 }
 
+function imageItems(content) {
+  if (content?.role !== 'user' || !Array.isArray(content.content)) return [];
+  return content.content.filter((part) => part?.type === 'input_image' && typeof part.image_url === 'string'
+    && part.image_url.length <= Math.ceil(maxHistoryImage / 3) * 4 + 64 && imageData.test(part.image_url));
+}
+
 function visibleMessage(row) {
   const content = row?.payload;
   if (row?.type !== 'response_item' || content?.type !== 'message'
       || !['user', 'assistant'].includes(content.role)) return null;
+  const images = imageItems(content).length;
   const text = (Array.isArray(content.content) ? content.content : [])
     .filter((part) => ['input_text', 'output_text'].includes(part?.type) && typeof part.text === 'string')
     .map((part) => content.role === 'user' ? stripGoalContext(part.text) : part.text)
     .filter((part) => !/^# AGENTS\.md instructions\b|^<environment_context>|^<permissions instructions>/.test(part))
+    .filter((part) => !images || !/^(?:<image(?: name=.+)?>|<\/image>)$/.test(part))
     .join('\n').replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '');
-  return text.trim() ? { role: content.role, text: text.slice(0, 32_000), time: row.timestamp, phase: content.phase } : null;
+  return text.trim() || images ? { role: content.role, text: text.slice(0, 32_000), time: row.timestamp,
+    phase: content.phase, ...(images && { images }) } : null;
 }
 
 export class History {
@@ -272,5 +284,29 @@ export class History {
     } finally {
       await file.close();
     }
+  }
+
+  async image(id, message, index) {
+    const unavailable = () => new Failure(404, 'Image is unavailable.');
+    if (!Number.isSafeInteger(message) || message < 1 || !Number.isSafeInteger(index) || index < 0) throw unavailable();
+    const file = await open(await this.locate(id), 'r');
+    try {
+      if (await rolloutId(file) !== id) throw unavailable();
+      const { size } = await file.stat();
+      if (message >= size) throw unavailable();
+      const block = Buffer.alloc(Math.min(maxRead, size - message + 1));
+      const { bytesRead } = await file.read(block, 0, block.length, message - 1);
+      const end = block.subarray(0, bytesRead).indexOf(10, 1);
+      if (block[0] !== 10 || end < 1) throw unavailable();
+      const row = decode(block.subarray(1, end));
+      if (row?.type !== 'response_item' || row.payload?.type !== 'message') throw unavailable();
+      const data = imageItems(row.payload)[index]?.image_url;
+      if (!data) throw unavailable();
+      const content = data.replace(imageData, '');
+      const bytes = Buffer.from(content, 'base64');
+      const mime = imageType(bytes);
+      if (!mime || bytes.length > maxHistoryImage || bytes.toString('base64') !== content) throw unavailable();
+      return { mime, content };
+    } finally { await file.close(); }
   }
 }

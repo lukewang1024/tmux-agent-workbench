@@ -12,11 +12,16 @@ function inside(root, path) {
   return suffix !== '..' && !suffix.startsWith('..' + sep) && !isAbsolute(suffix);
 }
 
-function fileType(filename, bytes) {
+export function imageType(bytes) {
   if (bytes.subarray(0, 8).equals(png)) return 'image/png';
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
   if (/^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6))) return 'image/gif';
   if (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+}
+
+function fileType(filename, bytes) {
+  const image = imageType(bytes);
+  if (image) return image;
   try {
     if (bytes.includes(0)) throw new Error();
     new TextDecoder('utf-8', { fatal: true }).decode(bytes);

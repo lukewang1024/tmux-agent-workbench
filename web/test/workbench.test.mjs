@@ -299,6 +299,59 @@ test('Codex history groups tool metadata by message and counts unfinished calls 
   assert.equal(page.messages.flatMap(({ tools = [] }) => tools).some(({ state }) => state === 'running'), false);
 });
 
+test('Codex history exposes the input of exec calls without their output or other arguments', async (t) => {
+  const directory = await scratch(t);
+  const id = '6091f405-efc0-47e2-8511-f26b0c5a436c';
+  const sessions = join(directory, 'sessions');
+  await mkdir(sessions);
+  const item = (payload) => ({ type: 'response_item', payload });
+  const snippet = 'text(await tools.exec_command({ cmd: "pwd" }));';
+  await writeFile(join(sessions, 'rollout-exec-' + id + '.jsonl'), [
+    { type: 'session_meta', payload: { id } },
+    item({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Checking files' }] }),
+    item({ type: 'custom_tool_call', call_id: 'one', name: 'exec', input: snippet }),
+    item({ type: 'custom_tool_call_output', call_id: 'one', output: 'hidden output' }),
+    item({ type: 'function_call', call_id: 'two', name: 'exec_command',
+      arguments: JSON.stringify({ cmd: 'ls -la', workdir: 'hidden directory' }) }),
+    item({ type: 'function_call', call_id: 'three', name: 'other',
+      arguments: JSON.stringify({ cmd: 'hidden argument' }) }),
+    item({ type: 'custom_tool_call', call_id: 'four', name: 'exec', input: 'x'.repeat(12_001) }),
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+  const page = await new History(directory).page(id);
+  const tools = page.messages[0].tools;
+  assert.deepEqual(tools.map(({ name, invocation }) => [name, invocation]), [
+    ['exec', snippet], ['exec_command', 'ls -la'], ['other', undefined], ['exec', 'x'.repeat(12_000)],
+  ]);
+  assert.equal(tools[0].state, 'finished');
+  assert.equal(tools[3].invocationTruncated, true);
+  assert.doesNotMatch(JSON.stringify(page), /hidden |call_id/);
+});
+
+test('image-only Codex messages stay in history and their image is fetched by exact record', async (t) => {
+  const directory = await scratch(t);
+  const id = '6091f405-efc0-47e2-8511-f26b0c5a436c';
+  const sessions = join(directory, 'sessions');
+  await mkdir(sessions);
+  const content = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRUkAAAAASUVORK5CYII=';
+  const rows = [
+    { type: 'session_meta', payload: { id } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+      { type: 'input_text', text: '<image name=[Image #1] path="/tmp/fixture.png">' },
+      { type: 'input_image', image_url: 'data:application/octet-stream;base64,' + content },
+      { type: 'input_text', text: '</image>' },
+    ] } },
+  ];
+  await writeFile(join(sessions, 'rollout-images-' + id + '.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+  const history = new History(directory);
+  const { messages: [message] } = await history.page(id);
+  assert.equal(message.text, '');
+  assert.equal(message.images, 1);
+  assert.doesNotMatch(JSON.stringify(message), /fixture\.png|base64/);
+  assert.deepEqual(await history.image(id, message.id, 0), { mime: 'image/png', content });
+  await assert.rejects(history.image(id, message.id + 1, 0), { status: 404 });
+  await assert.rejects(history.image(id, message.id, 1), { status: 404 });
+});
+
 test('Codex without hooks uses the rollout open in the verified live process', {
   skip: !['darwin', 'linux'].includes(process.platform),
 }, async (t) => {
@@ -611,11 +664,11 @@ test('gateway serves matching languages for the app shell, manifest, assistant t
       }
       assert.ok(html.includes('id="page-theme-color"'));
       assert.ok(html.includes(':root { --paper: #fafafa; }'));
-      assert.ok(html.includes('@media (prefers-color-scheme: dark) { :root { --paper: #282c34; } }'));
-      assert.ok(html.includes('content="#fafafa" media="(prefers-color-scheme: light)"'));
-      assert.ok(html.includes('content="#282c34" media="(prefers-color-scheme: dark)"'));
+      assert.ok(html.includes(':root[data-theme="dark"] { --paper: #282c34; }'));
+      assert.ok(html.includes('data-light="#fafafa" data-dark="#282c34"'));
       const version = html.match(/src="\/app\.js\?v=([a-f0-9]{16})"/)?.[1];
       assert.ok(version);
+      assert.ok(html.includes('src="/appearance.js?v=' + version + '"'));
       assert.ok(html.includes('id="connection-overlay"'));
       assert.ok(html.includes('href="/style.css?v=' + version + '"'));
       const resetHref = '/reset.css?v=' + version;
@@ -625,7 +678,7 @@ test('gateway serves matching languages for the app shell, manifest, assistant t
       assert.match(reset, /-webkit-tap-highlight-color: transparent/);
       const style = await fetch(address + '/style.css?v=' + version).then((response) => response.text());
       assert.match(style, /:root \{ color-scheme: light;\s+--paper: #fafafa;/);
-      assert.match(style, /:root \{ color-scheme: dark;\s+--paper: #282c34;/);
+      assert.match(style, /:root\[data-theme="dark"\] \{ color-scheme: dark;\s+--paper: #282c34;/);
       assert.ok(style.includes('--terminal-ansi-15:'));
       assert.ok(html.includes('src="/vendor/markdown-it.js?v=' + version + '"'));
       assert.equal((await fetch(address + '/vendor/markdown-it.js?v=' + version)).status, 200);

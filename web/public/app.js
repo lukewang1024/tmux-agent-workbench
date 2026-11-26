@@ -1,13 +1,17 @@
+import { actionMenuAnchor, mountActionMenu } from './action-menu.js?v=WORKBENCH_CACHE_VERSION';
 import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { bindComposerFocus } from './composer-focus.js?v=WORKBENCH_CACHE_VERSION';
+import { imagePreview, mountComposerImages } from './composer-images.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
 import { bindBackButton, button, glyph, make, restoreFocusOnFrame } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { mountDoneNotifications } from './done-notifications.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { linkModes, linkPreference, saveLinkPreference, workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
 import { addDiagramButtons } from './mermaid-preview.js?v=WORKBENCH_CACHE_VERSION';
-import { mountRunningTools, paintMessageTools, runningToolActivity } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
+import { mountRunningTools, mountToolDetails, paintMessageTools, runningToolActivity } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
+import { bindScrollEdges } from './scrollable.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
+import { mountWorkspaceLayout, singleColumnQuery } from './workspace-layout.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
 const autoSizeComposer = CSS.supports('field-sizing', 'content');
@@ -17,11 +21,14 @@ const percentage = new Intl.NumberFormat(language, { style: 'percent' });
 const byId = (id) => document.getElementById(id);
 const app = byId('app');
 const overlay = byId('overlay');
+const actionMenu = mountActionMenu(overlay);
 const pickerDialog = byId('picker-dialog');
 const connectionOverlay = byId('connection-overlay');
-const mobile = window.matchMedia('(max-width: 767px)');
-const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
+const mobile = window.matchMedia(singleColumnQuery);
 const chatInput = byId('chat-input');
+const chatForm = byId('chat-form');
+const workspace = byId('workspace');
+const workspaceLayout = mountWorkspaceLayout(workspace);
 const markdownOptions = { html: false, breaks: true, linkify: true };
 const markdown = window.markdownit(markdownOptions);
 const fileMarkdown = window.markdownit(markdownOptions);
@@ -80,12 +87,25 @@ const terminalView = new TerminalView(byId('term'), {
 let suppressHoldClick = false;
 const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), {
   t, markdown, fileMarkdown, getMode: () => linkMode, onVisibilityChange: updateLinkHistory,
+  fullScreen: mobile, onLayoutChange: workspaceLayout.refresh,
   onEscape: handleChatEscape,
   readFile: (target, path) => api('/api/file-preview', 'POST', { ...target, path }),
 });
 const setDetailBackLabel = bindBackButton(byId('back'), back);
 const doneNotifications = mountDoneNotifications(app, { t, openAgent: openCompletedAgent });
 const updateRunningTools = mountRunningTools(byId('running-tools'), { t, sheet });
+const toolDetails = mountToolDetails(byId('tool-detail'), t);
+const composerImages = mountComposerImages(byId('attach-image'), byId('image-picker'), chatInput, byId('draft-images'), {
+  t, context: imageContext, getImages: (key) => chatState.draftImages(key),
+  canAttach: () => !disconnected && !reauthRequired && !submitting,
+  setImages(key, images) {
+    if (!signedIn) return;
+    chatState.saveDraft(key, chatState.draft(key), undefined, images);
+    if (imageContext() === key) paintComposer();
+  },
+  onUpdate() { if (imageContext()) paintComposer(); },
+  onError: toast,
+});
 const invalidateComposerFocus = bindComposerFocus(chatInput, {
   canEdit: () => route === 'agents' && !disconnected && !overlay.open && !pickerDialog.open,
   isComposing: () => composingPrompt,
@@ -184,11 +204,17 @@ function pathWith(path, query) {
 }
 
 function sheet(title, ...contents) {
+  actionMenu.reset();
   delete overlay.dataset.position;
   byId('sheet-title').textContent = title;
   byId('sheet-body').replaceChildren(...contents);
   if (!overlay.open) overlay.showModal();
   byId('close').focus();
+}
+
+function actionSheet(title, actions, anchor, trigger) {
+  sheet(title, ...actions);
+  actionMenu.open(anchor, trigger);
 }
 
 function closeSheet() {
@@ -245,6 +271,7 @@ function navigate(target, node = scope) {
     return;
   }
   closeSheet();
+  toolDetails.close();
   launching = null;
   route = target;
   scope = node;
@@ -270,7 +297,7 @@ function back() {
 
 function paint() {
   app.dataset.route = route;
-  byId('workspace').hidden = !isWorkspace();
+  workspace.hidden = !isWorkspace();
   for (const name of ['machines', 'mine', 'login']) byId(name).hidden = name !== route;
   if (isWorkspace()) paintWorkspace();
   else {
@@ -283,9 +310,12 @@ function paint() {
 }
 
 function paintHeader() {
+  const toolbar = byId('home-bar');
+  const parent = isWorkspace() ? byId('list') : app;
+  if (toolbar.parentElement !== parent) parent.insertBefore(toolbar, isWorkspace() ? parent.firstChild : byId('app-body'));
   const hidden = !signedIn || (isWorkspace() && opened && mobile.matches)
     || (route === 'mine' && minePage !== 'home');
-  byId('home-bar').hidden = hidden;
+  toolbar.hidden = hidden;
   if (hidden || !isWorkspace()) doneNotifications.hide();
   byId('module-label').textContent = labels[route] || '';
   byId('workspace-actions').hidden = !isWorkspace();
@@ -300,7 +330,7 @@ function scopedMachines() {
   return scope === 'all' ? machines : machines.filter(({ id }) => id === scope);
 }
 
-function appearance() { return darkMode.matches ? 'dark' : 'light'; }
+function appearance() { return document.documentElement.dataset.theme; }
 
 function syncInstallTheme() {
   byId('app-manifest').href = '/manifest-' + appearance() + '.webmanifest';
@@ -412,8 +442,9 @@ function paintWorkspace() {
     terminalView.close();
   }
   if (!active || (opened && selection.has(route) && selection.get(route) !== activeKey)) opened = false;
-  byId('workspace').dataset.mobileView = opened ? 'detail' : 'list';
+  workspace.dataset.mobileView = opened ? 'detail' : 'list';
   paintHeader();
+  workspaceLayout.refresh();
   paintCollection();
   paintDetail();
 }
@@ -490,15 +521,11 @@ function onHold(row, activate, mouseMenu, setPressed) {
 }
 
 function itemMenu(container, open) {
-  const show = () => {
-    open();
-    trigger.setAttribute('aria-expanded', 'true');
-    overlay.addEventListener('close', () => trigger.setAttribute('aria-expanded', 'false'), { once: true });
-  };
+  const show = (event) => open(actionMenuAnchor(event, trigger), trigger);
   container.classList.add('has-item-menu');
   onHold(container, show, (event) => {
     event.preventDefault();
-    show();
+    show(event);
   }, (pressed) => container.classList.toggle('is-pressed', pressed));
   const trigger = button('', 'row-action item-menu', show);
   trigger.title = t('itemActions');
@@ -544,10 +571,11 @@ function closeChoice(title, machine, payload, allowed, exited = false) {
   row.prepend(glyph('close'));
   row.classList.add('danger');
   row.disabled = !allowed;
+  if (!allowed) row.title = t(exited ? 'agentExited' : 'closeIdleOnly');
   return row;
 }
 
-function showRecordMenu(item, machine, pinned) {
+function showRecordMenu(item, machine, pinned, anchor, trigger) {
   const session = item.sessionRecord;
   const title = item.worker?.name || item.title;
   const actions = [];
@@ -571,7 +599,7 @@ function showRecordMenu(item, machine, pinned) {
     const payload = { node: machine.id, scope: 'agent', agent: item.id, pane: item.pane.key };
     actions.push(closeChoice(title, machine.name, payload, item.canClose, item.exited));
   }
-  if (actions.length) sheet(title, ...actions);
+  if (actions.length) actionSheet(title, actions, anchor, trigger);
 }
 
 function agentTag(kind, fallback = 'terminal') {
@@ -645,7 +673,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
     badge.prepend(marker, make('span', 'sr-only', t('pinned')));
   }
   if (canPin || hasAgent) {
-    itemMenu(container, () => showRecordMenu(item, machine, pinned));
+    itemMenu(container, (anchor, trigger) => showRecordMenu(item, machine, pinned, anchor, trigger));
   }
   return container;
 }
@@ -712,6 +740,7 @@ function paintCollection() {
 }
 
 function openRecord(item) {
+  toolDetails.close();
   const fromList = !opened;
   launching = null;
   opened = true;
@@ -807,11 +836,11 @@ function renderSessionTree(session) {
       const row = button(title, 'pane-row', open);
       row.prepend(glyph('terminal'));
       container.append(row);
-      itemMenu(container, () => {
+      itemMenu(container, (anchor, trigger) => {
         const terminal = choice(t('openTerminal'), '', open);
         terminal.prepend(glyph('terminal'));
         const payload = { node: session.node, scope: 'pane', pane: pane.key };
-        sheet(title, terminal, closeChoice(title, session.host, payload, pane.canClose));
+        actionSheet(title, [terminal, closeChoice(title, session.host, payload, pane.canClose)], anchor, trigger);
       });
       group.append(container);
     }
@@ -855,6 +884,11 @@ function paintRunningTools() {
   updateRunningTools(toolActivity);
 }
 
+function imageContext() {
+  return route === 'agents' && active?.chat && machines.some((node) => node.id === active.node && node.imagePrompts)
+    ? conversationKey() : '';
+}
+
 function paintComposer() {
   const key = conversationKey();
   if (chatInput.dataset.thread !== key) {
@@ -864,7 +898,8 @@ function paintComposer() {
   const ready = (active.thread ? ['idle', 'done', 'working'].includes(active.state) : active.state === 'idle') && !active.pane.inMode;
   const working = active.state === 'working';
   const sendButton = byId('send');
-  sendButton.disabled = !ready || submitting || reauthRequired || disconnected;
+  sendButton.disabled = !ready || submitting || reauthRequired || disconnected || composerImages.pending(key);
+  composerImages.paint(imageContext());
   for (const retry of byId('outgoing-messages').querySelectorAll('.delivery-failed')) retry.disabled = sendButton.disabled;
   const label = stateNames[active.state] || stateNames.unknown;
   const display = byId('chat-status');
@@ -879,7 +914,7 @@ function paintComposer() {
   const stopLabel = t(pendingStop ? 'stoppingTurn' : 'stopCurrentTurn');
   stop.setAttribute('aria-label', stopLabel);
   stop.title = stopLabel;
-  sendButton.hidden = !stop.hidden && !chatInput.value.trim();
+  sendButton.hidden = !stop.hidden && !chatInput.value.trim() && !chatState.draftImages(key).length;
   stop.classList.toggle('secondary-stop', !sendButton.hidden);
   const settings = byId('chat-settings');
   settings.hidden = !active.chat;
@@ -1293,7 +1328,7 @@ async function readHistory(target, query, older) {
     const added = messages.filter(({ id }) => !target.rows.has(id));
     for (const { id, tools } of messages) {
       const element = target.elements.get(id);
-      if (element) paintMessageTools(element, tools, t, language);
+      if (element) paintMessageTools(element, tools, t, language, toolDetails);
     }
     for (const message of added) {
       target.rows.set(message.id, message);
@@ -1364,7 +1399,7 @@ async function jumpToUserMessage(direction) {
     if (row) {
       scroller.scrollTop += row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
       target.messageAnchor = { row, scrollTop: scroller.scrollTop };
-      if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (document.documentElement.dataset.motion !== 'reduce') {
         row.animate([{ backgroundColor: 'var(--active)' }, { backgroundColor: 'transparent' }], 700);
       }
     }
@@ -1425,12 +1460,7 @@ function messageMenu(event, select) {
     select();
   });
   action.prepend(glyph('select'));
-  sheet(t('messageActions'), action);
-  overlay.dataset.position = 'context';
-  const bounds = overlay.querySelector('.sheet').getBoundingClientRect();
-  overlay.style.setProperty('--menu-x', Math.max(8, Math.min(event.clientX, innerWidth - bounds.width - 8)) + 'px');
-  overlay.style.setProperty('--menu-y', Math.max(8, Math.min(event.clientY, innerHeight - bounds.height - 8)) + 'px');
-  action.focus();
+  actionSheet(t('messageActions'), [action], actionMenuAnchor(event, event.currentTarget));
 }
 
 function updateLinkHistory(visible) {
@@ -1462,9 +1492,15 @@ function paintMessageSelection() {
   paintMessageNavigation();
 }
 
-function messageContent(text, human) {
+function messageContent(text, human, images = []) {
   const body = make('div', human ? 'message-content bubble' : 'message-content');
   body.innerHTML = fileMarkdown.render(text);
+  for (const block of body.querySelectorAll('pre, table')) block.classList.add('scrollable');
+  if (images.length) {
+    const gallery = make('div', 'message-images');
+    gallery.append(...images.map((image) => imagePreview(image, t('attachedImage'))));
+    body.prepend(gallery);
+  }
   for (const link of body.querySelectorAll('a')) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
@@ -1486,6 +1522,7 @@ function reconcileDeliveries(key, messages) {
   if (draftCleared && chatInput.dataset.thread === key) {
     chatInput.value = '';
     resizeComposer();
+    composerImages.paint(imageContext());
   }
   return changed;
 }
@@ -1514,7 +1551,7 @@ function paintOutgoing() {
       }
       row.append(indicator);
     }
-    row.append(messageContent(entry.text, true));
+    row.append(messageContent(entry.text, true, entry.images));
     row.addEventListener('click', followChatLink);
     article.append(make('div', 'message-meta', t('you')), row);
     return article;
@@ -1572,8 +1609,11 @@ function renderHistory(target, added, older) {
     });
     const sender = make('span', '', human ? t('you') : 'Codex');
     meta.append(...(human ? [sender, pick] : [pick, sender]));
-    element.append(meta, messageContent(row.text, human));
-    if (!human) paintMessageTools(element, row.tools, t, language);
+    const images = Array.from({ length: Math.min(32, Number(row.images) || 0) }, (_, index) => ({
+      src: pathWith('/api/history-image', { node: active.node, agent: active.id, thread: active.thread, message: row.id, index }),
+    }));
+    element.append(meta, messageContent(row.text, human, images));
+    if (!human) paintMessageTools(element, row.tools, t, language, toolDetails);
     return element;
   });
   if (older) {
@@ -1589,17 +1629,20 @@ function renderHistory(target, added, older) {
 }
 
 async function send(text = chatInput.value, retry = null) {
-  if (byId('send').disabled || !text.trim() || !active) return;
-  if (!retry && active.chat && /^\/[a-z][a-z0-9-]*(?: +[^\x00-\x1f\x7f]*)?$/i.test(text.trim())) return runSlash(text);
+  if (byId('send').disabled || !active) return;
+  const key = conversationKey();
+  const images = retry ? retry.images || [] : chatState.draftImages(key);
+  if (!text.trim() && !images.length) return;
+  if (images.length && !imageContext()) { toast(t('imageAttachmentUnavailable')); return; }
+  if (!retry && !images.length && active.chat && /^\/[a-z][a-z0-9-]*(?: +[^\x00-\x1f\x7f]*)?$/i.test(text.trim())) return runSlash(text);
   hideSuggestions();
   const item = active;
-  const key = conversationKey();
   const requestedSettings = chatState.settings(key).pending;
-  const previous = retry || chatState.failedDelivery(key, text);
+  const previous = retry || chatState.failedDelivery(key, text, images);
   if (previous && item.thread) await loadHistory();
   if (byId('send').disabled || conversationKey() !== key || route !== 'agents') return;
   const delivery = chatState.beginDelivery(key, {
-    text, previous, after: item.thread && transcript?.loaded ? transcript.latest + 1 : null,
+    text, images, previous, after: item.thread && transcript?.loaded ? transcript.latest + 1 : null,
     replaceDraft: !retry,
   });
   if (!delivery) return;
@@ -1615,6 +1658,7 @@ async function send(text = chatInput.value, retry = null) {
   try {
     const receipt = await api('/api/prompt', 'POST', {
       ...chatTarget(item), text, requestId: entry.id, settings: requestedSettings,
+      ...(images.length && { images: images.map(({ mime, content }) => ({ mime, content })) }),
     });
     chatState.sent(entry, receipt);
     if (receipt.settingsApplied && requestedSettings && chatState.settings(entry.key).pending === requestedSettings) {
@@ -1711,6 +1755,7 @@ function switchMachine() {
     if (item.state) row.prepend(make('span', item.state === 'online' ? 'dot' : 'dot off'));
     return row;
   }));
+  overlay.style.setProperty('--menu-end', Math.max(8, innerWidth - byId('home-bar').getBoundingClientRect().right + 8) + 'px');
   overlay.dataset.position = 'end';
 }
 
@@ -1860,6 +1905,11 @@ function paintMine() {
       linkMode = mode;
       saveLinkPreference(mode);
     });
+    const modes = workbenchAppearance.modes.map((value) => ({ value, label: t('appearance_' + value) }));
+    for (const [setting, label] of [['theme', 'darkMode'], ['motion', 'reduceMotion']]) {
+      setPicker(byId(setting + '-preference'), t(label), modes, workbenchAppearance.get(setting),
+        (value) => workbenchAppearance.set(setting, value));
+    }
   }
 }
 
@@ -2070,11 +2120,11 @@ byId('modules').addEventListener('click', switchModule);
 byId('machine').addEventListener('click', switchMachine);
 byId('new-agent').addEventListener('click', newAgentSheet);
 byId('new-shell').addEventListener('click', shellSheet);
-byId('chat-menu').addEventListener('click', () => {
+byId('chat-menu').addEventListener('click', (event) => {
   const machine = machines.find(({ id }) => id === active?.node);
   if (byId('chat-menu').hidden || !machine) return;
   const pinned = machine.pinnedAgents?.some((card) => card.pane?.window === active.pane.window);
-  showRecordMenu(active, machine, pinned);
+  showRecordMenu(active, machine, pinned, actionMenuAnchor(event, event.currentTarget), event.currentTarget);
 });
 bindBackButton(byId('mine-back'), back);
 byId('picker-close').addEventListener('click', () => pickerDialog.close());
@@ -2095,6 +2145,7 @@ byId('history').addEventListener('scroll', () => {
   paintMessageNavigation();
 }, { passive: true });
 new ResizeObserver(paintMessageNavigation).observe(byId('history'));
+bindScrollEdges(byId('history'));
 byId('exit-selection').addEventListener('click', () => {
   if (transcript?.selected) exitMessageSelection();
 });
@@ -2111,6 +2162,7 @@ function handleChatEscape(event) {
 
 document.addEventListener('keydown', (event) => {
   if (route !== 'agents' || overlay.open || pickerDialog.open) return;
+  if (event.key === 'Escape' && toolDetails.close()) { event.preventDefault(); return; }
   if (handleChatEscape(event)) return;
   if (transcript?.selected && !event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
       && !event.target.closest?.('input:not([type="checkbox"]),textarea,[contenteditable]')
@@ -2119,7 +2171,7 @@ document.addEventListener('keydown', (event) => {
     copyMessages(selectedMessages());
   }
 });
-byId('chat-form').addEventListener('submit', (event) => { event.preventDefault(); send(); });
+chatForm.addEventListener('submit', (event) => { event.preventDefault(); send(); });
 byId('stop-agent').addEventListener('click', stopAgent);
 byId('chat-settings').addEventListener('click', showChatSettings);
 byId('chat-permission').addEventListener('click', showPermissionSettings);
@@ -2152,7 +2204,13 @@ chatInput.addEventListener('compositionend', () => {
   updateSuggestions();
 });
 chatInput.addEventListener('keydown', (event) => {
-  if (event.isComposing || byId('chat-suggestions').hidden) return;
+  if (event.isComposing || composingPrompt) return;
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
+    event.preventDefault();
+    if (!event.repeat && !byId('send').disabled) chatForm.requestSubmit();
+    return;
+  }
+  if (byId('chat-suggestions').hidden) return;
   if (event.key === 'Escape') {
     event.preventDefault();
     event.stopPropagation();
@@ -2239,10 +2297,13 @@ window.addEventListener('popstate', (event) => {
   if (route === 'mine') { if (minePage === 'keys') loadKeys(); else loadUsage(); }
 });
 mobile.addEventListener('change', () => { if (isWorkspace()) paintWorkspace(); });
-darkMode.addEventListener('change', () => {
-  syncInstallTheme();
-  paint();
-  terminalView.updateTheme();
+workbenchAppearance.subscribe(({ themeChanged }) => {
+  if (themeChanged) {
+    syncInstallTheme();
+    paint();
+    terminalView.updateTheme();
+  }
+  linkPanel.updateAppearance(themeChanged);
 });
 syncInstallTheme();
 for (const dialog of [overlay, pickerDialog]) {
@@ -2274,7 +2335,7 @@ window.addEventListener('pageshow', fitViewport);
 viewport?.addEventListener('resize', fitViewport);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) fitViewport(); });
 fitViewport();
-byId('chat-form').addEventListener('pointerdown', (event) => {
+chatForm.addEventListener('pointerdown', (event) => {
   if (document.activeElement === chatInput && event.target.closest('button')) event.preventDefault();
 });
 

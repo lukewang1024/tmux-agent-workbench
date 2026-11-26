@@ -2,6 +2,18 @@ const callTypes = new Set(['function_call', 'custom_tool_call']);
 const outputTypes = new Set(['function_call_output', 'custom_tool_call_output']);
 const turnBoundaries = new Set(['task_started', 'task_complete', 'turn_started', 'turn_completed', 'turn_aborted', 'user_message']);
 const toolName = /^[\w.:-]{1,150}$/;
+const maxInvocation = 12_000;
+
+function execInvocation(item) {
+  let text;
+  const name = item.name.replace(/^functions\./, '');
+  if (name === 'exec' && item.type === 'custom_tool_call') text = item.input;
+  if (name === 'exec_command' && item.type === 'function_call' && typeof item.arguments === 'string') {
+    try { text = JSON.parse(item.arguments)?.cmd; } catch {}
+  }
+  if (typeof text !== 'string' || !text.trim()) return {};
+  return { invocation: text.slice(0, maxInvocation), ...(text.length > maxInvocation && { invocationTruncated: true }) };
+}
 
 // History pages are scanned from the latest bytes toward the earliest messages.
 export class HistoryTools {
@@ -44,7 +56,7 @@ export class HistoryTools {
     const state = finished ? 'finished' : this.#currentTurn ? 'running' : 'unconfirmed';
     this.#outputs.delete(item.call_id);
     if (state === 'running') this.runningNames.push(item.name);
-    this.#calls.push({ name: item.name, state, ...(elapsed >= 0 && { elapsed }) });
+    this.#calls.push({ name: item.name, state, ...(elapsed >= 0 && { elapsed }), ...execInvocation(item) });
   }
 
   finish() { this.#attach(this.#following); }

@@ -194,17 +194,25 @@ function linkFrame(label, sandbox) {
   return frame;
 }
 
+export function syncFrameAppearance(frameDocument) {
+  const root = frameDocument?.documentElement;
+  if (!root?.classList.contains('workbench-link-frame')) return;
+  root.dataset.theme = document.documentElement.dataset.theme;
+  root.dataset.motion = document.documentElement.dataset.motion;
+}
+
 function renderContentFrame(page, source, { label, onEscape }, render) {
   // The parent builds the preview and owns its interactions. The frame runs no scripts.
   const frame = linkFrame(label, 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<main class="link-document" tabindex="0"></main>';
+    + '<main class="link-document scrollable" tabindex="0"></main>';
   frame.addEventListener('load', () => {
     const frameDocument = frame.contentDocument;
     const content = frameDocument?.querySelector('main');
     if (!content) return;
     frameDocument.documentElement.classList.add('workbench-link-frame');
     frameDocument.documentElement.lang = document.documentElement.lang;
+    syncFrameAppearance(frameDocument);
     const policy = frameDocument.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
     policy.content = "default-src 'none'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; img-src data:"
@@ -359,7 +367,7 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
 
 export function createLinkPage(url, source, options) {
   const local = source.kind === 'file' || source.kind === 'diagram';
-  const page = element('section', local ? 'link-page link-document' : 'link-page link-framed');
+  const page = element('section', local ? 'link-page link-document scrollable' : 'link-page link-framed');
   if (source.kind === 'diagram') {
     page.append(diagramFigure(source.text, options.t));
     return page;

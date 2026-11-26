@@ -12,14 +12,17 @@ import { RemoteNode, nodeProtocol } from './connector.mjs';
 import { stripGoalContext } from './history.mjs';
 import { loadLocale, renderDocument } from './i18n.mjs';
 import { readPublicDocument } from './public-document.mjs';
+import { decodePromptImages, promptBodyLimit } from './prompt-images.mjs';
 import { githubMarkdownURL } from './public/link-policy.js';
 import { readReaderSource } from './reader-source.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'diagram-viewer.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
-  'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'mermaid-preview.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
+const browserModules = ['action-menu.js', 'appearance.js', 'chat-state.js', 'composer-focus.js', 'composer-images.js',
+  'connection.js', 'diagram-viewer.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
+  'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'mermaid-preview.js', 'message-tools.js',
+  'reader-preview.js', 'scrollable.js', 'terminal.js', 'workspace-layout.js'];
 const diagramRenderer = '/mermaid-renderer.html';
 const diagramScript = '/mermaid-renderer.js';
 const diagramLibrary = '/vendor/mermaid.js';
@@ -79,7 +82,7 @@ function json(res, result, status = 200) {
   res.end(JSON.stringify(result));
 }
 
-async function body(req) {
+async function body(req, limit = 64 * 1024) {
   if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
     throw new Failure(415, 'Use application/json.');
   }
@@ -87,7 +90,7 @@ async function body(req) {
   let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > 64 * 1024) throw new Failure(413, 'Request is too large.');
+    if (length > limit) throw new Failure(413, 'Request is too large.');
     chunks.push(chunk);
   }
   try {
@@ -315,9 +318,17 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const messages = page.messages.flatMap((message) => {
         if (message.role !== 'user') return [message];
         const text = stripGoalContext(message.text);
-        return text.trim() ? [{ ...message, text }] : [];
+        return text.trim() || message.images ? [{ ...message, text }] : [];
       });
       return json(res, { ...page, messages });
+    }
+    if (path === '/api/history-image' && method === 'GET') {
+      const args = Object.fromEntries(['agent', 'thread', 'message', 'index'].map((key) => [key, request.searchParams.get(key)]));
+      const image = await node(request.searchParams.get('node') || 'local').request('history-image', args);
+      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.mime)) throw new Failure(404, 'Image is unavailable.');
+      const content = Buffer.from(image.content, 'base64');
+      res.writeHead(200, { 'content-type': image.mime, 'content-length': content.length });
+      return res.end(content);
     }
     if ((path === '/api/chat-settings' || path === '/api/chat-capabilities') && method === 'GET') {
       const [agent, thread, pane] = ['agent', 'thread', 'pane'].map((key) => request.searchParams.get(key));
@@ -335,7 +346,8 @@ export async function startServer({ local, localName, store, listen, origin, cer
       '/api/chat-commands': 'chat-capabilities',
     }[path];
     if (typeof chatOperation === 'string' && method === 'POST') {
-      const input = await body(req);
+      const input = await body(req, chatOperation === 'prompt' ? promptBodyLimit : undefined);
+      const attached = chatOperation === 'prompt' && decodePromptImages(input.images).length > 0;
       if (path === '/api/chat-commands') input.kind = 'commands';
       if (typeof input.pane !== 'string' || !/^\d+(?:\.\d+){3}$/.test(input.pane)) throw new Failure(400, 'Invalid Pane.');
       const lease = input.node + ':' + input.pane;
@@ -344,7 +356,7 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const prompt = {};
       leases.set(lease, prompt);
       try {
-        return json(res, await node(input.node).request(chatOperation, input));
+        return json(res, await node(input.node).request(attached ? 'prompt-with-images' : chatOperation, input));
       } finally {
         if (leases.get(lease) === prompt) leases.delete(lease);
       }

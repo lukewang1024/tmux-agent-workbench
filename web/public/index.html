@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" id="page-theme-color">
-  <meta name="theme-color" content="WORKBENCH_THEME_LIGHT" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="WORKBENCH_THEME_DARK" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" id="page-theme-color" content="WORKBENCH_THEME_LIGHT"
+        data-light="WORKBENCH_THEME_LIGHT" data-dark="WORKBENCH_THEME_DARK">
+  <script src="/appearance.js?v=WORKBENCH_CACHE_VERSION"></script>
   <style>
     :root { --paper: WORKBENCH_THEME_LIGHT; }
-    @media (prefers-color-scheme: dark) { :root { --paper: WORKBENCH_THEME_DARK; } }
+    :root[data-theme="dark"] { --paper: WORKBENCH_THEME_DARK; }
     html, body { background-color: var(--paper); }
   </style>
   <title>Workbench Web</title>
@@ -49,6 +49,7 @@
     <symbol id="icon-fit-diagram" viewBox="0 0 24 24"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/><rect x="8" y="9" width="8" height="6" rx="1"/></symbol>
     <symbol id="icon-expand-diagram" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-6 6m-4 10H4v-6m0 6 6-6"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="M5 19 19 5m-9 0h9v9"/></symbol>
+    <symbol id="icon-attach" viewBox="0 0 24 24"><path d="m9 14.5 6.5-6.5a2 2 0 0 1 2.8 2.8l-8 8a3.75 3.75 0 0 1-5.3-5.3l8-8"/></symbol>
     <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></symbol>
     <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 4-3 7-8 9-5-2-8-5-8-9V6l8-3Zm-3 9 2 2 4-4"/></symbol>
     <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
@@ -80,14 +81,16 @@
         </button>
       </div>
     </header>
-    <div class="app-body">
-      <div class="workspace" id="workspace" data-mobile-view="list" hidden>
+    <div class="app-body" id="app-body">
+      <div class="workspace" id="workspace" data-mobile-view="list" data-layout="single" hidden>
         <section class="screen" id="list" aria-labelledby="list-heading">
           <h1 class="sr-only" id="list-heading" tabindex="-1">{{agents}}</h1>
-          <div class="list-content">
+          <div class="list-content scrollable">
             <div id="groups"></div>
           </div>
         </section>
+        <div class="panel-separator" data-resize-panel="list" role="separator" aria-orientation="vertical"
+             aria-controls="list" aria-label="{{resizeList}}" tabindex="0"></div>
         <section class="screen" id="detail" hidden>
           <header class="toolbar bar detail-bar">
             <button id="back" type="button" aria-label="{{backToAgents}}"></button>
@@ -101,7 +104,7 @@
                 <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
               </button>
             </div>
-            <button class="row-action" id="chat-menu" type="button" aria-label="{{itemActions}}" title="{{itemActions}}" aria-haspopup="dialog" hidden>
+            <button class="row-action" id="chat-menu" type="button" aria-label="{{itemActions}}" title="{{itemActions}}" aria-haspopup="dialog" aria-expanded="false" hidden>
               <svg class="glyph" aria-hidden="true"><use href="#icon-more"></use></svg>
             </button>
             <div class="chat-actions" id="chat-actions" hidden>
@@ -121,22 +124,24 @@
             <button class="secondary" id="new-shell" type="button" hidden><svg class="glyph" aria-hidden="true"><use href="#icon-plus"></use></svg>{{newTerminal}}</button>
           </header>
           <div class="panel" id="chat" aria-label="{{conversation}}" hidden>
-            <div class="history" id="history">
-              <div class="history-progress" id="history-progress" role="status" hidden><span>{{loadingEarlierMessages}}</span></div>
-              <div id="messages"></div>
-              <div id="outgoing-messages" hidden></div>
+            <div class="scroll-edges">
+              <div class="history scrollable" id="history">
+                <div class="history-progress" id="history-progress" role="status" hidden><span>{{loadingEarlierMessages}}</span></div>
+                <div id="messages"></div>
+                <div id="outgoing-messages" hidden></div>
+              </div>
             </div>
             <div class="composer-wrap">
               <div class="composer-inner">
                 <p id="chat-error" class="message-error" role="status" hidden></p>
-                <div class="command-result" id="command-result" hidden>
-                  <pre id="command-result-text" role="status"></pre>
+                <div class="command-result scrollable" id="command-result" hidden>
+                  <pre class="scrollable" id="command-result-text" role="status"></pre>
                   <div class="command-result-actions">
                     <button class="plain" id="command-open-pane" type="button">{{openTerminal}}</button>
                     <button class="plain" id="command-dismiss" type="button">{{close}}</button>
                   </div>
                 </div>
-                <div class="suggestions" id="chat-suggestions" role="listbox" aria-label="{{chatSuggestions}}" hidden></div>
+                <div class="suggestions scrollable" id="chat-suggestions" role="listbox" aria-label="{{chatSuggestions}}" hidden></div>
                 <div class="composer-label" id="composer-label">
                   <span class="composer-state">
                     <span class="dot" aria-hidden="true"></span><span id="chat-status" role="status"></span>
@@ -157,12 +162,17 @@
                     </button>
                   </span>
                 </div>
+                <div class="draft-images" id="draft-images" hidden></div>
                 <form class="composer" id="chat-form">
-                  <textarea rows="1" id="chat-input" aria-label="{{messageAgent}}" aria-controls="chat-suggestions" placeholder="{{continueConversation}}"></textarea>
+                  <input type="file" id="image-picker" accept="image/*" multiple hidden>
+                  <button class="row-action composer-attach" id="attach-image" type="button" aria-label="{{attachImages}}" title="{{attachImages}}" hidden>
+                    <svg class="glyph" aria-hidden="true"><use href="#icon-attach"></use></svg>
+                  </button>
+                  <textarea class="scrollable" rows="1" id="chat-input" aria-label="{{messageAgent}}" aria-controls="chat-suggestions" placeholder="{{continueConversation}}"></textarea>
                   <button type="button" class="composer-send stop-agent" id="stop-agent" aria-label="{{stopCurrentTurn}}" title="{{stopCurrentTurn}}" hidden>
                     <svg class="glyph" aria-hidden="true"><use href="#icon-stop"></use></svg>
                   </button>
-                  <button class="composer-send" type="submit" id="send" aria-label="{{send}}" title="{{send}}">
+                  <button class="composer-send" type="submit" id="send" aria-label="{{send}}" title="{{send}}" aria-keyshortcuts="Meta+Enter Control+Enter">
                     <svg class="glyph" aria-hidden="true"><use href="#icon-send"></use></svg>
                   </button>
                 </form>
@@ -196,9 +206,11 @@
               <button class="secondary" type="submit">{{enter}}</button>
             </form>
           </div>
-          <div class="session-tree" id="session-tree" hidden></div>
+          <div class="session-tree scrollable" id="session-tree" hidden></div>
           <div class="detail-empty" id="detail-empty" hidden></div>
         </section>
+        <div class="panel-separator" data-resize-panel="preview" role="separator" aria-orientation="vertical"
+             aria-controls="link-panel" aria-label="{{resizePreview}}" tabindex="0"></div>
         <aside class="link-panel" id="link-panel" aria-label="{{linkPreview}}" hidden>
           <header class="toolbar link-bar">
             <button id="back-link-panel" type="button" aria-label="{{backToConversation}}"></button>
@@ -211,7 +223,7 @@
                 <span class="picker-value"></span>
                 <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
               </button>
-              <div class="link-tab-picker" id="link-tab-picker" popover="auto" role="group" aria-label="{{linkTabs}}"></div>
+              <div class="link-tab-picker scrollable" id="link-tab-picker" popover="auto" role="group" aria-label="{{linkTabs}}"></div>
             </div>
             <a class="row-action" id="open-link-browser" target="_blank" rel="noopener noreferrer" aria-label="{{openInBrowser}}" title="{{openInBrowser}}" hidden>
               <svg class="glyph" aria-hidden="true"><use href="#icon-external"></use></svg>
@@ -221,14 +233,14 @@
           <div class="link-pages" id="link-pages"></div>
         </aside>
       </div>
-      <section class="page" id="machines" aria-labelledby="machines-heading" hidden>
+      <section class="page scrollable" id="machines" aria-labelledby="machines-heading" hidden>
         <div class="page-content">
           <header class="page-head"><h1 id="machines-heading" tabindex="-1">{{machines}}</h1></header>
           <p class="machine-summary" id="machine-summary"></p>
           <div class="node-list" id="node-list"></div>
         </div>
       </section>
-      <section class="page" id="mine" aria-labelledby="mine-heading" hidden>
+      <section class="page scrollable" id="mine" aria-labelledby="mine-heading" hidden>
         <header class="toolbar page-head profile-header">
           <button id="mine-back" type="button" aria-label="{{backToProfile}}" hidden></button>
           <h1 id="mine-heading" tabindex="-1">{{profile}}</h1>
@@ -256,9 +268,17 @@
             </div>
           </div>
           <div class="subpage" id="mine-settings" hidden>
-            <div class="link-preference">
+            <div class="preference-row">
               <span>{{openLinks}}</span>
               <button class="picker-button" type="button" id="link-preference"></button>
+            </div>
+            <div class="preference-row">
+              <span>{{darkMode}}</span>
+              <button class="picker-button" type="button" id="theme-preference"></button>
+            </div>
+            <div class="preference-row">
+              <span>{{reduceMotion}}</span>
+              <button class="picker-button" type="button" id="motion-preference"></button>
             </div>
             <button class="profile-row" type="button" id="install"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-download"></use></svg></span><span class="row-copy"><b>{{install}}</b><small>{{openFromHomeScreen}}</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
             <button class="profile-row" type="button" id="signout"><span class="row-glyph"><svg class="glyph" aria-hidden="true"><use href="#icon-logout"></use></svg></span><span class="row-copy"><b>{{signOut}}</b><small>{{endBrowserSession}}</small></span><span class="trailing"><svg class="glyph" aria-hidden="true"><use href="#icon-next"></use></svg></span></button>
@@ -277,7 +297,7 @@
       </section>
     </div>
     <dialog class="overlay" id="overlay" aria-labelledby="sheet-title">
-      <section class="sheet">
+      <section class="sheet scrollable" tabindex="-1">
         <header class="sheet-head">
           <h2 id="sheet-title"></h2>
           <button class="plain icon" type="button" id="close" aria-label="{{close}}" autofocus><svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg></button>
@@ -286,7 +306,7 @@
       </section>
     </dialog>
     <dialog class="overlay" id="picker-dialog" aria-labelledby="picker-title">
-      <section class="sheet">
+      <section class="sheet scrollable">
         <header class="sheet-head">
           <h2 id="picker-title"></h2>
           <button class="plain icon" type="button" id="picker-close" aria-label="{{close}}"><svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg></button>
@@ -295,7 +315,12 @@
       </section>
     </dialog>
     <div class="toast" id="toast" role="status" hidden></div>
-    <section class="done-popover" id="done-popover" popover="auto" aria-label="{{completionNotifications}}">
+    <aside class="tool-detail scrollable" id="tool-detail" popover="auto" aria-label="{{toolInvocation}}">
+      <h2>{{toolInvocation}}</h2>
+      <pre class="scrollable" tabindex="0"></pre>
+      <p hidden></p>
+    </aside>
+    <section class="done-popover scrollable" id="done-popover" popover="auto" aria-label="{{completionNotifications}}">
       <header><h2>{{completionNotifications}}</h2><button class="plain" id="done-clear" type="button">{{clearCompletions}}</button></header>
       <div id="done-list"></div>
     </section>

@@ -6,6 +6,10 @@ function normalizeText(text) {
   return text.replace(/\r\n?/g, '\n').trim();
 }
 
+function sameImages(left = [], right = []) {
+  return left.length === right.length && left.every((image, index) => image.content === right[index].content);
+}
+
 export class ChatState {
   #storage;
   #drafts = new Map();
@@ -43,7 +47,7 @@ export class ChatState {
           if (value?.model || value?.permission) this.#pendingSettings.set(key.slice(settingsPrefix.length), value);
           continue;
         }
-        if (typeof value?.text !== 'string' || !value.text) continue;
+        if (typeof value?.text !== 'string' || (!value.text && !value.images?.length)) continue;
         if (key.startsWith(draftPrefix)) {
           this.#drafts.set(key.slice(draftPrefix.length), value);
           continue;
@@ -59,18 +63,21 @@ export class ChatState {
       for (const [key, queue] of this.#deliveries) {
         queue.entries.sort((a, b) => a.startedAt - b.startedAt);
         const failed = queue.entries.findLast((entry) => entry.state === 'failed');
-        if (failed && !this.#drafts.has(key)) this.#drafts.set(key, { text: failed.text, retry: failed.id });
+        if (failed && !this.#drafts.has(key)) this.saveDraft(key, failed.text, failed.id, failed.images);
       }
     } catch {}
   }
 
   draft(key) { return this.#drafts.get(key)?.text || ''; }
+  draftImages(key) { return this.#drafts.get(key)?.images || []; }
 
-  saveDraft(key, text, retry) {
-    if (text) this.#drafts.set(key, { text, retry });
+  saveDraft(key, text, retry, images = this.draftImages(key)) {
+    if (text || images.length) this.#drafts.set(key, { text, retry, ...(images.length && { images }) });
     else this.#drafts.delete(key);
     this.#persist(draftPrefix + key, this.#drafts.get(key));
   }
+
+  clearDraft(key) { this.saveDraft(key, '', undefined, []); }
 
   settings(key) {
     return { pending: this.#pendingSettings.get(key), model: this.#models.get(key), permission: this.#permissions.get(key) };
@@ -120,8 +127,8 @@ export class ChatState {
     }
     const draft = this.#drafts.get(previous);
     if (draft) {
-      if (!this.#drafts.has(key)) this.saveDraft(key, draft.text, draft.retry);
-      this.saveDraft(previous, '');
+      if (!this.#drafts.has(key)) this.saveDraft(key, draft.text, draft.retry, draft.images);
+      this.clearDraft(previous);
     }
     const queue = this.#deliveries.get(previous);
     if (queue) {
@@ -150,14 +157,14 @@ export class ChatState {
 
   deliveries(key) { return this.#deliveries.get(key)?.entries || []; }
 
-  failedDelivery(key, text) {
-    return this.deliveries(key).findLast((entry) => entry.state === 'failed' && entry.text === text);
+  failedDelivery(key, text, images) {
+    return this.deliveries(key).findLast((entry) => entry.state === 'failed' && entry.text === text && sameImages(entry.images, images));
   }
 
-  beginDelivery(key, { text, previous, after, replaceDraft }) {
+  beginDelivery(key, { text, images = [], previous, after, replaceDraft }) {
     const entries = this.deliveries(key);
     if (previous && (previous.state !== 'failed' || !entries.includes(previous))) return null;
-    const entry = previous || { id: crypto.randomUUID(), key, text, match: normalizeText(text) };
+    const entry = previous || { id: crypto.randomUUID(), key, text, match: normalizeText(text), ...(images.length && { images }) };
     entry.state = 'sending';
     entry.startedAt = Date.now();
     entry.after = after;
@@ -165,7 +172,7 @@ export class ChatState {
     this.#queue(key).entries.push(entry);
     this.#persist(deliveryPrefix + entry.id, entry);
     const clearDraft = replaceDraft || this.#drafts.get(key)?.retry === entry.id;
-    if (clearDraft) this.saveDraft(key, '');
+    if (clearDraft) this.clearDraft(key);
     return { entry, clearDraft };
   }
 
@@ -182,7 +189,7 @@ export class ChatState {
     entry.state = 'failed';
     entry.error = message;
     this.#persist(deliveryPrefix + entry.id, entry);
-    if (!this.#drafts.has(entry.key)) this.saveDraft(entry.key, entry.text, entry.id);
+    if (!this.#drafts.has(entry.key)) this.saveDraft(entry.key, entry.text, entry.id, entry.images ?? []);
     return true;
   }
 
@@ -193,13 +200,13 @@ export class ChatState {
     for (const message of messages) {
       if (message.role !== 'user' || queue.matched.has(message.id)) continue;
       const text = normalizeText(message.text);
-      const index = queue.entries.findIndex((entry) => text === entry.match && (entry.after !== null
+      const index = queue.entries.findIndex((entry) => text === entry.match && (entry.images?.length || 0) === (message.images || 0) && (entry.after !== null
         ? message.id >= entry.after : entry.state !== 'sending' && Date.parse(message.time) >= entry.startedAt));
       if (index < 0) continue;
       const [entry] = queue.entries.splice(index, 1);
       this.#persist(deliveryPrefix + entry.id, null);
       if (this.#drafts.get(key)?.retry === entry.id) {
-        this.saveDraft(key, '');
+        this.clearDraft(key);
         result.draftCleared = true;
       }
       queue.matched.add(message.id);

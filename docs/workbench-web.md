@@ -15,6 +15,15 @@ Scroll up to load earlier messages. Messages can be copied individually or
 together through the selection control. Chat sends follow-ups while the Agent
 is idle, working or done. Codex handles submitting the message in the active
 conversation. Respond to permission prompts on the Agent's machine.
+Use **Attach images** or paste an image into the composer to send up to three
+images with an optional caption. Remote Agents need an updated Web connector.
+Press **Command+Enter** or **Control+Enter** to send from the composer. Expand
+an Agent message's tool activity and select an exec entry to read its invocation.
+
+Drag the separators to resize the list, conversation and preview. You can also
+focus a separator and use the arrow keys. Workbench remembers widths per
+browser. On medium viewports the preview takes the list's place beside the
+conversation. On small viewports each view uses the full screen.
 
 Use the model, thinking and permissions controls beside the composer. Codex
 provides the available models, thinking levels and allowed permission profiles.
@@ -38,6 +47,8 @@ embedding. **Always use browser** opens all web links externally. Failed web
 previews offer **Open in browser**. A retry is available for temporary service
 failures. If the GitHub README API is unavailable, Workbench can load a public
 `README.md` from the repository root.
+**Dark mode** and **Reduce motion** in Settings can each follow the OS or be
+set independently on this device.
 
 Local file links open in the panel in every mode. The Agent machine reads UTF-8
 text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's

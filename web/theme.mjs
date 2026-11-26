@@ -51,9 +51,10 @@ export function paletteStyles(palettes) {
     };
     const declarations = Object.entries(colors).map(([role, color]) => '--' + role + ': ' + color + ';');
     ansi.forEach((color, index) => declarations.push('--terminal-ansi-' + index + ': ' + color + ';'));
-    return ':root { color-scheme: ' + mode + ';\n  ' + declarations.join('\n  ') + '\n}';
+    const selector = mode === 'dark' ? ':root[data-theme="dark"]' : ':root';
+    return selector + ' { color-scheme: ' + mode + ';\n  ' + declarations.join('\n  ') + '\n}';
   };
-  return root('light') + '\n@media (prefers-color-scheme: dark) {\n' + root('dark') + '\n}';
+  return root('light') + '\n' + root('dark');
 }
 
 function tmuxColor(value) {

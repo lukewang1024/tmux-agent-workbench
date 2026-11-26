@@ -1,20 +1,21 @@
 import { bindBackButton } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
-import { createLinkPage, linkPreviewSource } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
+import { createLinkPage, linkPreviewSource, syncFrameAppearance } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkTabs } from './link-tabs.js?v=WORKBENCH_CACHE_VERSION';
+import { refreshDiagramFigures } from './mermaid-preview.js?v=WORKBENCH_CACHE_VERSION';
 
-export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMode, readFile, onVisibilityChange, onEscape }) {
+export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMode, readFile, fullScreen, onVisibilityChange, onLayoutChange, onEscape }) {
   const backButton = panel.querySelector('#back-link-panel');
   const closeButton = panel.querySelector('#close-link-panel');
   const openInBrowser = panel.querySelector('#open-link-browser');
   const tabBar = mountLinkTabs(panel.querySelector('.link-tab-slot'), { t, selectTab, closeTab });
   const pages = panel.querySelector('#link-pages');
   const empty = panel.querySelector('#link-preview-empty');
-  const fullScreen = window.matchMedia('(max-width: 1023px)');
   const tabs = new Map();
   let selected = '';
   let visible = false;
   let opener;
+  let transition;
   let nextId = 0;
 
   function renderTabs() {
@@ -40,18 +41,43 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
   }
 
   function restore(open, returnFocus = false) {
+    if (!open && !visible && transition && returnFocus) return;
     const wasVisible = visible;
     visible = open;
+    transition?.cancel();
+    transition = undefined;
+    panel.inert = false;
     if (!visible) tabBar.closePicker();
-    panel.hidden = !visible;
     toggle.setAttribute('aria-expanded', String(visible));
     toggle.title = t(visible ? 'closeLinkPreview' : 'openLinkPreview');
     toggle.setAttribute('aria-label', toggle.title);
+    const animate = document.documentElement.dataset.motion === 'full';
+    const rest = { opacity: 1, transform: 'translateX(0)' };
+    const away = { opacity: 0, transform: 'translateX(8px)' };
     if (visible) {
+      panel.hidden = false;
+      onLayoutChange();
       renderTabs();
       if (!wasVisible && fullScreen.matches) backButton.focus({ preventScroll: true });
-    } else if (wasVisible && returnFocus) {
-      (opener?.isConnected ? opener : toggle).focus({ preventScroll: true });
+      if (!wasVisible && animate) transition = panel.animate([away, rest], { duration: 145, easing: 'ease-out' });
+    } else {
+      function hide() {
+        panel.hidden = true;
+        panel.inert = false;
+        onLayoutChange();
+        if (wasVisible && returnFocus) (opener?.isConnected ? opener : toggle).focus({ preventScroll: true });
+      }
+      if (wasVisible && returnFocus && animate) {
+        panel.inert = true;
+        const closing = panel.animate([rest, away], { duration: 130, easing: 'ease-in', fill: 'forwards' });
+        transition = closing;
+        closing.finished.then(() => {
+          if (transition !== closing) return;
+          transition = undefined;
+          closing.cancel();
+          hide();
+        }).catch(() => {});
+      } else if (!panel.hidden) hide();
     }
   }
 
@@ -116,6 +142,11 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
   });
   bindBackButton(backButton, close);
   closeButton.addEventListener('click', close);
+  fullScreen.addEventListener('change', () => {
+    if (!visible) return;
+    if (fullScreen.matches && (!panel.contains(document.activeElement) || document.activeElement === closeButton)) backButton.focus();
+    else if (!fullScreen.matches && document.activeElement === backButton) closeButton.focus();
+  });
   return {
     get isOpen() { return visible; },
     openLink,
@@ -125,6 +156,13 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
     close,
     closeTabPicker: tabBar.closePicker,
     restore,
+    updateAppearance(themeChanged) {
+      if (themeChanged) refreshDiagramFigures(pages);
+      for (const frame of pages.querySelectorAll('iframe.link-frame[srcdoc]')) {
+        syncFrameAppearance(frame.contentDocument);
+        if (themeChanged && frame.contentDocument) refreshDiagramFigures(frame.contentDocument);
+      }
+    },
     reset() {
       restore(false);
       for (const tab of tabs.values()) tab.page?.remove();

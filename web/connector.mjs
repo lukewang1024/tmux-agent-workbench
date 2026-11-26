@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import { promptBodyLimit } from './prompt-images.mjs';
 import { Failure, parseOrigin } from './state.mjs';
 
 export const nodeProtocol = '1';
@@ -91,7 +92,7 @@ export async function runConnector(config, local, signal) {
     const connected = await new Promise((resolve) => {
       const socket = new WebSocket(destination, {
         headers: headers(config.id, config.credential),
-        maxPayload: 96 * 1024, handshakeTimeout: 10_000, perMessageDeflate: false,
+        maxPayload: promptBodyLimit + 1024, handshakeTimeout: 10_000, perMessageDeflate: false,
       });
       let online = false;
       let inFlight = 0;

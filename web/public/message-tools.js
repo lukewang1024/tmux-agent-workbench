@@ -1,4 +1,4 @@
-import { glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 
 const states = { running: 'toolRunning', finished: 'toolFinished', unconfirmed: 'toolUnconfirmed' };
 
@@ -30,7 +30,56 @@ export function mountRunningTools(trigger, { t, sheet }) {
   };
 }
 
-export function paintMessageTools(message, tools, t, language) {
+export function mountToolDetails(popover, t) {
+  const text = popover.querySelector('pre');
+  const note = popover.querySelector('p');
+  let source;
+  const isOpen = () => popover.matches(':popover-open');
+  function place() {
+    if (!source?.isConnected || !source.getClientRects().length) return close();
+    const { left, top, bottom } = source.getBoundingClientRect();
+    const width = Math.min(560, innerWidth - 16);
+    const below = innerHeight - bottom - 12;
+    const above = top - 12;
+    const flip = below < 200 && above > below;
+    popover.style.inlineSize = width + 'px';
+    popover.style.maxBlockSize = Math.max(0, Math.min(340, flip ? above : below)) + 'px';
+    popover.style.left = Math.min(innerWidth - width - 8, Math.max(8, left)) + 'px';
+    popover.style.top = flip ? 'auto' : bottom + 5 + 'px';
+    popover.style.bottom = flip ? innerHeight - top + 5 + 'px' : 'auto';
+  }
+  function close() {
+    if (!isOpen()) return false;
+    popover.hidePopover();
+    return true;
+  }
+  popover.addEventListener('toggle', () => {
+    if (isOpen()) return;
+    source?.setAttribute('aria-expanded', 'false');
+    source = undefined;
+    text.textContent = '';
+  });
+  window.addEventListener('resize', () => { if (isOpen()) place(); });
+  window.addEventListener('scroll', ({ target }) => {
+    if (isOpen() && target.contains?.(source)) place();
+  }, true);
+  return {
+    open(trigger, invocation, truncated) {
+      if (source === trigger && close()) return;
+      source?.setAttribute('aria-expanded', 'false');
+      source = trigger;
+      text.textContent = invocation;
+      note.hidden = !truncated;
+      note.textContent = truncated ? t('toolInvocationTruncated') : '';
+      place();
+      if (!isOpen()) popover.showPopover({ source: trigger });
+      trigger.setAttribute('aria-expanded', 'true');
+    },
+    close,
+  };
+}
+
+export function paintMessageTools(message, tools, t, language, toolDetails) {
   if (!Array.isArray(tools) || !tools.length) return;
   let disclosure = message.querySelector('.message-tools');
   const revision = JSON.stringify(tools);
@@ -45,11 +94,24 @@ export function paintMessageTools(message, tools, t, language) {
   disclosure.dataset.revision = revision;
   disclosure.querySelector('summary span').textContent = t('messageToolCount', { count: tools.length });
   const seconds = new Intl.NumberFormat(language, { style: 'unit', unit: 'second', maximumFractionDigits: 1 });
-  const entries = tools.map(({ name, state, elapsed }) => {
+  const entries = tools.map(({ name, state, elapsed, invocation, invocationTruncated }) => {
     const row = make('li');
     const label = Object.hasOwn(states, state) ? states[state] : 'toolUnconfirmed';
     const text = [t(label), Number.isFinite(elapsed) && seconds.format(elapsed / 1000)].filter(Boolean).join(' · ');
-    row.append(make('span', 'tool-name', name), make('span', 'tool-state', text));
+    const nameLabel = make('span', 'tool-name', name);
+    const stateLabel = make('span', 'tool-state', text);
+    if (typeof invocation !== 'string' || !invocation) {
+      row.append(nameLabel, stateLabel);
+      return row;
+    }
+    const trigger = button('', 'tool-detail-trigger', (event) => {
+      event.stopPropagation();
+      toolDetails.open(trigger, invocation, invocationTruncated);
+    });
+    trigger.setAttribute('aria-controls', 'tool-detail');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.append(nameLabel, stateLabel, glyph('next'));
+    row.append(trigger);
     return row;
   });
   disclosure.querySelector('ul').replaceChildren(...entries);

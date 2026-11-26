@@ -5,6 +5,7 @@ const maxSource = 24_000;
 const maxInlineDiagrams = 16;
 let renderer;
 let queue = Promise.resolve();
+const figureSources = new WeakMap();
 
 function loadRenderer() {
   renderer ??= new Promise((resolve, reject) => {
@@ -33,7 +34,7 @@ function loadRenderer() {
 async function requestDiagram(text) {
   if (!text.trim() || text.length > maxSource) throw new Error('Diagram size is unsupported');
   const frame = await loadRenderer();
-  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const dark = document.documentElement.dataset.theme === 'dark';
   const style = getComputedStyle(document.documentElement);
   const palette = Object.fromEntries(['paper', 'ink', 'muted', 'active', 'raised'].map((role) =>
     [role, style.getPropertyValue('--' + role).trim()]));
@@ -58,10 +59,11 @@ async function requestDiagram(text) {
 
 export function diagramFigure(text, t) {
   const figure = make('figure', 'mermaid-figure');
+  figureSources.set(figure, { text, t });
   const status = make('p', 'link-preview-status', t('loadingDiagram'));
   status.setAttribute('role', 'status');
   const source = make('details', 'diagram-source');
-  const pre = make('pre');
+  const pre = make('pre', 'scrollable');
   pre.append(make('code', 'language-mermaid', text));
   source.append(make('summary', '', t('diagramSource')), pre);
   figure.append(status, source);
@@ -93,6 +95,13 @@ export function diagramFigure(text, t) {
     source.open = true;
   });
   return figure;
+}
+
+export function refreshDiagramFigures(container) {
+  for (const figure of container.querySelectorAll('.mermaid-figure')) {
+    const source = figureSources.get(figure);
+    if (source) figure.replaceWith(diagramFigure(source.text, source.t));
+  }
 }
 
 export function renderMarkdownDiagrams(container, t) {

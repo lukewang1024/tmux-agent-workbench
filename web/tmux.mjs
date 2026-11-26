@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readWorkspaceFile } from './file-preview.mjs';
 import { History, hasThread, sameProcess } from './history.mjs';
+import { decodePromptImages, imageFingerprint, prunePromptImages, stagePromptImages } from './prompt-images.mjs';
 import { Failure, secret, workbenchState } from './state.mjs';
 import { tmuxPalette } from './theme.mjs';
 import { codexCommands, codexComposer, codexLaunchPermission, codexOutput, codexSettings, modelChangeConfirmed, readModels,
@@ -224,6 +225,7 @@ export class LocalNode {
     const catalog = {
       agents, sessions, terminals, pinnedAgents,
       snapshotAvailable: Boolean(data) && panes.status === 'fulfilled',
+      imagePrompts: true,
     };
     if (sidebar) {
       const { sort, colors, stats, agentRows, sessionRows, pinnedSessions, launchTool } = sidebar;
@@ -363,16 +365,18 @@ export class LocalNode {
     return entry;
   }
 
-  async sendPrompt(agentId, thread, text, paneKey, requestId, settings) {
-    if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 16_384
+  async sendPrompt(agentId, thread, text, paneKey, requestId, settings, encodedImages) {
+    const images = decodePromptImages(encodedImages);
+    if (typeof text !== 'string' || (!text.trim() && !images.length) || Buffer.byteLength(text) > 16_384
         || /[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/.test(text)) {
       throw new Failure(400, 'Enter a text message under 16 KB.');
     }
     if (requestId != null && !hasThread(requestId)) throw new Failure(400, 'Invalid message request ID.');
     const receiptKey = requestId && [agentId, paneKey, requestId].join('/');
+    const fingerprint = imageFingerprint(images);
     const previous = this.promptReceipts.get(receiptKey);
     if (previous) {
-      if (previous.text !== text) throw new Failure(409, 'A message request ID was reused with different text.');
+      if (previous.text !== text || previous.fingerprint !== fingerprint) throw new Failure(409, 'A message request ID was reused with different content.');
       return previous.response;
     }
     const canSend = (entry) => !entry.pane.inMode && (entry.thread ? promptStates.includes(entry.state) : entry.state === 'idle');
@@ -386,7 +390,9 @@ export class LocalNode {
     }
     let after;
     let submittedAt;
-    await this.paste(entry.pane, Buffer.from(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')), {
+    const paths = await stagePromptImages(images);
+    const parts = [...paths, text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')].filter(Boolean).map((part) => Buffer.from(part));
+    await this.pasteParts(entry.pane, parts, {
       bracketed: true,
       submit: true,
       check: async () => {
@@ -399,7 +405,7 @@ export class LocalNode {
     const response = submittedAt === undefined ? { after } : { submittedAt };
     if (settingsApplied) response.settingsApplied = true;
     if (receiptKey) {
-      this.promptReceipts.set(receiptKey, { text, response });
+      this.promptReceipts.set(receiptKey, { text, fingerprint, response });
       if (this.promptReceipts.size > 256) this.promptReceipts.delete(this.promptReceipts.keys().next().value);
     }
     return response;
@@ -613,29 +619,34 @@ export class LocalNode {
   }
 
   async paste(pane, bytes, { bracketed = false, submit = false, check } = {}) {
+    return this.pasteParts(pane, bytes.length ? [bytes] : [], { bracketed, submit, check });
+  }
+
+  async pasteParts(pane, parts, { bracketed, submit, check }) {
     await this.verify(pane);
-    if (!bytes.length && submit) {
-      await this.tmux(['send-keys', '-t', pane.pane, 'Enter']);
-      return;
-    }
-    const name = 'workbench-web-' + secret();
-    const arguments_ = this.arguments(['load-buffer', '-b', name, '-']);
-    const load = spawn('tmux', arguments_, { env: this.env, stdio: ['pipe', 'ignore', 'ignore'] });
-    load.stdin.on('error', () => {});
-    load.stdin.end(bytes);
-    const timer = setTimeout(() => load.kill(), 4000);
+    const names = [];
     try {
-      const [code] = await once(load, 'close');
-      if (code !== 0) throw new Failure(502, 'Unable to deliver terminal input.');
+      for (const bytes of parts) {
+        const name = 'workbench-web-' + secret();
+        names.push(name);
+        const args = this.arguments(['load-buffer', '-b', name, '-']);
+        const load = spawn('tmux', args, { env: this.env, stdio: ['pipe', 'ignore', 'ignore'] });
+        load.stdin.on('error', () => {});
+        load.stdin.end(bytes);
+        const timer = setTimeout(() => load.kill(), 4000);
+        try {
+          const [code] = await once(load, 'close');
+          if (code !== 0) throw new Failure(502, 'Unable to deliver terminal input.');
+        } finally { clearTimeout(timer); }
+      }
       if (check) await check();
       await this.verify(pane);
-      const args = ['paste-buffer', '-r', '-d', '-b', name, '-t', pane.pane];
-      if (bracketed) args.push('-p');
-      if (submit) args.push(';', 'send-keys', '-t', pane.pane, 'Enter');
-      await this.tmux(args);
+      // Individual bracketed path pastes let Codex attach each image to the same turn.
+      const commands = names.map((name) => ['paste-buffer', '-r', '-d', '-b', name, '-t', pane.pane, ...(bracketed ? ['-p'] : [])]);
+      if (submit) commands.push(['send-keys', '-t', pane.pane, 'Enter']);
+      if (commands.length) await this.tmux(commands.flatMap((command, index) => index ? [';', ...command] : command));
     } finally {
-      clearTimeout(timer);
-      await this.tmux(['delete-buffer', '-b', name]).catch(() => {});
+      for (const name of names) await this.tmux(['delete-buffer', '-b', name]).catch(() => {});
     }
   }
 
@@ -771,6 +782,7 @@ export class LocalNode {
   }
 
   cleanup() {
+    prunePromptImages();
     for (const [id, watch] of this.watches) if (watch.closed || Date.now() - watch.seen > ttl) this.watchClose(id);
   }
 
@@ -808,8 +820,10 @@ export class LocalNode {
       case 'sidebar-sort': return this.setSort(args.sort);
       case 'launch': return this.launch(args);
       case 'history': return this.transcript(args.agent, args.before, args.thread);
+      case 'history-image': return this.transcriptImage(args);
       case 'file-preview': return this.previewFile(args);
       case 'prompt': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId, args.settings);
+      case 'prompt-with-images': return this.sendPrompt(args.agent, args.thread, args.text, args.pane, args.requestId, args.settings, args.images);
       case 'interrupt': return this.interrupt(args);
       case 'chat-settings': return this.settings(args);
       case 'change-chat-settings': return this.changeSettings(args);
@@ -829,5 +843,11 @@ export class LocalNode {
       case 'usage': return this.usage(args.refresh);
       default: throw new Failure(400, 'Unknown node operation.');
     }
+  }
+
+  async transcriptImage({ agent, thread, message, index }) {
+    const entry = (await this.catalog(true)).agents.find((item) => item.id === agent && item.chat && item.thread === thread);
+    if (!entry) throw new Failure(404, 'Image is unavailable.');
+    return this.history.image(thread, Number(message), Number(index));
   }
 }

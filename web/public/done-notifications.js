@@ -110,6 +110,15 @@ export function mountDoneNotifications(root, { t, openAgent }) {
     if (popover.matches(':popover-open')) popover.hidePopover();
   }
 
+  function place() {
+    const { bottom, right, width } = trigger.getBoundingClientRect();
+    if (!width) return hide();
+    const popoverWidth = Math.min(330, innerWidth - 16);
+    popover.style.setProperty('--done-top', bottom + 5 + 'px');
+    popover.style.setProperty('--done-left', Math.min(innerWidth - popoverWidth - 8, Math.max(8, right - popoverWidth)) + 'px');
+  }
+  popover.addEventListener('beforetoggle', ({ newState }) => { if (newState === 'open') place(); });
+  new ResizeObserver(() => { if (popover.matches(':popover-open')) place(); }).observe(trigger.closest('.home-bar'));
   popover.addEventListener('toggle', (event) => trigger.setAttribute('aria-expanded', String(event.newState === 'open')));
   bannerOpen.addEventListener('click', () => activate(current));
   byId('done-toast-dismiss').addEventListener('click', dismissToast);
