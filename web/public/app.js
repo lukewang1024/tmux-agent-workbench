@@ -79,6 +79,7 @@ const terminalView = new TerminalView(byId('term'), {
 let suppressHoldClick = false;
 const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), {
   t, markdown, fileMarkdown, getMode: () => linkMode, onVisibilityChange: updateLinkHistory,
+  onEscape: handleChatEscape,
   readFile: (target, path) => api('/api/file-preview', 'POST', { ...target, path }),
 });
 const setDetailBackLabel = bindBackButton(byId('back'), back);
@@ -2088,12 +2089,18 @@ byId('exit-selection').addEventListener('click', () => {
 });
 byId('copy-selection').addEventListener('click', () => copyMessages(selectedMessages()));
 byId('share-selection').addEventListener('click', shareMessages);
+function handleChatEscape(event) {
+  if (event.key !== 'Escape' || disconnected || route !== 'agents' || overlay.open || pickerDialog.open
+      || (!transcript?.selected && !linkPanel.isOpen)) return false;
+  event.preventDefault();
+  if (!exitMessageSelection()) linkPanel.close();
+  return true;
+}
+
 document.addEventListener('keydown', (event) => {
   if (route !== 'agents' || overlay.open || pickerDialog.open) return;
-  if (event.key === 'Escape' && (transcript?.selected || linkPanel.isOpen)) {
-    event.preventDefault();
-    if (!exitMessageSelection()) linkPanel.close();
-  } else if (transcript?.selected && !event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
+  if (handleChatEscape(event)) return;
+  if (transcript?.selected && !event.repeat && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
       && !event.target.closest?.('input:not([type="checkbox"]),textarea,[contenteditable]')
       && !window.getSelection()?.toString() && transcript.selected.size) {
     event.preventDefault();

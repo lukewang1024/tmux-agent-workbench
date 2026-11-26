@@ -42,27 +42,35 @@ test('unrecognized HTTPS links and Android app intents are left to the browser',
   assert.equal(source('http://github.com/owner/repository'), null);
 });
 
-test('web link modes share a strict reader rule and leave native intents outside iframes', () => {
+test('reader view is limited to approved public article paths', () => {
   const guide = new URL('https://web.dev/articles/manifest-updates?hl=zh-cn&unrelated=1#android');
   const preview = linkPreviewSource(guide);
   assert.equal(preview.kind, 'reader');
   assert.equal(new URL(preview.endpoint, 'http://localhost').searchParams.get('url'),
     'https://web.dev/articles/manifest-updates?hl=zh-cn');
-  assert.equal(linkPreviewSource(guide, 'browser'), null);
-  assert.deepEqual(linkPreviewSource(guide, 'iframe'), { kind: 'iframe' });
-  assert.deepEqual(linkPreviewSource(new URL('http://example.com/'), 'iframe'), { kind: 'iframe' });
-  assert.equal(linkPreviewSource(new URL('intent://maps/#Intent;end'), 'iframe'), null);
   for (const url of ['https://web.dev/', 'https://web.dev.evil.example/articles/test', 'https://web.dev:8001/articles/test',
     'https://web.dev/articles/%2fevil', 'https://login@web.dev/articles/test']) assert.equal(readerURL(new URL(url)), null);
 });
 
-test('forced iframe uses GitHub file diffs without framing the GitHub page', () => {
-  const diff = new URL('https://github.com/owner/repository/pull/42/files#change');
-  const balanced = linkPreviewSource(diff);
-  assert.equal(balanced.kind, 'diff');
-  assert.deepEqual(linkPreviewSource(diff, 'iframe'), { ...balanced, kind: 'diff-frame' });
-  assert.equal(linkPreviewSource(diff, 'browser'), null);
-  assert.deepEqual(linkPreviewSource(new URL('https://github.com/owner/repository'), 'iframe'), { kind: 'iframe' });
+test('smart and forced iframe share every structured source and differ only on unrecognized web links', () => {
+  for (const [address, kind] of [
+    ['https://github.com/owner/repository/pull/42/files#change', 'diff'],
+    ['https://github.com/owner/repository', 'readme'],
+    ['https://docs.github.com/en/rest/pulls/pulls', 'article'],
+    ['https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/iframe', 'article'],
+    ['https://developer.android.com/design/ui/mobile/guides/foundations/system-bars', 'article'],
+    ['https://web.dev/articles/manifest-updates#android', 'reader'],
+  ]) {
+    const url = new URL(address);
+    const balanced = linkPreviewSource(url);
+    assert.equal(balanced.kind, kind);
+    assert.deepEqual(linkPreviewSource(url, 'iframe'), balanced);
+    assert.equal(linkPreviewSource(url, 'browser'), null);
+  }
+  const other = new URL('http://example.com/');
+  assert.equal(linkPreviewSource(other), null);
+  assert.deepEqual(linkPreviewSource(other, 'iframe'), { kind: 'iframe' });
+  assert.equal(linkPreviewSource(new URL('intent://maps/#Intent;end'), 'iframe'), null);
 });
 
 test('file links preserve the path and supported line anchors', () => {

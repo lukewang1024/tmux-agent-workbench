@@ -1,6 +1,6 @@
 import { renderWorkspaceFile } from './file-preview.js?v=WORKBENCH_CACHE_VERSION';
 import { readerURL } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
-import { linkFrame, readerFrame } from './reader-preview.js?v=WORKBENCH_CACHE_VERSION';
+import { readerArticle } from './reader-preview.js?v=WORKBENCH_CACHE_VERSION';
 
 const githubOrigin = 'https://github.com';
 const docsOrigin = 'https://docs.github.com';
@@ -24,14 +24,11 @@ function githubSource(path) {
     endpoint: endpoint + '/pulls/' + pull + '/files' };
 }
 
-export function linkPreviewSource(url, mode = 'balanced') {
-  if (mode === 'browser' || url.username || url.password || !['https:', 'http:'].includes(url.protocol)) return null;
-  const github = url.origin === githubOrigin ? githubSource(url.pathname) : null;
-  if (mode === 'iframe') return github?.kind === 'diff' ? { ...github, kind: 'diff-frame' } : { kind: 'iframe' };
+function structuredSource(url) {
   if (url.protocol !== 'https:' || url.port) return null;
   const reader = readerURL(url);
   if (reader) return { kind: 'reader', endpoint: '/api/reader-source?' + new URLSearchParams({ url: reader.href }) };
-  if (url.origin === githubOrigin) return github;
+  if (url.origin === githubOrigin) return githubSource(url.pathname);
   if (url.origin === docsOrigin) {
     if (!/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/[a-z\d][a-z\d.@_-]*){2,}\/?$/i.test(url.pathname)) return null;
     return { kind: 'article', endpoint: docsOrigin + '/api/article/body?' +
@@ -50,6 +47,11 @@ export function linkPreviewSource(url, mode = 'balanced') {
   const imageRoot = rawOrigin + '/mdn/' + repo + '/main/files/';
   return { kind: 'article', endpoint: imageRoot + language + '/' + slug + '/index.md',
     mime: 'text/plain', imageRoot };
+}
+
+export function linkPreviewSource(url, mode = 'balanced') {
+  if (mode === 'browser' || url.username || url.password || !['https:', 'http:'].includes(url.protocol)) return null;
+  return structuredSource(url) || (mode === 'iframe' ? { kind: 'iframe' } : null);
 }
 
 function element(tag, className, text) {
@@ -154,23 +156,37 @@ function renderDiff(page, source, t) {
   loadContent(status, () => read(1), t);
 }
 
-function renderDiffFrame(page, source, { label, t }) {
-  // The parent renders text and owns the interactions. The frame runs no scripts.
-  const frame = linkFrame(label, 'allow-same-origin');
+function linkFrame(label, sandbox) {
+  const frame = element('iframe', 'link-frame');
+  frame.title = label;
+  frame.referrerPolicy = 'no-referrer';
+  frame.setAttribute('sandbox', sandbox);
+  return frame;
+}
+
+function renderContentFrame(page, source, { label, onEscape }, render) {
+  // The parent builds the preview and owns its interactions. The frame runs no scripts.
+  const frame = linkFrame(label, 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'self\'; base-uri \'none\'; form-action \'none\'">'
     + '<main class="link-document"></main>';
   frame.addEventListener('load', () => {
     const frameDocument = frame.contentDocument;
     const content = frameDocument?.querySelector('main');
     if (!content) return;
-    frameDocument.documentElement.classList.add('workbench-diff-frame');
+    frameDocument.documentElement.classList.add('workbench-link-frame');
     frameDocument.documentElement.lang = document.documentElement.lang;
+    const policy = frameDocument.createElement('meta');
+    policy.httpEquiv = 'Content-Security-Policy';
+    policy.content = "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'"
+      + (source.imageRoot ? '; img-src ' + source.imageRoot : '');
     const style = frameDocument.createElement('link');
     style.rel = 'stylesheet';
     style.href = new URL('./style.css?v=WORKBENCH_CACHE_VERSION', import.meta.url).href;
-    frameDocument.head.append(style);
-    renderDiff(content, source, t);
+    frameDocument.head.append(policy, style);
+    frameDocument.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') onEscape(event);
+    });
+    render(content);
   }, { once: true });
   page.append(frame);
 }
@@ -248,10 +264,38 @@ async function readArticle(source, url, markdown) {
   return { html: readmeMarkdown.render(raw), base };
 }
 
+function bindArticleLinks(article, url, base, openLink) {
+  const jump = articleSections(article);
+  for (const link of article.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href');
+    let target;
+    try { target = new URL(href, href.startsWith('#') ? url : base); } catch { continue; }
+    link.href = target.href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+  article.addEventListener('click', (event) => {
+    if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest('a[href]');
+    if (!link) return;
+    if ((link.origin === url.origin && link.pathname === url.pathname && jump(link.hash)) || openLink(link)) {
+      event.preventDefault();
+    }
+  });
+  requestAnimationFrame(() => jump(url.hash));
+}
+
 function renderArticle(page, source, url, { t, markdown, openLink }) {
   const status = statusBlock();
   page.append(status);
   loadContent(status, async () => {
+    if (source.kind === 'reader') {
+      const response = await publicContent(source.endpoint, 'text/plain');
+      const article = readerArticle(await response.text(), url);
+      if (!article) throw new PreviewError('linkPreviewUnavailable');
+      bindArticleLinks(article, url, url, openLink);
+      return [article];
+    }
     const { html, plain, base } = await readArticle(source, url, markdown);
     const article = element('article', 'message-content');
     if (plain !== undefined) {
@@ -264,67 +308,38 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
     template.innerHTML = html;
     prepareImages(template.content, source, base);
     article.append(template.content);
-    const jump = articleSections(article);
-    for (const link of article.querySelectorAll('a[href]')) {
-      const href = link.getAttribute('href');
-      let target;
-      try { target = new URL(href, href.startsWith('#') ? url : base); } catch { continue; }
-      link.href = target.href;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-    }
-    article.addEventListener('click', (event) => {
-      if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-      const link = event.target.closest('a[href]');
-      if (!link) return;
-      if ((link.origin === url.origin && link.pathname === url.pathname && jump(link.hash)) || openLink(link)) {
-        event.preventDefault();
-      }
-    });
-    requestAnimationFrame(() => jump(url.hash));
+    bindArticleLinks(article, url, base, openLink);
     return [article];
   }, t);
 }
 
 export function createLinkPage(url, source, options) {
-  const framed = ['iframe', 'reader', 'diff-frame'].includes(source.kind);
-  const page = element('section', framed ? 'link-page link-framed' : 'link-page link-document');
+  const page = element('section', source.kind === 'file' ? 'link-page link-document' : 'link-page link-framed');
   if (source.kind === 'iframe') {
     const frame = linkFrame(options.label, 'allow-scripts allow-forms');
     frame.src = url.href;
     page.append(frame);
     return page;
   }
-  if (source.kind === 'diff-frame') {
-    renderDiffFrame(page, source, options);
-    return page;
-  }
-  if (source.kind === 'reader' || source.kind === 'file') {
+  if (source.kind === 'file') {
     const status = statusBlock();
     page.append(status);
     loadContent(status, async () => {
-      if (source.kind === 'file') {
-        try {
-          const file = await options.readFile(source.target, source.path);
-          return [renderWorkspaceFile(file, source, options)];
-        } catch (error) {
-          const key = error.message === 'Unknown node operation.' ? 'filePreviewUpdateNode'
-            : { 403: 'filePreviewOutside', 404: 'filePreviewMissing', 413: 'filePreviewTooLarge', 415: 'filePreviewUnsupported' }[error.status];
-          if (key) throw new PreviewError(key);
-          throw error;
-        }
+      try {
+        const file = await options.readFile(source.target, source.path);
+        return [renderWorkspaceFile(file, source, options)];
+      } catch (error) {
+        const key = error.message === 'Unknown node operation.' ? 'filePreviewUpdateNode'
+          : { 403: 'filePreviewOutside', 404: 'filePreviewMissing', 413: 'filePreviewTooLarge', 415: 'filePreviewUnsupported' }[error.status];
+        if (key) throw new PreviewError(key);
+        throw error;
       }
-      const response = await publicContent(source.endpoint, 'text/plain');
-      const frame = readerFrame(await response.text(), url, options.label);
-      if (!frame) throw new PreviewError('linkPreviewUnavailable');
-      return [frame];
     }, options.t);
     return page;
   }
-  if (source.kind === 'diff') {
-    renderDiff(page, source, options.t);
-  } else {
-    renderArticle(page, source, url, options);
-  }
+  renderContentFrame(page, source, options, (content) => {
+    if (source.kind === 'diff') renderDiff(content, source, options.t);
+    else renderArticle(content, source, url, options);
+  });
   return page;
 }

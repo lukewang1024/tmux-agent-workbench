@@ -28,14 +28,14 @@ slash command to run it, and open the session Pane for commands that require
 further terminal interaction. Drafts and failed sends stay in the browser.
 
 Choose a web link preference in **Profile → Settings**. **Smart preview** is
-the default. The panel uses public content sources for GitHub READMEs, pull
-request file diffs, GitHub Docs, MDN and Android Developers. For allowlisted
-web.dev articles and guides, it shows a Readability reader view in a sandboxed
-iframe. Other web links use the browser, including Android App Links.
-**Always use browser** opens all web links externally. **Always use iframe
-(testing)** attempts to embed external HTTP(S) links. GitHub file diffs use
-Workbench's diff viewer inside the frame. Sites can still deny direct embedding.
-Use **Open in browser** in the preview toolbar to follow the source.
+the default. Workbench renders GitHub READMEs, pull request file diffs,
+GitHub Docs, MDN and Android Developers from public content sources in the
+preview iframe. Allowlisted web.dev articles and guides use Readability in the
+same viewer. Smart preview sends other web links to the browser, including
+Android App Links. **Always use iframe (testing)** uses the same previews and
+attempts to embed other external HTTP(S) links directly. Sites can deny direct
+embedding. **Always use browser** opens all web links externally. Use **Open in
+browser** in the preview toolbar to follow the source.
 
 Local file links open in the panel in every mode. The Agent machine reads UTF-8
 text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's

@@ -23,30 +23,14 @@ function appendReaderContent(parent, children, url) {
     const clean = make(node.localName);
     if (clean.localName === 'a' && node.hasAttribute('href')) {
       const target = readerLink(node.getAttribute('href'), url);
-      if (target) {
-        clean.href = target;
-        clean.target = '_blank';
-        clean.rel = 'noopener noreferrer';
-      }
+      if (target) clean.href = target;
     }
     appendReaderContent(clean, node.childNodes, url);
     parent.append(clean);
   }
 }
 
-const readerStyle = 'html{color-scheme:light dark}body{margin:0;padding:14px;font:15px/1.6 system-ui;overflow-wrap:anywhere}'
-  + 'h1,h2,h3,h4{line-height:1.3}pre{padding:8px;overflow:auto;background:color-mix(in srgb,CanvasText 7%,Canvas)}'
-  + 'img{max-width:100%}table{border-collapse:collapse}td,th{padding:3px 8px;border:1px solid GrayText}';
-
-export function linkFrame(title, permissions) {
-  const frame = make('iframe', 'link-frame');
-  frame.title = title;
-  frame.referrerPolicy = 'no-referrer';
-  frame.setAttribute('sandbox', permissions);
-  return frame;
-}
-
-export function readerFrame(html, url, label) {
+export function readerArticle(html, url) {
   const doc = document.implementation.createHTMLDocument();
   const input = doc.createElement('template');
   input.innerHTML = html;
@@ -61,14 +45,10 @@ export function readerFrame(html, url, label) {
   doc.body.append(input.content);
   const parsed = new window.Readability(doc, { maxElemsToParse: 15000, disableJSONLD: true }).parse();
   if (!parsed?.content || !parsed.textContent?.trim()) return null;
-  const frame = linkFrame(label, 'allow-popups allow-popups-to-escape-sandbox');
   const extracted = make('template');
   extracted.innerHTML = parsed.content;
-  const fragment = make('article');
-  if (parsed.title && !extracted.content.querySelector('h1')) fragment.append(make('h1', '', parsed.title));
-  appendReaderContent(fragment, extracted.content.childNodes, url);
-  frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">'
-    + '<style>' + readerStyle + '</style>' + fragment.outerHTML;
-  return frame;
+  const article = make('article', 'message-content');
+  if (parsed.title && !extracted.content.querySelector('h1')) article.append(make('h1', '', parsed.title));
+  appendReaderContent(article, extracted.content.childNodes, url);
+  return article;
 }

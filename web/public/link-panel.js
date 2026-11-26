@@ -2,7 +2,7 @@ import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_
 import { workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
 import { createLinkPage, linkPreviewSource } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
 
-export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMode, readFile, onVisibilityChange }) {
+export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMode, readFile, onVisibilityChange, onEscape }) {
   const backButton = panel.querySelector('#back-link-panel');
   const closeButton = panel.querySelector('#close-link-panel');
   const openInBrowser = panel.querySelector('#open-link-browser');
@@ -25,7 +25,7 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
     tabList.replaceChildren(...Array.from(tabs, ([key, tab]) => {
       const current = key === selected;
       if (current && !tab.page) {
-        const page = createLinkPage(tab.url, tab.source, { t, markdown, fileMarkdown, readFile, openLink, label: tab.label });
+        const page = createLinkPage(tab.url, tab.source, { t, markdown, fileMarkdown, readFile, openLink, onEscape, label: tab.label });
         page.id = tab.id;
         page.setAttribute('role', 'tabpanel');
         page.setAttribute('aria-labelledby', tab.id + '-tab');
@@ -99,7 +99,7 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
       const label = link.textContent.trim() || local?.path.split('/').at(-1) || url?.hostname;
       tabs.set(key, { id: 'link-preview-' + ++nextId, label, url, source, page: null });
     }
-    if (!panel.contains(link)) opener = link;
+    if (link.ownerDocument === panel.ownerDocument && !panel.contains(link)) opener = link;
     selected = key;
     show();
     return true;
