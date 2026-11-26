@@ -5,6 +5,7 @@ import { bindBackButton, button, glyph, make, restoreFocusOnFrame } from './dom.
 import { mountDoneNotifications } from './done-notifications.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { linkModes, linkPreference, saveLinkPreference, workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
+import { addDiagramButtons } from './mermaid-preview.js?v=WORKBENCH_CACHE_VERSION';
 import { mountRunningTools, paintMessageTools, runningToolActivity } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
@@ -1468,6 +1469,9 @@ function messageContent(text, human) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
   }
+  addDiagramButtons(body, t, (source, trigger) => {
+    if (!transcript?.selected) linkPanel.openDiagram(source, trigger);
+  });
   return body;
 }
 

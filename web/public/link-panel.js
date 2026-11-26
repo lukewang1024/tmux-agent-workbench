@@ -66,6 +66,14 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
     onVisibilityChange(false);
   }
 
+  function openTab(key, label, source, url, trigger) {
+    if (!tabs.has(key)) tabs.set(key, { id: 'link-preview-' + ++nextId, label, url, source, page: null });
+    if (trigger.ownerDocument === panel.ownerDocument && !panel.contains(trigger)) opener = trigger;
+    selected = key;
+    show();
+    return true;
+  }
+
   function openLink(link, target) {
     const local = target && workspaceLink(link.getAttribute('href'));
     let source, url, key;
@@ -78,14 +86,8 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
       if (!source || url.origin === location.origin) return false;
       key = source.kind + ':' + url.href;
     }
-    if (!tabs.has(key)) {
-      const label = link.textContent.trim() || local?.path.split('/').at(-1) || url?.hostname;
-      tabs.set(key, { id: 'link-preview-' + ++nextId, label, url, source, page: null });
-    }
-    if (link.ownerDocument === panel.ownerDocument && !panel.contains(link)) opener = link;
-    selected = key;
-    show();
-    return true;
+    const label = link.textContent.trim() || local?.path.split('/').at(-1) || url?.hostname;
+    return openTab(key, label, source, url, link);
   }
 
   function selectTab(url) {
@@ -117,6 +119,9 @@ export function mountLinkPanel(panel, toggle, { t, markdown, fileMarkdown, getMo
   return {
     get isOpen() { return visible; },
     openLink,
+    openDiagram(text, trigger) {
+      return openTab('diagram:' + text, t('mermaidDiagram'), { kind: 'diagram', text }, undefined, trigger);
+    },
     close,
     closeTabPicker: tabBar.closePicker,
     restore,

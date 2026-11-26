@@ -11,13 +11,18 @@ import { Auth, sameSecret } from './auth.mjs';
 import { RemoteNode, nodeProtocol } from './connector.mjs';
 import { stripGoalContext } from './history.mjs';
 import { loadLocale, renderDocument } from './i18n.mjs';
+import { readPublicDocument } from './public-document.mjs';
+import { githubMarkdownURL } from './public/link-policy.js';
 import { readReaderSource } from './reader-source.mjs';
 import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
 const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
-  'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
+  'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'mermaid-preview.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
+const diagramRenderer = '/mermaid-renderer.html';
+const diagramScript = '/mermaid-renderer.js';
+const diagramLibrary = '/vendor/mermaid.js';
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
@@ -39,6 +44,9 @@ const assets = new Map([
   ['/vendor/markdown-it.js', ['node_modules/markdown-it/dist/browser/markdown-it.umd.min.js', 'text/javascript; charset=utf-8']],
   ['/vendor/readability.js', ['node_modules/@mozilla/readability/Readability.js', 'text/javascript; charset=utf-8']],
   ['/vendor/highlight.js', ['node_modules/@highlightjs/cdn-assets/highlight.min.js', 'text/javascript; charset=utf-8']],
+  [diagramRenderer, ['public/mermaid-renderer.html', 'text/html; charset=utf-8']],
+  [diagramScript, ['public/mermaid-renderer.js', 'text/javascript; charset=utf-8']],
+  [diagramLibrary, ['node_modules/mermaid/dist/mermaid.min.js', 'text/javascript; charset=utf-8']],
 ]);
 
 function withAssistantTitles(catalog, title) {
@@ -60,7 +68,7 @@ function security(res) {
   res.setHeader('X-Frame-Options', 'DENY');
   const mdnContent = 'https://raw.githubusercontent.com/mdn/content/main/files/ https://raw.githubusercontent.com/mdn/translated-content/main/files/';
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    + "img-src 'self' data: https://docs.github.com/assets/images/ https://developer.android.google.cn/static/ " + mdnContent + "; "
+    + "img-src 'self' data: https://docs.github.com/assets/images/ https://developer.android.google.cn/static/ https://raw.githubusercontent.com/; "
     + "connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body " + mdnContent + "; "
     + "frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
@@ -126,7 +134,7 @@ async function cachedAssets(locale, palettes) {
   const fingerprint = createHash('sha256');
   for (const { data } of loaded.values()) fingerprint.update(data);
   const version = fingerprint.digest('hex').slice(0, 16);
-  for (const path of ['/', '/app.js', '/sw.js', ...browserModules.map((name) => '/' + name)]) {
+  for (const path of ['/', '/app.js', '/sw.js', diagramRenderer, ...browserModules.map((name) => '/' + name)]) {
     const asset = loaded.get(path);
     asset.data = Buffer.from(asset.data.toString().replaceAll('WORKBENCH_CACHE_VERSION', version));
   }
@@ -216,6 +224,14 @@ export async function startServer({ local, localName, store, listen, origin, cer
     if (method === 'GET' && (staticFiles.has(path) || path === '/healthz')) {
       if (path === '/healthz') return json(res, { ok: true });
       const file = staticFiles.get(path);
+      if (path === diagramRenderer) {
+        // This frame has an opaque origin even when its URL is opened directly.
+        res.removeHeader('X-Frame-Options');
+        res.setHeader('Content-Security-Policy', "sandbox allow-scripts; default-src 'none'; script-src 'self'; "
+          + "style-src 'unsafe-inline'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
+      } else if (path === diagramScript || path === diagramLibrary) {
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      }
       res.writeHead(200, { 'content-type': file.type, 'content-length': file.data.length });
       return res.end(file.data);
     }
@@ -253,6 +269,13 @@ export async function startServer({ local, localName, store, listen, origin, cer
       const page = await readReaderSource(request.searchParams.get('url'));
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
       return res.end(page);
+    }
+    if (path === '/api/github-markdown' && method === 'GET') {
+      const source = githubMarkdownURL(request.searchParams.get('path'));
+      if (!source) throw new Failure(400, 'Invalid Markdown preview path.');
+      const markdown = await readPublicDocument(source, { mime: 'text/plain', limit: 512 * 1024 });
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end(markdown);
     }
     if (path === '/api/file-preview' && method === 'POST') {
       const input = await body(req);

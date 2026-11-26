@@ -1,5 +1,6 @@
 import { make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
 import { workspaceLink } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
+import { diagramFigure, renderMarkdownDiagrams } from './mermaid-preview.js?v=WORKBENCH_CACHE_VERSION';
 
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const encodePath = (path) => path.split('/').map(encodeURIComponent).join('/');
@@ -31,7 +32,7 @@ function renderSourceFile(text, name, line) {
   return view;
 }
 
-export function renderWorkspaceFile(file, source, { fileMarkdown, openLink }) {
+export function renderWorkspaceFile(file, source, { fileMarkdown, openLink, t }) {
   if (imageTypes.has(file.mime)) {
     const image = make('img', 'workspace-file-image');
     image.alt = file.name;
@@ -39,6 +40,7 @@ export function renderWorkspaceFile(file, source, { fileMarkdown, openLink }) {
     return image;
   }
   const text = new TextDecoder().decode(Uint8Array.from(atob(file.content), (character) => character.charCodeAt(0)));
+  if (!source.line && /\.(?:mmd|mermaid)$/i.test(file.name)) return diagramFigure(text, t);
   if (file.mime === 'text/markdown' && !source.line) {
     const article = make('article', 'message-content');
     const template = make('template');
@@ -56,6 +58,7 @@ export function renderWorkspaceFile(file, source, { fileMarkdown, openLink }) {
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
     }
+    renderMarkdownDiagrams(template.content, t);
     article.append(template.content);
     article.addEventListener('click', (event) => {
       if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;

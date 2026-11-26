@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { readWorkspaceFile } from '../file-preview.mjs';
-import { readerURL, workspaceLink } from '../public/link-policy.js';
+import { githubMarkdownURL, readerURL, workspaceLink } from '../public/link-policy.js';
 import { linkPreviewSource } from '../public/link-preview.js';
 import { androidDocURL } from '../android-docs.mjs';
 
@@ -26,6 +26,14 @@ test('GitHub links resolve only to the public preview endpoints', () => {
   });
   assert.equal(source('https://github.com/sindresorhus/modern-normalize').endpoint,
     'https://api.github.com/repos/sindresorhus/modern-normalize/readme');
+  const blob = '/owner/project/blob/feature/docs/diagram%20notes.md';
+  const markdown = source('https://github.com' + blob + '#diagram');
+  assert.equal(markdown.kind, 'article');
+  assert.equal(new URL(markdown.endpoint, 'http://localhost').searchParams.get('path'), blob);
+  assert.equal(markdown.raw, 'https://raw.githubusercontent.com/owner/project/feature/docs/diagram%20notes.md');
+  assert.equal(markdown.imageRoot, 'https://raw.githubusercontent.com/owner/project/');
+  for (const path of ['//remote.example/note.md', '/owner/repo/blob/main/a.js',
+    '/owner/repo/blob/main/%2e%2e/note.md', '/owner/repo/blob/main/%2fnote.md']) assert.equal(githubMarkdownURL(path), null);
   assert.equal(source('https://github.com/owner/repository/issues'), null);
   assert.equal(source('https://github.com:8080/owner/repository/pull/42/files'), null);
   assert.equal(source('https://secret@github.com/owner/repository/pull/42/files'), null);
@@ -56,6 +64,7 @@ test('smart and forced iframe share every structured source and differ only on u
   for (const [address, kind] of [
     ['https://github.com/owner/repository/pull/42/files#change', 'diff'],
     ['https://github.com/owner/repository', 'readme'],
+    ['https://github.com/owner/repository/blob/main/docs/architecture.md', 'article'],
     ['https://docs.github.com/en/rest/pulls/pulls', 'article'],
     ['https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/iframe', 'article'],
     ['https://developer.android.com/design/ui/mobile/guides/foundations/system-bars', 'article'],

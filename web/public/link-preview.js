@@ -1,5 +1,6 @@
 import { renderWorkspaceFile } from './file-preview.js?v=WORKBENCH_CACHE_VERSION';
-import { readerURL } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
+import { githubMarkdownURL, readerURL } from './link-policy.js?v=WORKBENCH_CACHE_VERSION';
+import { diagramFigure, renderMarkdownDiagrams } from './mermaid-preview.js?v=WORKBENCH_CACHE_VERSION';
 import { readerArticle } from './reader-preview.js?v=WORKBENCH_CACHE_VERSION';
 
 const githubOrigin = 'https://github.com';
@@ -14,6 +15,12 @@ const filesPerPage = 30;
 const maxDiffPages = 3000 / filesPerPage;
 
 function githubSource(path) {
+  const raw = githubMarkdownURL(path);
+  if (raw) {
+    const repository = raw.pathname.split('/').slice(1, 3).join('/');
+    return { kind: 'article', endpoint: '/api/github-markdown?' + new URLSearchParams({ path }),
+      mime: 'text/plain', imageRoot: raw.origin + '/' + repository + '/', raw: raw.href };
+  }
   const match = /^\/([a-z\d-]{1,39})\/([a-z\d_.-]{1,100})(?:\/pull\/([1-9]\d{0,14})\/files)?\/?$/i.exec(path);
   if (!match) return null;
   const [, owner, repo, pull] = match;
@@ -46,7 +53,7 @@ function structuredSource(url) {
   const repo = language === 'en-us' ? 'content' : 'translated-content';
   const imageRoot = rawOrigin + '/mdn/' + repo + '/main/files/';
   return { kind: 'article', endpoint: imageRoot + language + '/' + slug + '/index.md',
-    mime: 'text/plain', imageRoot };
+    mime: 'text/plain', imageRoot, mdn: true };
 }
 
 export function linkPreviewSource(url, mode = 'balanced') {
@@ -177,8 +184,8 @@ function renderContentFrame(page, source, { label, onEscape }, render) {
     frameDocument.documentElement.lang = document.documentElement.lang;
     const policy = frameDocument.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
-    policy.content = "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'"
-      + (source.imageRoot ? '; img-src ' + source.imageRoot : '');
+    policy.content = "default-src 'none'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; img-src data:"
+      + (source.imageRoot ? ' ' + source.imageRoot : '');
     const style = frameDocument.createElement('link');
     style.rel = 'stylesheet';
     style.href = new URL('./style.css?v=WORKBENCH_CACHE_VERSION', import.meta.url).href;
@@ -222,7 +229,7 @@ function mdnMarkdown(raw) {
 function prepareImages(fragment, source, origin) {
   for (const image of fragment.querySelectorAll('img[src]')) {
     let url;
-    const base = source.mime === 'text/plain' ? source.endpoint : origin;
+    const base = source.raw || (source.mdn ? source.endpoint : origin);
     try { url = new URL(image.getAttribute('src'), base); } catch { /* Fall back to the image description. */ }
     if (source.android && url?.origin === androidOrigin) url.hostname = 'developer.android.google.cn';
     if (!source.imageRoot || !url || url.username || url.password || !url.href.startsWith(source.imageRoot)) {
@@ -242,7 +249,7 @@ async function readArticle(source, url, markdown) {
   if (source.kind !== 'readme') {
     const response = await publicContent(source.endpoint, source.mime);
     const raw = await response.text();
-    return { html: markdown.render(source.mime === 'text/plain' ? mdnMarkdown(raw) : raw), base: url };
+    return { html: markdown.render(source.mdn ? mdnMarkdown(raw) : raw), base: url };
   }
 
   const response = await publicContent(source.endpoint, 'application/vnd.github+json', 'application/json');
@@ -307,6 +314,7 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
     const template = element('template');
     template.innerHTML = html;
     prepareImages(template.content, source, base);
+    renderMarkdownDiagrams(template.content, t);
     article.append(template.content);
     bindArticleLinks(article, url, base, openLink);
     return [article];
@@ -314,7 +322,12 @@ function renderArticle(page, source, url, { t, markdown, openLink }) {
 }
 
 export function createLinkPage(url, source, options) {
-  const page = element('section', source.kind === 'file' ? 'link-page link-document' : 'link-page link-framed');
+  const local = source.kind === 'file' || source.kind === 'diagram';
+  const page = element('section', local ? 'link-page link-document' : 'link-page link-framed');
+  if (source.kind === 'diagram') {
+    page.append(diagramFigure(source.text, options.t));
+    return page;
+  }
   if (source.kind === 'iframe') {
     const frame = linkFrame(options.label, 'allow-scripts allow-forms');
     frame.src = url.href;

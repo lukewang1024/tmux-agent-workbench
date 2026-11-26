@@ -28,8 +28,8 @@ slash command to run it, and open the session Pane for commands that require
 further terminal interaction. Drafts and failed sends stay in the browser.
 
 Choose a web link preference in **Profile → Settings**. **Smart preview** is
-the default. Workbench renders GitHub READMEs, pull request file diffs,
-GitHub Docs, MDN and Android Developers from public content sources in the
+the default. Workbench renders public GitHub Markdown files and READMEs,
+pull request file diffs, GitHub Docs, MDN and Android Developers in the
 preview iframe. Allowlisted web.dev articles and guides use Readability in the
 same viewer. Smart preview sends other web links to the browser, including
 Android App Links. **Always use iframe (testing)** uses the same previews and
@@ -42,6 +42,12 @@ text, Markdown and PNG, JPEG, GIF or WebP files up to 768 KiB from the Agent's
 workspace. Source previews show line numbers and highlight recognized languages.
 A line suffix such as `src/example.js:24` opens and highlights that line.
 Remote file previews require a connector that supports the file preview command.
+
+Use **Preview diagram** on a Mermaid code block in a conversation to open the
+diagram in the sidebar. Markdown previews render Mermaid diagrams inline, and
+workspace `.mmd` and `.mermaid` files open as diagrams. Expand **Diagram source**
+to read the original Mermaid text. The browser loads the renderer on demand
+and displays its output as a static image.
 
 The provider marks identify the Agent CLIs in the list and belong to their
 respective owners. The artwork comes from the [OpenAI mark in Lobe Icons],
@@ -238,11 +244,15 @@ flowchart TD
     App --> Terminal["terminal.js<br/>PTY streams and input"]
     App --> Connection["connection.js<br/>Connectivity and recovery"]
     App --> Panel["link-panel.js<br/>Preview lifetime and selection"]
+    App --> Mermaid["mermaid-preview.js<br/>Diagram preview and source"]
     Panel --> Tabs["link-tabs.js<br/>Tab layout, dropdown and keyboard navigation"]
     Panel --> Preview["link-preview.js<br/>Shared iframe renderer"]
     Preview --> Policy["link-policy.js<br/>Opening preferences and supported links"]
     Preview --> Reader["reader-preview.js<br/>Article extraction and sanitization"]
     Preview --> Files["file-preview.js<br/>Workspace files and code highlighting"]
+    Preview --> Mermaid
+    Files --> Mermaid
+    Mermaid --> Renderer["mermaid-renderer.js<br/>Isolated rendering"]
 ```
 
 `link-panel.js` owns the open pages and their selected tab. The tab controls

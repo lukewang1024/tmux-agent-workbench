@@ -48,7 +48,7 @@ export function mountLinkTabs(slot, { t, selectTab, closeTab }) {
         if (vertical) closePicker();
         selectTab(key);
       });
-      title.title = tab.url?.href || tab.source.path;
+      title.title = tab.url?.href || tab.source.path || tab.label;
       if (vertical) {
         title.setAttribute('aria-current', String(current));
       } else {

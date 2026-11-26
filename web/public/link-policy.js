@@ -23,6 +23,15 @@ export function readerURL(url) {
   return result;
 }
 
+export function githubMarkdownURL(path) {
+  if (typeof path !== 'string' || path.length > 4096 || /[%](?:2f|5c|00)|[\\\x00-\x20\x7f?#]/i.test(path)) return null;
+  const match = /^\/([a-z\d-]{1,39}\/[a-z\d_.-]{1,100})\/blob\/((?:[^/]+\/)+[^/]+\.(?:md|markdown))$/i.exec(path);
+  if (!match) return null;
+  const rawPath = '/' + match[1] + '/' + match[2];
+  const url = new URL(rawPath, 'https://raw.githubusercontent.com');
+  return url.pathname === rawPath ? url : null;
+}
+
 export function workspaceLink(href) {
   if (typeof href !== 'string' || !href || href.length > 8192 || /^[?#]|^\/\//.test(href)) return null;
   let address = href;

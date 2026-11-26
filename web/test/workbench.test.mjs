@@ -642,8 +642,11 @@ test('gateway serves matching languages for the app shell, manifest, assistant t
       assert.deepEqual(machine.agents, [{ ...assistant, title: assistantTitle }, task]);
       assert.deepEqual(machine.pinnedAgents, [{ ...assistant, assistant: true, title: assistantTitle }, task]);
       assert.deepEqual(machine.sessions, sessions);
+      const badMarkdown = address + '/api/github-markdown?path=' + encodeURIComponent('//external.example/file.md');
+      assert.equal((await fetch(badMarkdown)).status, 401);
+      assert.equal((await fetch(badMarkdown, { headers: { Cookie: cookie } })).status, 400);
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
-      for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-policy.js', 'message-tools.js', 'terminal.js']) {
+      for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-policy.js', 'mermaid-preview.js', 'message-tools.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
         assert.ok(worker.includes('/' + module));
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);
@@ -656,6 +659,12 @@ test('gateway serves matching languages for the app shell, manifest, assistant t
         assert.ok(worker.includes(module));
         assert.equal((await fetch(address + module + '?v=' + version)).status, 200);
       }
+      const diagram = await fetch(address + '/mermaid-renderer.html?v=' + version);
+      assert.match(diagram.headers.get('content-security-policy'), /^sandbox allow-scripts; default-src 'none';/);
+      assert.match(diagram.headers.get('content-security-policy'), /frame-ancestors 'self'/);
+      assert.equal(diagram.headers.get('x-frame-options'), null);
+      assert.ok((await diagram.text()).includes('/vendor/mermaid.js?v=' + version));
+      assert.ok(!worker.includes('/vendor/mermaid.js'));
       assert.ok(worker.includes('/reset.css'));
       workers.push(worker);
     } finally {

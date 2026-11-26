@@ -415,6 +415,14 @@ button { touch-action: manipulation; }
 .link-preview-status { color: var(--muted); }
 .link-preview-status p + button { margin-top: 8px; }
 .link-load-button { min-height: 34px; padding-inline: 10px; font-size: 12px; }
+.diagram-trigger { min-height: 29px; padding-inline: 8px; font-size: 12px; }
+.mermaid-renderer { position: fixed; inset: 0 auto auto 0; width: 960px; height: 640px; border: 0; visibility: hidden; pointer-events: none; }
+.mermaid-figure { margin-inline: 0; margin-block: .55em; min-inline-size: 0; }
+.diagram-image { overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 8px; overscroll-behavior-inline: contain; }
+.diagram-image img { display: block; max-inline-size: none; height: auto; margin-inline: auto; }
+.diagram-source { margin-block-start: 4px; color: var(--muted); }
+.diagram-source summary { width: fit-content; cursor: pointer; }
+.diagram-source pre { margin: 4px 0 0; padding: 8px; overflow: auto; border-radius: 7px; background: var(--quiet); color: var(--ink); }
 .link-diff-heading { margin: 0 0 10px; overflow-wrap: anywhere; font-size: 14px; }
 /* Keep the frame viewport fixed and scroll the document inside it. */
 .workbench-link-frame, .workbench-link-frame body { block-size: 100%; overflow: clip; }
