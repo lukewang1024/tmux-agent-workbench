@@ -1,5 +1,5 @@
 import { actionMenuAnchor, mountActionMenu } from './action-menu.js?v=WORKBENCH_CACHE_VERSION';
-import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
+import { ChatState, normalizeHistoryMessage } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { bindComposerFocus } from './composer-focus.js?v=WORKBENCH_CACHE_VERSION';
 import { imagePreview, mountComposerImages } from './composer-images.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
@@ -1316,7 +1316,8 @@ async function readHistory(target, query, older) {
   try {
     const page = await api(pathWith('/api/history', query));
     if (target !== transcript) return;
-    const { messages, before } = page;
+    const { before } = page;
+    const messages = page.messages.map(normalizeHistoryMessage);
     if (!older) {
       target.toolActivity = runningToolActivity(page);
       if (route === 'agents' && supportsChat()) paintRunningTools();
@@ -1564,7 +1565,8 @@ function renderHistory(target, added, older) {
   const nearBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 60;
   const height = scroller.scrollHeight;
   const top = scroller.scrollTop;
-  if (!older && reconcileDeliveries(target.key, added)) paintOutgoing();
+  const deliveriesChanged = reconcileDeliveries(target.key, added);
+  if (deliveriesChanged && !older) paintOutgoing();
   paintMessageSelection();
   if (!target.rows.size) {
     messages.replaceChildren(make('div', 'empty', t('noMessages')));
@@ -1622,6 +1624,7 @@ function renderHistory(target, added, older) {
     if (target.messageAnchor && Math.abs(top - target.messageAnchor.scrollTop) < 1) {
       target.messageAnchor.scrollTop = scroller.scrollTop;
     }
+    if (deliveriesChanged) paintOutgoing();
   } else {
     messages.append(...rows);
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;

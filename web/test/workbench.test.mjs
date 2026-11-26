@@ -13,7 +13,7 @@ import { codexComposer, codexFullAccessConfirmation, codexSettings, modelChangeC
 import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
-import { ChatState } from '../public/chat-state.js';
+import { ChatState, normalizeHistoryMessage } from '../public/chat-state.js';
 import { DoneNotifications } from '../public/done-notifications.js';
 import { startServer } from '../server.mjs';
 import { hash, readJson, Store } from '../state.mjs';
@@ -192,6 +192,37 @@ test('chat state restores a pending delivery and reconciles it after the pane ac
   assert.equal(restored.draft(thread), 'A newer draft');
   restored.applySettings(thread, { model: 'gpt-6.2-sol', effort: 'high' });
   assert.deepEqual(restored.settings(thread).pending, { permission: ':read-only' });
+});
+
+test('a restored image delivery matches the saved Codex caption and leaves one history message', () => {
+  const storage = {
+    getItem(key) { return this[key]; },
+    setItem(key, value) { this[key] = value; },
+    removeItem(key) { delete this[key]; },
+  };
+  const state = new ChatState(() => storage);
+  const key = 'fixture';
+  const text = '[Image #1] caption typed by the user';
+  const images = [{ content: 'one' }, { content: 'two' }];
+  const { entry } = state.beginDelivery(key, { text, images, after: 12, replaceDraft: true });
+  state.sent(entry, { after: 12 });
+  state.restore('Unconfirmed');
+
+  const row = normalizeHistoryMessage({ role: 'user', id: 12, images: 2, text: '[Image #1] [Image #2] ' + text });
+  assert.equal(row.text, text);
+  assert.equal(row.images, 2);
+  assert.equal(state.reconcile(key, [{ ...row, id: 11 }]).changed, false);
+  assert.equal(state.reconcile(key, [row]).changed, true);
+  assert.deepEqual(state.deliveries(key), []);
+  state.restore('Unconfirmed');
+  assert.deepEqual(state.deliveries(key), []);
+
+  for (const input of ['[Image #1]', '[Image #1] ']) {
+    assert.equal(normalizeHistoryMessage({ role: 'user', images: 1, text: input }).text, '');
+  }
+  assert.equal(normalizeHistoryMessage({ role: 'user', text }).text, text);
+  assert.equal(normalizeHistoryMessage({ role: 'user', images: 2, text }).text, text);
+  assert.equal(normalizeHistoryMessage({ role: 'assistant', images: 1, text }).text, text);
 });
 
 test('completion notifications only add observed working-to-done transitions', () => {

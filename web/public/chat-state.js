@@ -10,6 +10,20 @@ function sameImages(left = [], right = []) {
   return left.length === right.length && left.every((image, index) => image.content === right[index].content);
 }
 
+export function normalizeHistoryMessage(message) {
+  const { role, images } = message;
+  if (role !== 'user' || !Number.isSafeInteger(images) || images < 1) return message;
+  // Codex prefixes the caption with one numbered placeholder per pasted image.
+  let { text } = message;
+  for (let index = 1; index <= images; index++) {
+    const label = '[Image #' + index + ']';
+    if (index === images && text === label) return { ...message, text: '' };
+    if (!text.startsWith(label + ' ')) return message;
+    text = text.slice(label.length + 1);
+  }
+  return { ...message, text };
+}
+
 export class ChatState {
   #storage;
   #drafts = new Map();
