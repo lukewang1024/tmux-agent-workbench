@@ -201,7 +201,14 @@
             <button class="row-action link-panel-close" id="close-link-panel" type="button" aria-label="{{closeLinkPreview}}" title="{{closeLinkPreview}}">
               <svg class="glyph" aria-hidden="true"><use href="#icon-close"></use></svg>
             </button>
-            <div class="link-tabs" id="link-tabs" role="tablist" aria-label="{{linkTabs}}"></div>
+            <div class="link-tab-slot">
+              <div class="link-tabs" id="link-tabs" role="tablist" aria-label="{{linkTabs}}"></div>
+              <button class="picker-button link-tab-trigger" id="link-tab-trigger" type="button" popovertarget="link-tab-picker" aria-controls="link-tab-picker" aria-expanded="false">
+                <span class="picker-value"></span>
+                <svg class="glyph" aria-hidden="true"><use href="#icon-down"></use></svg>
+              </button>
+              <div class="link-tab-picker" id="link-tab-picker" popover="auto" role="group" aria-label="{{linkTabs}}"></div>
+            </div>
             <a class="row-action" id="open-link-browser" target="_blank" rel="noopener noreferrer" aria-label="{{openInBrowser}}" title="{{openInBrowser}}" hidden>
               <svg class="glyph" aria-hidden="true"><use href="#icon-external"></use></svg>
             </a>

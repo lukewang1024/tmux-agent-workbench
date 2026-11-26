@@ -232,6 +232,7 @@
     "confirmAgentClose": "This ends the running Agent.",
     "confirmPaneClose": "This closes the Pane and ends any programs running in it.",
     "cancel": "Cancel",
+    "personalAssistant": "Personal assistant",
     "assistantPinned": "Personal assistant stays pinned",
     "groupBySession": "By Session",
     "sortByName": "By Name",

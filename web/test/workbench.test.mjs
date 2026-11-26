@@ -570,21 +570,30 @@ test('locale follows LOCALE, the Workbench override, and system message settings
   ]) assert.equal(resolveLanguage(env), language, JSON.stringify(env));
 });
 
-test('gateway serves matching languages for the app shell, manifest, and errors', async (t) => {
+test('gateway serves matching languages for the app shell, manifest, assistant title, and errors', async (t) => {
   const store = new Store(await scratch(t));
-  const local = { cleanup() {}, close() {} };
+  const origin = 'http://localhost:7080';
+  store.writeKeys([{ id: 'fixture-browser' }]);
+  const cookie = new Auth(store, new URL(origin)).issueSession('fixture-browser').split(';')[0];
+  const assistant = { id: 'assistant', title: 'project-session', session: 'project-session' };
+  const task = { id: 'task', title: 'project-session', session: 'project-session' };
+  const sessions = [{ id: '$1', title: 'project-session' }];
+  const local = { cleanup() {}, close() {}, request(method) {
+    assert.equal(method, 'catalog');
+    return { agents: [assistant, task], pinnedAgents: [{ ...assistant, assistant: true }, task], sessions };
+  } };
   const previous = process.env.LOCALE;
   t.after(() => {
     if (previous === undefined) delete process.env.LOCALE;
     else process.env.LOCALE = previous;
   });
   const workers = [];
-  for (const [locale, lang, title, error] of [
-    ['en-GB', 'en', 'Sign in to Workbench', 'Sign in to Workbench.'],
-    ['zh_CN.UTF-8', 'zh-CN', '登录工作台', '请登录工作台。'],
+  for (const [locale, lang, title, error, assistantTitle] of [
+    ['en-GB', 'en', 'Sign in to Workbench', 'Sign in to Workbench.', 'Personal assistant'],
+    ['zh_CN.UTF-8', 'zh-CN', '登录工作台', '请登录工作台。', '个人助理'],
   ]) {
     process.env.LOCALE = locale;
-    const gateway = await startServer({ store, local, localName: 'fixture', listen: '127.0.0.1:0', origin: 'http://localhost:7080' });
+    const gateway = await startServer({ store, local, localName: 'fixture', listen: '127.0.0.1:0', origin });
     const address = 'http://127.0.0.1:' + gateway.address.port;
     try {
       const html = await fetch(address + '/?refresh=1').then((response) => response.text());
@@ -627,6 +636,12 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const protectedWorkspace = await fetch(address + '/api/workspace');
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
+      const response = await fetch(address + '/api/workspace', { headers: { Cookie: cookie } });
+      assert.equal(response.status, 200);
+      const { nodes: [machine] } = await response.json();
+      assert.deepEqual(machine.agents, [{ ...assistant, title: assistantTitle }, task]);
+      assert.deepEqual(machine.pinnedAgents, [{ ...assistant, assistant: true, title: assistantTitle }, task]);
+      assert.deepEqual(machine.sessions, sessions);
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
       for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-policy.js', 'message-tools.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
@@ -636,7 +651,8 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       const panel = await fetch(address + '/link-panel.js?v=' + version).then((response) => response.text());
       assert.ok(panel.includes('./dom.js?v=' + version));
       assert.ok(panel.includes('./link-preview.js?v=' + version));
-      for (const module of ['/link-preview.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js', '/vendor/highlight.js']) {
+      assert.ok(panel.includes('./link-tabs.js?v=' + version));
+      for (const module of ['/link-preview.js', '/link-tabs.js', '/reader-preview.js', '/file-preview.js', '/vendor/markdown-it.js', '/vendor/readability.js', '/vendor/highlight.js']) {
         assert.ok(worker.includes(module));
         assert.equal((await fetch(address + module + '?v=' + version)).status, 200);
       }

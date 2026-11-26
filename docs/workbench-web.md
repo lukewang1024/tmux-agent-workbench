@@ -228,6 +228,41 @@ drafts, delivery retries, history reconciliation, and pending settings by
 conversation. `terminal.js` owns the xterm view, socket lifecycle, and PTY input.
 `connection.js` reports gateway reachability and handles recovery probes.
 
+```mermaid
+flowchart TD
+    App["app.js<br/>Navigation and active view"]
+    App --> Chat["chat-state.js<br/>Drafts, delivery and queued settings"]
+    App --> Focus["composer-focus.js<br/>Editor focus and composition"]
+    App --> Tools["message-tools.js<br/>Running tools and message details"]
+    App --> Notifications["done-notifications.js<br/>Completion toasts and history"]
+    App --> Terminal["terminal.js<br/>PTY streams and input"]
+    App --> Connection["connection.js<br/>Connectivity and recovery"]
+    App --> Panel["link-panel.js<br/>Preview lifetime and selection"]
+    Panel --> Tabs["link-tabs.js<br/>Tab layout, dropdown and keyboard navigation"]
+    Panel --> Preview["link-preview.js<br/>Shared iframe renderer"]
+    Preview --> Policy["link-policy.js<br/>Opening preferences and supported links"]
+    Preview --> Reader["reader-preview.js<br/>Article extraction and sanitization"]
+    Preview --> Files["file-preview.js<br/>Workspace files and code highlighting"]
+```
+
+`link-panel.js` owns the open pages and their selected tab. The tab controls
+adapt to available space and call back when the user selects or closes a tab.
+The preview stays mounted when the controls switch between layouts.
+
+## Gateway and connectors
+
+```mermaid
+flowchart LR
+    PWA["Browser or installed PWA"] -->|"HTTP API and terminal WebSocket"| Gateway["server.mjs<br/>Passkeys, assets and workspace API"]
+    Gateway --> Local["tmux.mjs<br/>Local node"]
+    Gateway <-->|"Outbound connector WebSocket"| Connector["connector.mjs<br/>Paired node transport"]
+    Connector --> Remote["tmux.mjs<br/>Remote node"]
+    Local --> LocalRuntime["Local Workbench snapshot and tmux"]
+    Remote --> RemoteRuntime["Remote Workbench snapshot and tmux"]
+    Local --> History["history.mjs and history-tools.mjs<br/>Codex history and tool metadata on each node"]
+    Remote --> History
+```
+
 ## Verify a local checkout
 
     npm test --prefix web

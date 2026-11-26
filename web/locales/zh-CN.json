@@ -220,6 +220,7 @@
     "confirmAgentClose": "这会结束该智能体进程。",
     "confirmPaneClose": "这会关闭 Pane，并结束其中运行的程序。",
     "cancel": "取消",
+    "personalAssistant": "个人助理",
     "assistantPinned": "个人助理始终置顶",
     "groupBySession": "按会话分组",
     "sortByName": "按名称",

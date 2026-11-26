@@ -153,6 +153,7 @@ function setDisconnected(value) {
   disconnected = value;
   if (value) {
     doneNotifications.hide();
+    linkPanel.closeTabPicker();
     placeConnectionOverlay();
     hideSuggestions();
   }
@@ -2099,6 +2100,7 @@ function handleChatEscape(event) {
   if (event.key !== 'Escape' || disconnected || route !== 'agents' || overlay.open || pickerDialog.open
       || (!transcript?.selected && !linkPanel.isOpen)) return false;
   event.preventDefault();
+  if (linkPanel.closeTabPicker()) return true;
   if (!exitMessageSelection()) linkPanel.close();
   return true;
 }

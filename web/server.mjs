@@ -17,7 +17,7 @@ import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
 const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'file-preview.js',
-  'link-panel.js', 'link-policy.js', 'link-preview.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
+  'link-panel.js', 'link-policy.js', 'link-preview.js', 'link-tabs.js', 'message-tools.js', 'reader-preview.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
@@ -40,6 +40,17 @@ const assets = new Map([
   ['/vendor/readability.js', ['node_modules/@mozilla/readability/Readability.js', 'text/javascript; charset=utf-8']],
   ['/vendor/highlight.js', ['node_modules/@highlightjs/cdn-assets/highlight.min.js', 'text/javascript; charset=utf-8']],
 ]);
+
+function withAssistantTitles(catalog, title) {
+  const pinned = catalog.pinnedAgents || [];
+  const assistants = new Set(pinned.filter((card) => card.assistant).map((card) => card.id));
+  if (!assistants.size) return catalog;
+  return {
+    ...catalog,
+    agents: catalog.agents?.map((agent) => assistants.has(agent.id) ? { ...agent, title } : agent),
+    pinnedAgents: pinned.map((card) => card.assistant ? { ...card, title } : card),
+  };
+}
 
 function security(res) {
   res.setHeader('Cache-Control', 'no-store');
@@ -182,7 +193,8 @@ export async function startServer({ local, localName, store, listen, origin, cer
     ].map(async (info) => {
       if (info.state !== 'online') return info;
       try {
-        return { ...info, ...await node(info.id).request('catalog', { hidden }) };
+        const catalog = await node(info.id).request('catalog', { hidden });
+        return { ...info, ...withAssistantTitles(catalog, locale.messages.personalAssistant) };
       } catch {
         return { ...info, snapshotAvailable: false };
       }
