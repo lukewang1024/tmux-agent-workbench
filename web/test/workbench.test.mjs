@@ -14,6 +14,7 @@ import { enrollNode, runConnector } from '../connector.mjs';
 import { History } from '../history.mjs';
 import { resolveLanguage } from '../i18n.mjs';
 import { ChatState } from '../public/chat-state.js';
+import { DoneNotifications } from '../public/done-notifications.js';
 import { startServer } from '../server.mjs';
 import { hash, readJson, Store } from '../state.mjs';
 import { tmuxPalette } from '../theme.mjs';
@@ -191,6 +192,28 @@ test('chat state restores a pending delivery and reconciles it after the pane ac
   assert.equal(restored.draft(thread), 'A newer draft');
   restored.applySettings(thread, { model: 'gpt-6.2-sol', effort: 'high' });
   assert.deepEqual(restored.settings(thread).pending, { permission: ':read-only' });
+});
+
+test('completion notifications only add observed working-to-done transitions', () => {
+  const notifications = new DoneNotifications();
+  const item = (id, state) => ({ id, title: id, state, pane: { key: id + '.pane' } });
+  const node = (id, ...agents) => ({ id, name: id, state: 'online', snapshotAvailable: true, agents });
+  const initial = [node('local', item('a', 'working'), item('old', 'done')), node('remote', item('b', 'working'))];
+  assert.deepEqual(notifications.observe(initial), []);
+  const completed = [node('local', item('a', 'done'), item('old', 'done')), node('remote', item('b', 'done'))];
+  assert.equal(notifications.observe(completed).length, 2);
+  assert.deepEqual(notifications.items.map(({ id }) => id), ['b', 'a']);
+  assert.deepEqual(notifications.observe(completed), []);
+  assert.equal(notifications.read('remote', 'b', 'b.pane'), true);
+  assert.deepEqual(notifications.items.map(({ id }) => id), ['a']);
+  notifications.clear();
+  assert.deepEqual(notifications.observe(completed), []);
+  assert.deepEqual(notifications.items, []);
+  notifications.observe(initial);
+  notifications.observe([initial[0], { id: 'remote', state: 'offline' }]);
+  assert.equal(notifications.observe(completed).length, 2);
+  notifications.observe([node('local', item('a', 'idle'))]);
+  assert.deepEqual(notifications.items, []);
 });
 
 test('Codex history is tied to an exact rollout and only returns visible text', async (t) => {
@@ -594,7 +617,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
-      for (const module of ['chat-state.js', 'connection.js', 'dom.js', 'link-panel.js', 'message-tools.js', 'terminal.js']) {
+      for (const module of ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'message-tools.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
         assert.ok(worker.includes('/' + module));
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);

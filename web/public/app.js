@@ -1,6 +1,8 @@
 import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
+import { bindComposerFocus } from './composer-focus.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
-import { bindBackButton, button, glyph, make } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { bindBackButton, button, glyph, make, restoreFocusOnFrame } from './dom.js?v=WORKBENCH_CACHE_VERSION';
+import { mountDoneNotifications } from './done-notifications.js?v=WORKBENCH_CACHE_VERSION';
 import { mountLinkPanel } from './link-panel.js?v=WORKBENCH_CACHE_VERSION';
 import { paintMessageTools } from './message-tools.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
@@ -74,6 +76,12 @@ const linkPanel = mountLinkPanel(byId('link-panel'), byId('toggle-link-panel'), 
   t, markdown, onVisibilityChange: updateLinkHistory,
 });
 const setDetailBackLabel = bindBackButton(byId('back'), back);
+const doneNotifications = mountDoneNotifications(app, { t, openAgent: openCompletedAgent });
+const invalidateComposerFocus = bindComposerFocus(chatInput, {
+  canEdit: () => route === 'agents' && !disconnected && !overlay.open && !pickerDialog.open,
+  isComposing: () => composingPrompt,
+  dialogs: [overlay, pickerDialog],
+});
 
 function t(key, values = {}) {
   const message = messages[key];
@@ -136,6 +144,7 @@ function setDisconnected(value) {
   if (disconnected === value) return;
   disconnected = value;
   if (value) {
+    doneNotifications.hide();
     placeConnectionOverlay();
     hideSuggestions();
   }
@@ -152,6 +161,7 @@ function connectionChanged(session) {
     if (session.authenticated) signedOn();
     if (enrollment) registerSheet();
   } else if (restored && signedIn && !reauthRequired) {
+    invalidateComposerFocus();
     refresh(true).then(() => {
       terminalView.resume();
       if (route === 'agents' && supportsChat() && (opened || !mobile.matches)) loadHistory();
@@ -263,8 +273,10 @@ function paint() {
 }
 
 function paintHeader() {
-  byId('home-bar').hidden = !signedIn || (isWorkspace() && opened && mobile.matches)
+  const hidden = !signedIn || (isWorkspace() && opened && mobile.matches)
     || (route === 'mine' && minePage !== 'home');
+  byId('home-bar').hidden = hidden;
+  if (hidden || !isWorkspace()) doneNotifications.hide();
   byId('module-label').textContent = labels[route] || '';
   byId('workspace-actions').hidden = !isWorkspace();
   const machine = machines.find(({ id }) => id === scope);
@@ -423,7 +435,7 @@ function paintStateFilters() {
     chip.setAttribute('aria-pressed', String(!hiddenStates.has(state)));
     chip.setAttribute('aria-label', stateNames[state] + ', ' + count);
     chip.append(stateDot(state, nodes[0]), make('b', '', String(count)));
-    if (state === activeFilter) requestAnimationFrame(() => chip.focus({ preventScroll: true }));
+    if (state === activeFilter) restoreFocusOnFrame(chip);
     return chip;
   }));
 }
@@ -584,7 +596,7 @@ function recordRow(item, machine, pinned, focusKey, canExpand = true) {
   badge.append(stateDot(item.state, machine), make('span', 'sr-only', badge.title));
   row.append(agentTag(item.kind, session ? 'sessions' : 'terminal'), copy, badge);
   container.append(row);
-  if (row.dataset.record === focusKey) requestAnimationFrame(() => row.focus({ preventScroll: true }));
+  if (row.dataset.record === focusKey) restoreFocusOnFrame(row);
   if (session && canExpand && item.windows?.length) {
     const key = recordKey(item);
     const expanded = expandedSessions.has(key);
@@ -700,11 +712,21 @@ function openRecord(item) {
   acknowledgeOpened(item, selectedPane.get(recordKey(item)) || item.pane?.key);
 }
 
+function openCompletedAgent({ node, id, pane }) {
+  const machine = machines.find((item) => item.id === node);
+  const agent = machine?.agents?.find((item) => item.id === id && item.pane.key === pane);
+  if (!agent) return;
+  const targetScope = scope === 'all' || scope === node ? scope : node;
+  if (route !== 'agents' || scope !== targetScope) navigate('agents', targetScope);
+  openRecord(withMachine(agent, machine));
+}
+
 async function acknowledgeOpened(item, pane) {
   const machine = machines.find(({ id }) => id === item.node);
   const agent = item.sessionRecord
     ? machine?.agents?.find((record) => record.pane.key === pane && record.completion && !record.exited)
     : item;
+  if (agent?.pane) doneNotifications.read(item.node, agent.id, agent.pane.key);
   if (!agent?.completion) return;
   try {
     await api('/api/attention', 'POST', { node: item.node, pane: agent.pane.key, agent: agent.id, event: agent.completion });
@@ -1786,6 +1808,7 @@ async function refresh(force = false) {
     if (fingerprint !== overview || force) {
       promoteChats(result.nodes);
       machines = result.nodes;
+      doneNotifications.observe(machines);
       overview = fingerprint;
       if (isWorkspace()) paintWorkspace();
       else {
@@ -1974,6 +1997,7 @@ function signedOut() {
   stopping = null;
   byId('outgoing-messages').replaceChildren();
   linkPanel.reset();
+  doneNotifications.reset();
   byId('messages').replaceChildren();
   byId('groups').replaceChildren();
   byId('node-list').replaceChildren();
@@ -2080,7 +2104,10 @@ chatInput.addEventListener('input', () => {
   updateSuggestions();
 });
 chatInput.addEventListener('focus', updateSuggestions);
-chatInput.addEventListener('blur', hideSuggestions);
+chatInput.addEventListener('blur', () => {
+  composingPrompt = false;
+  hideSuggestions();
+});
 chatInput.addEventListener('compositionstart', () => { composingPrompt = true; hideSuggestions(); });
 chatInput.addEventListener('compositionend', () => {
   composingPrompt = false;

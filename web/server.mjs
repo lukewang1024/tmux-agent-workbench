@@ -15,7 +15,7 @@ import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'connection.js', 'dom.js', 'link-panel.js', 'link-preview.js', 'message-tools.js', 'terminal.js'];
+const browserModules = ['chat-state.js', 'composer-focus.js', 'connection.js', 'dom.js', 'done-notifications.js', 'link-panel.js', 'link-preview.js', 'message-tools.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],

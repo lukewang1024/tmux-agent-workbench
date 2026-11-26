@@ -33,3 +33,9 @@ export function bindBackButton(element, onBack) {
   setLabel(element.getAttribute('aria-label'));
   return setLabel;
 }
+
+export function restoreFocusOnFrame(element) {
+  requestAnimationFrame(() => {
+    if (element.isConnected && document.activeElement === document.body) element.focus({ preventScroll: true });
+  });
+}

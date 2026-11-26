@@ -334,6 +334,19 @@ button { touch-action: manipulation; }
 .machine-trigger .glyph { flex: none; width: 12px; height: 12px; }
 .new-agent { display: inline-grid; place-items: center; flex: none; width: 31px; height: 31px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--accent); }
 .new-agent .glyph { width: 17px; height: 17px; }
+.done-trigger { position: relative; flex: none; }
+#done-count { position: absolute; inset-block-start: 1px; inset-inline-end: 0; min-inline-size: 15px; padding: 0 3px; border-radius: 9px; background: var(--primary-fill); color: var(--light-ink); font-size: 10px; line-height: 15px; }
+.done-popover { position: fixed; inset: calc(var(--toolbar-height) + env(safe-area-inset-top) + 5px) max(6px, env(safe-area-inset-right)) auto auto; width: min(330px, calc(100% - 16px)); max-height: min(60dvh, 480px); overflow: auto; overscroll-behavior: contain; margin: 0; padding: 6px; border: 1px solid var(--outline); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: 0 8px 26px var(--shadow); }
+.done-popover header { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding-inline: 6px; }
+.done-popover h2 { font-size: 14px; }
+.done-popover .plain { min-height: 34px; font-size: 12px; }
+.done-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; min-height: 42px; padding: 5px 7px; border: 0; border-radius: 6px; background: transparent; text-align: start; font-size: 13px; }
+.done-row .glyph { width: 14px; height: 14px; color: var(--muted); }
+.done-toast { position: fixed; z-index: 7; inset-block-start: calc(var(--toolbar-height) + env(safe-area-inset-top) + 6px); inset-inline: 8px; display: flex; width: fit-content; max-width: calc(100% - 16px); margin-inline: auto; padding: 2px 3px; border: 1px solid var(--outline); border-radius: 11px; background: var(--paper); box-shadow: 0 4px 18px var(--shadow); }
+.done-toast-open { display: flex; align-items: center; gap: 6px; min-width: 0; padding-inline: 6px; border: 0; border-radius: 7px; background: transparent; text-align: start; font-size: 13px; }
+.done-toast-open .glyph { width: 16px; height: 16px; color: var(--good); }
+.done-toast-open span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-toast > .row-action { flex: none; }
 .app-body { display: grid; min-width: 0; min-height: 0; grid-row: 2; }
 .login { align-items: center; }
 .login-inner { width: min(100%, 365px); }
@@ -493,7 +506,7 @@ h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
   .module-trigger:hover, .machine-trigger:hover, .new-agent:not(:disabled):hover, .filter-chip:hover, .plain:hover, .back-button:hover, .row-action:not(.has-item-menu > .row-action):hover { background: var(--control-hover); }
   .record-row:hover, .pane-actions:hover { background: var(--hover); }
   .record-row:has(.agent-row[aria-current="true"]):hover { background: var(--active); }
-  .node-button:hover, .profile-row:hover, .sheet-row:hover { background: var(--hover); }
+  .node-button:hover, .profile-row:hover, .sheet-row:hover, .done-row:hover, .done-toast-open:hover { background: var(--hover); }
   .picker-button:hover { background: var(--quiet); }
   .terminal-bar .picker-button:hover { background: var(--terminal-control); }
   .primary:hover { background: var(--primary-hover); }
