@@ -1,5 +1,6 @@
 import { ChatState } from './chat-state.js?v=WORKBENCH_CACHE_VERSION';
 import { monitorGateway } from './connection.js?v=WORKBENCH_CACHE_VERSION';
+import { createLinkPage } from './link-preview.js?v=WORKBENCH_CACHE_VERSION';
 import { TerminalView } from './terminal.js?v=WORKBENCH_CACHE_VERSION';
 
 const { language, messages } = WORKBENCH_LOCALE;
@@ -1387,7 +1388,7 @@ function openLinkPreview(link) {
   if (!['http:', 'https:'].includes(url.protocol) || url.origin === location.origin) return false;
   if (!linkTabs.has(url.href)) {
     const label = link.textContent.trim() || url.hostname;
-    linkTabs.set(url.href, { id: 'link-preview-' + ++nextLinkId, label, frame: null });
+    linkTabs.set(url.href, { id: 'link-preview-' + ++nextLinkId, label, page: null });
   }
   if (!activeLink && !history.state?.linkPreview) pushChatLayer({ linkPreview: true });
   linkOpener = link;
@@ -1416,7 +1417,7 @@ function selectLinkTab(url) {
 function closeLinkTab(url) {
   const keys = [...linkTabs.keys()];
   const tab = linkTabs.get(url);
-  tab.frame?.remove();
+  tab.page?.remove();
   linkTabs.delete(url);
   if (!linkTabs.size) closeLinkPanel();
   else selectLinkTab(url === activeLink ? keys[keys.indexOf(url) + 1] || keys.at(-2) : activeLink);
@@ -1429,8 +1430,8 @@ function paintLinkPanel() {
   app.toggleAttribute('data-link-preview', visible);
   if (!visible) {
     for (const tab of linkTabs.values()) {
-      tab.frame?.remove();
-      tab.frame = null;
+      tab.page?.remove();
+      tab.page = null;
     }
     return;
   }
@@ -1439,17 +1440,16 @@ function paintLinkPanel() {
   const tabs = byId('link-tabs');
   tabs.replaceChildren(...[...linkTabs].map(([url, tab]) => {
     const selected = url === activeLink;
-    if (selected && !tab.frame) {
-      const frame = make('iframe', 'link-frame');
-      frame.id = tab.id;
-      frame.title = tab.label;
-      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
-      frame.referrerPolicy = 'no-referrer';
-      frame.src = url;
-      pages.append(frame);
-      tab.frame = frame;
+    if (selected && !tab.page) {
+      const page = createLinkPage(new URL(url), tab.label, { t, markdown, openLink: openLinkPreview });
+      page.id = tab.id;
+      page.setAttribute('role', 'tabpanel');
+      page.setAttribute('aria-labelledby', tab.id + '-tab');
+      page.tabIndex = 0;
+      pages.append(page);
+      tab.page = page;
     }
-    if (tab.frame) tab.frame.hidden = !selected;
+    if (tab.page) tab.page.hidden = !selected;
     const controls = make('div', 'link-tab');
     controls.setAttribute('role', 'presentation');
     const title = button(tab.label, 'link-tab-title', () => selectLinkTab(url));
@@ -1458,7 +1458,7 @@ function paintLinkPanel() {
     title.setAttribute('role', 'tab');
     title.setAttribute('aria-selected', String(selected));
     title.tabIndex = selected ? 0 : -1;
-    if (tab.frame) title.setAttribute('aria-controls', tab.id);
+    if (tab.page) title.setAttribute('aria-controls', tab.id);
     const close = button('', 'link-tab-close', () => closeLinkTab(url));
     close.title = t('closeLinkTab', { page: tab.label });
     close.setAttribute('aria-label', close.title);

@@ -527,7 +527,7 @@ test('gateway serves matching languages for the app shell, manifest, and errors'
       assert.equal(protectedWorkspace.status, 401);
       assert.deepEqual(await protectedWorkspace.json(), { error });
       const worker = await fetch(address + '/sw.js').then((response) => response.text());
-      for (const module of ['chat-state.js', 'connection.js', 'terminal.js']) {
+      for (const module of ['chat-state.js', 'connection.js', 'link-preview.js', 'terminal.js']) {
         assert.ok(script.includes('./' + module + '?v=' + version));
         assert.ok(worker.includes('/' + module));
         assert.equal((await fetch(address + '/' + module + '?v=' + version)).status, 200);

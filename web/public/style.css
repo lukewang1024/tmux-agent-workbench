@@ -352,6 +352,26 @@ button { touch-action: manipulation; }
 .link-tab-close { display: grid; place-content: center; width: 25px; min-height: 28px; flex: none; padding: 0; border-radius: 6px; color: var(--muted); }
 .link-tab-close .glyph { width: 13px; height: 13px; }
 .link-pages { display: grid; grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; background: var(--paper); }
+.link-page { min-width: 0; min-height: 0; }
+.link-document { overflow: auto; overscroll-behavior: contain; padding: 12px 12px max(12px, env(safe-area-inset-bottom)); font-size: 13px; }
+.link-document :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 12px; }
+.link-preview-status { color: var(--muted); }
+.link-preview-status p + button { margin-top: 8px; }
+.link-load-button { min-height: 34px; padding-inline: 10px; font-size: 12px; }
+.link-diff-heading { margin: 0 0 10px; overflow-wrap: anywhere; font-size: 14px; }
+.link-diff-file { margin-block-end: 5px; border: 1px solid var(--line); border-radius: 6px; }
+.link-diff-file summary { padding: 7px 9px; cursor: pointer; background: var(--quiet); overflow-wrap: anywhere; }
+.link-diff-path { font-size: 12px; font-weight: 620; }
+.link-diff-counts { display: inline-flex; gap: 6px; margin-inline-start: 8px; font: 11px var(--mono); }
+.link-diff-file > p { padding: 8px 9px; }
+.link-diff-patch { margin: 0; overflow-x: auto; padding: 6px 0; font: 11px/1.5 var(--mono); }
+.link-diff-patch code { display: block; min-width: max-content; font: inherit; }
+.link-diff-patch code span { display: block; padding-inline: 8px; }
+.link-diff-add { color: var(--good); }
+.link-diff-remove { color: var(--danger); }
+.link-diff-hunk { color: var(--accent); background: var(--quiet); }
+.link-diff-patch .link-diff-add { background: color-mix(in srgb, var(--paper), var(--state-idle) 13%); }
+.link-diff-patch .link-diff-remove { background: var(--danger-wash); }
 .link-frame { display: block; width: 100%; height: 100%; border: 0; }
 #open-link-browser { text-decoration: none; }
 @media (min-width: 1024px) {

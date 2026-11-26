@@ -14,7 +14,7 @@ import { Failure, nodeName, parseOrigin } from './state.mjs';
 import { paletteStyles, sidebarPalettes, terminalPalettes } from './theme.mjs';
 
 const run = promisify(execFile);
-const browserModules = ['chat-state.js', 'connection.js', 'terminal.js'];
+const browserModules = ['chat-state.js', 'connection.js', 'link-preview.js', 'terminal.js'];
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
@@ -41,7 +41,7 @@ function security(res) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com/repos/ https://docs.github.com/api/article/body; frame-src https: http:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
 function json(res, result, status = 200) {
